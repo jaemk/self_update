@@ -7,7 +7,7 @@ keywords = ["update", "upgrade", "download", "release"]
 license = "MIT"
 readme = "README.md"
 authors = ["James Kominick <james.kominick@gmail.com>"]
-exclue = ["ci/", ".travis.yml"]
+exclude = ["ci/", ".travis.yml"]
 
 [dependencies]
 serde_json = "1"
