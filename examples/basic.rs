@@ -10,9 +10,9 @@ fn run() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
     self_update::backends::github::Updater::configure()?
         .repo_owner("jaemk")
-        .repo_name("clin")
+        .repo_name("self_update")
         .target(&target)
-        .bin_name("clin")
+        .bin_name("self_update_example")
         .show_progress(true)
         .current_version(crate_version!())
         .build()?

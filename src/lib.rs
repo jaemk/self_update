@@ -1,5 +1,4 @@
 /*!
-# self_update
 
 ```shell
 self_update = "0.1"
