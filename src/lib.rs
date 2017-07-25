@@ -31,6 +31,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 }
 ```
 
+Run the above example to see `self_update` in action: `cargo run --example github`
+
 */
 extern crate serde_json;
 extern crate reqwest;
