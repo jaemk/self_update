@@ -1,15 +1,13 @@
 # self_update
 
-## self_update
-
 ```shell
 self_update = "0.1"
 ```
 
-### Usage
+## Usage
 
 ```rust,ignore
-##[macro_use] extern crate self_update;
+#[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
