@@ -25,4 +25,5 @@ pub fn main() {
         eprintln!("[ERROR] {}", e);
         ::std::process::exit(1);
     }
+    println!("self_update example version: `{}`!", crate_version!());
 }
