@@ -14,6 +14,7 @@ self_update = "0.1"
 Update (replace) the current executable with the latest release downloaded
 from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
+
 ```rust,ignore
 #[macro_use] extern crate self_update;
 
@@ -29,7 +30,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .build()?
         .update()?;
 }
-```rust
+```
+
 
 Run the above example to see `self_update` in action: `cargo run --example github`
 

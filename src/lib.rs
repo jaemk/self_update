@@ -29,7 +29,9 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .build()?
         .update()?;
 }
+
 ```
+
 
 Run the above example to see `self_update` in action: `cargo run --example github`
 
