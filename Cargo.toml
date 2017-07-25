@@ -1,0 +1,17 @@
+[package]
+name = "self_update"
+version = "0.1.0"
+description = "Self updates for standalone executables"
+repository = "https://github.com/jaemk/self_update"
+keywords = ["update", "upgrade", "download", "release"]
+license = "MIT"
+readme = "README.md"
+authors = ["James Kominick <james.kominick@gmail.com>"]
+exclue = ["ci/", ".travis.yml"]
+
+[dependencies]
+serde_json = "1"
+reqwest = "0.7"
+tempdir = "0.3"
+flate2 = "0.2"
+tar = "0.4"
