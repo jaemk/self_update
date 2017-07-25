@@ -1,10 +1,18 @@
 # self_update
 
+`self_update` provides updaters for updating rust executables in-place from various release
+distribution backends.
+
+Currently only GitHub releases are supported.
+
 ```shell
 self_update = "0.1"
 ```
 
 ## Usage
+
+Update (replace) the current executable with the latest release downloaded
+from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
 ```rust,ignore
 #[macro_use] extern crate self_update;
