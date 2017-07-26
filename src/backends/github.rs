@@ -135,7 +135,7 @@ impl Builder {
     ///
     /// The path provided should be:
     ///
-    /// ```rust
+    /// ```
     /// # use self_update::backends::github::Updater;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
     /// Updater::configure()?
@@ -263,7 +263,6 @@ impl Updater {
         self.println(&format!("v{}", latest_tag));
 
         if !should_update(&self.current_version, &latest_tag)? {
-            self.println(&format!("Already up to date! -- v{}", self.current_version));
             return Ok(Status::UpToDate(self.current_version.to_owned()))
         }
 

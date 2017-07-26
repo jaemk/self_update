@@ -19,7 +19,7 @@ self_update = "0.2"
 Update (replace) the current executable with the latest release downloaded
 from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
-```rust
+```
 #[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
@@ -36,7 +36,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     println!("Update status: `v{}`!", status.version());
     Ok(())
 }
-
 # fn main() { }
 ```
 
