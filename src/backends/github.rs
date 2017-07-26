@@ -270,11 +270,13 @@ impl Updater {
         self.println(&format!("New release found! v{} --> v{}", self.current_version, latest_tag));
         let target_asset = Self::get_target_asset(&latest["assets"], &self.target)?;
 
-        self.println(&format!("\n{} release status:", self.bin_name));
-        self.println(&format!("  * Current exe: {:?}", self.bin_install_path));
-        self.println(&format!("  * New exe tarball: {:?}", target_asset.name));
-        self.println(&format!("  * New exe download url: {:?}", target_asset.download_url));
-        self.println("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+        if self.show_output || !self.no_confirm {
+            println!("\n{} release status:", self.bin_name);
+            println!("  * Current exe: {:?}", self.bin_install_path);
+            println!("  * New exe tarball: {:?}", target_asset.name);
+            println!("  * New exe download url: {:?}", target_asset.download_url);
+            println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+        }
         if !self.no_confirm {
             prompt_ok("Do you want to continue? [Y/n] ")?;
         }
