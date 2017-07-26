@@ -12,7 +12,7 @@ fn run() -> Result<(), Box<::std::error::Error>> {
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
-        .bin_name("self_update_example")
+        .bin_name("github")
         .show_download_progress(true)
         //.show_output(false)
         //.no_confirm(true)
