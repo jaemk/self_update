@@ -260,14 +260,16 @@ fn extract_targz(tarball: &path::Path, into_dir: &path::Path) -> Result<()> {
 fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::Path) -> Result<()> {
     fs::copy(current_exe, tmp_file)?;
     match fs::remove_file(current_exe) {
-        Err(_) => {
+        Err(e) => {
             fs::copy(tmp_file, current_exe)?;
+            return Err(Error::from(e))
         }
         Ok(_) => (),
     };
     match fs::rename(new_exe, current_exe) {
-        Err(_) => {
+        Err(e) => {
             fs::copy(tmp_file, current_exe)?;
+            return Err(Error::from(e))
         }
         Ok(_) => (),
     };
