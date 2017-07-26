@@ -1,6 +1,5 @@
 use std::env;
 use std::path::PathBuf;
-use std::cmp;
 use std::fs;
 use std::io::Write;
 
@@ -8,6 +7,7 @@ use serde_json;
 use reqwest;
 use tempdir;
 
+use super::super::Status;
 use super::super::replace_exe;
 use super::super::extract_targz;
 use super::super::prompt_ok;
@@ -50,7 +50,9 @@ pub struct Builder {
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_tarball: Option<PathBuf>,
-    show_progress: bool,
+    show_download_progress: bool,
+    show_output: bool,
+    no_confirm: bool,
     current_version: Option<String>,
 }
 impl Builder {
@@ -65,7 +67,9 @@ impl Builder {
             target: None, bin_name: None,
             bin_install_path: Some(env::current_exe()?),
             bin_path_in_tarball: None,
-            show_progress: false,
+            show_download_progress: false,
+            show_output: true,
+            no_confirm: false,
             current_version: None,
         })
     }
@@ -145,9 +149,21 @@ impl Builder {
         self
     }
 
-    /// Toggle download progress bar, defaults to off.
-    pub fn show_progress(&mut self, show: bool) -> &mut Self {
-        self.show_progress = show;
+    /// Toggle download progress bar, defaults to `off`.
+    pub fn show_download_progress(&mut self, show: bool) -> &mut Self {
+        self.show_download_progress = show;
+        self
+    }
+
+    /// Toggle update output information, defaults to `true`.
+    pub fn show_output(&mut self, show: bool) -> &mut Self {
+        self.show_output = show;
+        self
+    }
+
+    /// Toggle download confirmation. Defaults to `false`.
+    pub fn no_confirm(&mut self, no_confirm: bool) -> &mut Self {
+        self.no_confirm = no_confirm;
         self
     }
 
@@ -164,7 +180,9 @@ impl Builder {
             bin_install_path: if let Some(ref path) = self.bin_install_path { path.to_owned() } else { bail!(Error::Config, "`bin_install_path` required")},
             bin_path_in_tarball: if let Some(ref path) = self.bin_path_in_tarball { path.to_owned() } else { bail!(Error::Config, "`bin_path_in_tarball` required")},
             current_version: if let Some(ref ver) = self.current_version { ver.to_owned() } else { bail!(Error::Config, "`current_version` required")},
-            show_progress: self.show_progress,
+            show_download_progress: self.show_download_progress,
+            show_output: self.show_output,
+            no_confirm: self.no_confirm,
         })
     }
 }
@@ -179,7 +197,9 @@ pub struct Updater {
     bin_name: String,
     bin_install_path: PathBuf,
     bin_path_in_tarball: PathBuf,
-    show_progress: bool,
+    show_download_progress: bool,
+    show_output: bool,
+    no_confirm: bool,
 }
 impl Updater {
     /// Initialize a new `Updater` builder
@@ -215,52 +235,67 @@ impl Updater {
         Ok(target_asset)
     }
 
+    fn print_flush(&self, msg: &str) -> Result<()> {
+        if self.show_output {
+            print_flush!("{}", msg);
+        }
+        Ok(())
+    }
+
+    fn println(&self, msg: &str) {
+        if self.show_output {
+            println!("{}", msg);
+        }
+    }
+
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user
-    pub fn update(self) -> Result<()> {
-        print_flush!("Checking target-arch... ");
-        println!("{}", self.target);
-        println!("Checking current version... v{}", self.current_version);
+    pub fn update(self) -> Result<Status> {
 
-        print_flush!("Checking latest released version... ");
+        self.println(&format!("Checking target-arch... {}", self.target));
+        self.println(&format!("Checking current version... v{}", self.current_version));
+
+        self.print_flush("Checking latest released version... ")?;
         let latest = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
         let latest_tag = latest["tag_name"].as_str()
             .ok_or_else(|| format_err!(Error::Update, "No tag_name found for latest release"))?
             .trim_left_matches("v");
-        println!("v{}", latest_tag);
+        self.println(&format!("v{}", latest_tag));
 
         if !should_update(&self.current_version, &latest_tag)? {
-            println!("Already up to date! -- v{}", self.current_version);
-            return Ok(())
+            self.println(&format!("Already up to date! -- v{}", self.current_version));
+            return Ok(Status::UpToDate(self.current_version.to_owned()))
         }
 
-        println!("New release found! v{} --> v{}", self.current_version, latest_tag);
+        self.println(&format!("New release found! v{} --> v{}", self.current_version, latest_tag));
         let target_asset = Self::get_target_asset(&latest["assets"], &self.target)?;
 
-        println!("\n{} release status:", self.bin_name);
-        println!("  * Current exe: {:?}", self.bin_install_path);
-        println!("  * New exe tarball: {:?}", target_asset.name);
-        println!("  * New exe download url: {:?}", target_asset.download_url);
-        println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
-        prompt_ok("Do you want to continue? [Y/n] ")?;
+        self.println(&format!("\n{} release status:", self.bin_name));
+        self.println(&format!("  * Current exe: {:?}", self.bin_install_path));
+        self.println(&format!("  * New exe tarball: {:?}", target_asset.name));
+        self.println(&format!("  * New exe download url: {:?}", target_asset.download_url));
+        self.println("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+        if !self.no_confirm {
+            prompt_ok("Do you want to continue? [Y/n] ")?;
+        }
 
         let tmp_dir = tempdir::TempDir::new(&format!("__{}-download", self.bin_name))?;
         let tmp_tarball_path = tmp_dir.path().join(&target_asset.name);
         let mut tmp_tarball = fs::File::create(&tmp_tarball_path)?;
 
-        println!("Downloading...");
-        download_to_file_with_progress(&target_asset.download_url, &mut tmp_tarball, self.show_progress)?;
+        self.println("Downloading...");
+        download_to_file_with_progress(&target_asset.download_url, &mut tmp_tarball, self.show_download_progress)?;
 
-        print_flush!("Extracting tarball... ");
+        self.print_flush("Extracting tarball... ")?;
         extract_targz(&tmp_tarball_path, &tmp_dir.path())?;
         let new_exe = tmp_dir.path().join(&self.bin_path_in_tarball);
-        println!("Done");
+        self.println("Done");
 
-        print_flush!("Replacing binary file... ");
+        self.print_flush("Replacing binary file... ")?;
         let tmp_file = tmp_dir.path().join(&format!("__{}_backup", self.bin_name));
         replace_exe(&self.bin_install_path, &new_exe, &tmp_file)?;
-        println!("Done");
-        Ok(())
+        self.println("Done");
+        Ok(Status::Updated(latest_tag.to_owned()))
     }
 }
 

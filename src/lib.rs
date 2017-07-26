@@ -24,24 +24,20 @@ from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
-    self_update::backends::github::Updater::configure()?
+    let status = self_update::backends::github::Updater::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
         .bin_name("self_update_example")
-        .show_progress(true)
+        .show_download_progress(true)
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
+    println!("Update status: `v{}`!", status.version());
     Ok(())
 }
 
-# fn main() {
-#     if let Err(e) = update() {
-#         println!("[ERROR] {}", e);
-#         ::std::process::exit(1);
-#     }
-# }
+# fn main() { }
 ```
 
 
@@ -66,6 +62,52 @@ pub mod errors;
 pub mod backends;
 
 use errors::*;
+
+
+/// Status returned after updating
+///
+/// Wrapped `String`s are version tags
+#[derive(Debug, Clone)]
+pub enum Status {
+    UpToDate(String),
+    Updated(String),
+}
+impl Status {
+    /// Return the version tag
+    pub fn version(&self) -> &str {
+        use Status::*;
+        match *self {
+            UpToDate(ref s) => s,
+            Updated(ref s) => s,
+        }
+    }
+
+    /// Returns `true` if `Status::UpToDate`
+    pub fn uptodate(&self) -> bool {
+        match *self {
+            Status::UpToDate(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if `Status::Updated`
+    pub fn updated(&self) -> bool {
+        match *self {
+            Status::Updated(_) => true,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        use Status::*;
+        match *self {
+            UpToDate(ref s) => write!(f, "UpToDate({})", s),
+            Updated(ref s) => write!(f, "Updated({})", s),
+        }
+    }
+}
 
 
 /// Try to determine the current target triple.
