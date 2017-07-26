@@ -11,7 +11,7 @@ distribution backends.
 Currently only GitHub releases are supported.
 
 ```shell
-self_update = "0.1"
+self_update = "0.2"
 ```
 
 ## Usage
