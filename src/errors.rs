@@ -5,6 +5,7 @@ Error type, conversions, and macros
 use std;
 use serde_json;
 use reqwest;
+use semver;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -16,6 +17,7 @@ pub enum Error {
     Io(std::io::Error),
     Json(serde_json::Error),
     Reqwest(reqwest::Error),
+    SemVer(semver::SemVerError),
 }
 
 
@@ -28,6 +30,7 @@ impl std::fmt::Display for Error {
             Io(ref e)       => write!(f, "IoError: {}", e),
             Json(ref e)     => write!(f, "JsonError: {}", e),
             Reqwest(ref e)  => write!(f, "ReqwestError: {}", e),
+            SemVer(ref e)   => write!(f, "SemVerError: {}", e),
         }
     }
 }
@@ -44,6 +47,7 @@ impl std::error::Error for Error {
             Io(ref e)           => e,
             Json(ref e)         => e,
             Reqwest(ref e)      => e,
+            SemVer(ref e)       => e,
             _ => return None,
         })
     }
@@ -65,6 +69,12 @@ impl From<serde_json::Error> for Error {
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Error {
         Error::Reqwest(e)
+    }
+}
+
+impl From<semver::SemVerError> for Error {
+    fn from(e: semver::SemVerError) -> Error {
+        Error::SemVer(e)
     }
 }
 

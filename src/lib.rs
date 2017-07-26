@@ -1,5 +1,10 @@
 /*!
 
+[![Build Status](https://travis-ci.org/jaemk/self_update.svg?branch=master)](https://travis-ci.org/jaemk/self_update)
+[![crates.io:clin](https://img.shields.io/crates/v/self_update.svg?label=self_update)](https://crates.io/crates/self_update)
+[![docs](https://docs.rs/self_update/badge.svg)](https://docs.rs/self_update)
+
+
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
@@ -14,7 +19,7 @@ self_update = "0.1"
 Update (replace) the current executable with the latest release downloaded
 from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
-```rust,ignore
+```rust
 #[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
@@ -25,11 +30,18 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .target(&target)
         .bin_name("self_update_example")
         .show_progress(true)
-        .current_version(crate_version!())
+        .current_version(cargo_crate_version!())
         .build()?
         .update()?;
+    Ok(())
 }
 
+# fn main() {
+#     if let Err(e) = update() {
+#         println!("[ERROR] {}", e);
+#         ::std::process::exit(1);
+#     }
+# }
 ```
 
 
@@ -41,6 +53,7 @@ extern crate reqwest;
 extern crate tempdir;
 extern crate flate2;
 extern crate tar;
+extern crate semver;
 
 
 use std::fs;
@@ -204,6 +217,12 @@ fn extract_targz(tarball: &path::Path, into_dir: &path::Path) -> Result<()> {
 ///     * Io - copying / renaming
 fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::Path) -> Result<()> {
     fs::copy(current_exe, tmp_file)?;
+    match fs::remove_file(current_exe) {
+        Err(_) => {
+            fs::copy(tmp_file, current_exe)?;
+        }
+        Ok(_) => (),
+    };
     match fs::rename(new_exe, current_exe) {
         Err(_) => {
             fs::copy(tmp_file, current_exe)?;
@@ -214,13 +233,25 @@ fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::
 }
 
 
+/// Content if the latest cersion tag is greater than the current
+fn should_update(current: &str, latest: &str) -> Result<bool> {
+    use semver::Version;
+    Ok(Version::parse(latest)? > Version::parse(current)?)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     #[test]
     fn can_determine_target_arch() {
         let target = get_target();
         assert!(target.is_ok(), "{:?}", target);
+        let target = target.unwrap();
+        if let Ok(env_target) = env::var("TARGET") {
+            assert_eq!(target, env_target);
+        }
     }
 }
 

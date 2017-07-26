@@ -12,6 +12,7 @@ use super::super::replace_exe;
 use super::super::extract_targz;
 use super::super::prompt_ok;
 use super::super::download_to_file_with_progress;
+use super::super::should_update;
 use super::super::errors::*;
 
 
@@ -39,6 +40,9 @@ impl ReleaseAsset {
 
 
 /// `github::Updater` builder
+///
+/// Configure download and installation from
+/// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
 pub struct Builder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
@@ -79,7 +83,7 @@ impl Builder {
     }
 
     /// Set the current app version, used to compare against the latest available version.
-    /// The `crate_version!` macro can be used to pull the version from your `Cargo.toml`
+    /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
     pub fn current_version(&mut self, ver: &str) -> &mut Self {
         self.current_version = Some(ver.to_owned());
         self
@@ -92,7 +96,7 @@ impl Builder {
         self
     }
 
-    /// Set the exe's name
+    /// Set the exe's name. Also sets `bin_path_in_tarball` if it hasn't already been set.
     pub fn bin_name(&mut self, name: &str) -> &mut Self {
         self.bin_name = Some(name.to_owned());
         if self.bin_path_in_tarball.is_none() {
@@ -110,23 +114,31 @@ impl Builder {
 
     /// Set the path of the exe inside the release tarball. This is the location
     /// of the executable relative to the base of the tar'd directory and is the
-    /// path that will be copied to the `bin_install_path`.
+    /// path that will be copied to the `bin_install_path`. If not specified, this
+    /// will default to the value of `bin_name`. This only needs to be specified if
+    /// the path to the binary (from the root of the tarball) is not equal to just
+    /// the `bin_name`.
     ///
     /// # Example
     ///
     /// For a tarball `myapp.tar.gz` with the contents:
     ///
     /// ```shell
-    /// myapp/
-    ///  |--- myapp  # <-- executable
+    /// myapp.tar/
+    ///  |------- bin/
+    ///  |         |--- myapp  # <-- executable
     /// ```
     ///
     /// The path provided should be:
     ///
-    /// ```rust,ignore
-    /// Builder::configure()?
-    ///     ....
-    ///     .bin_install_path("myapp")
+    /// ```rust
+    /// # use self_update::backends::github::Updater;
+    /// # fn run() -> Result<(), Box<::std::error::Error>> {
+    /// Updater::configure()?
+    ///     .bin_path_in_tarball("bin/myapp")
+    /// #   .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn bin_path_in_tarball(&mut self, bin_path: &str) -> &mut Self {
         self.bin_path_in_tarball = Some(PathBuf::from(bin_path));
@@ -175,8 +187,7 @@ impl Updater {
         Builder::new()
     }
 
-    /// Update the current binary to the latest release
-    pub fn update(self) -> Result<()> {
+    fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<serde_json::Value> {
         // Make sure openssl can find required files
         #[cfg(target_os="linux")]
         {
@@ -188,35 +199,43 @@ impl Updater {
             }
         }
 
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", self.repo_owner, self.repo_name);
+        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
+        let mut resp = reqwest::get(&api_url)?;
+        if !resp.status().is_success() { bail!(Error::Update, "api request failed with status: {:?}", resp.status()) }
+        Ok(resp.json::<serde_json::Value>()?)
+    }
 
+    fn get_target_asset(assets: &serde_json::Value, target: &str) -> Result<ReleaseAsset> {
+        let latest_assets = assets.as_array().ok_or_else(|| format_err!(Error::Update, "No release assets found!"))?;
+        let target_asset = latest_assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>();
+        let target_asset = target_asset?.into_iter()
+            .filter(|ra| ra.name.contains(target))
+            .nth(0)
+            .ok_or_else(|| format_err!(Error::Update, "No release asset found for current target: `{}`", target))?;
+        Ok(target_asset)
+    }
+
+    /// Display release information and update the current binary to the latest release, pending
+    /// confirmation from the user
+    pub fn update(self) -> Result<()> {
         print_flush!("Checking target-arch... ");
         println!("{}", self.target);
-
         println!("Checking current version... v{}", self.current_version);
 
         print_flush!("Checking latest released version... ");
-        let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Update, "api request failed with status: {:?}", resp.status()) }
-        let latest: serde_json::Value = resp.json()?;
+        let latest = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
         let latest_tag = latest["tag_name"].as_str()
             .ok_or_else(|| format_err!(Error::Update, "No tag_name found for latest release"))?
             .trim_left_matches("v");
         println!("v{}", latest_tag);
 
-        if latest_tag.cmp(&self.current_version) != cmp::Ordering::Greater {
+        if !should_update(&self.current_version, &latest_tag)? {
             println!("Already up to date! -- v{}", self.current_version);
             return Ok(())
         }
 
         println!("New release found! v{} --> v{}", self.current_version, latest_tag);
-
-        let latest_assets = latest["assets"].as_array().ok_or_else(|| format_err!(Error::Update, "No release assets found!"))?;
-        let target_asset = latest_assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>();
-        let target_asset = target_asset?.into_iter()
-            .filter(|ra| ra.name.contains(&self.target))
-            .nth(0)
-            .ok_or_else(|| format_err!(Error::Update, "No release asset found for current target: `{}`", self.target))?;
+        let target_asset = Self::get_target_asset(&latest["assets"], &self.target)?;
 
         println!("\n{} release status:", self.bin_name);
         println!("  * Current exe: {:?}", self.bin_install_path);
@@ -241,7 +260,6 @@ impl Updater {
         let tmp_file = tmp_dir.path().join(&format!("__{}_backup", self.bin_name));
         replace_exe(&self.bin_install_path, &new_exe, &tmp_file)?;
         println!("Done");
-
         Ok(())
     }
 }

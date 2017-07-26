@@ -3,7 +3,7 @@
 /// Allows you to pull the version from your Cargo.toml at compile time as
 /// `MAJOR.MINOR.PATCH_PKGVERSION_PRE`
 #[macro_export]
-macro_rules! crate_version {
+macro_rules! cargo_crate_version {
     // -- Pulled from clap.rs src/macros.rs
     () => {
         env!("CARGO_PKG_VERSION")
