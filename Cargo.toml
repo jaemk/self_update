@@ -1,6 +1,7 @@
 [package]
 name = "self_update"
-version = "0.2.2"
+#version = "0.2.2"
+version = "9.9.9"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
