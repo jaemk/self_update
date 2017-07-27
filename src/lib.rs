@@ -252,23 +252,16 @@ fn extract_targz(tarball: &path::Path, into_dir: &path::Path) -> Result<()> {
 }
 
 
-/// Copy existing executable to a temp directory and try putting our new one in its place.
-/// If something goes wrong, copy the original executable back
+/// Move existing executable to a temp directory and try putting our new one in its place.
+/// If something goes wrong, move the original executable back
 ///
 /// * Errors:
 ///     * Io - copying / renaming
 fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::Path) -> Result<()> {
-    fs::copy(current_exe, tmp_file)?;
-    match fs::remove_file(current_exe) {
-        Err(e) => {
-            fs::copy(tmp_file, current_exe)?;
-            return Err(Error::from(e))
-        }
-        Ok(_) => (),
-    };
+    fs::rename(current_exe, tmp_file)?;
     match fs::rename(new_exe, current_exe) {
         Err(e) => {
-            fs::copy(tmp_file, current_exe)?;
+            fs::rename(tmp_file, current_exe)?;
             return Err(Error::from(e))
         }
         Ok(_) => (),
