@@ -280,7 +280,9 @@ impl Updater {
             prompt_ok("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir = tempdir::TempDir::new(&format!("__{}-download", self.bin_name))?;
+        let tmp_dir_parent = self.bin_install_path.parent()
+            .expect(&format!("Failed to determine parent dir of `bin_install_path`: {:?}", self.bin_install_path));
+        let tmp_dir = tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
         let tmp_tarball_path = tmp_dir.path().join(&target_asset.name);
         let mut tmp_tarball = fs::File::create(&tmp_tarball_path)?;
 
