@@ -1,7 +1,6 @@
 use std::env;
 use std::path::PathBuf;
 use std::fs;
-use std::io::Write;
 
 use serde_json;
 use reqwest;
@@ -11,7 +10,7 @@ use super::super::Status;
 use super::super::replace_exe;
 use super::super::extract_targz;
 use super::super::prompt_ok;
-use super::super::download_to_file_with_progress;
+use super::super::Download;
 use super::super::should_update;
 use super::super::errors::*;
 
@@ -39,11 +38,11 @@ impl ReleaseAsset {
 }
 
 
-/// `github::Updater` builder
+/// `github::Update` builder
 ///
 /// Configure download and installation from
 /// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
-pub struct Builder {
+pub struct UpdateBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
@@ -55,14 +54,14 @@ pub struct Builder {
     no_confirm: bool,
     current_version: Option<String>,
 }
-impl Builder {
+impl UpdateBuilder {
     /// Initialize a new builder, defaulting the `bin_install_path` to the current
     /// executable's path
     ///
     /// * Errors:
     ///     * Io - Determining current exe path
-    pub fn new() -> Result<Builder> {
-        Ok(Builder {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             repo_owner: None, repo_name: None,
             target: None, bin_name: None,
             bin_install_path: Some(env::current_exe()?),
@@ -136,9 +135,9 @@ impl Builder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::Updater;
+    /// # use self_update::backends::github::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// Updater::configure()?
+    /// Update::configure()?
     ///     .bin_path_in_tarball("bin/myapp")
     /// #   .build()?;
     /// # Ok(())
@@ -167,12 +166,12 @@ impl Builder {
         self
     }
 
-    /// Confirm config and create a ready-to-use `Updater`
+    /// Confirm config and create a ready-to-use `Update`
     ///
     /// * Errors:
-    ///     * Config - Invalid `Updater` configuration
-    pub fn build(&self) -> Result<Updater> {
-        Ok(Updater {
+    ///     * Config - Invalid `Update` configuration
+    pub fn build(&self) -> Result<Update> {
+        Ok(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required")},
             repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required")},
             target: if let Some(ref target) = self.target { target.to_owned() } else { bail!(Error::Config, "`target` required")},
@@ -188,8 +187,8 @@ impl Builder {
 }
 
 
-/// Updater intended for handling releases distributed via GitHub
-pub struct Updater {
+/// Update intended for handling releases distributed via GitHub
+pub struct Update {
     repo_owner: String,
     repo_name: String,
     target: String,
@@ -201,32 +200,22 @@ pub struct Updater {
     show_output: bool,
     no_confirm: bool,
 }
-impl Updater {
-    /// Initialize a new `Updater` builder
-    pub fn configure() -> Result<Builder> {
-        Builder::new()
+impl Update {
+    /// Initialize a new `Update` builder
+    pub fn configure() -> Result<UpdateBuilder> {
+        UpdateBuilder::new()
     }
 
     fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<serde_json::Value> {
-        // Make sure openssl can find required files
-        #[cfg(target_os="linux")]
-        {
-            if env::var_os("SSL_CERT_FILE").is_none() {
-                env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
-            }
-            if env::var_os("SSL_CERT_DIR").is_none() {
-                env::set_var("SSL_CERT_DIR", "/etc/ssl/certs");
-            }
-        }
-
+        set_ssl_vars!()
         let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
         let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Update, "api request failed with status: {:?}", resp.status()) }
+        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?}", resp.status()) }
         Ok(resp.json::<serde_json::Value>()?)
     }
 
     fn get_target_asset(assets: &serde_json::Value, target: &str) -> Result<ReleaseAsset> {
-        let latest_assets = assets.as_array().ok_or_else(|| format_err!(Error::Update, "No release assets found!"))?;
+        let latest_assets = assets.as_array().ok_or_else(|| format_err!(Error::Release, "No release assets found!"))?;
         let target_asset = latest_assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>();
         let target_asset = target_asset?.into_iter()
             .filter(|ra| ra.name.contains(target))
@@ -287,7 +276,9 @@ impl Updater {
         let mut tmp_tarball = fs::File::create(&tmp_tarball_path)?;
 
         self.println("Downloading...");
-        download_to_file_with_progress(&target_asset.download_url, &mut tmp_tarball, self.show_download_progress)?;
+        Download::from_url(&target_asset.download_url)
+            .show_progress(self.show_download_progress)
+            .download_to(&mut tmp_tarball)?;
 
         self.print_flush("Extracting tarball... ")?;
         extract_targz(&tmp_tarball_path, &tmp_dir.path())?;

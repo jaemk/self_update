@@ -53,7 +53,7 @@ extern crate semver;
 
 
 use std::fs;
-use std::io::{self, Write, BufRead};
+use std::io;
 use std::path;
 
 
@@ -173,69 +173,6 @@ fn prompt_ok(msg: &str) -> Result<()> {
 }
 
 
-/// Display a download progress bar, returning the size of the
-/// bar that needs to be cleared on the next run
-///
-/// * Errors:
-///     * Io flushing
-fn display_dl_progress(total_size: u64, bytes_read: u64, clear_size: usize) -> Result<usize> {
-    let bar_width = 75;
-    let ratio = bytes_read as f64 / total_size as f64;
-    let percent = (ratio * 100.) as u8;
-    let n_complete = (bar_width as f64 * ratio) as usize;
-    let mut complete_bars = std::iter::repeat("=").take(n_complete).collect::<String>();
-    if ratio != 1. { complete_bars.push('>'); }
-
-    let clear_chars = std::iter::repeat("\x08").take(clear_size).collect::<String>();
-    print_flush!("{}\r", clear_chars);
-
-    let bar = format!("{percent: >3}% [{compl: <full_size$}] {total}kB", percent=percent, compl=complete_bars, full_size=bar_width, total=total_size/1000);
-    print_flush!("{}", bar);
-
-    Ok(bar.len())
-}
-
-
-/// Download the file behind the given `url` into the specified `dest`.
-/// Show a sliding progress bar if specified.
-/// If the resource doesn't specify a content-length, the progress bar will not be shown
-///
-/// * Errors:
-///     * `reqwest` network errors
-///     * Unsuccessful response status
-///     * Progress-bar errors
-///     * Reading from response to `BufReader`-buffer
-///     * Writing from `BufReader`-buffer to `File`
-fn download_to_file_with_progress<T: io::Write>(url: &str, mut dest: T, mut show_progress: bool) -> Result<()> {
-    let resp = reqwest::get(url)?;
-    let size = resp.headers()
-        .get::<reqwest::header::ContentLength>()
-        .map(|ct_len| **ct_len)
-        .unwrap_or(0);
-    if !resp.status().is_success() { bail!(Error::Update, "Download request failed with status: {:?}", resp.status()) }
-    if size == 0 { show_progress = false; }
-
-    let mut bytes_read = 0;
-    let mut clear_size = 0;
-    let mut src = io::BufReader::new(resp);
-    loop {
-        if show_progress {
-            clear_size = display_dl_progress(size, bytes_read as u64, clear_size)?;
-        }
-        let n = {
-            let mut buf = src.fill_buf()?;
-            dest.write_all(&mut buf)?;
-            buf.len()
-        };
-        if n == 0 { break; }
-        src.consume(n);
-        bytes_read += n;
-    }
-    if show_progress { println!(" ... Done"); }
-    Ok(())
-}
-
-
 /// Extract contents of a tar.gz file to a specified directory, returning the
 /// temp path to our new executable
 ///
@@ -270,10 +207,93 @@ fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::
 }
 
 
-/// Content if the latest cersion tag is greater than the current
-fn should_update(current: &str, latest: &str) -> Result<bool> {
+/// Check if the latest version tag is greater than the current
+pub fn should_update(current: &str, latest: &str) -> Result<bool> {
     use semver::Version;
     Ok(Version::parse(latest)? > Version::parse(current)?)
+}
+
+
+#[derive(Debug)]
+pub struct Download {
+    show_progress: bool,
+    url: String,
+}
+impl Download {
+    pub fn from_url(url: &str) -> Self {
+        Self {
+            show_progress: false,
+            url: url.to_owned(),
+        }
+    }
+
+    pub fn show_progress(&mut self, b: bool) -> &mut Self {
+        self.show_progress = b;
+        self
+    }
+
+    /// Display a download progress bar, returning the size of the
+    /// bar that needs to be cleared on the next run
+    ///
+    /// * Errors:
+    ///     * Io flushing
+    fn display_dl_progress(total_size: u64, bytes_read: u64, clear_size: usize) -> Result<usize> {
+        let bar_width = 75;
+        let ratio = bytes_read as f64 / total_size as f64;
+        let percent = (ratio * 100.) as u8;
+        let n_complete = (bar_width as f64 * ratio) as usize;
+        let mut complete_bars = std::iter::repeat("=").take(n_complete).collect::<String>();
+        if ratio != 1. { complete_bars.push('>'); }
+
+        let clear_chars = std::iter::repeat("\x08").take(clear_size).collect::<String>();
+        print_flush!("{}\r", clear_chars);
+
+        let bar = format!("{percent: >3}% [{compl: <full_size$}] {total}kB", percent=percent, compl=complete_bars, full_size=bar_width, total=total_size/1000);
+        print_flush!("{}", bar);
+
+        Ok(bar.len())
+    }
+
+    /// Download the file behind the given `url` into the specified `dest`.
+    /// Show a sliding progress bar if specified.
+    /// If the resource doesn't specify a content-length, the progress bar will not be shown
+    ///
+    /// * Errors:
+    ///     * `reqwest` network errors
+    ///     * Unsuccessful response status
+    ///     * Progress-bar errors
+    ///     * Reading from response to `BufReader`-buffer
+    ///     * Writing from `BufReader`-buffer to `File`
+    pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
+        use io::BufRead;
+
+        let resp = reqwest::get(&self.url)?;
+        let size = resp.headers()
+            .get::<reqwest::header::ContentLength>()
+            .map(|ct_len| **ct_len)
+            .unwrap_or(0);
+        if !resp.status().is_success() { bail!(Error::Update, "Download request failed with status: {:?}", resp.status()) }
+        let show_progress = if size == 0 { false } else { self.show_progress };
+
+        let mut bytes_read = 0;
+        let mut clear_size = 0;
+        let mut src = io::BufReader::new(resp);
+        loop {
+            if show_progress {
+                clear_size = Self::display_dl_progress(size, bytes_read as u64, clear_size)?;
+            }
+            let n = {
+                let mut buf = src.fill_buf()?;
+                dest.write_all(&mut buf)?;
+                buf.len()
+            };
+            if n == 0 { break; }
+            src.consume(n);
+            bytes_read += n;
+        }
+        if show_progress { println!(" ... Done"); }
+        Ok(())
+    }
 }
 
 

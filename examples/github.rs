@@ -8,7 +8,7 @@ Example updating an executable to the latest version released via GitHub
 
 fn run() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
-    let status = self_update::backends::github::Updater::configure()?
+    let status = self_update::backends::github::Update::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
