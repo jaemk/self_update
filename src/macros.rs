@@ -11,15 +11,31 @@ macro_rules! cargo_crate_version {
 }
 
 
+macro_rules! set_ssl_vars {
+    // Make sure openssl can find required files
+    () => {
+        #[cfg(target_os="linux")]
+        {
+            if ::std::env::var_os("SSL_CERT_FILE").is_none() {
+                ::std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
+            }
+            if ::std::env::var_os("SSL_CERT_DIR").is_none() {
+                ::std::env::set_var("SSL_CERT_DIR", "/etc/ssl/certs");
+            }
+        }
+    }
+}
+
+
 /// Helper to `print!` and immediately `flush` `stdout`
 macro_rules! print_flush {
     ($literal:expr) => {
         print!($literal);
-        ::std::io::stdout().flush()?;
+        ::std::io::Write::flush(&mut ::std::io::stdout())?;
     };
     ($literal:expr, $($arg:expr),*) => {
         print!($literal, $($arg),*);
-        ::std::io::stdout().flush()?;
+        ::std::io::Write::flush(&mut ::std::io::stdout())?;
     }
 }
 
