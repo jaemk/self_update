@@ -399,6 +399,7 @@ impl Download {
     pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use io::BufRead;
 
+        set_ssl_vars!();
         let resp = reqwest::get(&self.url)?;
         let size = resp.headers()
             .get::<reqwest::header::ContentLength>()
