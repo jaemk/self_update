@@ -352,7 +352,7 @@ impl UpdateBuilder {
 }
 
 
-/// Updates to the latest releases distributed via GitHub
+/// Updates to a specified or latest release distributed via GitHub
 #[derive(Debug)]
 pub struct Update {
     repo_owner: String,
