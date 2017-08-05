@@ -22,7 +22,7 @@ use super::super::errors::*;
 
 
 /// GitHub release-asset information
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseAsset {
     pub download_url: String,
     pub name: String,
@@ -46,7 +46,7 @@ impl ReleaseAsset {
 
 
 /// GitHub release information
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Release {
     pub name: String,
     pub body: String,
@@ -74,14 +74,22 @@ impl Release {
             assets: assets,
         })
     }
-    fn has_target_asset(&self, target: &str) -> bool {
+
+    /// Check if release has an asset who's name contains the specified `target`
+    pub fn has_target_asset(&self, target: &str) -> bool {
         self.assets.iter().any(|asset| asset.name.contains(target))
+    }
+
+    /// Return the first `ReleaseAsset` for the current release who's name
+    /// contains the specified `target`
+    pub fn asset_for(&self, target: &str) -> Option<ReleaseAsset> {
+        self.assets.iter().filter(|asset| asset.name.contains(target)).cloned().nth(0)
     }
 }
 
 
 /// `ReleaseList` Builder
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseListBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
@@ -119,7 +127,7 @@ impl ReleaseListBuilder {
 
 /// `ReleaseList` provides a builder api for querying a GitHub repo,
 /// returning a `Vec` of available `Release`s
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseList {
     repo_owner: String,
     repo_name: String,
