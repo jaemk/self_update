@@ -25,7 +25,7 @@ from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
-    let status = self_update::backends::github::Updater::configure()?
+    let status = self_update::backends::github::UpdateLatest::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
@@ -51,6 +51,7 @@ extern crate flate2;
 extern crate tar;
 extern crate semver;
 
+pub use tempdir::TempDir;
 
 use std::fs;
 use std::io;
@@ -62,6 +63,76 @@ pub mod errors;
 pub mod backends;
 
 use errors::*;
+
+
+/// Try to determine the current target triple.
+///
+/// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`) or an
+/// `Error::Config` if the current config cannot be determined or is not some combination of the
+/// following values:
+/// `linux, mac, windows` -- `i686, x86, armv7` -- `gnu, musl, msvc`
+///
+/// * Errors:
+///     * Unexpected system config
+pub fn get_target() -> Result<String> {
+    let arch_config = (cfg!(target_arch = "x86"), cfg!(target_arch = "x86_64"), cfg!(target_arch = "arm"));
+    let arch = match arch_config {
+        (true, _, _) => "i686",
+        (_, true, _) => "x86_64",
+        (_, _, true) => "armv7",
+        _ => bail!(Error::Update, "Unable to determine target-architecture"),
+    };
+
+    let os_config = (cfg!(target_os = "linux"), cfg!(target_os = "macos"), cfg!(target_os = "windows"));
+    let os = match os_config {
+        (true, _, _) => "unknown-linux",
+        (_, true, _) => "apple-darwin",
+        (_, _, true) => "pc-windows",
+        _ => bail!(Error::Update, "Unable to determine target-os"),
+    };
+
+    let s;
+    let os = if cfg!(target_os = "macos") {
+        os
+    } else {
+        let env_config = (cfg!(target_env = "gnu"), cfg!(target_env = "musl"), cfg!(target_env = "msvc"));
+        let env = match env_config {
+            (true, _, _) => "gnu",
+            (_, true, _) => "musl",
+            (_, _, true) => "msvc",
+            _ => bail!(Error::Update, "Unable to determine target-environment"),
+        };
+        s = format!("{}-{}", os, env);
+        &s
+    };
+
+    Ok(format!("{}-{}", arch, os))
+}
+
+
+/// Check if the latest version tag is greater than the current
+pub fn should_update(current: &str, latest: &str) -> Result<bool> {
+    use semver::Version;
+    Ok(Version::parse(latest)? > Version::parse(current)?)
+}
+
+
+/// Flush a message to stdout and check if they respond `yes`
+///
+/// * Errors:
+///     * Io flushing
+///     * User entered anything other than Y/y
+fn prompt_ok(msg: &str) -> Result<()> {
+    print_flush!("{}", msg);
+
+    let stdin = io::stdin();
+    let mut s = String::new();
+    stdin.read_line(&mut s)?;
+    if s.trim().to_lowercase() != "y" {
+        bail!(Error::Update, "Update aborted");
+    }
+    Ok(())
+}
 
 
 /// Status returned after updating
@@ -110,116 +181,135 @@ impl std::fmt::Display for Status {
 }
 
 
-/// Try to determine the current target triple.
-///
-/// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`) or an
-/// `Error::Config` if the current config cannot be determined or is not some combination of the
-/// following values:
-/// `linux, mac, windows` -- `i686, x86, armv7` -- `gnu, musl, msvc`
-///
-/// * Errors:
-///     * Unexpected system config
-pub fn get_target() -> Result<String> {
-    let arch_config = (cfg!(target_arch = "x86"), cfg!(target_arch = "x86_64"), cfg!(target_arch = "arm"));
-    let arch = match arch_config {
-        (true, _, _) => "i686",
-        (_, true, _) => "x86_64",
-        (_, _, true) => "armv7",
-        _ => bail!(Error::Update, "Unable to determine target-architecture"),
-    };
-
-    let os_config = (cfg!(target_os = "linux"), cfg!(target_os = "macos"), cfg!(target_os = "windows"));
-    let os = match os_config {
-        (true, _, _) => "unknown-linux",
-        (_, true, _) => "apple-darwin",
-        (_, _, true) => "pc-windows",
-        _ => bail!(Error::Update, "Unable to determine target-os"),
-    };
-
-    let s;
-    let os = if cfg!(target_os = "macos") {
-        os
-    } else {
-        let env_config = (cfg!(target_env = "gnu"), cfg!(target_env = "musl"), cfg!(target_env = "msvc"));
-        let env = match env_config {
-            (true, _, _) => "gnu",
-            (_, true, _) => "musl",
-            (_, _, true) => "msvc",
-            _ => bail!(Error::Update, "Unable to determine target-environment"),
-        };
-        s = format!("{}-{}", os, env);
-        &s
-    };
-
-    Ok(format!("{}-{}", arch, os))
+/// Supported archive formats
+#[derive(Debug)]
+pub enum ArchiveKind {
+    Tar,
+    Plain,
 }
 
 
-/// Flush a message to stdout and check if they respond `yes`
-///
-/// * Errors:
-///     * Io flushing
-///     * User entered anything other than Y/y
-fn prompt_ok(msg: &str) -> Result<()> {
-    print_flush!("{}", msg);
-
-    let stdin = io::stdin();
-    let mut s = String::new();
-    stdin.read_line(&mut s)?;
-    if s.trim().to_lowercase() != "y" {
-        bail!(Error::Update, "Update aborted");
-    }
-    Ok(())
+/// Supported encoding formats
+#[derive(Debug)]
+pub enum EncodingKind {
+    Gz,
+    Plain,
 }
 
 
-/// Extract contents of a tar.gz file to a specified directory, returning the
-/// temp path to our new executable
+/// Extract contents of an encoded archive (e.g. tar.gz) file to a specified directory
 ///
 /// * Errors:
 ///     * Io - opening files
 ///     * Io - gzip decoding
 ///     * Io - archive unpacking
-fn extract_targz(tarball: &path::Path, into_dir: &path::Path) -> Result<()> {
-    let tarball = fs::File::open(tarball)?;
-    let tar = flate2::read::GzDecoder::new(tarball)?;
-    let mut archive = tar::Archive::new(tar);
-    archive.unpack(into_dir)?;
-    Ok(())
+#[derive(Debug)]
+pub struct Extract<'a> {
+    source: &'a path::Path,
+    archive: ArchiveKind,
+    encoding: EncodingKind,
+}
+impl<'a> Extract<'a> {
+    pub fn from_source(source: &'a path::Path) -> Extract<'a> {
+        Self {
+            source: source,
+            archive: ArchiveKind::Plain,
+            encoding: EncodingKind::Plain,
+        }
+    }
+    pub fn archive(&mut self, kind: ArchiveKind) -> &mut Self {
+        self.archive = kind;
+        self
+    }
+    pub fn encoding(&mut self, kind: EncodingKind) -> &mut Self {
+        self.encoding = kind;
+        self
+    }
+    pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
+        let source = fs::File::open(self.source)?;
+        let archive: Box<io::Read> = match self.encoding {
+            EncodingKind::Plain => Box::new(source),
+            EncodingKind::Gz => {
+                let reader = flate2::read::GzDecoder::new(source)?;
+                Box::new(reader)
+            },
+        };
+        match self.archive {
+            ArchiveKind::Plain => (),
+            ArchiveKind::Tar => {
+                let mut archive = tar::Archive::new(archive);
+                archive.unpack(into_dir)?;
+            }
+        };
+        Ok(())
+    }
 }
 
 
-/// Move existing executable to a temp directory and try putting our new one in its place.
-/// If something goes wrong, move the original executable back
+/// Moves a file from the given path to the specified destination.
+///
+/// If `replace_using_temp` is provided, the destination file will be
+/// replaced using the given temp path as a backup.
 ///
 /// * Errors:
 ///     * Io - copying / renaming
-fn replace_exe(current_exe: &path::Path, new_exe: &path::Path, tmp_file: &path::Path) -> Result<()> {
-    fs::rename(current_exe, tmp_file)?;
-    match fs::rename(new_exe, current_exe) {
-        Err(e) => {
-            fs::rename(tmp_file, current_exe)?;
-            return Err(Error::from(e))
+#[derive(Debug)]
+pub struct Move<'a> {
+    source: &'a path::Path,
+    temp: Option<&'a path::Path>,
+}
+impl<'a> Move<'a> {
+    /// Specify source file
+    pub fn from_source(source: &'a path::Path) -> Move<'a> {
+        Self {
+            source: source,
+            temp: None,
         }
-        Ok(_) => (),
-    };
-    Ok(())
+    }
+
+    /// If specified and the destination file already exists, the destination
+    /// file will be "safely" replaced using a temp path.
+    /// The `temp` dir should must be explicitly provided since `replace` operations require
+    /// files to live on the same filesystem.
+    pub fn replace_using_temp(&mut self, temp: &'a path::Path) -> &mut Self {
+        self.temp = Some(temp);
+        self
+    }
+
+    /// Move source file to specified destination
+    pub fn to_dest(&self, dest: &path::Path) -> Result<()> {
+        match self.temp {
+            None => {
+                fs::rename(self.source, dest)?;
+            }
+            Some(temp) => {
+                if dest.exists() {
+                    fs::rename(dest, temp)?;
+                    match fs::rename(self.source, dest) {
+                        Err(e) => {
+                            fs::rename(temp, dest)?;
+                            return Err(Error::from(e))
+                        }
+                        Ok(_) => (),
+                    };
+                } else {
+                    fs::rename(self.source, dest)?;
+                }
+            }
+        };
+        Ok(())
+    }
 }
 
 
-/// Check if the latest version tag is greater than the current
-pub fn should_update(current: &str, latest: &str) -> Result<bool> {
-    use semver::Version;
-    Ok(Version::parse(latest)? > Version::parse(current)?)
-}
-
-
+/// Download things into files
 #[derive(Debug)]
 pub struct Download {
     show_progress: bool,
     url: String,
 }
 impl Download {
+    /// Specify download url
     pub fn from_url(url: &str) -> Self {
         Self {
             show_progress: false,
@@ -227,6 +317,7 @@ impl Download {
         }
     }
 
+    /// Toggle download progress bar
     pub fn show_progress(&mut self, b: bool) -> &mut Self {
         self.show_progress = b;
         self

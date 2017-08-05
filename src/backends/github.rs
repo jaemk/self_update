@@ -1,3 +1,6 @@
+/*!
+GitHub releases
+*/
 use std::env;
 use std::path::PathBuf;
 use std::fs;
@@ -7,18 +10,22 @@ use reqwest;
 use tempdir;
 
 use super::super::Status;
-use super::super::replace_exe;
-use super::super::extract_targz;
-use super::super::prompt_ok;
 use super::super::Download;
+use super::super::Extract;
+use super::super::ArchiveKind;
+use super::super::EncodingKind;
+use super::super::Move;
+
+use super::super::prompt_ok;
 use super::super::should_update;
 use super::super::errors::*;
 
 
+/// GitHub release-asset information
 #[derive(Debug)]
-struct ReleaseAsset {
-    download_url: String,
-    name: String,
+pub struct ReleaseAsset {
+    pub download_url: String,
+    pub name: String,
 }
 impl ReleaseAsset {
     /// Parse a release-asset json object
@@ -27,9 +34,9 @@ impl ReleaseAsset {
     ///     * Missing required name & download-url keys
     fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
         let download_url = asset["browser_download_url"].as_str()
-            .ok_or_else(|| format_err!(Error::Update, "Asset missing `browser_download_url`"))?;
+            .ok_or_else(|| format_err!(Error::Release, "Asset missing `browser_download_url`"))?;
         let name = asset["name"].as_str()
-            .ok_or_else(|| format_err!(Error::Update, "Asset missing `name`"))?;
+            .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
         Ok(ReleaseAsset {
             download_url: download_url.to_owned(),
             name: name.to_owned(),
@@ -38,11 +45,121 @@ impl ReleaseAsset {
 }
 
 
-/// `github::Update` builder
+/// GitHub release information
+#[derive(Debug)]
+pub struct Release {
+    pub name: String,
+    pub body: String,
+    pub tag: String,
+    pub date_created: String,
+    pub assets: Vec<ReleaseAsset>,
+}
+impl Release {
+    fn from_release(release: &serde_json::Value) -> Result<Release> {
+        let name = release["name"].as_str()
+            .ok_or_else(|| format_err!(Error::Release, "Release missing `name`"))?;
+        let body = release["body"].as_str()
+            .ok_or_else(|| format_err!(Error::Release, "Release missing `body`"))?;
+        let tag = release["tag_name"].as_str()
+            .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
+        let date_created = release["created_at"].as_str()
+            .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
+        let assets = release["assets"].as_array().ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
+        let assets = assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>()?;
+        Ok(Release {
+            name: name.to_owned(),
+            body: body.to_owned(),
+            tag: tag.to_owned(),
+            date_created: date_created.to_owned(),
+            assets: assets,
+        })
+    }
+    fn has_target_asset(&self, target: &str) -> bool {
+        self.assets.iter().any(|asset| asset.name.contains(target))
+    }
+}
+
+
+/// `ReleaseList` Builder
+#[derive(Debug)]
+pub struct ReleaseListBuilder {
+    repo_owner: Option<String>,
+    repo_name: Option<String>,
+    target: Option<String>,
+}
+impl ReleaseListBuilder {
+    /// Set the repo owner, used to build a github api url
+    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
+        self.repo_owner = Some(owner.to_owned());
+        self
+    }
+
+    /// Set the repo name, used to build a github api url
+    pub fn repo_name(&mut self, name: &str) -> &mut Self {
+        self.repo_name = Some(name.to_owned());
+        self
+    }
+
+    /// Set the optional arch `target` name, used to filter available releases
+    pub fn with_target(&mut self, target: &str) -> &mut Self {
+        self.target = Some(target.to_owned());
+        self
+    }
+
+    /// Verify builder args, returning a `ReleaseList`
+    pub fn build(&self) -> Result<ReleaseList> {
+        Ok(ReleaseList{
+            repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required") },
+            repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required") },
+            target: self.target.clone(),
+        })
+    }
+}
+
+
+/// `ReleaseList` provides a builder api for querying a GitHub repo,
+/// returning a `Vec` of available `Release`s
+#[derive(Debug)]
+pub struct ReleaseList {
+    repo_owner: String,
+    repo_name: String,
+    target: Option<String>,
+}
+impl ReleaseList {
+    /// Initialize a ReleaseListBuilder
+    pub fn configure() -> ReleaseListBuilder {
+        ReleaseListBuilder {
+            repo_owner: None,
+            repo_name: None,
+            target: None,
+        }
+    }
+
+    /// Retrieve a list of `Release`s.
+    /// If specified, filter for those containing a specified `target`
+    pub fn fetch(self) -> Result<Vec<Release>> {
+        set_ssl_vars!();
+        let api_url = format!("https://api.github.com/repos/{}/{}/releases", self.repo_owner, self.repo_name);
+        let mut resp = reqwest::get(&api_url)?;
+        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?}", resp.status()) }
+        let releases = resp.json::<serde_json::Value>()?;
+        let releases = releases.as_array().ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+        let releases = releases.iter().map(Release::from_release).collect::<Result<Vec<Release>>>()?;
+        let releases = match self.target {
+            None => releases,
+            Some(ref target) => releases.into_iter().filter(|r| r.has_target_asset(target)).collect::<Vec<_>>(),
+        };
+        Ok(releases)
+    }
+}
+
+
+/// `github::UpdateLatest` builder
 ///
 /// Configure download and installation from
 /// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
-pub struct UpdateBuilder {
+#[derive(Debug)]
+pub struct UpdateLatestBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
@@ -54,7 +171,7 @@ pub struct UpdateBuilder {
     no_confirm: bool,
     current_version: Option<String>,
 }
-impl UpdateBuilder {
+impl UpdateLatestBuilder {
     /// Initialize a new builder, defaulting the `bin_install_path` to the current
     /// executable's path
     ///
@@ -135,9 +252,9 @@ impl UpdateBuilder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::Update;
+    /// # use self_update::backends::github::UpdateLatest;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// Update::configure()?
+    /// UpdateLatest::configure()?
     ///     .bin_path_in_tarball("bin/myapp")
     /// #   .build()?;
     /// # Ok(())
@@ -166,12 +283,12 @@ impl UpdateBuilder {
         self
     }
 
-    /// Confirm config and create a ready-to-use `Update`
+    /// Confirm config and create a ready-to-use `UpdateLatest`
     ///
     /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Update> {
-        Ok(Update {
+    ///     * Config - Invalid `UpdateLatest` configuration
+    pub fn build(&self) -> Result<UpdateLatest> {
+        Ok(UpdateLatest {
             repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required")},
             repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required")},
             target: if let Some(ref target) = self.target { target.to_owned() } else { bail!(Error::Config, "`target` required")},
@@ -187,8 +304,9 @@ impl UpdateBuilder {
 }
 
 
-/// Update intended for handling releases distributed via GitHub
-pub struct Update {
+/// Updates to the latest releases distributed via GitHub
+#[derive(Debug)]
+pub struct UpdateLatest {
     repo_owner: String,
     repo_name: String,
     target: String,
@@ -200,14 +318,14 @@ pub struct Update {
     show_output: bool,
     no_confirm: bool,
 }
-impl Update {
-    /// Initialize a new `Update` builder
-    pub fn configure() -> Result<UpdateBuilder> {
-        UpdateBuilder::new()
+impl UpdateLatest {
+    /// Initialize a new `UpdateLatest` builder
+    pub fn configure() -> Result<UpdateLatestBuilder> {
+        UpdateLatestBuilder::new()
     }
 
     fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<serde_json::Value> {
-        set_ssl_vars!()
+        set_ssl_vars!();
         let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
         let mut resp = reqwest::get(&api_url)?;
         if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?}", resp.status()) }
@@ -240,7 +358,6 @@ impl Update {
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user
     pub fn update(self) -> Result<Status> {
-
         self.println(&format!("Checking target-arch... {}", self.target));
         self.println(&format!("Checking current version... v{}", self.current_version));
 
@@ -266,7 +383,7 @@ impl Update {
             println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
         }
         if !self.no_confirm {
-            prompt_ok("Do you want to continue? [Y/n] ")?;
+            prompt_ok("Do you want to continue? [y/n] ")?;
         }
 
         let tmp_dir_parent = self.bin_install_path.parent()
@@ -281,13 +398,18 @@ impl Update {
             .download_to(&mut tmp_tarball)?;
 
         self.print_flush("Extracting tarball... ")?;
-        extract_targz(&tmp_tarball_path, &tmp_dir.path())?;
+        Extract::from_source(&tmp_tarball_path)
+            .encoding(EncodingKind::Gz)
+            .archive(ArchiveKind::Tar)
+            .extract_into(&tmp_dir.path())?;
         let new_exe = tmp_dir.path().join(&self.bin_path_in_tarball);
         self.println("Done");
 
         self.print_flush("Replacing binary file... ")?;
         let tmp_file = tmp_dir.path().join(&format!("__{}_backup", self.bin_name));
-        replace_exe(&self.bin_install_path, &new_exe, &tmp_file)?;
+        Move::from_source(&new_exe)
+            .replace_using_temp(&tmp_file)
+            .to_dest(&self.bin_install_path)?;
         self.println("Done");
         Ok(Status::Updated(latest_tag.to_owned()))
     }

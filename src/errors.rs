@@ -14,6 +14,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Update(String),
     Network(String),
+    Release(String),
     Config(String),
     Io(std::io::Error),
     Json(serde_json::Error),
@@ -28,6 +29,7 @@ impl std::fmt::Display for Error {
         match *self {
             Update(ref s)   => write!(f, "UpdateError: {}", s),
             Network(ref s)  => write!(f, "NetworkError: {}", s),
+            Release(ref s)  => write!(f, "ReleaseError: {}", s),
             Config(ref s)   => write!(f, "ConfigError: {}", s),
             Io(ref e)       => write!(f, "IoError: {}", e),
             Json(ref e)     => write!(f, "JsonError: {}", e),
