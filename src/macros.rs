@@ -11,8 +11,8 @@ macro_rules! cargo_crate_version {
 }
 
 
+/// Set ssl cert env. vars to make sure openssl can find required files
 macro_rules! set_ssl_vars {
-    // Make sure openssl can find required files
     () => {
         #[cfg(target_os="linux")]
         {

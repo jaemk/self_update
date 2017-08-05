@@ -56,14 +56,14 @@ pub struct Release {
 }
 impl Release {
     fn from_release(release: &serde_json::Value) -> Result<Release> {
-        let name = release["name"].as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `name`"))?;
-        let body = release["body"].as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `body`"))?;
         let tag = release["tag_name"].as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
         let date_created = release["created_at"].as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
+        let name = release["name"].as_str()
+            .unwrap_or(tag);
+        let body = release["body"].as_str()
+            .unwrap_or("");
         let assets = release["assets"].as_array().ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
         let assets = assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
@@ -148,26 +148,53 @@ impl ReleaseList {
     pub fn fetch(self) -> Result<Vec<Release>> {
         set_ssl_vars!();
         let api_url = format!("https://api.github.com/repos/{}/{}/releases", self.repo_owner, self.repo_name);
-        let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?}", resp.status()) }
-        let releases = resp.json::<serde_json::Value>()?;
-        let releases = releases.as_array().ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
-        let releases = releases.iter().map(Release::from_release).collect::<Result<Vec<Release>>>()?;
+        let releases = Self::fetch_releases(&api_url)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases.into_iter().filter(|r| r.has_target_asset(target)).collect::<Vec<_>>(),
         };
         Ok(releases)
     }
+
+    fn fetch_releases(url: &str) -> Result<Vec<Release>> {
+        let mut resp = reqwest::get(url)?;
+        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), url) }
+        let releases = resp.json::<serde_json::Value>()?;
+        let releases = releases.as_array().ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+        let mut releases = releases.iter().map(Release::from_release).collect::<Result<Vec<Release>>>()?;
+
+        // handle paged responses containing `Link` header:
+        // `Link: <https://api.github.com/resource?page=2>; rel="next"`
+        let link = resp.headers().get::<reqwest::header::Link>();
+        if link.is_none() { return Ok(releases) }
+
+        let link_vals = link.unwrap().values();
+        let next_link = link_vals.iter().filter_map(|link| {
+            if let Some(rels) = link.rel() {
+                if rels.contains(&reqwest::header::RelationType::Next) {
+                    return Some(link.link())
+                }
+            }
+            None
+        }).nth(0);
+
+        Ok(match next_link {
+            None => releases,
+            Some(link) => {
+                releases.extend(Self::fetch_releases(link)?);
+                releases
+            }
+        })
+    }
 }
 
 
-/// `github::UpdateLatest` builder
+/// `github::Update` builder
 ///
 /// Configure download and installation from
 /// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
 #[derive(Debug)]
-pub struct UpdateLatestBuilder {
+pub struct UpdateBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
@@ -178,8 +205,9 @@ pub struct UpdateLatestBuilder {
     show_output: bool,
     no_confirm: bool,
     current_version: Option<String>,
+    target_version: Option<String>,
 }
-impl UpdateLatestBuilder {
+impl UpdateBuilder {
     /// Initialize a new builder, defaulting the `bin_install_path` to the current
     /// executable's path
     ///
@@ -195,6 +223,7 @@ impl UpdateLatestBuilder {
             show_output: true,
             no_confirm: false,
             current_version: None,
+            target_version: None,
         })
     }
 
@@ -214,6 +243,16 @@ impl UpdateLatestBuilder {
     /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
     pub fn current_version(&mut self, ver: &str) -> &mut Self {
         self.current_version = Some(ver.to_owned());
+        self
+    }
+
+    /// Set the target version tag to update to. This will be used to search for a release
+    /// by tag name:
+    /// `/repos/:owner/:repo/releases/tags/:tag`
+    ///
+    /// If not specified, the latest available release is used.
+    pub fn target_version_tag(&mut self, ver: &str) -> &mut Self {
+        self.target_version = Some(ver.to_owned());
         self
     }
 
@@ -260,9 +299,9 @@ impl UpdateLatestBuilder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::UpdateLatest;
+    /// # use self_update::backends::github::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// UpdateLatest::configure()?
+    /// Update::configure()?
     ///     .bin_path_in_tarball("bin/myapp")
     /// #   .build()?;
     /// # Ok(())
@@ -291,12 +330,12 @@ impl UpdateLatestBuilder {
         self
     }
 
-    /// Confirm config and create a ready-to-use `UpdateLatest`
+    /// Confirm config and create a ready-to-use `Update`
     ///
     /// * Errors:
-    ///     * Config - Invalid `UpdateLatest` configuration
-    pub fn build(&self) -> Result<UpdateLatest> {
-        Ok(UpdateLatest {
+    ///     * Config - Invalid `Update` configuration
+    pub fn build(&self) -> Result<Update> {
+        Ok(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required")},
             repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required")},
             target: if let Some(ref target) = self.target { target.to_owned() } else { bail!(Error::Config, "`target` required")},
@@ -304,6 +343,7 @@ impl UpdateLatestBuilder {
             bin_install_path: if let Some(ref path) = self.bin_install_path { path.to_owned() } else { bail!(Error::Config, "`bin_install_path` required")},
             bin_path_in_tarball: if let Some(ref path) = self.bin_path_in_tarball { path.to_owned() } else { bail!(Error::Config, "`bin_path_in_tarball` required")},
             current_version: if let Some(ref ver) = self.current_version { ver.to_owned() } else { bail!(Error::Config, "`current_version` required")},
+            target_version: self.target_version.as_ref().map(|v| v.to_owned()),
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
@@ -314,11 +354,12 @@ impl UpdateLatestBuilder {
 
 /// Updates to the latest releases distributed via GitHub
 #[derive(Debug)]
-pub struct UpdateLatest {
+pub struct Update {
     repo_owner: String,
     repo_name: String,
     target: String,
     current_version: String,
+    target_version: Option<String>,
     bin_name: String,
     bin_install_path: PathBuf,
     bin_path_in_tarball: PathBuf,
@@ -326,28 +367,28 @@ pub struct UpdateLatest {
     show_output: bool,
     no_confirm: bool,
 }
-impl UpdateLatest {
-    /// Initialize a new `UpdateLatest` builder
-    pub fn configure() -> Result<UpdateLatestBuilder> {
-        UpdateLatestBuilder::new()
+impl Update {
+    /// Initialize a new `Update` builder
+    pub fn configure() -> Result<UpdateBuilder> {
+        UpdateBuilder::new()
     }
 
-    fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<serde_json::Value> {
+    fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
         let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?}", resp.status()) }
-        Ok(resp.json::<serde_json::Value>()?)
+        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), api_url) }
+        let json = resp.json::<serde_json::Value>()?;
+        Ok(Release::from_release(&json)?)
     }
 
-    fn get_target_asset(assets: &serde_json::Value, target: &str) -> Result<ReleaseAsset> {
-        let latest_assets = assets.as_array().ok_or_else(|| format_err!(Error::Release, "No release assets found!"))?;
-        let target_asset = latest_assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>();
-        let target_asset = target_asset?.into_iter()
-            .filter(|ra| ra.name.contains(target))
-            .nth(0)
-            .ok_or_else(|| format_err!(Error::Update, "No release asset found for current target: `{}`", target))?;
-        Ok(target_asset)
+    fn get_release_version(repo_owner: &str, repo_name: &str, ver: &str) -> Result<Release> {
+        set_ssl_vars!();
+        let api_url = format!("https://api.github.com/repos/{}/{}/releases/tags/{}", repo_owner, repo_name, ver);
+        let mut resp = reqwest::get(&api_url)?;
+        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), api_url) }
+        let json = resp.json::<serde_json::Value>()?;
+        Ok(Release::from_release(&json)?)
     }
 
     fn print_flush(&self, msg: &str) -> Result<()> {
@@ -369,19 +410,29 @@ impl UpdateLatest {
         self.println(&format!("Checking target-arch... {}", self.target));
         self.println(&format!("Checking current version... v{}", self.current_version));
 
-        self.print_flush("Checking latest released version... ")?;
-        let latest = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
-        let latest_tag = latest["tag_name"].as_str()
-            .ok_or_else(|| format_err!(Error::Update, "No tag_name found for latest release"))?
-            .trim_left_matches("v");
-        self.println(&format!("v{}", latest_tag));
+        let release = match self.target_version {
+            None => {
+                self.print_flush("Checking latest released version... ")?;
+                let release = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
+                {
+                    let release_tag = release.tag.trim_left_matches("v");
+                    self.println(&format!("v{}", release_tag));
 
-        if !should_update(&self.current_version, &latest_tag)? {
-            return Ok(Status::UpToDate(self.current_version.to_owned()))
-        }
+                    if !should_update(&self.current_version, &release_tag)? {
+                        return Ok(Status::UpToDate(self.current_version.to_owned()))
+                    }
 
-        self.println(&format!("New release found! v{} --> v{}", self.current_version, latest_tag));
-        let target_asset = Self::get_target_asset(&latest["assets"], &self.target)?;
+                    self.println(&format!("New release found! v{} --> v{}", &self.current_version, release_tag));
+                }
+                release
+            }
+            Some(ref ver) => {
+                self.println(&format!("Looking for tag: {}", ver));
+                Self::get_release_version(&self.repo_owner, &self.repo_name, ver)?
+            }
+        };
+
+        let target_asset = release.asset_for(&self.target).ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", self.target))?;
 
         if self.show_output || !self.no_confirm {
             println!("\n{} release status:", self.bin_name);
@@ -419,7 +470,7 @@ impl UpdateLatest {
             .replace_using_temp(&tmp_file)
             .to_dest(&self.bin_install_path)?;
         self.println("Done");
-        Ok(Status::Updated(latest_tag.to_owned()))
+        Ok(Status::Updated(release.tag.to_owned()))
     }
 }
 

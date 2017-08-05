@@ -17,18 +17,19 @@ fn run() -> Result<(), Box<::std::error::Error>> {
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    let status = self_update::backends::github::UpdateLatest::configure()?
+    let status = self_update::backends::github::Update::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
         .bin_name("github")
         .show_download_progress(true)
+        //.target_version_tag("v9.9.9")
         //.show_output(false)
         //.no_confirm(true)
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
-    println!("Update status: `v{}`!", status.version());
+    println!("Update status: `{}`!", status.version());
     Ok(())
 }
 

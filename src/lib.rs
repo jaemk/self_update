@@ -10,7 +10,7 @@
 distribution backends.
 
 ```shell
-self_update = "0.3"
+self_update = "0.4"
 ```
 
 ## Usage
@@ -23,7 +23,7 @@ from `https://api.github.com/repos/jaemk/self_update/releases/latest`
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let target = self_update::get_target()?;
-    let status = self_update::backends::github::UpdateLatest::configure()?
+    let status = self_update::backends::github::Update::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
         .target(&target)
@@ -32,7 +32,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
-    println!("Update status: `v{}`!", status.version());
+    println!("Update status: `{}`!", status.version());
     Ok(())
 }
 # fn main() { }
@@ -289,8 +289,9 @@ impl<'a> Extract<'a> {
 
 /// Moves a file from the given path to the specified destination.
 ///
+/// `source` and `dest` must be on the same filesystem.
 /// If `replace_using_temp` is provided, the destination file will be
-/// replaced using the given temp path as a backup.
+/// replaced using the given temp path as a backup in case of `io` errors.
 ///
 /// * Errors:
 ///     * Io - copying / renaming
@@ -344,6 +345,8 @@ impl<'a> Move<'a> {
 
 
 /// Download things into files
+///
+/// With optional progress bar
 #[derive(Debug)]
 pub struct Download {
     show_progress: bool,
