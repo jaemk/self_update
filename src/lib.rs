@@ -91,6 +91,7 @@ extern crate tempdir;
 extern crate flate2;
 extern crate tar;
 extern crate semver;
+extern crate pbr;
 
 pub use tempdir::TempDir;
 
@@ -367,28 +368,6 @@ impl Download {
         self
     }
 
-    /// Display a download progress bar, returning the size of the
-    /// bar that needs to be cleared on the next run
-    ///
-    /// * Errors:
-    ///     * Io flushing
-    fn display_dl_progress(total_size: u64, bytes_read: u64, clear_size: usize) -> Result<usize> {
-        let bar_width = 75;
-        let ratio = bytes_read as f64 / total_size as f64;
-        let percent = (ratio * 100.) as u8;
-        let n_complete = (bar_width as f64 * ratio) as usize;
-        let mut complete_bars = std::iter::repeat("=").take(n_complete).collect::<String>();
-        if ratio != 1. { complete_bars.push('>'); }
-
-        let clear_chars = std::iter::repeat("\x08").take(clear_size).collect::<String>();
-        print_flush!("{}\r", clear_chars);
-
-        let bar = format!("{percent: >3}% [{compl: <full_size$}] {total}kB", percent=percent, compl=complete_bars, full_size=bar_width, total=total_size/1000);
-        print_flush!("{}", bar);
-
-        Ok(bar.len())
-    }
-
     /// Download the file behind the given `url` into the specified `dest`.
     /// Show a sliding progress bar if specified.
     /// If the resource doesn't specify a content-length, the progress bar will not be shown
@@ -411,13 +390,14 @@ impl Download {
         if !resp.status().is_success() { bail!(Error::Update, "Download request failed with status: {:?}", resp.status()) }
         let show_progress = if size == 0 { false } else { self.show_progress };
 
-        let mut bytes_read = 0;
-        let mut clear_size = 0;
         let mut src = io::BufReader::new(resp);
+        let mut bar = if show_progress {
+            let mut bar = pbr::ProgressBar::new(size);
+            bar.set_units(pbr::Units::Bytes);
+            bar.format("[=> ]");
+            Some(bar)
+        } else { None };
         loop {
-            if show_progress {
-                clear_size = Self::display_dl_progress(size, bytes_read as u64, clear_size)?;
-            }
             let n = {
                 let mut buf = src.fill_buf()?;
                 dest.write_all(&mut buf)?;
@@ -425,7 +405,9 @@ impl Download {
             };
             if n == 0 { break; }
             src.consume(n);
-            bytes_read += n;
+            if let Some(ref mut bar) = bar {
+                bar.add(n as u64);
+            }
         }
         if show_progress { println!(" ... Done"); }
         Ok(())
