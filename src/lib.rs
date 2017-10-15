@@ -159,18 +159,19 @@ pub fn should_update(current: &str, latest: &str) -> Result<bool> {
 }
 
 
-/// Flush a message to stdout and check if they respond `yes`
+/// Flush a message to stdout and check if they respond `yes`.
+/// Interprets a blank response as yes.
 ///
 /// * Errors:
 ///     * Io flushing
-///     * User entered anything other than Y/y
-fn prompt_ok(msg: &str) -> Result<()> {
+///     * User entered anything other than enter/Y/y
+fn confirm(msg: &str) -> Result<()> {
     print_flush!("{}", msg);
 
-    let stdin = io::stdin();
     let mut s = String::new();
-    stdin.read_line(&mut s)?;
-    if s.trim().to_lowercase() != "y" {
+    io::stdin().read_line(&mut s)?;
+    let s = s.trim().to_lowercase();
+    if ! s.is_empty() && s != "y" {
         bail!(Error::Update, "Update aborted");
     }
     Ok(())

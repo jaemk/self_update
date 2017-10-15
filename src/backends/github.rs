@@ -16,7 +16,7 @@ use super::super::ArchiveKind;
 use super::super::EncodingKind;
 use super::super::Move;
 
-use super::super::prompt_ok;
+use super::super::confirm;
 use super::super::should_update;
 use super::super::errors::*;
 
@@ -442,7 +442,7 @@ impl Update {
             println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
         }
         if !self.no_confirm {
-            prompt_ok("Do you want to continue? [y/n] ")?;
+            confirm("Do you want to continue? [Y/n] ")?;
         }
 
         let tmp_dir_parent = self.bin_install_path.parent()
