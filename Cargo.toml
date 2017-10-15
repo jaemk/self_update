@@ -1,9 +1,10 @@
 [package]
 name = "self_update"
-version = "0.4.0"
+version = "0.4.1"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
+categories = ["command-line-utilities"]
 license = "MIT"
 readme = "README.md"
 authors = ["James Kominick <james.kominick@gmail.com>"]
