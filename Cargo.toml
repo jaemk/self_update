@@ -12,10 +12,10 @@ exclude = ["ci/", ".travis.yml"]
 
 [dependencies]
 serde_json = "1"
-reqwest = "0.7"
+reqwest = "0.8"
 tempdir = "0.3"
-flate2 = "0.2"
+flate2 = "1"
 tar = "0.4"
-semver = "0.7"
+semver = "0.8"
 pbr = "1"
 

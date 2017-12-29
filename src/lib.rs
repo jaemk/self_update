@@ -273,7 +273,7 @@ impl<'a> Extract<'a> {
         let archive: Box<io::Read> = match self.encoding {
             EncodingKind::Plain => Box::new(source),
             EncodingKind::Gz => {
-                let reader = flate2::read::GzDecoder::new(source)?;
+                let reader = flate2::read::GzDecoder::new(source);
                 Box::new(reader)
             },
         };
