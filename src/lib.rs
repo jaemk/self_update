@@ -103,6 +103,7 @@ use std::path;
 #[macro_use] pub mod macros;
 pub mod errors;
 pub mod backends;
+pub mod version;
 
 use errors::*;
 
@@ -152,7 +153,9 @@ pub fn get_target() -> Result<String> {
 }
 
 
-/// Check if the latest version tag is greater than the current
+/// Check if a version tag is greater than the current
+#[deprecated(since="0.5.0", note="`should_update` functionality has been moved to `version::bump_is_greater`.\
+                                  `version::bump_is_compatible` should be used instead.")]
 pub fn should_update(current: &str, latest: &str) -> Result<bool> {
     use semver::Version;
     Ok(Version::parse(latest)? > Version::parse(current)?)
