@@ -1,7 +1,9 @@
 # Changelog
 
-
 ## [Unreleased]
+
+
+## [0.4.2]
 ### Added
 - `version` module for comparing semver tags more explicitly
 
