@@ -17,7 +17,7 @@ use super::super::EncodingKind;
 use super::super::Move;
 
 use super::super::confirm;
-use super::super::should_update;
+use super::super::version;
 use super::super::errors::*;
 
 
@@ -418,11 +418,15 @@ impl Update {
                     let release_tag = release.tag.trim_left_matches("v");
                     self.println(&format!("v{}", release_tag));
 
-                    if !should_update(&self.current_version, &release_tag)? {
+                    if !version::bump_is_greater(&self.current_version, &release_tag)? {
                         return Ok(Status::UpToDate(self.current_version.to_owned()))
                     }
 
                     self.println(&format!("New release found! v{} --> v{}", &self.current_version, release_tag));
+                    let qualifier = if version::bump_is_compatible(&self.current_version, &release_tag)? {
+                        ""
+                    } else { "*NOT* " };
+                    self.println(&format!("New release is {}compatible", qualifier));
                 }
                 release
             }
