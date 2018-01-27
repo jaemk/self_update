@@ -1,4 +1,7 @@
-///! Semver version checks
+/*! Semver version checks
+
+The following functions compare two semver compatible version strings.
+*/
 use errors::*;
 use semver::Version;
 
