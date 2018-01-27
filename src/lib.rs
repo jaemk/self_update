@@ -16,7 +16,10 @@ self_update = "0.4"
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
-from `https://api.github.com/repos/jaemk/self_update/releases/latest`
+from `https://api.github.com/repos/jaemk/self_update/releases/latest`.
+Note, the [`trust`](https://github.com/japaric/trust) project provides a nice setup for
+producing release-builds via CI (travis/appveyor).
+
 
 ```
 #[macro_use] extern crate self_update;
