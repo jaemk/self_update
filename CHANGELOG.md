@@ -4,6 +4,14 @@
 ### Added
 
 ### Changed
+
+### Removed
+
+
+## [0.4.3]
+### Added
+
+### Changed
 - Update readme - mention `trust` for producing releases
 - Update `version` module docs
 
