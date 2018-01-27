@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+### Changed
+- Update readme - mention `trust` for producing releases
+- Update `version` module docs
+
+### Removed
+- `macro` module is no longer public
+    - `cargo_crate_version!` is still exported
 
 
 ## [0.4.2]
