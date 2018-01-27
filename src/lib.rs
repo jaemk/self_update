@@ -103,7 +103,7 @@ use std::io;
 use std::path;
 
 
-#[macro_use] pub mod macros;
+#[macro_use] mod macros;
 pub mod errors;
 pub mod backends;
 pub mod version;
