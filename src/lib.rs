@@ -298,8 +298,8 @@ impl<'a> Extract<'a> {
 /// Moves a file from the given path to the specified destination.
 ///
 /// `source` and `dest` must be on the same filesystem.
-/// If `replace_using_temp` is provided, the destination file will be
-/// replaced using the given temp path as a backup in case of `io` errors.
+/// If `replace_using_temp` is specified, the destination file will be
+/// replaced using the given temporary path.
 ///
 /// * Errors:
 ///     * Io - copying / renaming
@@ -317,9 +317,14 @@ impl<'a> Move<'a> {
         }
     }
 
-    /// If specified and the destination file already exists, the destination
-    /// file will be "safely" replaced using a temp path.
-    /// The `temp` dir should must be explicitly provided since `replace` operations require
+    /// If specified and the destination file already exists, the "destination"
+    /// file will be moved to the given temporary location before the "source"
+    /// file is moved to the "destination" file.
+    ///
+    /// In the event of an `io` error while renaming "source" to "destination",
+    /// the temporary file will be moved back to "destination".
+    ///
+    /// The `temp` dir must be explicitly provided since `rename` operations require
     /// files to live on the same filesystem.
     pub fn replace_using_temp(&mut self, temp: &'a path::Path) -> &mut Self {
         self.temp = Some(temp);
