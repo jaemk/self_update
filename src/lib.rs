@@ -95,6 +95,7 @@ extern crate flate2;
 extern crate tar;
 extern crate semver;
 extern crate pbr;
+extern crate hyper_old_types;
 
 pub use tempdir::TempDir;
 
@@ -396,8 +397,8 @@ impl Download {
         set_ssl_vars!();
         let resp = reqwest::get(&self.url)?;
         let size = resp.headers()
-            .get::<reqwest::header::ContentLength>()
-            .map(|ct_len| **ct_len)
+            .get(reqwest::header::CONTENT_LENGTH)
+            .map(|val| val.to_str().map(|s| s.parse::<u64>().unwrap_or(0)).unwrap_or(0))
             .unwrap_or(0);
         if !resp.status().is_success() { bail!(Error::Update, "Download request failed with status: {:?}", resp.status()) }
         let show_progress = if size == 0 { false } else { self.show_progress };
