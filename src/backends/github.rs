@@ -8,6 +8,7 @@ use std::fs;
 use serde_json;
 use reqwest;
 use tempdir;
+use hyper_old_types::header::{LinkValue,RelationType};
 
 use super::super::Status;
 use super::super::Download;
@@ -165,17 +166,21 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://api.github.com/resource?page=2>; rel="next"`
-        let link = resp.headers().get::<reqwest::header::Link>();
-        if link.is_none() { return Ok(releases) }
+        let headers = resp.headers();
+        let links = headers.get_all(reqwest::header::LINK);
 
-        let link_vals = link.unwrap().values();
-        let next_link = link_vals.iter().filter_map(|link| {
-            if let Some(rels) = link.rel() {
-                if rels.contains(&reqwest::header::RelationType::Next) {
-                    return Some(link.link())
+        let next_link = links.iter().filter_map(|link| {
+            if let Ok(link) = link.to_str() {
+                let lv = LinkValue::new(link.to_owned());
+                if let Some(rels) = lv.rel() {
+                    if rels.contains(&RelationType::Next) {
+                        return Some(link)
+                    }
                 }
+                None
+            } else {
+                None
             }
-            None
         }).nth(0);
 
         Ok(match next_link {
