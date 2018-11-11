@@ -1,13 +1,13 @@
 [package]
 name = "self_update"
-version = "0.4.3"
+version = "0.4.4"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
 categories = ["command-line-utilities"]
 license = "MIT"
 readme = "README.md"
-authors = ["James Kominick <james.kominick@gmail.com>"]
+authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 
 [dependencies]
