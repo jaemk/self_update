@@ -130,16 +130,20 @@ pub fn get_target() -> Result<String> {
         _ => bail!(Error::Update, "Unable to determine target-architecture"),
     };
 
-    let os_config = (cfg!(target_os = "linux"), cfg!(target_os = "macos"), cfg!(target_os = "windows"));
-    let os = match os_config {
-        (true, _, _) => "unknown-linux",
-        (_, true, _) => "apple-darwin",
-        (_, _, true) => "pc-windows",
-        _ => bail!(Error::Update, "Unable to determine target-os"),
+    let os = if cfg!(target_os = "linux") {
+        "unknown-linux"
+    } else if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else if cfg!(target_os = "windows") {
+        "pc-windows"
+    } else if cfg!(target_os = "freebsd") {
+        "unknown-freebsd"
+    } else {
+        bail!(Error::Update, "Unable to determine target-os");
     };
 
     let s;
-    let os = if cfg!(target_os = "macos") {
+    let os = if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
         os
     } else {
         let env_config = (cfg!(target_env = "gnu"), cfg!(target_env = "musl"), cfg!(target_env = "msvc"));
