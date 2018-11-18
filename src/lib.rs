@@ -71,8 +71,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .download_to(&tmp_tarball)?;
 
     self_update::Extract::from_source(&tmp_tarball_path)
-        .archive(self_update::ArchiveKind::Tar)
-        .encoding(self_update::EncodingKind::Gz)
+        .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
         .extract_into(&tmp_dir.path())?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
@@ -93,6 +92,7 @@ extern crate reqwest;
 extern crate tempdir;
 extern crate flate2;
 extern crate tar;
+extern crate zip;
 extern crate semver;
 extern crate pbr;
 extern crate hyper_old_types;
@@ -238,16 +238,15 @@ impl std::fmt::Display for Status {
 /// Supported archive formats
 #[derive(Debug)]
 pub enum ArchiveKind {
-    Tar,
-    Plain,
+    Tar(Option<Compression>),
+    Plain(Option<Compression>),
+    Zip,
 }
 
 
-/// Supported encoding formats
 #[derive(Debug)]
-pub enum EncodingKind {
+pub enum Compression {
     Gz,
-    Plain,
 }
 
 
@@ -261,38 +260,48 @@ pub enum EncodingKind {
 pub struct Extract<'a> {
     source: &'a path::Path,
     archive: ArchiveKind,
-    encoding: EncodingKind,
 }
 impl<'a> Extract<'a> {
     pub fn from_source(source: &'a path::Path) -> Extract<'a> {
         Self {
             source: source,
-            archive: ArchiveKind::Plain,
-            encoding: EncodingKind::Plain,
+            archive: ArchiveKind::Plain(None),
         }
     }
     pub fn archive(&mut self, kind: ArchiveKind) -> &mut Self {
         self.archive = kind;
         self
     }
-    pub fn encoding(&mut self, kind: EncodingKind) -> &mut Self {
-        self.encoding = kind;
-        self
-    }
     pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
-        let archive: Box<io::Read> = match self.encoding {
-            EncodingKind::Plain => Box::new(source),
-            EncodingKind::Gz => {
-                let reader = flate2::read::GzDecoder::new(source);
-                Box::new(reader)
+        match &self.archive {
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+
+                let reader: Box<io::Read> = match compression {
+                    Some(Compression::Gz) => Box::new(flate2::read::GzDecoder::new(source)),
+                    None => Box::new(source)
+                };
+
+                match self.archive {
+                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Tar(_) => {
+                        let mut archive = tar::Archive::new(reader);
+                        archive.unpack(into_dir)?;
+                    },
+                    _ => {
+                        panic!("Unreasonable code");
+                    }
+                };
             },
-        };
-        match self.archive {
-            ArchiveKind::Plain => (),
-            ArchiveKind::Tar => {
-                let mut archive = tar::Archive::new(archive);
-                archive.unpack(into_dir)?;
+            ArchiveKind::Zip => {
+                let mut archive = zip::ZipArchive::new(source)?;
+                for i in 0..archive.len()
+                {
+                    let mut file = archive.by_index(i)?;
+                    let mut output = fs::File::create(into_dir.join(file.name()))?;
+                    io::copy(&mut file, &mut output)?;
+                }
+
             }
         };
         Ok(())

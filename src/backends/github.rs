@@ -14,7 +14,7 @@ use super::super::Status;
 use super::super::Download;
 use super::super::Extract;
 use super::super::ArchiveKind;
-use super::super::EncodingKind;
+use super::super::Compression;
 use super::super::Move;
 
 use super::super::confirm;
@@ -467,8 +467,7 @@ impl Update {
 
         self.print_flush("Extracting tarball... ")?;
         Extract::from_source(&tmp_tarball_path)
-            .encoding(EncodingKind::Gz)
-            .archive(ArchiveKind::Tar)
+            .archive(ArchiveKind::Tar(Some(Compression::Gz)))
             .extract_into(&tmp_dir.path())?;
         let new_exe = tmp_dir.path().join(&self.bin_path_in_tarball);
         self.println("Done");

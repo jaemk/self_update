@@ -70,8 +70,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .download_to(&tmp_tarball)?;
 
     self_update::Extract::from_source(&tmp_tarball_path)
-        .archive(self_update::ArchiveKind::Tar)
-        .encoding(self_update::EncodingKind::Gz)
+        .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
         .extract_into(&tmp_dir.path())?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
