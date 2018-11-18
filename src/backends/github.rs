@@ -13,8 +13,6 @@ use hyper_old_types::header::{LinkValue,RelationType};
 use super::super::Status;
 use super::super::Download;
 use super::super::Extract;
-use super::super::ArchiveKind;
-use super::super::Compression;
 use super::super::Move;
 
 use super::super::confirm;
@@ -205,7 +203,7 @@ pub struct UpdateBuilder {
     target: Option<String>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
-    bin_path_in_tarball: Option<PathBuf>,
+    bin_path_in_archive: Option<PathBuf>,
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
@@ -223,7 +221,7 @@ impl UpdateBuilder {
             repo_owner: None, repo_name: None,
             target: None, bin_name: None,
             bin_install_path: Some(env::current_exe()?),
-            bin_path_in_tarball: None,
+            bin_path_in_archive: None,
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
@@ -268,11 +266,11 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set the exe's name. Also sets `bin_path_in_tarball` if it hasn't already been set.
+    /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
     pub fn bin_name(&mut self, name: &str) -> &mut Self {
         self.bin_name = Some(name.to_owned());
-        if self.bin_path_in_tarball.is_none() {
-            self.bin_path_in_tarball = Some(PathBuf::from(name));
+        if self.bin_path_in_archive.is_none() {
+            self.bin_path_in_archive = Some(PathBuf::from(name));
         }
         self
     }
@@ -307,13 +305,13 @@ impl UpdateBuilder {
     /// # use self_update::backends::github::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
     /// Update::configure()?
-    ///     .bin_path_in_tarball("bin/myapp")
+    ///     .bin_path_in_archive("bin/myapp")
     /// #   .build()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn bin_path_in_tarball(&mut self, bin_path: &str) -> &mut Self {
-        self.bin_path_in_tarball = Some(PathBuf::from(bin_path));
+    pub fn bin_path_in_archive(&mut self, bin_path: &str) -> &mut Self {
+        self.bin_path_in_archive = Some(PathBuf::from(bin_path));
         self
     }
 
@@ -346,7 +344,7 @@ impl UpdateBuilder {
             target: if let Some(ref target) = self.target { target.to_owned() } else { bail!(Error::Config, "`target` required")},
             bin_name: if let Some(ref name) = self.bin_name { name.to_owned() } else { bail!(Error::Config, "`bin_name` required")},
             bin_install_path: if let Some(ref path) = self.bin_install_path { path.to_owned() } else { bail!(Error::Config, "`bin_install_path` required")},
-            bin_path_in_tarball: if let Some(ref path) = self.bin_path_in_tarball { path.to_owned() } else { bail!(Error::Config, "`bin_path_in_tarball` required")},
+            bin_path_in_archive: if let Some(ref path) = self.bin_path_in_archive { path.to_owned() } else { bail!(Error::Config, "`bin_path_in_archive` required")},
             current_version: if let Some(ref ver) = self.current_version { ver.to_owned() } else { bail!(Error::Config, "`current_version` required")},
             target_version: self.target_version.as_ref().map(|v| v.to_owned()),
             show_download_progress: self.show_download_progress,
@@ -367,7 +365,7 @@ pub struct Update {
     target_version: Option<String>,
     bin_name: String,
     bin_install_path: PathBuf,
-    bin_path_in_tarball: PathBuf,
+    bin_path_in_archive: PathBuf,
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
@@ -446,7 +444,7 @@ impl Update {
         if self.show_output || !self.no_confirm {
             println!("\n{} release status:", self.bin_name);
             println!("  * Current exe: {:?}", self.bin_install_path);
-            println!("  * New exe tarball: {:?}", target_asset.name);
+            println!("  * New exe release: {:?}", target_asset.name);
             println!("  * New exe download url: {:?}", target_asset.download_url);
             println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
         }
@@ -457,19 +455,18 @@ impl Update {
         let tmp_dir_parent = self.bin_install_path.parent()
             .expect(&format!("Failed to determine parent dir of `bin_install_path`: {:?}", self.bin_install_path));
         let tmp_dir = tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
-        let tmp_tarball_path = tmp_dir.path().join(&target_asset.name);
-        let mut tmp_tarball = fs::File::create(&tmp_tarball_path)?;
+        let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
+        let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
         self.println("Downloading...");
         Download::from_url(&target_asset.download_url)
             .show_progress(self.show_download_progress)
-            .download_to(&mut tmp_tarball)?;
+            .download_to(&mut tmp_archive)?;
 
-        self.print_flush("Extracting tarball... ")?;
-        Extract::from_source(&tmp_tarball_path)
-            .archive(ArchiveKind::Tar(Some(Compression::Gz)))
+        self.print_flush("Extracting archive... ")?;
+        Extract::from_source(&tmp_archive_path)
             .extract_into(&tmp_dir.path())?;
-        let new_exe = tmp_dir.path().join(&self.bin_path_in_tarball);
+        let new_exe = tmp_dir.path().join(&self.bin_path_in_archive);
         self.println("Done");
 
         self.print_flush("Replacing binary file... ")?;
