@@ -96,12 +96,14 @@ extern crate zip;
 extern crate semver;
 extern crate pbr;
 extern crate hyper_old_types;
+extern crate either;
 
 pub use tempdir::TempDir;
 
 use std::fs;
 use std::io;
 use std::path;
+use either::Either;
 
 
 #[macro_use] mod macros;
@@ -292,9 +294,9 @@ impl<'a> Extract<'a> {
         match &archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
 
-                let reader: Box<io::Read> = match compression {
-                    Some(Compression::Gz) => Box::new(flate2::read::GzDecoder::new(source)),
-                    None => Box::new(source)
+                let reader: Either<fs::File, flate2::read::GzDecoder<fs::File>> = match compression {
+                    Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
+                    None => Either::Left(source)
                 };
 
                 match archive {
