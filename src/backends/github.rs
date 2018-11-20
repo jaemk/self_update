@@ -465,7 +465,7 @@ impl Update {
 
         self.print_flush("Extracting archive... ")?;
         Extract::from_source(&tmp_archive_path)
-            .extract_into(&tmp_dir.path())?;
+            .extract_into(&tmp_dir.path(), &self.bin_path_in_archive)?;
         let new_exe = tmp_dir.path().join(&self.bin_path_in_archive);
         self.println("Done");
 

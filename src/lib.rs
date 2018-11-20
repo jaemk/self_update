@@ -70,12 +70,12 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     self_update::Download::from_url(&asset.download_url)
         .download_to(&tmp_tarball)?;
 
+    let bin_name = std::path::PathBuf::from("self_update_bin");
     self_update::Extract::from_source(&tmp_tarball_path)
         .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
-        .extract_into(&tmp_dir.path())?;
+        .extract_into(&tmp_dir.path(), &bin_name)?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
-    let bin_name = "self_update_bin";
     let bin_path = tmp_dir.path().join(bin_name);
     self_update::Move::from_source(&bin_path)
         .replace_using_temp(&tmp_file)
@@ -287,7 +287,7 @@ impl<'a> Extract<'a> {
         self.archive = Some(kind);
         self
     }
-    pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
+    pub fn extract_into(&self, into_dir: &path::Path, file_to_extract: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
@@ -303,7 +303,12 @@ impl<'a> Extract<'a> {
                     ArchiveKind::Plain(_) => (),
                     ArchiveKind::Tar(_) => {
                         let mut archive = tar::Archive::new(reader);
-                        archive.unpack(into_dir)?;
+                        let mut entry = archive.entries()?
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
+                            .next()
+                            .ok_or_else(|| Error::Update("Could not find the required path in the archive".into()))?;
+                        entry.unpack_in(into_dir)?;
                     },
                     _ => {
                         panic!("Unreasonable code");
@@ -312,12 +317,9 @@ impl<'a> Extract<'a> {
             },
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
-                for i in 0..archive.len()
-                {
-                    let mut file = archive.by_index(i)?;
-                    let mut output = fs::File::create(into_dir.join(file.name()))?;
-                    io::copy(&mut file, &mut output)?;
-                }
+                let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
+                let mut output = fs::File::create(into_dir.join(file.name()))?;
+                io::copy(&mut file, &mut output)?;
 
             }
         };
