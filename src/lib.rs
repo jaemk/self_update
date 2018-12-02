@@ -73,7 +73,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let bin_name = std::path::PathBuf::from("self_update_bin");
     self_update::Extract::from_source(&tmp_tarball_path)
         .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
-        .extract_into(&tmp_dir.path(), &bin_name)?;
+        .extract_file(&tmp_dir.path(), &bin_name)?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
     let bin_path = tmp_dir.path().join(bin_name);
@@ -287,46 +287,87 @@ impl<'a> Extract<'a> {
         self.archive = Some(kind);
         self
     }
-    pub fn extract_into(&self, into_dir: &path::Path, file_to_extract: &path::Path) -> Result<()> {
+
+    fn get_archive_reader(
+        source: fs::File,
+        compression: &Option<Compression>,
+    ) -> Either<fs::File, flate2::read::GzDecoder<fs::File>> {
+        match compression {
+            Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
+            None => Either::Left(source),
+        }
+    }
+
+    pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
         match &archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
-
-                let reader: Either<fs::File, flate2::read::GzDecoder<fs::File>> = match compression {
-                    Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
-                    None => Either::Left(source)
-                };
+                let reader = Self::get_archive_reader(source, compression);
 
                 match archive {
                     ArchiveKind::Plain(_) => (),
                     ArchiveKind::Tar(_) => {
                         let mut archive = tar::Archive::new(reader);
-                        let mut entry = archive.entries()?
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
-                            .next()
-                            .ok_or_else(|| Error::Update("Could not find the required path in the archive".into()))?;
-                        entry.unpack_in(into_dir)?;
-                    },
+                        archive.unpack(into_dir)?;
+                    }
                     _ => {
                         panic!("Unreasonable code");
                     }
                 };
-            },
+            }
+            ArchiveKind::Zip => {
+                let mut archive = zip::ZipArchive::new(source)?;
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i)?;
+                    let mut output = fs::File::create(into_dir.join(file.name()))?;
+                    io::copy(&mut file, &mut output)?;
+                }
+            }
+        };
+        Ok(())
+    }
+
+    pub fn extract_file(&self, into_dir: &path::Path, file_to_extract: &path::Path) -> Result<()> {
+        let source = fs::File::open(self.source)?;
+        let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
+
+        match &archive {
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+                let reader = Self::get_archive_reader(source, compression);
+
+                match archive {
+                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Tar(_) => {
+                        let mut archive = tar::Archive::new(reader);
+                        let mut entry = archive
+                            .entries()?
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
+                            .next()
+                            .ok_or_else(|| {
+                                Error::Update(
+                                    "Could not find the required path in the archive".into(),
+                                )
+                            })?;
+                        entry.unpack_in(into_dir)?;
+                    }
+                    _ => {
+                        panic!("Unreasonable code");
+                    }
+                };
+            }
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
                 let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
                 let mut output = fs::File::create(into_dir.join(file.name()))?;
                 io::copy(&mut file, &mut output)?;
-
             }
         };
         Ok(())
     }
 }
-
 
 /// Moves a file from the given path to the specified destination.
 ///
