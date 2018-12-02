@@ -70,13 +70,12 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     self_update::Download::from_url(&asset.download_url)
         .download_to(&tmp_tarball)?;
 
+    let bin_name = std::path::PathBuf::from("self_update_bin");
     self_update::Extract::from_source(&tmp_tarball_path)
-        .archive(self_update::ArchiveKind::Tar)
-        .encoding(self_update::EncodingKind::Gz)
-        .extract_into(&tmp_dir.path())?;
+        .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
+        .extract_file(&tmp_dir.path(), &bin_name)?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
-    let bin_name = "self_update_bin";
     let bin_path = tmp_dir.path().join(bin_name);
     self_update::Move::from_source(&bin_path)
         .replace_using_temp(&tmp_file)
@@ -93,15 +92,18 @@ extern crate reqwest;
 extern crate tempdir;
 extern crate flate2;
 extern crate tar;
+extern crate zip;
 extern crate semver;
 extern crate pbr;
 extern crate hyper_old_types;
+extern crate either;
 
 pub use tempdir::TempDir;
 
 use std::fs;
 use std::io;
 use std::path;
+use either::Either;
 
 
 #[macro_use] mod macros;
@@ -236,18 +238,30 @@ impl std::fmt::Display for Status {
 
 
 /// Supported archive formats
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArchiveKind {
-    Tar,
-    Plain,
+    Tar(Option<Compression>),
+    Plain(Option<Compression>),
+    Zip,
 }
 
 
-/// Supported encoding formats
-#[derive(Debug)]
-pub enum EncodingKind {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Compression {
     Gz,
-    Plain,
+}
+
+fn detect_archive(path: &path::Path) -> ArchiveKind {
+
+    match path.extension() {
+        Some(extension) if extension == std::ffi::OsStr::new("zip") => ArchiveKind::Zip,
+        Some(extension) if extension == std::ffi::OsStr::new("tar") => ArchiveKind::Tar(None),
+        Some(extension) if extension == std::ffi::OsStr::new("gz") => match path.file_stem().map(|e| path::Path::new(e)).and_then(|f| f.extension()) {
+            Some(extension) if extension == std::ffi::OsStr::new("tar") => ArchiveKind::Tar(Some(Compression::Gz)),
+            _ => ArchiveKind::Plain(Some(Compression::Gz)),
+        }
+        _ => ArchiveKind::Plain(None)
+    }
 }
 
 
@@ -260,45 +274,100 @@ pub enum EncodingKind {
 #[derive(Debug)]
 pub struct Extract<'a> {
     source: &'a path::Path,
-    archive: ArchiveKind,
-    encoding: EncodingKind,
+    archive: Option<ArchiveKind>,
 }
 impl<'a> Extract<'a> {
     pub fn from_source(source: &'a path::Path) -> Extract<'a> {
         Self {
             source: source,
-            archive: ArchiveKind::Plain,
-            encoding: EncodingKind::Plain,
+            archive: None,
         }
     }
     pub fn archive(&mut self, kind: ArchiveKind) -> &mut Self {
-        self.archive = kind;
+        self.archive = Some(kind);
         self
     }
-    pub fn encoding(&mut self, kind: EncodingKind) -> &mut Self {
-        self.encoding = kind;
-        self
+
+    fn get_archive_reader(
+        source: fs::File,
+        compression: &Option<Compression>,
+    ) -> Either<fs::File, flate2::read::GzDecoder<fs::File>> {
+        match compression {
+            Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
+            None => Either::Left(source),
+        }
     }
+
     pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
-        let archive: Box<io::Read> = match self.encoding {
-            EncodingKind::Plain => Box::new(source),
-            EncodingKind::Gz => {
-                let reader = flate2::read::GzDecoder::new(source);
-                Box::new(reader)
-            },
+        let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
+
+        match &archive {
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+                let reader = Self::get_archive_reader(source, compression);
+
+                match archive {
+                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Tar(_) => {
+                        let mut archive = tar::Archive::new(reader);
+                        archive.unpack(into_dir)?;
+                    }
+                    _ => {
+                        panic!("Unreasonable code");
+                    }
+                };
+            }
+            ArchiveKind::Zip => {
+                let mut archive = zip::ZipArchive::new(source)?;
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i)?;
+                    let mut output = fs::File::create(into_dir.join(file.name()))?;
+                    io::copy(&mut file, &mut output)?;
+                }
+            }
         };
-        match self.archive {
-            ArchiveKind::Plain => (),
-            ArchiveKind::Tar => {
-                let mut archive = tar::Archive::new(archive);
-                archive.unpack(into_dir)?;
+        Ok(())
+    }
+
+    pub fn extract_file(&self, into_dir: &path::Path, file_to_extract: &path::Path) -> Result<()> {
+        let source = fs::File::open(self.source)?;
+        let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
+
+        match &archive {
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+                let reader = Self::get_archive_reader(source, compression);
+
+                match archive {
+                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Tar(_) => {
+                        let mut archive = tar::Archive::new(reader);
+                        let mut entry = archive
+                            .entries()?
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
+                            .next()
+                            .ok_or_else(|| {
+                                Error::Update(
+                                    "Could not find the required path in the archive".into(),
+                                )
+                            })?;
+                        entry.unpack_in(into_dir)?;
+                    }
+                    _ => {
+                        panic!("Unreasonable code");
+                    }
+                };
+            }
+            ArchiveKind::Zip => {
+                let mut archive = zip::ZipArchive::new(source)?;
+                let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
+                let mut output = fs::File::create(into_dir.join(file.name()))?;
+                io::copy(&mut file, &mut output)?;
             }
         };
         Ok(())
     }
 }
-
 
 /// Moves a file from the given path to the specified destination.
 ///
@@ -435,6 +504,8 @@ impl Download {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use std::env;
     #[test]
     fn can_determine_target_arch() {
@@ -444,6 +515,31 @@ mod tests {
         if let Ok(env_target) = env::var("TARGET") {
             assert_eq!(target, env_target);
         }
+    }
+
+    #[test]
+    fn detect_plain() {
+        assert_eq!(ArchiveKind::Plain(None), detect_archive(&PathBuf::from("Something.exe")));
+    }
+
+    #[test]
+    fn detect_plain_gz() {
+        assert_eq!(ArchiveKind::Plain(Some(Compression::Gz)), detect_archive(&PathBuf::from("Something.exe.gz")));
+    }
+
+    #[test]
+    fn detect_tar_gz() {
+        assert_eq!(ArchiveKind::Tar(Some(Compression::Gz)), detect_archive(&PathBuf::from("Something.tar.gz")));
+    }
+
+    #[test]
+    fn detect_plain_tar() {
+        assert_eq!(ArchiveKind::Tar(None), detect_archive(&PathBuf::from("Something.tar")));
+    }
+
+    #[test]
+    fn detect_zip() {
+        assert_eq!(ArchiveKind::Zip, detect_archive(&PathBuf::from("Something.zip")));
     }
 }
 
