@@ -343,7 +343,8 @@ impl<'a> Extract<'a> {
                 let mut archive = zip::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
-                    let mut output = fs::File::create(into_dir.join(file.name()))?;
+                    let path = into_dir.join(file.name());
+                    let mut output = fs::File::create(path)?;
                     io::copy(&mut file, &mut output)?;
                 }
             }
@@ -549,6 +550,7 @@ mod tests {
     use std::io::{self, Write, Read};
     use tempdir::TempDir;
     use tar;
+    use zip;
     use flate2;
     use flate2::write::GzEncoder;
 
@@ -713,6 +715,56 @@ mod tests {
         let out_file = out_path.join("inner_archive/temp.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
+    }
+
+    #[test]
+    fn unpack_zip() {
+        let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
+        let tmp_path = tmp_dir.path();
+
+        let archive_path = tmp_path.join("archive.zip");
+        let archive_file = File::create(&archive_path).expect("create file fail");
+        let mut zip = zip::ZipWriter::new(archive_file);
+        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("zipped.txt", options).expect("failed starting zip file");
+        zip.write(b"This is a test!").expect("failed writing to zip");
+        zip.start_file("zipped2.txt", options).expect("failed starting second zip file");
+        zip.write(b"This is a second test!").expect("failed writing to second zip");
+        zip.finish().expect("failed finishing zip");
+
+        let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&archive_path).extract_into(&out_path).expect("extract fail");
+        let out_file = out_path.join("zipped.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a test!");
+
+        let out_file2 = out_path.join("zipped2.txt");
+        assert!(out_file2.exists());
+        cmp_content(&out_file2, "This is a second test!");
+    }
+
+    #[test]
+    fn unpack_zip_file() {
+        let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
+        let tmp_path = tmp_dir.path();
+
+        let archive_path = tmp_path.join("archive.zip");
+        let archive_file = File::create(&archive_path).expect("create file fail");
+        let mut zip = zip::ZipWriter::new(archive_file);
+        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("zipped.txt", options).expect("failed starting zip file");
+        zip.write(b"This is a test!").expect("failed writing to zip");
+        zip.start_file("zipped2.txt", options).expect("failed starting second zip file");
+        zip.write(b"This is a second test!").expect("failed writing to second zip");
+        zip.finish().expect("failed finishing zip");
+
+        let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&archive_path).extract_file(&out_path, "zipped2.txt").expect("extract fail");
+        let out_file = out_path.join("zipped2.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a second test!");
     }
 }
 
