@@ -1,9 +1,30 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0]
+### Added
+- zip archive support
+- option to extract a single file
+
+### Changed
+- renamed github-updater `bin_path_in_tarball` to `bin_path_in_archive`
+
+### Removed
+
+
+## [0.4.5]
+### Added
+- freebsd support
+
+### Changed
+
+### Removed
+
+
+## [0.4.4]
 ### Added
 
 ### Changed
+- bump reqwest
 
 ### Removed
 
