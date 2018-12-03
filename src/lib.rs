@@ -277,12 +277,16 @@ pub struct Extract<'a> {
     archive: Option<ArchiveKind>,
 }
 impl<'a> Extract<'a> {
+    /// Create an `Extract`or from a source path
     pub fn from_source(source: &'a path::Path) -> Extract<'a> {
         Self {
             source: source,
             archive: None,
         }
     }
+
+    /// Specify an archive format of the source being extracted. If not specified, the
+    /// archive format will determined from the file extension.
     pub fn archive(&mut self, kind: ArchiveKind) -> &mut Self {
         self.archive = Some(kind);
         self
@@ -298,22 +302,40 @@ impl<'a> Extract<'a> {
         }
     }
 
+    /// Extract an entire source archive into a specified path. If the source is a single compressed
+    /// file and not an archive, it will be extracted into a file with the same name inside of
+    /// `into_dir`.
     pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
         match &archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
-                let reader = Self::get_archive_reader(source, compression);
+                let mut reader = Self::get_archive_reader(source, compression);
 
                 match archive {
-                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Plain(_) => {
+                        match fs::create_dir_all(into_dir) {
+                            Ok(_) => (),
+                            Err(e) => {
+                                if e.kind() != io::ErrorKind::AlreadyExists {
+                                    return Err(Error::Io(e))
+                                }
+                            }
+                        }
+                        let file_name = self.source.file_name()
+                            .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                        let mut out_path = into_dir.join(file_name);
+                        out_path.set_extension("");
+                        let mut out_file = fs::File::create(&out_path)?;
+                        io::copy(&mut reader, &mut out_file)?;
+                    }
                     ArchiveKind::Tar(_) => {
                         let mut archive = tar::Archive::new(reader);
                         archive.unpack(into_dir)?;
                     }
                     _ => {
-                        panic!("Unreasonable code");
+                        unreachable!()
                     }
                 };
             }
@@ -329,16 +351,34 @@ impl<'a> Extract<'a> {
         Ok(())
     }
 
-    pub fn extract_file(&self, into_dir: &path::Path, file_to_extract: &path::Path) -> Result<()> {
+    /// Extract a single file from a source and save to a file of the same name in `into_dir`.
+    /// If the source is a single compressed file, it will be saved with the name `file_to_extract`
+    /// in the specified `into_dir`.
+    pub fn extract_file<T: AsRef<path::Path>>(&self, into_dir: &path::Path, file_to_extract: T) -> Result<()> {
+        let file_to_extract = file_to_extract.as_ref();
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
         match &archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
-                let reader = Self::get_archive_reader(source, compression);
+                let mut reader = Self::get_archive_reader(source, compression);
 
                 match archive {
-                    ArchiveKind::Plain(_) => (),
+                    ArchiveKind::Plain(_) => {
+                        match fs::create_dir_all(into_dir) {
+                            Ok(_) => (),
+                            Err(e) => {
+                                if e.kind() != io::ErrorKind::AlreadyExists {
+                                    return Err(Error::Io(e))
+                                }
+                            }
+                        }
+                        let file_name = file_to_extract.file_name()
+                            .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                        let mut out_path = into_dir.join(file_name);
+                        let mut out_file = fs::File::create(&out_path)?;
+                        io::copy(&mut reader, &mut out_file)?;
+                    }
                     ArchiveKind::Tar(_) => {
                         let mut archive = tar::Archive::new(reader);
                         let mut entry = archive
@@ -348,7 +388,7 @@ impl<'a> Extract<'a> {
                             .next()
                             .ok_or_else(|| {
                                 Error::Update(
-                                    "Could not find the required path in the archive".into(),
+                                    format!("Could not find the required path in the archive: {:?}", file_to_extract),
                                 )
                             })?;
                         entry.unpack_in(into_dir)?;
@@ -504,7 +544,13 @@ impl Download {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{PathBuf, Path};
+    use std::fs::{self, File};
+    use std::io::{self, Write, Read};
+    use tempdir::TempDir;
+    use tar;
+    use flate2;
+    use flate2::write::GzEncoder;
 
     use std::env;
     #[test]
@@ -541,5 +587,133 @@ mod tests {
     fn detect_zip() {
         assert_eq!(ArchiveKind::Zip, detect_archive(&PathBuf::from("Something.zip")));
     }
+
+    fn cmp_content<T: AsRef<Path>>(path: T, s: &str) {
+        let mut content = String::new();
+        let mut f = File::open(&path).unwrap();
+        f.read_to_string(&mut content).unwrap();
+        assert!(s == content);
+    }
+
+    #[test]
+    fn unpack_plain_gzip() {
+        let tmp_dir = TempDir::new("self_update_unpack_plain_gzip_src").expect("tempdir fail");
+        let fp = tmp_dir.path().with_file_name("temp.gz");
+        let mut tmp_file = File::create(&fp).expect("temp file create fail");
+        let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
+        e.write_all(b"This is a test!").expect("gz encode fail");
+        e.finish().expect("gz finish fail");
+
+        let out_tmp = TempDir::new("self_update_unpack_plain_gzip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&fp).extract_into(&out_path).expect("extract fail");
+        let out_file = out_path.join("temp");
+        assert!(out_file.exists());
+        cmp_content(out_file, "This is a test!");
+    }
+
+    #[test]
+    fn unpack_plain_gzip_double_ext() {
+        let tmp_dir = TempDir::new("self_update_unpack_plain_gzip_double_ext_src").expect("tempdir fail");
+        let fp = tmp_dir.path().with_file_name("temp.txt.gz");
+        let mut tmp_file = File::create(&fp).expect("temp file create fail");
+        let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
+        e.write_all(b"This is a test!").expect("gz encode fail");
+        e.finish().expect("gz finish fail");
+
+        let out_tmp = TempDir::new("self_update_unpack_plain_gzip_double_ext_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&fp).extract_into(&out_path).expect("extract fail");
+        let out_file = out_path.join("temp.txt");
+        assert!(out_file.exists());
+        cmp_content(out_file, "This is a test!");
+    }
+
+    #[test]
+    fn unpack_tar_gzip() {
+        let tmp_dir = TempDir::new("self_update_unpack_tar_gzip_src").expect("tempdir fail");
+        let tmp_path = tmp_dir.path();
+
+        let archive_src = tmp_path.join("src_archive");
+        fs::create_dir_all(&archive_src).expect("tmp archive-dir create fail");
+
+        let fp = archive_src.join("temp.txt");
+        let mut tmp_file = File::create(&fp).expect("temp file create fail");
+        tmp_file.write_all(b"This is a test!").unwrap();
+
+        let fp2 = archive_src.join("temp2.txt");
+        let mut tmp_file = File::create(&fp2).expect("temp file 2 create fail");
+        tmp_file.write_all(b"This is a second test!").unwrap();
+
+        let mut ar = tar::Builder::new(vec![]);
+        ar.append_dir_all("inner_archive", &archive_src).expect("tar append dir all fail");
+        let tar_writer = ar.into_inner().expect("failed getting tar writer");
+
+        let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
+        let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
+        let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
+        io::copy(&mut tar_writer.as_slice(), &mut e).expect("failed writing from tar archive to gz encoder");
+        e.finish().expect("gz finish fail");
+
+        let out_tmp = TempDir::new("self_update_unpack_tar_gzip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&archive_fp).extract_into(&out_path).expect("extract fail");
+
+        let out_file = out_path.join("inner_archive/temp.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a test!");
+
+        let out_file = out_path.join("inner_archive/temp2.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a second test!");
+    }
+
+    #[test]
+    fn unpack_file_plain_gzip() {
+        let tmp_dir = TempDir::new("self_update_unpack_file_plain_gzip_src").expect("tempdir fail");
+        let fp = tmp_dir.path().with_file_name("temp.gz");
+        let mut tmp_file = File::create(&fp).expect("temp file create fail");
+        let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
+        e.write_all(b"This is a test!").expect("gz encode fail");
+        e.finish().expect("gz finish fail");
+
+        let out_tmp = TempDir::new("self_update_unpack_file_plain_gzip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&fp).extract_file(&out_path, "renamed_file").expect("extract fail");
+        let out_file = out_path.join("renamed_file");
+        assert!(out_file.exists());
+        cmp_content(out_file, "This is a test!");
+    }
+
+    #[test]
+    fn unpack_file_tar_gzip() {
+        let tmp_dir = TempDir::new("self_update_unpack_file_tar_gzip_src").expect("tempdir fail");
+        let tmp_path = tmp_dir.path();
+
+        let archive_src = tmp_path.join("src_archive");
+        fs::create_dir_all(&archive_src).expect("tmp archive-dir create fail");
+
+        let fp = archive_src.join("temp.txt");
+        let mut tmp_file = File::create(&fp).expect("temp file create fail");
+        tmp_file.write_all(b"This is a test!").unwrap();
+
+        let mut ar = tar::Builder::new(vec![]);
+        ar.append_dir_all("inner_archive", &archive_src).expect("tar append dir all fail");
+        let tar_writer = ar.into_inner().expect("failed getting tar writer");
+
+        let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
+        let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
+        let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
+        io::copy(&mut tar_writer.as_slice(), &mut e).expect("failed writing from tar archive to gz encoder");
+        e.finish().expect("gz finish fail");
+
+        let out_tmp = TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&archive_fp).extract_file(&out_path, "inner_archive/temp.txt").expect("extract fail");
+        let out_file = out_path.join("inner_archive/temp.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a test!");
+    }
 }
+
 
