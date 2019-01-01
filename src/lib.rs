@@ -87,32 +87,31 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 ```
 
 */
-extern crate serde_json;
-extern crate reqwest;
-extern crate tempdir;
-extern crate flate2;
-extern crate tar;
-extern crate zip;
-extern crate semver;
-extern crate pbr;
-extern crate hyper_old_types;
 extern crate either;
+extern crate flate2;
+extern crate hyper_old_types;
+extern crate pbr;
+extern crate reqwest;
+extern crate semver;
+extern crate serde_json;
+extern crate tar;
+extern crate tempdir;
+extern crate zip;
 
 pub use tempdir::TempDir;
 
+use either::Either;
 use std::fs;
 use std::io;
 use std::path;
-use either::Either;
 
-
-#[macro_use] mod macros;
-pub mod errors;
+#[macro_use]
+mod macros;
 pub mod backends;
+pub mod errors;
 pub mod version;
 
 use errors::*;
-
 
 /// Try to determine the current target triple.
 ///
@@ -124,7 +123,11 @@ use errors::*;
 /// * Errors:
 ///     * Unexpected system config
 pub fn get_target() -> Result<String> {
-    let arch_config = (cfg!(target_arch = "x86"), cfg!(target_arch = "x86_64"), cfg!(target_arch = "arm"));
+    let arch_config = (
+        cfg!(target_arch = "x86"),
+        cfg!(target_arch = "x86_64"),
+        cfg!(target_arch = "arm"),
+    );
     let arch = match arch_config {
         (true, _, _) => "i686",
         (_, true, _) => "x86_64",
@@ -148,7 +151,11 @@ pub fn get_target() -> Result<String> {
     let os = if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
         os
     } else {
-        let env_config = (cfg!(target_env = "gnu"), cfg!(target_env = "musl"), cfg!(target_env = "msvc"));
+        let env_config = (
+            cfg!(target_env = "gnu"),
+            cfg!(target_env = "musl"),
+            cfg!(target_env = "msvc"),
+        );
         let env = match env_config {
             (true, _, _) => "gnu",
             (_, true, _) => "musl",
@@ -162,15 +169,16 @@ pub fn get_target() -> Result<String> {
     Ok(format!("{}-{}", arch, os))
 }
 
-
 /// Check if a version tag is greater than the current
-#[deprecated(since="0.4.2", note="`should_update` functionality has been moved to `version::bump_is_greater`.\
-                                  `version::bump_is_compatible` should be used instead.")]
+#[deprecated(
+    since = "0.4.2",
+    note = "`should_update` functionality has been moved to `version::bump_is_greater`.\
+            `version::bump_is_compatible` should be used instead."
+)]
 pub fn should_update(current: &str, latest: &str) -> Result<bool> {
     use semver::Version;
     Ok(Version::parse(latest)? > Version::parse(current)?)
 }
-
 
 /// Flush a message to stdout and check if they respond `yes`.
 /// Interprets a blank response as yes.
@@ -184,12 +192,11 @@ fn confirm(msg: &str) -> Result<()> {
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
     let s = s.trim().to_lowercase();
-    if ! s.is_empty() && s != "y" {
+    if !s.is_empty() && s != "y" {
         bail!(Error::Update, "Update aborted");
     }
     Ok(())
 }
-
 
 /// Status returned after updating
 ///
@@ -236,7 +243,6 @@ impl std::fmt::Display for Status {
     }
 }
 
-
 /// Supported archive formats
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArchiveKind {
@@ -245,25 +251,28 @@ pub enum ArchiveKind {
     Zip,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Compression {
     Gz,
 }
 
 fn detect_archive(path: &path::Path) -> ArchiveKind {
-
     match path.extension() {
         Some(extension) if extension == std::ffi::OsStr::new("zip") => ArchiveKind::Zip,
         Some(extension) if extension == std::ffi::OsStr::new("tar") => ArchiveKind::Tar(None),
-        Some(extension) if extension == std::ffi::OsStr::new("gz") => match path.file_stem().map(|e| path::Path::new(e)).and_then(|f| f.extension()) {
-            Some(extension) if extension == std::ffi::OsStr::new("tar") => ArchiveKind::Tar(Some(Compression::Gz)),
+        Some(extension) if extension == std::ffi::OsStr::new("gz") => match path
+            .file_stem()
+            .map(|e| path::Path::new(e))
+            .and_then(|f| f.extension())
+        {
+            Some(extension) if extension == std::ffi::OsStr::new("tar") => {
+                ArchiveKind::Tar(Some(Compression::Gz))
+            }
             _ => ArchiveKind::Plain(Some(Compression::Gz)),
-        }
-        _ => ArchiveKind::Plain(None)
+        },
+        _ => ArchiveKind::Plain(None),
     }
 }
-
 
 /// Extract contents of an encoded archive (e.g. tar.gz) file to a specified directory
 ///
@@ -319,12 +328,13 @@ impl<'a> Extract<'a> {
                             Ok(_) => (),
                             Err(e) => {
                                 if e.kind() != io::ErrorKind::AlreadyExists {
-                                    return Err(Error::Io(e))
+                                    return Err(Error::Io(e));
                                 }
                             }
                         }
-                        let file_name = self.source.file_name()
-                            .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                        let file_name = self.source.file_name().ok_or_else(|| {
+                            Error::Update("Extractor source has no file-name".into())
+                        })?;
                         let mut out_path = into_dir.join(file_name);
                         out_path.set_extension("");
                         let mut out_file = fs::File::create(&out_path)?;
@@ -334,9 +344,7 @@ impl<'a> Extract<'a> {
                         let mut archive = tar::Archive::new(reader);
                         archive.unpack(into_dir)?;
                     }
-                    _ => {
-                        unreachable!()
-                    }
+                    _ => unreachable!(),
                 };
             }
             ArchiveKind::Zip => {
@@ -355,7 +363,11 @@ impl<'a> Extract<'a> {
     /// Extract a single file from a source and save to a file of the same name in `into_dir`.
     /// If the source is a single compressed file, it will be saved with the name `file_to_extract`
     /// in the specified `into_dir`.
-    pub fn extract_file<T: AsRef<path::Path>>(&self, into_dir: &path::Path, file_to_extract: T) -> Result<()> {
+    pub fn extract_file<T: AsRef<path::Path>>(
+        &self,
+        into_dir: &path::Path,
+        file_to_extract: T,
+    ) -> Result<()> {
         let file_to_extract = file_to_extract.as_ref();
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
@@ -370,12 +382,13 @@ impl<'a> Extract<'a> {
                             Ok(_) => (),
                             Err(e) => {
                                 if e.kind() != io::ErrorKind::AlreadyExists {
-                                    return Err(Error::Io(e))
+                                    return Err(Error::Io(e));
                                 }
                             }
                         }
-                        let file_name = file_to_extract.file_name()
-                            .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                        let file_name = file_to_extract.file_name().ok_or_else(|| {
+                            Error::Update("Extractor source has no file-name".into())
+                        })?;
                         let mut out_path = into_dir.join(file_name);
                         let mut out_file = fs::File::create(&out_path)?;
                         io::copy(&mut reader, &mut out_file)?;
@@ -388,9 +401,10 @@ impl<'a> Extract<'a> {
                             .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
                             .next()
                             .ok_or_else(|| {
-                                Error::Update(
-                                    format!("Could not find the required path in the archive: {:?}", file_to_extract),
-                                )
+                                Error::Update(format!(
+                                    "Could not find the required path in the archive: {:?}",
+                                    file_to_extract
+                                ))
                             })?;
                         entry.unpack_in(into_dir)?;
                     }
@@ -458,7 +472,7 @@ impl<'a> Move<'a> {
                     match fs::rename(self.source, dest) {
                         Err(e) => {
                             fs::rename(temp, dest)?;
-                            return Err(Error::from(e))
+                            return Err(Error::from(e));
                         }
                         Ok(_) => (),
                     };
@@ -470,7 +484,6 @@ impl<'a> Move<'a> {
         Ok(())
     }
 }
-
 
 /// Download things into files
 ///
@@ -510,11 +523,22 @@ impl Download {
 
         set_ssl_vars!();
         let resp = reqwest::get(&self.url)?;
-        let size = resp.headers()
+        let size = resp
+            .headers()
             .get(reqwest::header::CONTENT_LENGTH)
-            .map(|val| val.to_str().map(|s| s.parse::<u64>().unwrap_or(0)).unwrap_or(0))
+            .map(|val| {
+                val.to_str()
+                    .map(|s| s.parse::<u64>().unwrap_or(0))
+                    .unwrap_or(0)
+            })
             .unwrap_or(0);
-        if !resp.status().is_success() { bail!(Error::Update, "Download request failed with status: {:?}", resp.status()) }
+        if !resp.status().is_success() {
+            bail!(
+                Error::Update,
+                "Download request failed with status: {:?}",
+                resp.status()
+            )
+        }
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp);
@@ -523,36 +547,41 @@ impl Download {
             bar.set_units(pbr::Units::Bytes);
             bar.format("[=> ]");
             Some(bar)
-        } else { None };
+        } else {
+            None
+        };
         loop {
             let n = {
                 let mut buf = src.fill_buf()?;
                 dest.write_all(&mut buf)?;
                 buf.len()
             };
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             src.consume(n);
             if let Some(ref mut bar) = bar {
                 bar.add(n as u64);
             }
         }
-        if show_progress { println!(" ... Done"); }
+        if show_progress {
+            println!(" ... Done");
+        }
         Ok(())
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{PathBuf, Path};
-    use std::fs::{self, File};
-    use std::io::{self, Write, Read};
-    use tempdir::TempDir;
-    use tar;
-    use zip;
     use flate2;
     use flate2::write::GzEncoder;
+    use std::fs::{self, File};
+    use std::io::{self, Read, Write};
+    use std::path::{Path, PathBuf};
+    use tar;
+    use tempdir::TempDir;
+    use zip;
 
     use std::env;
     #[test]
@@ -567,27 +596,42 @@ mod tests {
 
     #[test]
     fn detect_plain() {
-        assert_eq!(ArchiveKind::Plain(None), detect_archive(&PathBuf::from("Something.exe")));
+        assert_eq!(
+            ArchiveKind::Plain(None),
+            detect_archive(&PathBuf::from("Something.exe"))
+        );
     }
 
     #[test]
     fn detect_plain_gz() {
-        assert_eq!(ArchiveKind::Plain(Some(Compression::Gz)), detect_archive(&PathBuf::from("Something.exe.gz")));
+        assert_eq!(
+            ArchiveKind::Plain(Some(Compression::Gz)),
+            detect_archive(&PathBuf::from("Something.exe.gz"))
+        );
     }
 
     #[test]
     fn detect_tar_gz() {
-        assert_eq!(ArchiveKind::Tar(Some(Compression::Gz)), detect_archive(&PathBuf::from("Something.tar.gz")));
+        assert_eq!(
+            ArchiveKind::Tar(Some(Compression::Gz)),
+            detect_archive(&PathBuf::from("Something.tar.gz"))
+        );
     }
 
     #[test]
     fn detect_plain_tar() {
-        assert_eq!(ArchiveKind::Tar(None), detect_archive(&PathBuf::from("Something.tar")));
+        assert_eq!(
+            ArchiveKind::Tar(None),
+            detect_archive(&PathBuf::from("Something.tar"))
+        );
     }
 
     #[test]
     fn detect_zip() {
-        assert_eq!(ArchiveKind::Zip, detect_archive(&PathBuf::from("Something.zip")));
+        assert_eq!(
+            ArchiveKind::Zip,
+            detect_archive(&PathBuf::from("Something.zip"))
+        );
     }
 
     fn cmp_content<T: AsRef<Path>>(path: T, s: &str) {
@@ -608,7 +652,9 @@ mod tests {
 
         let out_tmp = TempDir::new("self_update_unpack_plain_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&fp).extract_into(&out_path).expect("extract fail");
+        Extract::from_source(&fp)
+            .extract_into(&out_path)
+            .expect("extract fail");
         let out_file = out_path.join("temp");
         assert!(out_file.exists());
         cmp_content(out_file, "This is a test!");
@@ -616,16 +662,20 @@ mod tests {
 
     #[test]
     fn unpack_plain_gzip_double_ext() {
-        let tmp_dir = TempDir::new("self_update_unpack_plain_gzip_double_ext_src").expect("tempdir fail");
+        let tmp_dir =
+            TempDir::new("self_update_unpack_plain_gzip_double_ext_src").expect("tempdir fail");
         let fp = tmp_dir.path().with_file_name("temp.txt.gz");
         let mut tmp_file = File::create(&fp).expect("temp file create fail");
         let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
 
-        let out_tmp = TempDir::new("self_update_unpack_plain_gzip_double_ext_outdir").expect("tempdir fail");
+        let out_tmp =
+            TempDir::new("self_update_unpack_plain_gzip_double_ext_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&fp).extract_into(&out_path).expect("extract fail");
+        Extract::from_source(&fp)
+            .extract_into(&out_path)
+            .expect("extract fail");
         let out_file = out_path.join("temp.txt");
         assert!(out_file.exists());
         cmp_content(out_file, "This is a test!");
@@ -648,18 +698,22 @@ mod tests {
         tmp_file.write_all(b"This is a second test!").unwrap();
 
         let mut ar = tar::Builder::new(vec![]);
-        ar.append_dir_all("inner_archive", &archive_src).expect("tar append dir all fail");
+        ar.append_dir_all("inner_archive", &archive_src)
+            .expect("tar append dir all fail");
         let tar_writer = ar.into_inner().expect("failed getting tar writer");
 
         let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
         let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
         let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
-        io::copy(&mut tar_writer.as_slice(), &mut e).expect("failed writing from tar archive to gz encoder");
+        io::copy(&mut tar_writer.as_slice(), &mut e)
+            .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
 
         let out_tmp = TempDir::new("self_update_unpack_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_fp).extract_into(&out_path).expect("extract fail");
+        Extract::from_source(&archive_fp)
+            .extract_into(&out_path)
+            .expect("extract fail");
 
         let out_file = out_path.join("inner_archive/temp.txt");
         assert!(out_file.exists());
@@ -679,9 +733,12 @@ mod tests {
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
 
-        let out_tmp = TempDir::new("self_update_unpack_file_plain_gzip_outdir").expect("tempdir fail");
+        let out_tmp =
+            TempDir::new("self_update_unpack_file_plain_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&fp).extract_file(&out_path, "renamed_file").expect("extract fail");
+        Extract::from_source(&fp)
+            .extract_file(&out_path, "renamed_file")
+            .expect("extract fail");
         let out_file = out_path.join("renamed_file");
         assert!(out_file.exists());
         cmp_content(out_file, "This is a test!");
@@ -700,18 +757,23 @@ mod tests {
         tmp_file.write_all(b"This is a test!").unwrap();
 
         let mut ar = tar::Builder::new(vec![]);
-        ar.append_dir_all("inner_archive", &archive_src).expect("tar append dir all fail");
+        ar.append_dir_all("inner_archive", &archive_src)
+            .expect("tar append dir all fail");
         let tar_writer = ar.into_inner().expect("failed getting tar writer");
 
         let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
         let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
         let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
-        io::copy(&mut tar_writer.as_slice(), &mut e).expect("failed writing from tar archive to gz encoder");
+        io::copy(&mut tar_writer.as_slice(), &mut e)
+            .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
 
-        let out_tmp = TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
+        let out_tmp =
+            TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_fp).extract_file(&out_path, "inner_archive/temp.txt").expect("extract fail");
+        Extract::from_source(&archive_fp)
+            .extract_file(&out_path, "inner_archive/temp.txt")
+            .expect("extract fail");
         let out_file = out_path.join("inner_archive/temp.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
@@ -725,16 +787,23 @@ mod tests {
         let archive_path = tmp_path.join("archive.zip");
         let archive_file = File::create(&archive_path).expect("create file fail");
         let mut zip = zip::ZipWriter::new(archive_file);
-        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("zipped.txt", options).expect("failed starting zip file");
-        zip.write(b"This is a test!").expect("failed writing to zip");
-        zip.start_file("zipped2.txt", options).expect("failed starting second zip file");
-        zip.write(b"This is a second test!").expect("failed writing to second zip");
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("zipped.txt", options)
+            .expect("failed starting zip file");
+        zip.write(b"This is a test!")
+            .expect("failed writing to zip");
+        zip.start_file("zipped2.txt", options)
+            .expect("failed starting second zip file");
+        zip.write(b"This is a second test!")
+            .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
         let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_path).extract_into(&out_path).expect("extract fail");
+        Extract::from_source(&archive_path)
+            .extract_into(&out_path)
+            .expect("extract fail");
         let out_file = out_path.join("zipped.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
@@ -752,20 +821,25 @@ mod tests {
         let archive_path = tmp_path.join("archive.zip");
         let archive_file = File::create(&archive_path).expect("create file fail");
         let mut zip = zip::ZipWriter::new(archive_file);
-        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("zipped.txt", options).expect("failed starting zip file");
-        zip.write(b"This is a test!").expect("failed writing to zip");
-        zip.start_file("zipped2.txt", options).expect("failed starting second zip file");
-        zip.write(b"This is a second test!").expect("failed writing to second zip");
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("zipped.txt", options)
+            .expect("failed starting zip file");
+        zip.write(b"This is a test!")
+            .expect("failed writing to zip");
+        zip.start_file("zipped2.txt", options)
+            .expect("failed starting second zip file");
+        zip.write(b"This is a second test!")
+            .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
         let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_path).extract_file(&out_path, "zipped2.txt").expect("extract fail");
+        Extract::from_source(&archive_path)
+            .extract_file(&out_path, "zipped2.txt")
+            .expect("extract fail");
         let out_file = out_path.join("zipped2.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a second test!");
     }
 }
-
-

@@ -2,14 +2,13 @@
 Error type, conversions, and macros
 
 */
-use std;
-use serde_json;
 use reqwest;
 use semver;
+use serde_json;
+use std;
 use zip::result::ZipError;
 
 pub type Result<T> = std::result::Result<T, Error>;
-
 
 #[derive(Debug)]
 pub enum Error {
@@ -24,24 +23,22 @@ pub enum Error {
     SemVer(semver::SemVerError),
 }
 
-
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use Error::*;
         match *self {
-            Update(ref s)   => write!(f, "UpdateError: {}", s),
-            Network(ref s)  => write!(f, "NetworkError: {}", s),
-            Release(ref s)  => write!(f, "ReleaseError: {}", s),
-            Config(ref s)   => write!(f, "ConfigError: {}", s),
-            Io(ref e)       => write!(f, "IoError: {}", e),
-            Json(ref e)     => write!(f, "JsonError: {}", e),
-            Reqwest(ref e)  => write!(f, "ReqwestError: {}", e),
-            SemVer(ref e)   => write!(f, "SemVerError: {}", e),
-            Zip(ref e)      => write!(f, "ZipError: {}", e),
+            Update(ref s) => write!(f, "UpdateError: {}", s),
+            Network(ref s) => write!(f, "NetworkError: {}", s),
+            Release(ref s) => write!(f, "ReleaseError: {}", s),
+            Config(ref s) => write!(f, "ConfigError: {}", s),
+            Io(ref e) => write!(f, "IoError: {}", e),
+            Json(ref e) => write!(f, "JsonError: {}", e),
+            Reqwest(ref e) => write!(f, "ReqwestError: {}", e),
+            SemVer(ref e) => write!(f, "SemVerError: {}", e),
+            Zip(ref e) => write!(f, "ZipError: {}", e),
         }
     }
 }
-
 
 impl std::error::Error for Error {
     fn description(&self) -> &str {
@@ -51,15 +48,14 @@ impl std::error::Error for Error {
     fn cause(&self) -> Option<&std::error::Error> {
         use Error::*;
         Some(match *self {
-            Io(ref e)           => e,
-            Json(ref e)         => e,
-            Reqwest(ref e)      => e,
-            SemVer(ref e)       => e,
+            Io(ref e) => e,
+            Json(ref e) => e,
+            Reqwest(ref e) => e,
+            SemVer(ref e) => e,
             _ => return None,
         })
     }
 }
-
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {

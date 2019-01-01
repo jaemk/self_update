@@ -2,23 +2,22 @@
 GitHub releases
 */
 use std::env;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
-use serde_json;
+use hyper_old_types::header::{LinkValue, RelationType};
 use reqwest;
+use serde_json;
 use tempdir;
-use hyper_old_types::header::{LinkValue,RelationType};
 
-use super::super::Status;
 use super::super::Download;
 use super::super::Extract;
 use super::super::Move;
+use super::super::Status;
 
 use super::super::confirm;
-use super::super::version;
 use super::super::errors::*;
-
+use super::super::version;
 
 /// GitHub release-asset information
 #[derive(Clone, Debug)]
@@ -32,9 +31,11 @@ impl ReleaseAsset {
     /// Errors:
     ///     * Missing required name & download-url keys
     fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["browser_download_url"].as_str()
+        let download_url = asset["browser_download_url"]
+            .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Asset missing `browser_download_url`"))?;
-        let name = asset["name"].as_str()
+        let name = asset["name"]
+            .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
         Ok(ReleaseAsset {
             download_url: download_url.to_owned(),
@@ -42,7 +43,6 @@ impl ReleaseAsset {
         })
     }
 }
-
 
 /// GitHub release information
 #[derive(Clone, Debug)]
@@ -55,16 +55,21 @@ pub struct Release {
 }
 impl Release {
     fn from_release(release: &serde_json::Value) -> Result<Release> {
-        let tag = release["tag_name"].as_str()
+        let tag = release["tag_name"]
+            .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
-        let date_created = release["created_at"].as_str()
+        let date_created = release["created_at"]
+            .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
-        let name = release["name"].as_str()
-            .unwrap_or(tag);
-        let body = release["body"].as_str()
-            .unwrap_or("");
-        let assets = release["assets"].as_array().ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
-        let assets = assets.iter().map(ReleaseAsset::from_asset).collect::<Result<Vec<ReleaseAsset>>>()?;
+        let name = release["name"].as_str().unwrap_or(tag);
+        let body = release["body"].as_str().unwrap_or("");
+        let assets = release["assets"]
+            .as_array()
+            .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
+        let assets = assets
+            .iter()
+            .map(ReleaseAsset::from_asset)
+            .collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
             name: name.to_owned(),
             body: body.to_owned(),
@@ -82,10 +87,13 @@ impl Release {
     /// Return the first `ReleaseAsset` for the current release who's name
     /// contains the specified `target`
     pub fn asset_for(&self, target: &str) -> Option<ReleaseAsset> {
-        self.assets.iter().filter(|asset| asset.name.contains(target)).cloned().nth(0)
+        self.assets
+            .iter()
+            .filter(|asset| asset.name.contains(target))
+            .cloned()
+            .nth(0)
     }
 }
-
 
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
@@ -115,14 +123,21 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
-        Ok(ReleaseList{
-            repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required") },
-            repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required") },
+        Ok(ReleaseList {
+            repo_owner: if let Some(ref owner) = self.repo_owner {
+                owner.to_owned()
+            } else {
+                bail!(Error::Config, "`repo_owner` required")
+            },
+            repo_name: if let Some(ref name) = self.repo_name {
+                name.to_owned()
+            } else {
+                bail!(Error::Config, "`repo_name` required")
+            },
             target: self.target.clone(),
         })
     }
 }
-
 
 /// `ReleaseList` provides a builder api for querying a GitHub repo,
 /// returning a `Vec` of available `Release`s
@@ -146,40 +161,61 @@ impl ReleaseList {
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(self) -> Result<Vec<Release>> {
         set_ssl_vars!();
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases", self.repo_owner, self.repo_name);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases",
+            self.repo_owner, self.repo_name
+        );
         let releases = Self::fetch_releases(&api_url)?;
         let releases = match self.target {
             None => releases,
-            Some(ref target) => releases.into_iter().filter(|r| r.has_target_asset(target)).collect::<Vec<_>>(),
+            Some(ref target) => releases
+                .into_iter()
+                .filter(|r| r.has_target_asset(target))
+                .collect::<Vec<_>>(),
         };
         Ok(releases)
     }
 
     fn fetch_releases(url: &str) -> Result<Vec<Release>> {
         let mut resp = reqwest::get(url)?;
-        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), url) }
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                url
+            )
+        }
         let releases = resp.json::<serde_json::Value>()?;
-        let releases = releases.as_array().ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
-        let mut releases = releases.iter().map(Release::from_release).collect::<Result<Vec<Release>>>()?;
+        let releases = releases
+            .as_array()
+            .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+        let mut releases = releases
+            .iter()
+            .map(Release::from_release)
+            .collect::<Result<Vec<Release>>>()?;
 
         // handle paged responses containing `Link` header:
         // `Link: <https://api.github.com/resource?page=2>; rel="next"`
         let headers = resp.headers();
         let links = headers.get_all(reqwest::header::LINK);
 
-        let next_link = links.iter().filter_map(|link| {
-            if let Ok(link) = link.to_str() {
-                let lv = LinkValue::new(link.to_owned());
-                if let Some(rels) = lv.rel() {
-                    if rels.contains(&RelationType::Next) {
-                        return Some(link)
+        let next_link = links
+            .iter()
+            .filter_map(|link| {
+                if let Ok(link) = link.to_str() {
+                    let lv = LinkValue::new(link.to_owned());
+                    if let Some(rels) = lv.rel() {
+                        if rels.contains(&RelationType::Next) {
+                            return Some(link);
+                        }
                     }
+                    None
+                } else {
+                    None
                 }
-                None
-            } else {
-                None
-            }
-        }).nth(0);
+            })
+            .nth(0);
 
         Ok(match next_link {
             None => releases,
@@ -190,7 +226,6 @@ impl ReleaseList {
         })
     }
 }
-
 
 /// `github::Update` builder
 ///
@@ -218,8 +253,10 @@ impl UpdateBuilder {
     ///     * Io - Determining current exe path
     pub fn new() -> Result<Self> {
         Ok(Self {
-            repo_owner: None, repo_name: None,
-            target: None, bin_name: None,
+            repo_owner: None,
+            repo_name: None,
+            target: None,
+            bin_name: None,
             bin_install_path: Some(env::current_exe()?),
             bin_path_in_archive: None,
             show_download_progress: false,
@@ -339,13 +376,41 @@ impl UpdateBuilder {
     ///     * Config - Invalid `Update` configuration
     pub fn build(&self) -> Result<Update> {
         Ok(Update {
-            repo_owner: if let Some(ref owner) = self.repo_owner { owner.to_owned() } else { bail!(Error::Config, "`repo_owner` required")},
-            repo_name: if let Some(ref name) = self.repo_name { name.to_owned() } else { bail!(Error::Config, "`repo_name` required")},
-            target: if let Some(ref target) = self.target { target.to_owned() } else { bail!(Error::Config, "`target` required")},
-            bin_name: if let Some(ref name) = self.bin_name { name.to_owned() } else { bail!(Error::Config, "`bin_name` required")},
-            bin_install_path: if let Some(ref path) = self.bin_install_path { path.to_owned() } else { bail!(Error::Config, "`bin_install_path` required")},
-            bin_path_in_archive: if let Some(ref path) = self.bin_path_in_archive { path.to_owned() } else { bail!(Error::Config, "`bin_path_in_archive` required")},
-            current_version: if let Some(ref ver) = self.current_version { ver.to_owned() } else { bail!(Error::Config, "`current_version` required")},
+            repo_owner: if let Some(ref owner) = self.repo_owner {
+                owner.to_owned()
+            } else {
+                bail!(Error::Config, "`repo_owner` required")
+            },
+            repo_name: if let Some(ref name) = self.repo_name {
+                name.to_owned()
+            } else {
+                bail!(Error::Config, "`repo_name` required")
+            },
+            target: if let Some(ref target) = self.target {
+                target.to_owned()
+            } else {
+                bail!(Error::Config, "`target` required")
+            },
+            bin_name: if let Some(ref name) = self.bin_name {
+                name.to_owned()
+            } else {
+                bail!(Error::Config, "`bin_name` required")
+            },
+            bin_install_path: if let Some(ref path) = self.bin_install_path {
+                path.to_owned()
+            } else {
+                bail!(Error::Config, "`bin_install_path` required")
+            },
+            bin_path_in_archive: if let Some(ref path) = self.bin_path_in_archive {
+                path.to_owned()
+            } else {
+                bail!(Error::Config, "`bin_path_in_archive` required")
+            },
+            current_version: if let Some(ref ver) = self.current_version {
+                ver.to_owned()
+            } else {
+                bail!(Error::Config, "`current_version` required")
+            },
             target_version: self.target_version.as_ref().map(|v| v.to_owned()),
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
@@ -353,7 +418,6 @@ impl UpdateBuilder {
         })
     }
 }
-
 
 /// Updates to a specified or latest release distributed via GitHub
 #[derive(Debug)]
@@ -378,18 +442,38 @@ impl Update {
 
     fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<Release> {
         set_ssl_vars!();
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            repo_owner, repo_name
+        );
         let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), api_url) }
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                api_url
+            )
+        }
         let json = resp.json::<serde_json::Value>()?;
         Ok(Release::from_release(&json)?)
     }
 
     fn get_release_version(repo_owner: &str, repo_name: &str, ver: &str) -> Result<Release> {
         set_ssl_vars!();
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/tags/{}", repo_owner, repo_name, ver);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            repo_owner, repo_name, ver
+        );
         let mut resp = reqwest::get(&api_url)?;
-        if !resp.status().is_success() { bail!(Error::Network, "api request failed with status: {:?} - for: {:?}", resp.status(), api_url) }
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                api_url
+            )
+        }
         let json = resp.json::<serde_json::Value>()?;
         Ok(Release::from_release(&json)?)
     }
@@ -411,7 +495,10 @@ impl Update {
     /// confirmation from the user
     pub fn update(self) -> Result<Status> {
         self.println(&format!("Checking target-arch... {}", self.target));
-        self.println(&format!("Checking current version... v{}", self.current_version));
+        self.println(&format!(
+            "Checking current version... v{}",
+            self.current_version
+        ));
 
         let release = match self.target_version {
             None => {
@@ -422,13 +509,19 @@ impl Update {
                     self.println(&format!("v{}", release_tag));
 
                     if !version::bump_is_greater(&self.current_version, &release_tag)? {
-                        return Ok(Status::UpToDate(self.current_version.to_owned()))
+                        return Ok(Status::UpToDate(self.current_version.to_owned()));
                     }
 
-                    self.println(&format!("New release found! v{} --> v{}", &self.current_version, release_tag));
-                    let qualifier = if version::bump_is_compatible(&self.current_version, &release_tag)? {
-                        ""
-                    } else { "*NOT* " };
+                    self.println(&format!(
+                        "New release found! v{} --> v{}",
+                        &self.current_version, release_tag
+                    ));
+                    let qualifier =
+                        if version::bump_is_compatible(&self.current_version, &release_tag)? {
+                            ""
+                        } else {
+                            "*NOT* "
+                        };
                     self.println(&format!("New release is {}compatible", qualifier));
                 }
                 release
@@ -439,7 +532,13 @@ impl Update {
             }
         };
 
-        let target_asset = release.asset_for(&self.target).ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", self.target))?;
+        let target_asset = release.asset_for(&self.target).ok_or_else(|| {
+            format_err!(
+                Error::Release,
+                "No asset found for target: `{}`",
+                self.target
+            )
+        })?;
 
         if self.show_output || !self.no_confirm {
             println!("\n{} release status:", self.bin_name);
@@ -452,9 +551,12 @@ impl Update {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir_parent = self.bin_install_path.parent()
-            .expect(&format!("Failed to determine parent dir of `bin_install_path`: {:?}", self.bin_install_path));
-        let tmp_dir = tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
+        let tmp_dir_parent = self.bin_install_path.parent().expect(&format!(
+            "Failed to determine parent dir of `bin_install_path`: {:?}",
+            self.bin_install_path
+        ));
+        let tmp_dir =
+            tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
         let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
@@ -478,4 +580,3 @@ impl Update {
         Ok(Status::Updated(release.tag.to_owned()))
     }
 }
-
