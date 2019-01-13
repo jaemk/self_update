@@ -10,7 +10,7 @@
 distribution backends.
 
 ```shell
-self_update = "0.4"
+self_update = "0.5"
 ```
 
 ## Usage
