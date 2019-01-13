@@ -1,5 +1,19 @@
 # Changelog
 
+## [unreleased]
+### Added
+### Changed
+### Removed
+
+
+## [0.5.1]
+### Added
+- expose a more detailed `GitHubUpdateStatus`
+
+### Changed
+### Removed
+
+
 ## [0.5.0]
 ### Added
 - zip archive support
