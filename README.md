@@ -1,5 +1,6 @@
 # self_update
 
+
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
 [![Build Status](https://travis-ci.org/jaemk/self_update.svg?branch=master)](https://travis-ci.org/jaemk/self_update)
 [![crates.io:clin](https://img.shields.io/crates/v/self_update.svg?label=self_update)](https://crates.io/crates/self_update)
@@ -69,12 +70,12 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     self_update::Download::from_url(&asset.download_url)
         .download_to(&tmp_tarball)?;
 
+    let bin_name = std::path::PathBuf::from("self_update_bin");
     self_update::Extract::from_source(&tmp_tarball_path)
         .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
-        .extract_into(&tmp_dir.path())?;
+        .extract_file(&tmp_dir.path(), &bin_name)?;
 
     let tmp_file = tmp_dir.path().join("replacement_tmp");
-    let bin_name = "self_update_bin";
     let bin_path = tmp_dir.path().join(bin_name);
     self_update::Move::from_source(&bin_path)
         .replace_using_temp(&tmp_file)
