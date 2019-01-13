@@ -1,5 +1,3 @@
-
-
 /// Allows you to pull the version from your Cargo.toml at compile time as
 /// `MAJOR.MINOR.PATCH_PKGVERSION_PRE`
 #[macro_export]
@@ -10,11 +8,10 @@ macro_rules! cargo_crate_version {
     };
 }
 
-
 /// Set ssl cert env. vars to make sure openssl can find required files
 macro_rules! set_ssl_vars {
     () => {
-        #[cfg(target_os="linux")]
+        #[cfg(target_os = "linux")]
         {
             if ::std::env::var_os("SSL_CERT_FILE").is_none() {
                 ::std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
@@ -23,9 +20,8 @@ macro_rules! set_ssl_vars {
                 ::std::env::set_var("SSL_CERT_DIR", "/etc/ssl/certs");
             }
         }
-    }
+    };
 }
-
 
 /// Helper to `print!` and immediately `flush` `stdout`
 macro_rules! print_flush {
@@ -39,7 +35,6 @@ macro_rules! print_flush {
     }
 }
 
-
 /// Helper for formatting `errors::Error`s
 macro_rules! format_err {
     ($e_type:expr, $literal:expr) => {
@@ -50,7 +45,6 @@ macro_rules! format_err {
     };
 }
 
-
 /// Helper for formatting `errors::Error`s and returning early
 macro_rules! bail {
     ($e_type:expr, $literal:expr) => {
@@ -60,4 +54,3 @@ macro_rules! bail {
         return Err(format_err!($e_type, $literal, $($arg),*))
     };
 }
-
