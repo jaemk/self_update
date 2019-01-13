@@ -44,6 +44,37 @@ impl ReleaseAsset {
     }
 }
 
+/// Update status with extended information from Github
+pub enum GitHubUpdateStatus {
+    /// Crate is up to date
+    UpToDate,
+    /// Crate was updated to the contained release
+    Updated(Release),
+}
+
+impl GitHubUpdateStatus {
+    /// Turn the extended information into the crate's standard `Status` enum
+    pub fn into_status(self, current_version: String) -> Status {
+        match self {
+            GitHubUpdateStatus::UpToDate => Status::UpToDate(current_version),
+            GitHubUpdateStatus::Updated(release) => Status::Updated(release.version().into()),
+        }
+    }
+
+    /// Returns `true` if `Status::UpToDate`
+    pub fn uptodate(&self) -> bool {
+        match *self {
+            GitHubUpdateStatus::UpToDate => true,
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if `Status::Updated`
+    pub fn updated(&self) -> bool {
+        !self.uptodate()
+    }
+}
+
 /// GitHub release information
 #[derive(Clone, Debug)]
 pub struct Release {
@@ -92,6 +123,10 @@ impl Release {
             .filter(|asset| asset.name.contains(target))
             .cloned()
             .nth(0)
+    }
+
+    pub fn version(&self) -> &str {
+        self.tag.trim_left_matches('v')
     }
 }
 
@@ -494,6 +529,13 @@ impl Update {
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user
     pub fn update(self) -> Result<Status> {
+        let current_version = self.current_version.clone();
+        self.update_extended()
+            .map(|s| s.into_status(current_version))
+    }
+
+    /// Same as `update`, but returns `GitHubUpdateStatus`.
+    pub fn update_extended(self) -> Result<GitHubUpdateStatus> {
         self.println(&format!("Checking target-arch... {}", self.target));
         self.println(&format!(
             "Checking current version... v{}",
@@ -505,11 +547,11 @@ impl Update {
                 self.print_flush("Checking latest released version... ")?;
                 let release = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
                 {
-                    let release_tag = release.tag.trim_left_matches("v");
+                    let release_tag = release.version();
                     self.println(&format!("v{}", release_tag));
 
                     if !version::bump_is_greater(&self.current_version, &release_tag)? {
-                        return Ok(Status::UpToDate(self.current_version.to_owned()));
+                        return Ok(GitHubUpdateStatus::UpToDate);
                     }
 
                     self.println(&format!(
@@ -577,6 +619,6 @@ impl Update {
             .replace_using_temp(&tmp_file)
             .to_dest(&self.bin_install_path)?;
         self.println("Done");
-        Ok(Status::Updated(release.tag.to_owned()))
+        Ok(GitHubUpdateStatus::Updated(release))
     }
 }
