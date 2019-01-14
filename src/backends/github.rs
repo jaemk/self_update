@@ -106,7 +106,7 @@ impl Release {
             body: body.to_owned(),
             tag: tag.to_owned(),
             date_created: date_created.to_owned(),
-            assets: assets,
+            assets,
         })
     }
 
@@ -593,10 +593,10 @@ impl Update {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir_parent = self.bin_install_path.parent().expect(&format!(
-            "Failed to determine parent dir of `bin_install_path`: {:?}",
-            self.bin_install_path
-        ));
+        let tmp_dir_parent = self
+            .bin_install_path
+            .parent()
+            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
         let tmp_dir =
             tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
         let tmp_archive_path = tmp_dir.path().join(&target_asset.name);

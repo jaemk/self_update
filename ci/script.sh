@@ -8,6 +8,7 @@ main() {
     #cross build --target $TARGET --release
 
     cargo fmt --all -- --check
+    cargo clippy --all-targets --all-features --examples --tests
 
     if [ ! -z $DISABLE_TESTS ]; then
         return

@@ -9,10 +9,11 @@ After making changes:
     ```
     # make sure rust-fmt is installed
     rustup self update
-    rustup component add rustfmt-preview
+    rustup component add rustfmt-preview clippy
 
     # check
     cargo fmt --all -- --check
+    cargo clippy --all-targets --all-features --examples --tests
     # apply fixes
     cargo fmt --all
     ```
