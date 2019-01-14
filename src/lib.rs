@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "cargo-clippy", deny(clippy::all))]
-#![cfg_attr(feature = "cargo-clippy", allow(clippy::new_ret_no_self))]
 /*!
 
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
@@ -27,11 +26,9 @@ producing release-builds via CI (travis/appveyor).
 #[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
-    let target = self_update::get_target()?;
-    let status = self_update::backends::github::Update::configure()?
+    let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .target(&target)
         .bin_name("self_update_example")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
@@ -51,11 +48,9 @@ Separate utilities are also exposed:
 extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
-    let target = self_update::get_target()?;
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .with_target(&target)
         .build()?
         .fetch()?;
     println!("found releases:");
@@ -63,7 +58,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     // get the first available release
     let asset = releases[0]
-        .asset_for(&target).unwrap();
+        .asset_for(&self_update::get_target()).unwrap();
 
     let tmp_dir = self_update::TempDir::new_in(::std::env::current_dir()?, "self_update")?;
     let tmp_tarball_path = tmp_dir.path().join(&asset.name);
@@ -115,60 +110,11 @@ pub mod version;
 
 use errors::*;
 
-/// Try to determine the current target triple.
+/// Get the current target triple.
 ///
-/// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`) or an
-/// `Error::Config` if the current config cannot be determined or is not some combination of the
-/// following values:
-/// `linux, mac, windows` -- `i686, x86, armv7` -- `gnu, musl, msvc`
-///
-/// * Errors:
-///     * Unexpected system config
-pub fn get_target() -> Result<String> {
-    let arch_config = (
-        cfg!(target_arch = "x86"),
-        cfg!(target_arch = "x86_64"),
-        cfg!(target_arch = "arm"),
-    );
-    let arch = match arch_config {
-        (true, _, _) => "i686",
-        (_, true, _) => "x86_64",
-        (_, _, true) => "armv7",
-        _ => bail!(Error::Update, "Unable to determine target-architecture"),
-    };
-
-    let os = if cfg!(target_os = "linux") {
-        "unknown-linux"
-    } else if cfg!(target_os = "macos") {
-        "apple-darwin"
-    } else if cfg!(target_os = "windows") {
-        "pc-windows"
-    } else if cfg!(target_os = "freebsd") {
-        "unknown-freebsd"
-    } else {
-        bail!(Error::Update, "Unable to determine target-os");
-    };
-
-    let s;
-    let os = if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
-        os
-    } else {
-        let env_config = (
-            cfg!(target_env = "gnu"),
-            cfg!(target_env = "musl"),
-            cfg!(target_env = "msvc"),
-        );
-        let env = match env_config {
-            (true, _, _) => "gnu",
-            (_, true, _) => "musl",
-            (_, _, true) => "msvc",
-            _ => bail!(Error::Update, "Unable to determine target-environment"),
-        };
-        s = format!("{}-{}", os, env);
-        &s
-    };
-
-    Ok(format!("{}-{}", arch, os))
+/// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`)
+pub fn get_target() -> &'static str {
+    env!("TARGET")
 }
 
 /// Check if a version tag is greater than the current
@@ -577,17 +523,6 @@ mod tests {
     use tar;
     use tempdir::TempDir;
     use zip;
-
-    use std::env;
-    #[test]
-    fn can_determine_target_arch() {
-        let target = get_target();
-        assert!(target.is_ok(), "{:?}", target);
-        let target = target.unwrap();
-        if let Ok(env_target) = env::var("TARGET") {
-            assert_eq!(target, env_target);
-        }
-    }
 
     #[test]
     fn detect_plain() {

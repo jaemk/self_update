@@ -3,17 +3,14 @@ GitHub releases
 */
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use hyper_old_types::header::{LinkValue, RelationType};
 use reqwest;
 use serde_json;
 use tempdir;
 
-use super::super::Download;
-use super::super::Extract;
-use super::super::Move;
-use super::super::Status;
+use crate::{get_target, Download, Extract, Move, Status};
 
 use super::super::confirm;
 use super::super::errors::*;
@@ -280,26 +277,11 @@ pub struct UpdateBuilder {
     current_version: Option<String>,
     target_version: Option<String>,
 }
+
 impl UpdateBuilder {
-    /// Initialize a new builder, defaulting the `bin_install_path` to the current
-    /// executable's path
-    ///
-    /// * Errors:
-    ///     * Io - Determining current exe path
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            repo_owner: None,
-            repo_name: None,
-            target: None,
-            bin_name: None,
-            bin_install_path: Some(env::current_exe()?),
-            bin_path_in_archive: None,
-            show_download_progress: false,
-            show_output: true,
-            no_confirm: false,
-            current_version: None,
-            target_version: None,
-        })
+    /// Initialize a new builder
+    pub fn new() -> Self {
+        Default::default()
     }
 
     /// Set the repo owner, used to build a github api url
@@ -332,7 +314,8 @@ impl UpdateBuilder {
     }
 
     /// Set the target triple that will be downloaded, e.g. `x86_64-unknown-linux-gnu`.
-    /// The `get_target` function can cover use cases for most mainstream arches
+    ///
+    /// If unspecified, the build target of the crate will be used
     pub fn target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
@@ -349,8 +332,8 @@ impl UpdateBuilder {
 
     /// Set the installation path for the new exe, defaults to the current
     /// executable's path
-    pub fn bin_install_path(&mut self, bin_install_path: &str) -> &mut Self {
-        self.bin_install_path = Some(PathBuf::from(bin_install_path));
+    pub fn bin_install_path<A: AsRef<Path>>(&mut self, bin_install_path: A) -> &mut Self {
+        self.bin_install_path = Some(PathBuf::from(bin_install_path.as_ref()));
         self
     }
 
@@ -376,7 +359,7 @@ impl UpdateBuilder {
     /// ```
     /// # use self_update::backends::github::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// Update::configure()?
+    /// Update::configure()
     ///     .bin_path_in_archive("bin/myapp")
     /// #   .build()?;
     /// # Ok(())
@@ -410,6 +393,12 @@ impl UpdateBuilder {
     /// * Errors:
     ///     * Config - Invalid `Update` configuration
     pub fn build(&self) -> Result<Update> {
+        let bin_install_path = if let Some(v) = &self.bin_install_path {
+            v.clone()
+        } else {
+            env::current_exe()?
+        };
+
         Ok(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -421,21 +410,17 @@ impl UpdateBuilder {
             } else {
                 bail!(Error::Config, "`repo_name` required")
             },
-            target: if let Some(ref target) = self.target {
-                target.to_owned()
-            } else {
-                bail!(Error::Config, "`target` required")
-            },
+            target: self
+                .target
+                .as_ref()
+                .map(|t| t.to_owned())
+                .unwrap_or_else(|| get_target().to_owned()),
             bin_name: if let Some(ref name) = self.bin_name {
                 name.to_owned()
             } else {
                 bail!(Error::Config, "`bin_name` required")
             },
-            bin_install_path: if let Some(ref path) = self.bin_install_path {
-                path.to_owned()
-            } else {
-                bail!(Error::Config, "`bin_install_path` required")
-            },
+            bin_install_path,
             bin_path_in_archive: if let Some(ref path) = self.bin_path_in_archive {
                 path.to_owned()
             } else {
@@ -471,7 +456,7 @@ pub struct Update {
 }
 impl Update {
     /// Initialize a new `Update` builder
-    pub fn configure() -> Result<UpdateBuilder> {
+    pub fn configure() -> UpdateBuilder {
         UpdateBuilder::new()
     }
 
@@ -620,5 +605,23 @@ impl Update {
             .to_dest(&self.bin_install_path)?;
         self.println("Done");
         Ok(GitHubUpdateStatus::Updated(release))
+    }
+}
+
+impl Default for UpdateBuilder {
+    fn default() -> Self {
+        Self {
+            repo_owner: None,
+            repo_name: None,
+            target: None,
+            bin_name: None,
+            bin_install_path: None,
+            bin_path_in_archive: None,
+            show_download_progress: false,
+            show_output: true,
+            no_confirm: false,
+            current_version: None,
+            target_version: None,
+        }
     }
 }
