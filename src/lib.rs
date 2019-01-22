@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "cargo-clippy", deny(clippy::all))]
+#![cfg_attr(feature = "cargo-clippy", allow(clippy::new_ret_no_self))]
 /*!
 
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
@@ -289,7 +291,7 @@ impl<'a> Extract<'a> {
     /// Create an `Extract`or from a source path
     pub fn from_source(source: &'a path::Path) -> Extract<'a> {
         Self {
-            source: source,
+            source,
             archive: None,
         }
     }
@@ -303,7 +305,7 @@ impl<'a> Extract<'a> {
 
     fn get_archive_reader(
         source: fs::File,
-        compression: &Option<Compression>,
+        compression: Option<Compression>,
     ) -> Either<fs::File, flate2::read::GzDecoder<fs::File>> {
         match compression {
             Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
@@ -318,7 +320,7 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
-        match &archive {
+        match archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
                 let mut reader = Self::get_archive_reader(source, compression);
 
@@ -372,7 +374,7 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
-        match &archive {
+        match archive {
             ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
                 let mut reader = Self::get_archive_reader(source, compression);
 
@@ -398,8 +400,7 @@ impl<'a> Extract<'a> {
                         let mut entry = archive
                             .entries()?
                             .filter_map(|e| e.ok())
-                            .filter(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
-                            .next()
+                            .find(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
                             .ok_or_else(|| {
                                 Error::Update(format!(
                                     "Could not find the required path in the archive: {:?}",
@@ -440,10 +441,7 @@ pub struct Move<'a> {
 impl<'a> Move<'a> {
     /// Specify source file
     pub fn from_source(source: &'a path::Path) -> Move<'a> {
-        Self {
-            source: source,
-            temp: None,
-        }
+        Self { source, temp: None }
     }
 
     /// If specified and the destination file already exists, the "destination"
@@ -469,13 +467,10 @@ impl<'a> Move<'a> {
             Some(temp) => {
                 if dest.exists() {
                     fs::rename(dest, temp)?;
-                    match fs::rename(self.source, dest) {
-                        Err(e) => {
-                            fs::rename(temp, dest)?;
-                            return Err(Error::from(e));
-                        }
-                        Ok(_) => (),
-                    };
+                    if let Err(e) = fs::rename(self.source, dest) {
+                        fs::rename(temp, dest)?;
+                        return Err(Error::from(e));
+                    }
                 } else {
                     fs::rename(self.source, dest)?;
                 }
@@ -553,7 +548,7 @@ impl Download {
         loop {
             let n = {
                 let mut buf = src.fill_buf()?;
-                dest.write_all(&mut buf)?;
+                dest.write_all(&buf)?;
                 buf.len()
             };
             if n == 0 {
@@ -791,11 +786,11 @@ mod tests {
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("zipped.txt", options)
             .expect("failed starting zip file");
-        zip.write(b"This is a test!")
+        zip.write_all(b"This is a test!")
             .expect("failed writing to zip");
         zip.start_file("zipped2.txt", options)
             .expect("failed starting second zip file");
-        zip.write(b"This is a second test!")
+        zip.write_all(b"This is a second test!")
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
@@ -825,11 +820,11 @@ mod tests {
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("zipped.txt", options)
             .expect("failed starting zip file");
-        zip.write(b"This is a test!")
+        zip.write_all(b"This is a test!")
             .expect("failed writing to zip");
         zip.start_file("zipped2.txt", options)
             .expect("failed starting second zip file");
-        zip.write(b"This is a second test!")
+        zip.write_all(b"This is a second test!")
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
