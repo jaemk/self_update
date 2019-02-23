@@ -355,7 +355,7 @@ impl<'a> Extract<'a> {
                     let mut file = archive.by_index(i)?;
                     let outpath = into_dir.join(file.sanitized_name());
 
-                    if outpath.is_dir() {
+                    if (&*file.name()).ends_with('/') {
                         fs::create_dir_all(&outpath)?;
                     } else {
                         if let Some(p) = outpath.parent() {
