@@ -355,16 +355,16 @@ impl<'a> Extract<'a> {
                     let mut file = archive.by_index(i)?;
                     let outpath = into_dir.join(file.sanitized_name());
 
-                    if (&*file.name()).ends_with('/') {
-                        fs::create_dir_all(&outpath).unwrap();
+                    if outpath.is_dir() {
+                        fs::create_dir_all(&outpath)?;
                     } else {
                         if let Some(p) = outpath.parent() {
                             if !p.exists() {
-                                fs::create_dir_all(&p).unwrap();
+                                fs::create_dir_all(&p)?;
                             }
                         }
-                        let mut outfile = fs::File::create(&outpath).unwrap();
-                        io::copy(&mut file, &mut outfile).unwrap();
+                        let mut outfile = fs::File::create(&outpath)?;
+                        io::copy(&mut file, &mut outfile)?;
                     }
                 }
             }
