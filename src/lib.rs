@@ -84,16 +84,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 ```
 
 */
-extern crate either;
-extern crate flate2;
-extern crate hyper_old_types;
-extern crate pbr;
-extern crate reqwest;
-extern crate semver;
-extern crate serde_json;
-extern crate tar;
-extern crate tempdir;
-extern crate zip;
 
 pub use tempdir::TempDir;
 

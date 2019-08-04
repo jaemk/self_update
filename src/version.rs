@@ -2,7 +2,7 @@
 
 The following functions compare two semver compatible version strings.
 */
-use errors::*;
+use crate::errors::*;
 use semver::Version;
 
 /// Check if a version is greater than the current

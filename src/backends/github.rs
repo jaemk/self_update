@@ -10,11 +10,7 @@ use reqwest;
 use serde_json;
 use tempdir;
 
-use crate::{get_target, Download, Extract, Move, Status};
-
-use super::super::confirm;
-use super::super::errors::*;
-use super::super::version;
+use crate::{confirm, errors::*, get_target, version, Download, Extract, Move, Status};
 
 /// GitHub release-asset information
 #[derive(Clone, Debug)]

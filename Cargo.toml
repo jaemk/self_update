@@ -9,6 +9,7 @@ license = "MIT"
 readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
+edition = "2018"
 
 [dependencies]
 serde_json = "1"
