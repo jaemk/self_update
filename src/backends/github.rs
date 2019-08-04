@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hyper_old_types::header::{LinkValue, RelationType};
+use indicatif::ProgressStyle;
 use reqwest;
 use serde_json;
 use tempdir;
@@ -272,6 +273,7 @@ pub struct UpdateBuilder {
     no_confirm: bool,
     current_version: Option<String>,
     target_version: Option<String>,
+    progress_style: Option<ProgressStyle>,
 }
 
 impl UpdateBuilder {
@@ -372,6 +374,12 @@ impl UpdateBuilder {
         self
     }
 
+    /// Toggle download progress bar, defaults to `off`.
+    pub fn set_progress_style(&mut self, progress_style: ProgressStyle) -> &mut Self {
+        self.progress_style = Some(progress_style);
+        self
+    }
+
     /// Toggle update output information, defaults to `true`.
     pub fn show_output(&mut self, show: bool) -> &mut Self {
         self.show_output = show;
@@ -429,6 +437,7 @@ impl UpdateBuilder {
             },
             target_version: self.target_version.as_ref().map(|v| v.to_owned()),
             show_download_progress: self.show_download_progress,
+            progress_style: self.progress_style.clone(),
             show_output: self.show_output,
             no_confirm: self.no_confirm,
         })
@@ -449,6 +458,7 @@ pub struct Update {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
+    progress_style: Option<ProgressStyle>,
 }
 impl Update {
     /// Initialize a new `Update` builder
@@ -584,9 +594,14 @@ impl Update {
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
         self.println("Downloading...");
-        Download::from_url(&target_asset.download_url)
-            .show_progress(self.show_download_progress)
-            .download_to(&mut tmp_archive)?;
+        let mut download = Download::from_url(&target_asset.download_url);
+        download.show_progress(self.show_download_progress);
+
+        if let Some(ref progress_style) = self.progress_style {
+            download.set_progress_style(progress_style.clone());
+        }
+
+        download.download_to(&mut tmp_archive)?;
 
         self.print_flush("Extracting archive... ")?;
         Extract::from_source(&tmp_archive_path)
@@ -618,6 +633,7 @@ impl Default for UpdateBuilder {
             no_confirm: false,
             current_version: None,
             target_version: None,
+            progress_style: None,
         }
     }
 }

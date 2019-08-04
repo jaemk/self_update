@@ -425,6 +425,7 @@ impl<'a> Move<'a> {
 pub struct Download {
     show_progress: bool,
     url: String,
+    progress_style: ProgressStyle,
 }
 impl Download {
     /// Specify download url
@@ -432,12 +433,21 @@ impl Download {
         Self {
             show_progress: false,
             url: url.to_owned(),
+            progress_style: ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}")
+                .progress_chars("=>-"),
         }
     }
 
     /// Toggle download progress bar
     pub fn show_progress(&mut self, b: bool) -> &mut Self {
         self.show_progress = b;
+        self
+    }
+
+    /// Set the progress style
+    pub fn set_progress_style(&mut self, progress_style: ProgressStyle) -> &mut Self {
+        self.progress_style = progress_style;
         self
     }
 
@@ -478,11 +488,7 @@ impl Download {
         let mut downloaded = 0;
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}")
-                    .progress_chars("=>-"),
-            );
+            pb.set_style(self.progress_style.clone());
 
             Some(pb)
         } else {
