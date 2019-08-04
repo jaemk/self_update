@@ -88,6 +88,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 pub use tempdir::TempDir;
 
 use either::Either;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::cmp::min;
 use std::fs;
 use std::io;
 use std::path;
@@ -473,11 +475,16 @@ impl Download {
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp);
+        let mut downloaded = 0;
         let mut bar = if show_progress {
-            let mut bar = pbr::ProgressBar::new(size);
-            bar.set_units(pbr::Units::Bytes);
-            bar.format("[=> ]");
-            Some(bar)
+            let pb = ProgressBar::new(size);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}")
+                    .progress_chars("=>-"),
+            );
+
+            Some(pb)
         } else {
             None
         };
@@ -491,12 +498,14 @@ impl Download {
                 break;
             }
             src.consume(n);
+            downloaded = min(downloaded + n as u64, size);
+
             if let Some(ref mut bar) = bar {
-                bar.add(n as u64);
+                bar.set_position(downloaded);
             }
         }
-        if show_progress {
-            println!(" ... Done");
+        if let Some(ref mut bar) = bar {
+            bar.finish_with_message("Done");
         }
         Ok(())
     }
