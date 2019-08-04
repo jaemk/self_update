@@ -123,7 +123,7 @@ impl Release {
     }
 
     pub fn version(&self) -> &str {
-        self.tag.trim_left_matches('v')
+        self.tag.trim_start_matches('v')
     }
 }
 
