@@ -26,11 +26,9 @@ producing release-builds via CI (travis/appveyor).
 #[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
-    let target = self_update::get_target()?;
     let status = self_update::backends::github::Update::configure()?
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .target(&target)
         .bin_name("self_update_example")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
@@ -49,11 +47,9 @@ Separate utilities are also exposed:
 extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
-    let target = self_update::get_target()?;
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .with_target(&target)
         .build()?
         .fetch()?;
     println!("found releases:");

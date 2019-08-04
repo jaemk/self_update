@@ -7,20 +7,17 @@ Example updating an executable to the latest version released via GitHub
 extern crate self_update;
 
 fn run() -> Result<(), Box<::std::error::Error>> {
-    let target = self_update::get_target()?;
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .with_target(&target)
         .build()?
         .fetch()?;
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    let status = self_update::backends::github::Update::configure()?
+    let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .target(&target)
         .bin_name("github")
         .show_download_progress(true)
         //.target_version_tag("v9.9.9")
