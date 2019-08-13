@@ -1,8 +1,16 @@
 # Changelog
 
-## [unreleased]
+## [Unreleased]
 ### Added
 ### Changed
+### Removed
+
+## [0.6.0]
+### Added
+### Changed
+- use indicatif instead of pbr
+- update to rust 2018
+- determine target arch at build time
 ### Removed
 
 
