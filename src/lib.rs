@@ -32,6 +32,11 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .bin_name("self_update_example")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
+        // For private repos, you will need to provide a GitHub auth token
+        // Make sure not to bake the token into your app; it is recommended
+        // you obtain it via another mechanism, such as environment variables
+        // or prompting the user for input
+        //.auth_token(env!("ACCESS_TOKEN"))
         .build()?
         .update()?;
     println!("Update status: `{}`!", status.version());
@@ -425,6 +430,7 @@ impl<'a> Move<'a> {
 pub struct Download {
     show_progress: bool,
     url: String,
+    headers: reqwest::header::HeaderMap,
     progress_style: ProgressStyle,
 }
 impl Download {
@@ -433,6 +439,7 @@ impl Download {
         Self {
             show_progress: false,
             url: url.to_owned(),
+            headers: reqwest::header::HeaderMap::new(),
             progress_style: ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}")
                 .progress_chars("=>-"),
@@ -451,6 +458,12 @@ impl Download {
         self
     }
 
+    /// Set the download request headers
+    pub fn set_headers(&mut self, headers: reqwest::header::HeaderMap) -> &mut Self {
+        self.headers = headers;
+        self
+    }
+
     /// Download the file behind the given `url` into the specified `dest`.
     /// Show a sliding progress bar if specified.
     /// If the resource doesn't specify a content-length, the progress bar will not be shown
@@ -465,7 +478,10 @@ impl Download {
         use io::BufRead;
 
         set_ssl_vars!();
-        let resp = reqwest::get(&self.url)?;
+        let resp = reqwest::Client::new()
+            .get(&self.url)
+            .headers(self.headers.clone())
+            .send()?;
         let size = resp
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)

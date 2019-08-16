@@ -23,6 +23,7 @@ fn run() -> Result<(), Box<::std::error::Error>> {
         //.target_version_tag("v9.9.9")
         //.show_output(false)
         //.no_confirm(true)
+        //.auth_token("0123456789abcdef0123456789abcdef01234567")
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
