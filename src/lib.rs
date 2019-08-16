@@ -338,7 +338,10 @@ impl<'a> Extract<'a> {
                         let mut entry = archive
                             .entries()?
                             .filter_map(|e| e.ok())
-                            .find(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
+                            .find(|e|
+                                e.path().ok().filter(|p|
+                                    p.strip_prefix("./").unwrap_or(p) == file_to_extract
+                                ).is_some())
                             .ok_or_else(|| {
                                 Error::Update(format!(
                                     "Could not find the required path in the archive: {:?}",
@@ -679,8 +682,7 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[test]
-    fn unpack_file_tar_gzip() {
+    fn unpack_file_tar_gzip_with_folder(archive_top_folder: &str, prefix_file_to_extract: &str) {
         let tmp_dir = TempDir::new("self_update_unpack_file_tar_gzip_src").expect("tempdir fail");
         let tmp_path = tmp_dir.path();
 
@@ -692,7 +694,7 @@ mod tests {
         tmp_file.write_all(b"This is a test!").unwrap();
 
         let mut ar = tar::Builder::new(vec![]);
-        ar.append_dir_all("inner_archive", &archive_src)
+        ar.append_dir_all(archive_top_folder, &archive_src)
             .expect("tar append dir all fail");
         let tar_writer = ar.into_inner().expect("failed getting tar writer");
 
@@ -706,12 +708,20 @@ mod tests {
         let out_tmp =
             TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
+        let file_to_extract = format!("{}temp.txt", prefix_file_to_extract);
         Extract::from_source(&archive_fp)
-            .extract_file(&out_path, "inner_archive/temp.txt")
+            .extract_file(&out_path, &file_to_extract)
             .expect("extract fail");
-        let out_file = out_path.join("inner_archive/temp.txt");
+        let out_file = out_path.join(&file_to_extract);
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
+    }
+
+    #[test]
+    fn unpack_file_tar_gzip() {
+        for folder in &[("inner_archive", "inner_archive/"), ("", ""), ("./", "")] {
+            unpack_file_tar_gzip_with_folder(folder.0, folder.1)
+        }
     }
 
     #[test]
