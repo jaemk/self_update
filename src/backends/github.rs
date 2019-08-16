@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use hyper_old_types::header::{LinkValue, RelationType};
 use indicatif::ProgressStyle;
-use reqwest;
+use reqwest::{self, header};
 use serde_json;
 use tempdir;
 
@@ -25,9 +25,9 @@ impl ReleaseAsset {
     /// Errors:
     ///     * Missing required name & download-url keys
     fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["browser_download_url"]
+        let download_url = asset["url"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `browser_download_url`"))?;
+            .ok_or_else(|| format_err!(Error::Release, "Asset missing `url`"))?;
         let name = asset["name"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
@@ -130,6 +130,7 @@ pub struct ReleaseListBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
+    auth_token: Option<String>,
 }
 impl ReleaseListBuilder {
     /// Set the repo owner, used to build a github api url
@@ -150,6 +151,12 @@ impl ReleaseListBuilder {
         self
     }
 
+    /// Set the authorization token, used in requests to the github api url
+    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
+        self.auth_token = Some(auth_token.to_owned());
+        self
+    }
+
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
@@ -164,6 +171,7 @@ impl ReleaseListBuilder {
                 bail!(Error::Config, "`repo_name` required")
             },
             target: self.target.clone(),
+            auth_token: self.auth_token.clone(),
         })
     }
 }
@@ -175,6 +183,7 @@ pub struct ReleaseList {
     repo_owner: String,
     repo_name: String,
     target: Option<String>,
+    auth_token: Option<String>,
 }
 impl ReleaseList {
     /// Initialize a ReleaseListBuilder
@@ -183,6 +192,7 @@ impl ReleaseList {
             repo_owner: None,
             repo_name: None,
             target: None,
+            auth_token: None,
         }
     }
 
@@ -194,7 +204,7 @@ impl ReleaseList {
             "https://api.github.com/repos/{}/{}/releases",
             self.repo_owner, self.repo_name
         );
-        let releases = Self::fetch_releases(&api_url)?;
+        let releases = Self::fetch_releases(&api_url, &self.auth_token)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -205,8 +215,11 @@ impl ReleaseList {
         Ok(releases)
     }
 
-    fn fetch_releases(url: &str) -> Result<Vec<Release>> {
-        let mut resp = reqwest::get(url)?;
+    fn fetch_releases(url: &str, auth_token: &Option<String>) -> Result<Vec<Release>> {
+        let mut resp = reqwest::Client::new()
+            .get(url)
+            .headers(api_headers(&auth_token))
+            .send()?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -249,7 +262,7 @@ impl ReleaseList {
         Ok(match next_link {
             None => releases,
             Some(link) => {
-                releases.extend(Self::fetch_releases(link)?);
+                releases.extend(Self::fetch_releases(link, &auth_token)?);
                 releases
             }
         })
@@ -274,6 +287,7 @@ pub struct UpdateBuilder {
     current_version: Option<String>,
     target_version: Option<String>,
     progress_style: Option<ProgressStyle>,
+    auth_token: Option<String>,
 }
 
 impl UpdateBuilder {
@@ -392,6 +406,12 @@ impl UpdateBuilder {
         self
     }
 
+    /// Set the authorization token, used in requests to the github api url
+    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
+        self.auth_token = Some(auth_token.to_owned());
+        self
+    }
+
     /// Confirm config and create a ready-to-use `Update`
     ///
     /// * Errors:
@@ -440,6 +460,7 @@ impl UpdateBuilder {
             progress_style: self.progress_style.clone(),
             show_output: self.show_output,
             no_confirm: self.no_confirm,
+            auth_token: self.auth_token.clone(),
         })
     }
 }
@@ -459,6 +480,7 @@ pub struct Update {
     show_output: bool,
     no_confirm: bool,
     progress_style: Option<ProgressStyle>,
+    auth_token: Option<String>,
 }
 impl Update {
     /// Initialize a new `Update` builder
@@ -466,13 +488,20 @@ impl Update {
         UpdateBuilder::new()
     }
 
-    fn get_latest_release(repo_owner: &str, repo_name: &str) -> Result<Release> {
+    fn get_latest_release(
+        repo_owner: &str,
+        repo_name: &str,
+        auth_token: &Option<String>,
+    ) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
             repo_owner, repo_name
         );
-        let mut resp = reqwest::get(&api_url)?;
+        let mut resp = reqwest::Client::new()
+            .get(&api_url)
+            .headers(api_headers(&auth_token))
+            .send()?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -485,13 +514,21 @@ impl Update {
         Ok(Release::from_release(&json)?)
     }
 
-    fn get_release_version(repo_owner: &str, repo_name: &str, ver: &str) -> Result<Release> {
+    fn get_release_version(
+        repo_owner: &str,
+        repo_name: &str,
+        ver: &str,
+        auth_token: &Option<String>,
+    ) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases/tags/{}",
             repo_owner, repo_name, ver
         );
-        let mut resp = reqwest::get(&api_url)?;
+        let mut resp = reqwest::Client::new()
+            .get(&api_url)
+            .headers(api_headers(&auth_token))
+            .send()?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -536,7 +573,8 @@ impl Update {
         let release = match self.target_version {
             None => {
                 self.print_flush("Checking latest released version... ")?;
-                let release = Self::get_latest_release(&self.repo_owner, &self.repo_name)?;
+                let release =
+                    Self::get_latest_release(&self.repo_owner, &self.repo_name, &self.auth_token)?;
                 {
                     let release_tag = release.version();
                     self.println(&format!("v{}", release_tag));
@@ -561,7 +599,7 @@ impl Update {
             }
             Some(ref ver) => {
                 self.println(&format!("Looking for tag: {}", ver));
-                Self::get_release_version(&self.repo_owner, &self.repo_name, ver)?
+                Self::get_release_version(&self.repo_owner, &self.repo_name, ver, &self.auth_token)?
             }
         };
 
@@ -595,6 +633,9 @@ impl Update {
 
         self.println("Downloading...");
         let mut download = Download::from_url(&target_asset.download_url);
+        let mut headers = api_headers(&self.auth_token);
+        headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
+        download.set_headers(headers);
         download.show_progress(self.show_download_progress);
 
         if let Some(ref progress_style) = self.progress_style {
@@ -634,6 +675,22 @@ impl Default for UpdateBuilder {
             current_version: None,
             target_version: None,
             progress_style: None,
+            auth_token: None,
         }
     }
+}
+
+fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
+    let mut headers = header::HeaderMap::new();
+
+    if auth_token.is_some() {
+        headers.insert(
+            header::AUTHORIZATION,
+            (String::from("token ") + &auth_token.clone().unwrap())
+                .parse()
+                .unwrap(),
+        );
+    };
+
+    headers
 }

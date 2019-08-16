@@ -26,12 +26,17 @@ producing release-builds via CI (travis/appveyor).
 #[macro_use] extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
-    let status = self_update::backends::github::Update::configure()?
+    let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .bin_name("self_update_example")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
+        // For private repos, you will need to provide a GitHub auth token
+        // Make sure not to bake the token into your app; it is recommended
+        // you obtain it via another mechanism, such as environment variables
+        // or prompting the user for input
+        //.auth_token(env!("ACCESS_TOKEN"))
         .build()?
         .update()?;
     println!("Update status: `{}`!", status.version());
@@ -57,7 +62,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     // get the first available release
     let asset = releases[0]
-        .asset_for(&target).unwrap();
+        .asset_for(&self_update::get_target()).unwrap();
 
     let tmp_dir = self_update::TempDir::new_in(::std::env::current_dir()?, "self_update")?;
     let tmp_tarball_path = tmp_dir.path().join(&asset.name);
