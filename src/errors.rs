@@ -45,7 +45,7 @@ impl std::error::Error for Error {
         "Self Update Error"
     }
 
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         use Error::*;
         Some(match *self {
             Io(ref e) => e,
