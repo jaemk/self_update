@@ -646,6 +646,7 @@ mod tests {
         io::copy(&mut tar_writer.as_slice(), &mut e)
             .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
+        archive_file.sync_all().expect("sync fs");
 
         let out_tmp = TempDir::new("self_update_unpack_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
@@ -653,11 +654,11 @@ mod tests {
             .extract_into(&out_path)
             .expect("extract fail");
 
-        let out_file = out_path.join("inner_archive/temp.txt");
+        let out_file = out_path.join("inner_archive").join("temp.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
 
-        let out_file = out_path.join("inner_archive/temp2.txt");
+        let out_file = out_path.join("inner_archive").join("temp2.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a second test!");
     }
@@ -670,6 +671,7 @@ mod tests {
         let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
+        tmp_file.sync_all().expect("sync fs");
 
         let out_tmp =
             TempDir::new("self_update_unpack_file_plain_gzip_outdir").expect("tempdir fail");
@@ -704,11 +706,13 @@ mod tests {
         io::copy(&mut tar_writer.as_slice(), &mut e)
             .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
+        archive_file.sync_all().expect("sync fs");
 
         let out_tmp =
             TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
         let file_to_extract = format!("{}temp.txt", prefix_file_to_extract);
+        //dbg!(&out_path, &file_to_extract);
         Extract::from_source(&archive_fp)
             .extract_file(&out_path, &file_to_extract)
             .expect("extract fail");
@@ -731,7 +735,7 @@ mod tests {
 
         let archive_path = tmp_path.join("archive.zip");
         let archive_file = File::create(&archive_path).expect("create file fail");
-        let mut zip = zip::ZipWriter::new(archive_file);
+        let mut zip = zip::ZipWriter::new(&archive_file);
         let options =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("zipped.txt", options)
@@ -743,6 +747,7 @@ mod tests {
         zip.write_all(b"This is a second test!")
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
+        archive_file.sync_all().expect("sync fs");
 
         let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
@@ -765,7 +770,7 @@ mod tests {
 
         let archive_path = tmp_path.join("archive.zip");
         let archive_file = File::create(&archive_path).expect("create file fail");
-        let mut zip = zip::ZipWriter::new(archive_file);
+        let mut zip = zip::ZipWriter::new(&archive_file);
         let options =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("zipped.txt", options)
@@ -777,6 +782,7 @@ mod tests {
         zip.write_all(b"This is a second test!")
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
+        archive_file.sync_all().expect("sync fs");
 
         let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
