@@ -3,6 +3,11 @@
 ## [Unreleased]
 ### Added
 ### Changed
+### Removed
+
+## [0.7.0]
+### Added
+### Changed
 - accept `auth_token` in `Update` to allow obtaining releases from private GitHub repos
 - use GitHub api url instead of browser url to download assets so that auth can be used for private repos
 - accept headers in `Download` that can be used in GET request to download url (required for passing in auth token for private GitHub repos)
