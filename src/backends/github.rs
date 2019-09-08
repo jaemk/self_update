@@ -152,6 +152,11 @@ impl ReleaseListBuilder {
     }
 
     /// Set the authorization token, used in requests to the github api url
+    ///
+    /// This is to support private repos where you need a GitHub auth token.
+    /// **Make sure not to bake the token into your app**; it is recommended
+    /// you obtain it via another mechanism, such as environment variables
+    /// or prompting the user for input
     pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
         self.auth_token = Some(auth_token.to_owned());
         self
@@ -407,6 +412,11 @@ impl UpdateBuilder {
     }
 
     /// Set the authorization token, used in requests to the github api url
+    ///
+    /// This is to support private repos where you need a GitHub auth token.
+    /// **Make sure not to bake the token into your app**; it is recommended
+    /// you obtain it via another mechanism, such as environment variables
+    /// or prompting the user for input
     pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
         self.auth_token = Some(auth_token.to_owned());
         self

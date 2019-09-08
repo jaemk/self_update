@@ -32,11 +32,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .bin_name("self_update_example")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
-        // For private repos, you will need to provide a GitHub auth token
-        // Make sure not to bake the token into your app; it is recommended
-        // you obtain it via another mechanism, such as environment variables
-        // or prompting the user for input
-        //.auth_token(env!("ACCESS_TOKEN"))
         .build()?
         .update()?;
     println!("Update status: `{}`!", status.version());

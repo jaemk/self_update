@@ -23,7 +23,12 @@ fn run() -> Result<(), Box<::std::error::Error>> {
         //.target_version_tag("v9.9.9")
         //.show_output(false)
         //.no_confirm(true)
-        //.auth_token("0123456789abcdef0123456789abcdef01234567")
+        //
+        // For private repos, you will need to provide a GitHub auth token
+        // **Make sure not to bake the token into your app**; it is recommended
+        // you obtain it via another mechanism, such as environment variables
+        // or prompting the user for input
+        //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
