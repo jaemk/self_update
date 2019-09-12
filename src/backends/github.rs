@@ -277,9 +277,10 @@ impl UpdateBuilder {
 
     /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
     pub fn bin_name(&mut self, name: &str) -> &mut Self {
-        self.bin_name = Some(name.to_owned());
+        let raw_bin_name = format!("{}{}", name, EXECUTABLE_SUFFIX);
+        self.bin_name = Some(raw_bin_name.to_owned());
         if self.bin_path_in_archive.is_none() {
-            self.bin_path_in_archive = Some(PathBuf::from(name));
+            self.bin_path_in_archive = Some(PathBuf::from(raw_bin_name));
         }
         self
     }
