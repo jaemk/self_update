@@ -632,10 +632,12 @@ impl Update {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir_parent = self
-            .bin_install_path
-            .parent()
-            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
+        let tmp_dir_parent = if cfg!(windows) {
+            env::var_os("TEMP").map(PathBuf::from)
+        } else {
+            self.bin_install_path.parent().map(PathBuf::from)
+        }
+        .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
         let tmp_dir =
             tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
         let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
