@@ -5,6 +5,14 @@
 ### Changed
 ### Removed
 
+## [0.8.0]
+### Added
+
+### Changed
+- use the system temp directory on windows
+
+### Removed
+
 ## [0.7.0]
 ### Added
 ### Changed
