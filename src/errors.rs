@@ -45,7 +45,18 @@ impl std::error::Error for Error {
         "Self Update Error"
     }
 
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        use Error::*;
+        Some(match *self {
+            Io(ref e) => e,
+            Json(ref e) => e,
+            Reqwest(ref e) => e,
+            SemVer(ref e) => e,
+            _ => return None,
+        })
+    }
+
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         use Error::*;
         Some(match *self {
             Io(ref e) => e,
