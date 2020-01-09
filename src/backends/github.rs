@@ -2,23 +2,19 @@
 GitHub releases
 */
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use hyper_old_types::header::{LinkValue, RelationType};
 use indicatif::ProgressStyle;
 use reqwest::{self, header};
 use serde_json;
-use tempdir;
 
-use crate::{confirm, errors::*, get_target, version, Download, Extract, Move, Status};
+use crate::{
+    errors::*,
+    get_target,
+    update::{Release, ReleaseAsset, ReleaseUpdate},
+};
 
-/// GitHub release-asset information
-#[derive(Clone, Debug)]
-pub struct ReleaseAsset {
-    pub download_url: String,
-    pub name: String,
-}
 impl ReleaseAsset {
     /// Parse a release-asset json object
     ///
@@ -38,56 +34,15 @@ impl ReleaseAsset {
     }
 }
 
-/// Update status with extended information from Github
-pub enum GitHubUpdateStatus {
-    /// Crate is up to date
-    UpToDate,
-    /// Crate was updated to the contained release
-    Updated(Release),
-}
-
-impl GitHubUpdateStatus {
-    /// Turn the extended information into the crate's standard `Status` enum
-    pub fn into_status(self, current_version: String) -> Status {
-        match self {
-            GitHubUpdateStatus::UpToDate => Status::UpToDate(current_version),
-            GitHubUpdateStatus::Updated(release) => Status::Updated(release.version().into()),
-        }
-    }
-
-    /// Returns `true` if `Status::UpToDate`
-    pub fn uptodate(&self) -> bool {
-        match *self {
-            GitHubUpdateStatus::UpToDate => true,
-            _ => false,
-        }
-    }
-
-    /// Returns `true` if `Status::Updated`
-    pub fn updated(&self) -> bool {
-        !self.uptodate()
-    }
-}
-
-/// GitHub release information
-#[derive(Clone, Debug)]
-pub struct Release {
-    pub name: String,
-    pub body: String,
-    pub tag: String,
-    pub date_created: String,
-    pub assets: Vec<ReleaseAsset>,
-}
 impl Release {
     fn from_release(release: &serde_json::Value) -> Result<Release> {
         let tag = release["tag_name"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
-        let date_created = release["created_at"]
+        let date = release["created_at"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
         let name = release["name"].as_str().unwrap_or(tag);
-        let body = release["body"].as_str().unwrap_or("");
         let assets = release["assets"]
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
@@ -97,30 +52,10 @@ impl Release {
             .collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
             name: name.to_owned(),
-            body: body.to_owned(),
-            tag: tag.to_owned(),
-            date_created: date_created.to_owned(),
+            version: tag.to_owned(),
+            date: date.to_owned(),
             assets,
         })
-    }
-
-    /// Check if release has an asset who's name contains the specified `target`
-    pub fn has_target_asset(&self, target: &str) -> bool {
-        self.assets.iter().any(|asset| asset.name.contains(target))
-    }
-
-    /// Return the first `ReleaseAsset` for the current release who's name
-    /// contains the specified `target`
-    pub fn asset_for(&self, target: &str) -> Option<ReleaseAsset> {
-        self.assets
-            .iter()
-            .filter(|asset| asset.name.contains(target))
-            .cloned()
-            .nth(0)
-    }
-
-    pub fn version(&self) -> &str {
-        self.tag.trim_start_matches('v')
     }
 }
 
@@ -209,7 +144,7 @@ impl ReleaseList {
             "https://api.github.com/repos/{}/{}/releases",
             self.repo_owner, self.repo_name
         );
-        let releases = Self::fetch_releases(&api_url, &self.auth_token)?;
+        let releases = self.fetch_releases(&api_url)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -220,10 +155,10 @@ impl ReleaseList {
         Ok(releases)
     }
 
-    fn fetch_releases(url: &str, auth_token: &Option<String>) -> Result<Vec<Release>> {
+    fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
         let mut resp = reqwest::Client::new()
             .get(url)
-            .headers(api_headers(&auth_token))
+            .headers(api_headers(&self.auth_token))
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -267,7 +202,7 @@ impl ReleaseList {
         Ok(match next_link {
             None => releases,
             Some(link) => {
-                releases.extend(Self::fetch_releases(link, &auth_token)?);
+                releases.extend(self.fetch_releases(link)?);
                 releases
             }
         })
@@ -426,14 +361,14 @@ impl UpdateBuilder {
     ///
     /// * Errors:
     ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Update> {
+    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
         let bin_install_path = if let Some(v) = &self.bin_install_path {
             v.clone()
         } else {
             env::current_exe()?
         };
 
-        Ok(Update {
+        Ok(Box::new(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -471,7 +406,7 @@ impl UpdateBuilder {
             show_output: self.show_output,
             no_confirm: self.no_confirm,
             auth_token: self.auth_token.clone(),
-        })
+        }))
     }
 }
 
@@ -497,20 +432,18 @@ impl Update {
     pub fn configure() -> UpdateBuilder {
         UpdateBuilder::new()
     }
+}
 
-    fn get_latest_release(
-        repo_owner: &str,
-        repo_name: &str,
-        auth_token: &Option<String>,
-    ) -> Result<Release> {
+impl ReleaseUpdate for Update {
+    fn get_latest_release(&self) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
-            repo_owner, repo_name
+            self.repo_owner, self.repo_name
         );
         let mut resp = reqwest::Client::new()
             .get(&api_url)
-            .headers(api_headers(&auth_token))
+            .headers(api_headers(&self.auth_token))
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -524,20 +457,15 @@ impl Update {
         Ok(Release::from_release(&json)?)
     }
 
-    fn get_release_version(
-        repo_owner: &str,
-        repo_name: &str,
-        ver: &str,
-        auth_token: &Option<String>,
-    ) -> Result<Release> {
+    fn get_release_version(&self, ver: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases/tags/{}",
-            repo_owner, repo_name, ver
+            self.repo_owner, self.repo_name, ver
         );
         let mut resp = reqwest::Client::new()
             .get(&api_url)
-            .headers(api_headers(&auth_token))
+            .headers(api_headers(&self.auth_token))
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -551,124 +479,48 @@ impl Update {
         Ok(Release::from_release(&json)?)
     }
 
-    fn print_flush(&self, msg: &str) -> Result<()> {
-        if self.show_output {
-            print_flush!("{}", msg);
-        }
-        Ok(())
+    fn current_version(&self) -> String {
+        self.current_version.to_owned()
     }
 
-    fn println(&self, msg: &str) {
-        if self.show_output {
-            println!("{}", msg);
-        }
+    fn target(&self) -> String {
+        self.target.clone()
     }
 
-    /// Display release information and update the current binary to the latest release, pending
-    /// confirmation from the user
-    pub fn update(self) -> Result<Status> {
-        let current_version = self.current_version.clone();
-        self.update_extended()
-            .map(|s| s.into_status(current_version))
+    fn target_version(&self) -> Option<String> {
+        self.target_version.clone()
     }
 
-    /// Same as `update`, but returns `GitHubUpdateStatus`.
-    pub fn update_extended(self) -> Result<GitHubUpdateStatus> {
-        self.println(&format!("Checking target-arch... {}", self.target));
-        self.println(&format!(
-            "Checking current version... v{}",
-            self.current_version
-        ));
+    fn bin_name(&self) -> String {
+        self.bin_name.clone()
+    }
 
-        let release = match self.target_version {
-            None => {
-                self.print_flush("Checking latest released version... ")?;
-                let release =
-                    Self::get_latest_release(&self.repo_owner, &self.repo_name, &self.auth_token)?;
-                {
-                    let release_tag = release.version();
-                    self.println(&format!("v{}", release_tag));
+    fn bin_install_path(&self) -> PathBuf {
+        self.bin_install_path.clone()
+    }
 
-                    if !version::bump_is_greater(&self.current_version, &release_tag)? {
-                        return Ok(GitHubUpdateStatus::UpToDate);
-                    }
+    fn bin_path_in_archive(&self) -> PathBuf {
+        self.bin_path_in_archive.clone()
+    }
 
-                    self.println(&format!(
-                        "New release found! v{} --> v{}",
-                        &self.current_version, release_tag
-                    ));
-                    let qualifier =
-                        if version::bump_is_compatible(&self.current_version, &release_tag)? {
-                            ""
-                        } else {
-                            "*NOT* "
-                        };
-                    self.println(&format!("New release is {}compatible", qualifier));
-                }
-                release
-            }
-            Some(ref ver) => {
-                self.println(&format!("Looking for tag: {}", ver));
-                Self::get_release_version(&self.repo_owner, &self.repo_name, ver, &self.auth_token)?
-            }
-        };
+    fn show_download_progress(&self) -> bool {
+        self.show_download_progress
+    }
 
-        let target_asset = release.asset_for(&self.target).ok_or_else(|| {
-            format_err!(
-                Error::Release,
-                "No asset found for target: `{}`",
-                self.target
-            )
-        })?;
+    fn show_output(&self) -> bool {
+        self.show_output
+    }
 
-        if self.show_output || !self.no_confirm {
-            println!("\n{} release status:", self.bin_name);
-            println!("  * Current exe: {:?}", self.bin_install_path);
-            println!("  * New exe release: {:?}", target_asset.name);
-            println!("  * New exe download url: {:?}", target_asset.download_url);
-            println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
-        }
-        if !self.no_confirm {
-            confirm("Do you want to continue? [Y/n] ")?;
-        }
+    fn no_confirm(&self) -> bool {
+        self.no_confirm
+    }
 
-        let tmp_dir_parent = if cfg!(windows) {
-            env::var_os("TEMP").map(PathBuf::from)
-        } else {
-            self.bin_install_path.parent().map(PathBuf::from)
-        }
-        .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
-        let tmp_dir =
-            tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", self.bin_name))?;
-        let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
-        let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
+    fn progress_style(&self) -> Option<ProgressStyle> {
+        self.progress_style.clone()
+    }
 
-        self.println("Downloading...");
-        let mut download = Download::from_url(&target_asset.download_url);
-        let mut headers = api_headers(&self.auth_token);
-        headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
-        download.set_headers(headers);
-        download.show_progress(self.show_download_progress);
-
-        if let Some(ref progress_style) = self.progress_style {
-            download.set_progress_style(progress_style.clone());
-        }
-
-        download.download_to(&mut tmp_archive)?;
-
-        self.print_flush("Extracting archive... ")?;
-        Extract::from_source(&tmp_archive_path)
-            .extract_file(&tmp_dir.path(), &self.bin_path_in_archive)?;
-        let new_exe = tmp_dir.path().join(&self.bin_path_in_archive);
-        self.println("Done");
-
-        self.print_flush("Replacing binary file... ")?;
-        let tmp_file = tmp_dir.path().join(&format!("__{}_backup", self.bin_name));
-        Move::from_source(&new_exe)
-            .replace_using_temp(&tmp_file)
-            .to_dest(&self.bin_install_path)?;
-        self.println("Done");
-        Ok(GitHubUpdateStatus::Updated(release))
+    fn auth_token(&self) -> Option<String> {
+        self.auth_token.clone()
     }
 }
 
@@ -695,12 +547,10 @@ impl Default for UpdateBuilder {
 fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
     let mut headers = header::HeaderMap::new();
 
-    if auth_token.is_some() {
+    if let Some(token) = auth_token {
         headers.insert(
             header::AUTHORIZATION,
-            (String::from("token ") + &auth_token.clone().unwrap())
-                .parse()
-                .unwrap(),
+            format!("token {}", token).parse().unwrap(),
         );
     };
 
