@@ -6,7 +6,7 @@ Example updating an executable to the latest version released via GitHub
 #[macro_use]
 extern crate self_update;
 
-fn run() -> Result<(), Box<::std::error::Error>> {
+fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")

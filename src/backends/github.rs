@@ -158,7 +158,7 @@ impl ReleaseList {
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
         let mut resp = reqwest::Client::new()
             .get(url)
-            .headers(api_headers(&self.auth_token))
+            .headers(api_headers(&self.auth_token)?)
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -443,7 +443,7 @@ impl ReleaseUpdate for Update {
         );
         let mut resp = reqwest::Client::new()
             .get(&api_url)
-            .headers(api_headers(&self.auth_token))
+            .headers(api_headers(&self.auth_token)?)
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -465,7 +465,7 @@ impl ReleaseUpdate for Update {
         );
         let mut resp = reqwest::Client::new()
             .get(&api_url)
-            .headers(api_headers(&self.auth_token))
+            .headers(api_headers(&self.auth_token)?)
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -544,15 +544,17 @@ impl Default for UpdateBuilder {
     }
 }
 
-fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
+fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
     if let Some(token) = auth_token {
         headers.insert(
             header::AUTHORIZATION,
-            format!("token {}", token).parse().unwrap(),
+            format!("token {}", token)
+                .parse()
+                .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
         );
     };
 
-    headers
+    Ok(headers)
 }

@@ -362,24 +362,39 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         let releases = fetch_releases_from_s3(&self.bucket_name, &self.region, &self.asset_prefix)?;
-        let latest = (*releases
+        let rel = releases
             .iter()
-            .max_by(|x, y| {
-                if bump_is_greater(&y.version, &x.version).unwrap() {
-                    Ordering::Greater
-                } else {
+            .max_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+                Ok(is_greater) => {
+                    if is_greater {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                Err(_) => {
+                    // Ignoring release due to an unexpected failure in parsing its version string
                     Ordering::Less
                 }
-            })
-            .unwrap())
-        .clone();
-        Ok(latest)
+            });
+
+        match rel {
+            Some(r) => Ok(r.clone()),
+            None => bail!(Error::Release, "No release was found"),
+        }
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         let releases = fetch_releases_from_s3(&self.bucket_name, &self.region, &self.asset_prefix)?;
-        let rel = (*releases.iter().find(|x| x.version == ver).unwrap()).clone();
-        Ok(rel)
+        let rel = releases.iter().find(|x| x.version == ver);
+        match rel {
+            Some(r) => Ok(r.clone()),
+            None => bail!(
+                Error::Release,
+                "No release with version '{}' was found",
+                ver
+            ),
+        }
     }
 
     fn current_version(&self) -> String {
@@ -491,24 +506,26 @@ fn fetch_releases_from_s3(
                 _ => current_tag = Tag::Other,
             },
             Ok(Event::Text(e)) => {
-                let txt = e.unescape_and_decode(&reader).unwrap();
-                match current_tag {
-                    Tag::Key => {
-                        if let Some(captures) = regex.captures(&txt) {
-                            let release = current_release.get_or_insert(Release::default());
-                            release.name = captures["name"].to_string();
-                            release.version = captures["version"].to_string();
-                            release.assets = vec![ReleaseAsset {
-                                name: txt.clone(),
-                                download_url: format!("{}{}", download_base_url, txt),
-                            }];
+                // if we cannot decode a tag text we just ignore it
+                if let Ok(txt) = e.unescape_and_decode(&reader) {
+                    match current_tag {
+                        Tag::Key => {
+                            if let Some(captures) = regex.captures(&txt) {
+                                let release = current_release.get_or_insert(Release::default());
+                                release.name = captures["name"].to_string();
+                                release.version = captures["version"].to_string();
+                                release.assets = vec![ReleaseAsset {
+                                    name: txt.clone(),
+                                    download_url: format!("{}{}", download_base_url, txt),
+                                }];
+                            }
                         }
+                        Tag::LastModified => {
+                            let release = current_release.get_or_insert(Release::default());
+                            release.date = txt;
+                        }
+                        _ => (),
                     }
-                    Tag::LastModified => {
-                        let release = current_release.get_or_insert(Release::default());
-                        release.date = txt;
-                    }
-                    _ => (),
                 }
             }
             Ok(Event::Eof) => {

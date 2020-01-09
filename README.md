@@ -41,6 +41,28 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 Run the above example to see `self_update` in action: `cargo run --example github`
 
+Amazon S3 is also supported as the backend to check for new releases. Provided a `bucket_name`
+and `asset_prefix` string, `self_update` will look up all matching files using the following format
+as a convention for the filenames: `<asset name>-<semver>-<platform/target>.<extension>`.
+Any file not matching the format, or not matching the provided prefix string, is be ignored.
+
+```
+fn update() -> Result<(), Box<::std::error::Error>> {
+    let status = self_update::backends::s3::Update::configure()
+        .bucket_owner("self_update_releases")
+        .asset_prefix("self_update")
+        .region("eu-west-2")
+        .bin_name("self_update_example")
+        .show_download_progress(true)
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("S3 Update status: `{}`!", status.version());
+    Ok(())
+}
+# fn main() { }
+```
+
 Separate utilities are also exposed:
 
 ```rust
