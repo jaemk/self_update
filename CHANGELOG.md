@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Added
+- support for Amazon S3 as releases backend server
 ### Changed
 ### Removed
 
@@ -88,4 +89,3 @@
 - Update the github `update` method to display the compatibility of new release versions.
 
 ### Removed
-
