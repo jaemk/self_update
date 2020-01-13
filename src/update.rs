@@ -14,7 +14,7 @@ pub struct ReleaseAsset {
     pub name: String,
 }
 
-/// Update status with extended information from Github
+/// Update status with extended information
 pub enum UpdateStatus {
     /// Crate is up to date
     UpToDate,
@@ -27,7 +27,7 @@ impl UpdateStatus {
     pub fn into_status(self, current_version: String) -> Status {
         match self {
             UpdateStatus::UpToDate => Status::UpToDate(current_version),
-            UpdateStatus::Updated(release) => Status::Updated(release.version().into()),
+            UpdateStatus::Updated(release) => Status::Updated(release.version.into()),
         }
     }
 
@@ -69,38 +69,47 @@ impl Release {
             .cloned()
             .nth(0)
     }
-
-    pub fn version(&self) -> &str {
-        &self.version
-    }
 }
 
 /// Updates to a specified or latest release
 pub trait ReleaseUpdate {
+    /// Fetch details of the latest release from the backend
     fn get_latest_release(&self) -> Result<Release>;
 
+    /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
 
+    /// Current version of binary being updated
     fn current_version(&self) -> String;
 
+    /// Target platform the update is being performed for
     fn target(&self) -> String;
 
+    /// Target version optionally specified for the update
     fn target_version(&self) -> Option<String>;
 
+    /// Name of the binary being updated
     fn bin_name(&self) -> String;
 
+    /// Installation path for the binary being updated
     fn bin_install_path(&self) -> PathBuf;
 
+    /// Path of the binary to be extracted from release package
     fn bin_path_in_archive(&self) -> PathBuf;
 
+    /// Flag indicating if progress information shall be output when downloading a release
     fn show_download_progress(&self) -> bool;
 
+    /// Flag indicating if process informative messages shall be output
     fn show_output(&self) -> bool;
 
+    /// Flag indicating if the user shouldn't be prompted to confirm an update
     fn no_confirm(&self) -> bool;
 
+    /// Styling for progress information if `show_download_progress` is set (see `indicatif::ProgressStyle`)
     fn progress_style(&self) -> Option<ProgressStyle>;
 
+    /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<String>;
 
     /// Display release information and update the current binary to the latest release, pending
@@ -127,10 +136,9 @@ pub trait ReleaseUpdate {
                 print_flush(show_output, "Checking latest released version... ")?;
                 let release = self.get_latest_release()?;
                 {
-                    let release_version = release.version();
-                    println(show_output, &format!("v{}", release_version));
+                    println(show_output, &format!("v{}", release.version));
 
-                    if !version::bump_is_greater(&current_version, &release_version)? {
+                    if !version::bump_is_greater(&current_version, &release.version)? {
                         return Ok(UpdateStatus::UpToDate);
                     }
 
@@ -138,11 +146,11 @@ pub trait ReleaseUpdate {
                         show_output,
                         &format!(
                             "New release found! v{} --> v{}",
-                            current_version, release_version
+                            current_version, release.version
                         ),
                     );
                     let qualifier =
-                        if version::bump_is_compatible(&current_version, &release_version)? {
+                        if version::bump_is_compatible(&current_version, &release.version)? {
                             ""
                         } else {
                             "*NOT* "
@@ -218,6 +226,7 @@ pub trait ReleaseUpdate {
     }
 }
 
+// Print out message based on provided flag and flush the output buffer
 fn print_flush(show_output: bool, msg: &str) -> Result<()> {
     if show_output {
         print_flush!("{}", msg);
@@ -225,12 +234,14 @@ fn print_flush(show_output: bool, msg: &str) -> Result<()> {
     Ok(())
 }
 
+// Print out message based on provided flag
 fn println(show_output: bool, msg: &str) {
     if show_output {
         println!("{}", msg);
     }
 }
 
+// Construct a header with an authorisation entry if an auth token is provided
 fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
     let mut headers = header::HeaderMap::new();
 
