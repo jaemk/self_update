@@ -442,6 +442,8 @@ impl ReleaseUpdate for Update {
     }
 }
 
+// Obtain list of releases from AWS S3 API, from bucket and region specified,
+// filtering assets which don't match the prefix string if provided
 fn fetch_releases_from_s3(
     bucket_name: &str,
     region: &str,
@@ -473,8 +475,6 @@ fn fetch_releases_from_s3(
     reader.trim_text(true);
 
     // Let's now parse the response to extract the releases
-    let mut buf = Vec::new();
-    let mut releases: Vec<Release> = vec![];
     enum Tag {
         Contents,
         Key,
@@ -491,13 +491,16 @@ fn fetch_releases_from_s3(
         ))
     })?;
 
+    // inspecting each XML element we populate our releases list
+    let mut buf = Vec::new();
+    let mut releases: Vec<Release> = vec![];
     loop {
         match reader.read_event(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name() {
                 b"Contents" => {
                     current_tag = Tag::Contents;
                     if let Some(release) = current_release {
-                        add_release(&mut releases, release);
+                        add_to_releases_list(&mut releases, release);
                     }
                     current_release = None;
                 }
@@ -530,7 +533,7 @@ fn fetch_releases_from_s3(
             }
             Ok(Event::Eof) => {
                 if let Some(release) = current_release {
-                    add_release(&mut releases, release);
+                    add_to_releases_list(&mut releases, release);
                 }
                 break; // exits the loop when reaching end of file
             }
@@ -549,7 +552,9 @@ fn fetch_releases_from_s3(
     Ok(releases)
 }
 
-fn add_release(releases: &mut Vec<Release>, mut rel: Release) {
+// Add a release to the list if it's doesn't exist yet, or merge its asset/s
+// details into the release item already existing in the list
+fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
     if !rel.version.is_empty() && !rel.name.is_empty() {
         match releases
             .iter()
