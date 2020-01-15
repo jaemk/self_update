@@ -52,7 +52,7 @@ impl Release {
             .collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
             name: name.to_owned(),
-            version: tag.trim_start_matches("v").to_owned(),
+            version: tag.trim_start_matches('v').to_owned(),
             date: date.to_owned(),
             assets,
         })

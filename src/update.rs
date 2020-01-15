@@ -27,7 +27,7 @@ impl UpdateStatus {
     pub fn into_status(self, current_version: String) -> Status {
         match self {
             UpdateStatus::UpToDate => Status::UpToDate(current_version),
-            UpdateStatus::Updated(release) => Status::Updated(release.version.into()),
+            UpdateStatus::Updated(release) => Status::Updated(release.version),
         }
     }
 

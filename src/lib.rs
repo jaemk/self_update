@@ -37,7 +37,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     println!("Update status: `{}`!", status.version());
     Ok(())
 }
-# fn main() { }
 ```
 
 Run the above example to see `self_update` in action: `cargo run --example github`
@@ -63,7 +62,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     println!("S3 Update status: `{}`!", status.version());
     Ok(())
 }
-# fn main() { }
 ```
 
 Separate utilities are also exposed:
@@ -104,7 +102,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     Ok(())
 }
-# fn main() { }
 ```
 
 */
