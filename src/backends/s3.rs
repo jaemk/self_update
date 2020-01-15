@@ -516,7 +516,8 @@ fn fetch_releases_from_s3(
                             if let Some(captures) = regex.captures(&txt) {
                                 let release = current_release.get_or_insert(Release::default());
                                 release.name = captures["name"].to_string();
-                                release.version = captures["version"].to_string();
+                                release.version =
+                                    captures["version"].trim_start_matches("v").to_string();
                                 release.assets = vec![ReleaseAsset {
                                     name: txt.clone(),
                                     download_url: format!("{}{}", download_base_url, txt),
