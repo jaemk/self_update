@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.9.0]
+### Added
 - support for Amazon S3 as releases backend server
 ### Changed
 - use `Update` trait in GitHub backend implementation for code re-usability
