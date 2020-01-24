@@ -110,6 +110,7 @@ pub use tempdir::TempDir;
 
 use either::Either;
 use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::header;
 use std::cmp::min;
 use std::fs;
 use std::io;
@@ -493,11 +494,20 @@ impl Download {
     ///     * Writing from `BufReader`-buffer to `File`
     pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use io::BufRead;
+        let mut headers = self.headers.clone();
+        if !headers.contains_key(header::USER_AGENT) {
+            headers.insert(
+                header::USER_AGENT,
+                "rust-reqwest/self-update"
+                    .parse()
+                    .expect("invalid user-agent"),
+            );
+        }
 
         set_ssl_vars!();
-        let resp = reqwest::Client::new()
+        let resp = reqwest::blocking::Client::new()
             .get(&self.url)
-            .headers(self.headers.clone())
+            .headers(headers)
             .send()?;
         let size = resp
             .headers()

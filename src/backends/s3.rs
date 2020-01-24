@@ -460,7 +460,7 @@ fn fetch_releases_from_s3(
 
     let download_base_url = format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region);
 
-    let mut resp = reqwest::Client::new().get(&api_url).send()?;
+    let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
     if !resp.status().is_success() {
         bail!(
             Error::Network,

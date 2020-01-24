@@ -156,7 +156,7 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let mut resp = reqwest::Client::new()
+        let resp = reqwest::blocking::Client::new()
             .get(url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
@@ -168,6 +168,8 @@ impl ReleaseList {
                 url
             )
         }
+        let headers = resp.headers().clone();
+
         let releases = resp.json::<serde_json::Value>()?;
         let releases = releases
             .as_array()
@@ -179,7 +181,6 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://api.github.com/resource?page=2>; rel="next"`
-        let headers = resp.headers();
         let links = headers.get_all(reqwest::header::LINK);
 
         let next_link = links
@@ -441,7 +442,7 @@ impl ReleaseUpdate for Update {
             "https://api.github.com/repos/{}/{}/releases/latest",
             self.repo_owner, self.repo_name
         );
-        let mut resp = reqwest::Client::new()
+        let resp = reqwest::blocking::Client::new()
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
@@ -463,7 +464,7 @@ impl ReleaseUpdate for Update {
             "https://api.github.com/repos/{}/{}/releases/tags/{}",
             self.repo_owner, self.repo_name, ver
         );
-        let mut resp = reqwest::Client::new()
+        let resp = reqwest::blocking::Client::new()
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
@@ -546,6 +547,12 @@ impl Default for UpdateBuilder {
 
 fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::USER_AGENT,
+        "rust-reqwest/self-update"
+            .parse()
+            .expect("github invalid user-agent"),
+    );
 
     if let Some(token) = auth_token {
         headers.insert(

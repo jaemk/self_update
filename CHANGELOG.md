@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.10.0]
+### Added
+### Changed
+- update reqwest to 0.10, add default user-agent to requests
+- update indicatif to 0.13
+### Removed
+
 ## [0.9.0]
 ### Added
 - support for Amazon S3 as releases backend server
