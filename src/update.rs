@@ -2,6 +2,8 @@ use indicatif::ProgressStyle;
 use reqwest::{self, header};
 use std::env;
 use std::fs;
+#[cfg(not(windows))]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempdir;
 
@@ -214,6 +216,15 @@ pub trait ReleaseUpdate {
         Extract::from_source(&tmp_archive_path)
             .extract_file(&tmp_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_dir.path().join(&bin_path_in_archive);
+
+        // Make executable
+        #[cfg(not(windows))]
+        {
+            let mut permissions = fs::metadata(&new_exe)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&new_exe, permissions)?;
+        }
+
         println(show_output, "Done");
 
         print_flush(show_output, "Replacing binary file... ")?;
