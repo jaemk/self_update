@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.11.0]
+### Added
+### Changed
+- set executable bits on non-windows
+### Removed
+
 ## [0.10.0]
 ### Added
 ### Changed
