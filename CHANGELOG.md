@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.11.1]
+### Added
+### Changed
+- add rust highlighting tag to doc example
+### Removed
+
 ## [0.11.0]
 ### Added
 ### Changed
