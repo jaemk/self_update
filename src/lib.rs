@@ -670,10 +670,12 @@ mod tests {
         let fp = archive_src.join("temp.txt");
         let mut tmp_file = File::create(&fp).expect("temp file create fail");
         tmp_file.write_all(b"This is a test!").unwrap();
+        tmp_file.sync_all().expect("sync fail");
 
         let fp2 = archive_src.join("temp2.txt");
         let mut tmp_file = File::create(&fp2).expect("temp file 2 create fail");
         tmp_file.write_all(b"This is a second test!").unwrap();
+        tmp_file.sync_all().expect("sync fail");
 
         let mut ar = tar::Builder::new(vec![]);
         ar.append_dir_all("inner_archive", &archive_src)
@@ -686,6 +688,7 @@ mod tests {
         io::copy(&mut tar_writer.as_slice(), &mut e)
             .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
+        archive_file.sync_all().expect("sync fail");
 
         let out_tmp = TempDir::new("self_update_unpack_tar_gzip_outdir").expect("tempdir fail");
         let out_path = out_tmp.path();
