@@ -46,7 +46,7 @@ and `asset_prefix` string, `self_update` will look up all matching files using t
 as a convention for the filenames: `<asset name>-<semver>-<platform/target>.<extension>`.
 Any file not matching the format, or not matching the provided prefix string, is be ignored.
 
-```
+```rust
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
         .bucket_owner("self_update_releases")
