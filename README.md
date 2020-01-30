@@ -11,7 +11,7 @@
 distribution backends.
 
 ```shell
-self_update = "0.8"
+self_update = "0.11"
 ```
 
 ## Usage
@@ -23,7 +23,7 @@ producing release-builds via CI (travis/appveyor).
 
 
 ```rust
-#[macro_use] extern crate self_update;
+use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
@@ -44,12 +44,14 @@ Run the above example to see `self_update` in action: `cargo run --example githu
 Amazon S3 is also supported as the backend to check for new releases. Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format
 as a convention for the filenames: `<asset name>-<semver>-<platform/target>.<extension>`.
-Any file not matching the format, or not matching the provided prefix string, is be ignored.
+Any file not matching the format, or not matching the provided prefix string, will be ignored.
 
 ```rust
+use self_update::cargo_crate_version;
+
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
-        .bucket_owner("self_update_releases")
+        .bucket_name("self_update_releases")
         .asset_prefix("self_update")
         .region("eu-west-2")
         .bin_name("self_update_example")
@@ -60,13 +62,11 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     println!("S3 Update status: `{}`!", status.version());
     Ok(())
 }
-# fn main() { }
 ```
 
 Separate utilities are also exposed:
 
 ```rust
-extern crate self_update;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()

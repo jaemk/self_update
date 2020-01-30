@@ -11,7 +11,7 @@
 distribution backends.
 
 ```shell
-self_update = "0.7"
+self_update = "0.11"
 ```
 
 ## Usage
@@ -22,8 +22,8 @@ Note, the [`trust`](https://github.com/japaric/trust) project provides a nice se
 producing release-builds via CI (travis/appveyor).
 
 
-```
-#[macro_use] extern crate self_update;
+```rust
+use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
@@ -46,8 +46,8 @@ and `asset_prefix` string, `self_update` will look up all matching files using t
 as a convention for the filenames: `<asset name>-<semver>-<platform/target>.<extension>`.
 Any file not matching the format, or not matching the provided prefix string, will be ignored.
 
-```
-#[macro_use] extern crate self_update;
+```rust
+use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
@@ -66,8 +66,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 Separate utilities are also exposed:
 
-```
-extern crate self_update;
+```rust
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
