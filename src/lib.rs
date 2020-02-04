@@ -107,7 +107,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 pub use tempdir::TempDir;
 
-#[cfg(feature = "archive-flate2")]
+#[cfg(feature = "compression-flate2")]
 use either::Either;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header;
@@ -281,9 +281,9 @@ pub struct Extract<'a> {
     source: &'a path::Path,
     archive: Option<ArchiveKind>,
 }
-#[cfg(feature = "archive-flate2")]
+#[cfg(feature = "compression-flate2")]
 pub type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
-#[cfg(not(feature = "archive-flate2"))]
+#[cfg(not(feature = "compression-flate2"))]
 pub type GetArchiveReaderResult = fs::File;
 
 impl<'a> Extract<'a> {
@@ -304,16 +304,16 @@ impl<'a> Extract<'a> {
 
     fn get_archive_reader(
         source: fs::File,
-        #[cfg_attr(not(feature = "archive-flate2"), allow(unused_variables))] compression: Option<
+        compression: Option<
             Compression,
         >,
     ) -> GetArchiveReaderResult {
-        #[cfg(feature = "archive-flate2")]
+        #[cfg(feature = "compression-flate2")]
         match compression {
             Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
             None => Either::Left(source),
         }
-        #[cfg(not(feature = "archive-flate2"))]
+        #[cfg(not(feature = "compression-flate2"))]
         source
     }
 
@@ -639,7 +639,7 @@ impl Download {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "archive-flate2")]
+    #[cfg(feature = "compression-flate2")]
     use flate2::{self, write::GzEncoder};
     use std::fs::File;
     use std::io::Read;
@@ -724,13 +724,13 @@ mod tests {
         assert!(s == content);
     }
 
-    #[cfg(not(feature = "archive-flate2"))]
+    #[cfg(not(feature = "compression-flate2"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip() {
-        println!("WARNING: Please enable 'archive-flate2' feature!");
+        println!("WARNING: Please enable 'compression-flate2' feature!");
     }
-    #[cfg(feature = "archive-flate2")]
+    #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_plain_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_plain_gzip_src").expect("tempdir fail");
@@ -750,13 +750,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(feature = "archive-flate2"))]
+    #[cfg(not(feature = "compression-flate2"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip_double_ext() {
-        println!("WARNING: Please enable 'archive-flate2' feature!");
+        println!("WARNING: Please enable 'compression-flate2' feature!");
     }
-    #[cfg(feature = "archive-flate2")]
+    #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_plain_gzip_double_ext() {
         let tmp_dir =
@@ -831,13 +831,13 @@ mod tests {
         cmp_content(&out_file, "This is a second test!");
     }
 
-    #[cfg(not(feature = "archive-flate2"))]
+    #[cfg(not(feature = "compression-flate2"))]
     #[test]
     #[ignore]
     fn unpack_file_plain_gzip() {
-        println!("WARNING: Please enable 'archive-flate2' feature!");
+        println!("WARNING: Please enable 'compression-flate2' feature!");
     }
-    #[cfg(feature = "archive-flate2")]
+    #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_file_plain_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_file_plain_gzip_src").expect("tempdir fail");

@@ -27,10 +27,10 @@ The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifes
 available (but _disabled_ by default):
 
 * `archive-tar`: Support for _tar_ archive format;
-* `archive-flate2`: Support for _gzip_ compression;
 * `archive-zip`: Support for _zip_ archive format;
-* `archive-zip-deflate`: Support for _zip_'s _deflate_ compression format;
-* `archive-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
+* `compression-flate2`: Support for _gzip_ compression;
+* `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
+* `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
 
 Please active the feature(s) needed by your release files.
 
