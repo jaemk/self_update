@@ -212,6 +212,7 @@ pub enum ArchiveKind {
     #[cfg(feature = "archive-tar")]
     Tar(Option<Compression>),
     Plain(Option<Compression>),
+    #[cfg(feature = "archive-zip")]
     Zip,
 }
 
@@ -222,7 +223,18 @@ pub enum Compression {
 
 fn detect_archive(path: &path::Path) -> ArchiveKind {
     match path.extension() {
-        Some(extension) if extension == std::ffi::OsStr::new("zip") => ArchiveKind::Zip,
+        Some(extension) if extension == std::ffi::OsStr::new("zip") => {
+            #[cfg(feature = "archive-zip")]
+            {
+                ArchiveKind::Zip
+            }
+            #[cfg(not(feature = "archive-zip"))]
+            {
+                panic!(
+                    "Archive extension 'zip' not supported, please enable 'archive-zip' feature!"
+                )
+            }
+        }
         Some(extension) if extension == std::ffi::OsStr::new("tar") => {
             #[cfg(feature = "archive-tar")]
             {
@@ -341,6 +353,7 @@ impl<'a> Extract<'a> {
                     let mut archive = tar::Archive::new(reader);
                     archive.unpack(into_dir)?;
                 }
+                #[allow(unreachable_patterns)]
                 _ => unreachable!(),
             };
 
@@ -356,6 +369,7 @@ impl<'a> Extract<'a> {
             ArchiveKind::Plain(compression) => {
                 extract_into_plain_or_tar(source, compression)?;
             }
+            #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
@@ -418,6 +432,7 @@ impl<'a> Extract<'a> {
                         })?;
                     entry.unpack_in(into_dir)?;
                 }
+                #[allow(unreachable_patterns)]
                 _ => {
                     panic!("Unreasonable code");
                 }
@@ -435,6 +450,7 @@ impl<'a> Extract<'a> {
             ArchiveKind::Plain(compression) => {
                 extract_file_plain_or_tar(source, compression)?;
             }
+            #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
                 let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
@@ -626,13 +642,17 @@ mod tests {
     #[cfg(feature = "archive-flate2")]
     use flate2::{self, write::GzEncoder};
     use std::fs::File;
-    use std::io::{Read, Write};
+    use std::io::Read;
+    #[cfg(feature = "archive-zip")]
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     #[cfg(feature = "archive-tar")]
     use std::{fs, io};
     #[cfg(feature = "archive-tar")]
     use tar;
+    #[cfg(feature = "archive-zip")]
     use tempdir::TempDir;
+    #[cfg(feature = "archive-zip")]
     use zip;
 
     #[test]
@@ -681,6 +701,13 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "archive-zip"))]
+    #[test]
+    #[ignore]
+    fn detect_zip() {
+        println!("WARNING: Please enable 'archive-zip' feature!");
+    }
+    #[cfg(feature = "archive-zip")]
     #[test]
     fn detect_zip() {
         assert_eq!(
@@ -689,6 +716,7 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)]
     fn cmp_content<T: AsRef<Path>>(path: T, s: &str) {
         let mut content = String::new();
         let mut f = File::open(&path).unwrap();
@@ -872,6 +900,13 @@ mod tests {
         cmp_content(&out_file, "This is a test!");
     }
 
+    #[cfg(not(feature = "archive-zip"))]
+    #[test]
+    #[ignore]
+    fn unpack_zip() {
+        println!("WARNING: Please enable 'archive-zip' feature!");
+    }
+    #[cfg(feature = "archive-zip")]
     #[test]
     fn unpack_zip() {
         let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
@@ -906,6 +941,13 @@ mod tests {
         cmp_content(&out_file2, "This is a second test!");
     }
 
+    #[cfg(not(feature = "archive-zip"))]
+    #[test]
+    #[ignore]
+    fn unpack_zip_file() {
+        println!("WARNING: Please enable 'archive-zip' feature!");
+    }
+    #[cfg(feature = "archive-zip")]
     #[test]
     fn unpack_zip_file() {
         let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
