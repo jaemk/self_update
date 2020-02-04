@@ -29,3 +29,7 @@ regex = "1.3.1"
 default = []
 zip-bzip2 = ["zip/bzip2"]
 zip-deflate = ["zip/deflate"]
+
+[package.metadata.docs.rs]
+# Whether to pass `--all-features` to Cargo (default: false)
+all-features = true
