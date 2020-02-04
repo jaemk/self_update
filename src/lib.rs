@@ -64,10 +64,10 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 }
 ```
 
-Separate utilities are also exposed:
+Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature):
 
 ```rust
-
+#[cfg(feature = "archive-tar")]
 fn update() -> Result<(), Box<::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
@@ -208,6 +208,7 @@ impl std::fmt::Display for Status {
 /// Supported archive formats
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArchiveKind {
+    #[cfg(feature = "archive-tar")]
     Tar(Option<Compression>),
     Plain(Option<Compression>),
     Zip,
@@ -221,14 +222,34 @@ pub enum Compression {
 fn detect_archive(path: &path::Path) -> ArchiveKind {
     match path.extension() {
         Some(extension) if extension == std::ffi::OsStr::new("zip") => ArchiveKind::Zip,
-        Some(extension) if extension == std::ffi::OsStr::new("tar") => ArchiveKind::Tar(None),
+        Some(extension) if extension == std::ffi::OsStr::new("tar") => {
+            #[cfg(feature = "archive-tar")]
+            {
+                ArchiveKind::Tar(None)
+            }
+            #[cfg(not(feature = "archive-tar"))]
+            {
+                panic!(
+                    "Archive extension 'tar' not supported, please enable 'archive-tar' feature!"
+                )
+            }
+        }
         Some(extension) if extension == std::ffi::OsStr::new("gz") => match path
             .file_stem()
             .map(|e| path::Path::new(e))
             .and_then(|f| f.extension())
         {
             Some(extension) if extension == std::ffi::OsStr::new("tar") => {
-                ArchiveKind::Tar(Some(Compression::Gz))
+                #[cfg(feature = "archive-tar")]
+                {
+                    ArchiveKind::Tar(Some(Compression::Gz))
+                }
+                #[cfg(not(feature = "archive-tar"))]
+                {
+                    panic!(
+                        "Archive extension 'tar' not supported, please enable 'archive-tar' feature!"
+                    )
+                }
             }
             _ => ArchiveKind::Plain(Some(Compression::Gz)),
         },
@@ -280,34 +301,49 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
-        match archive {
-            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
-                let mut reader = Self::get_archive_reader(source, compression);
+        // We cannot use a feature flag in a match arm. To bypass this the code block is
+        // isolated in a closure and called accordingly.
+        let extract_into_plain_or_tar = |source: fs::File, compression: Option<Compression>| {
+            let mut reader = Self::get_archive_reader(source, compression);
 
-                match archive {
-                    ArchiveKind::Plain(_) => {
-                        match fs::create_dir_all(into_dir) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                if e.kind() != io::ErrorKind::AlreadyExists {
-                                    return Err(Error::Io(e));
-                                }
+            match archive {
+                ArchiveKind::Plain(_) => {
+                    match fs::create_dir_all(into_dir) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            if e.kind() != io::ErrorKind::AlreadyExists {
+                                return Err(Error::Io(e));
                             }
                         }
-                        let file_name = self.source.file_name().ok_or_else(|| {
-                            Error::Update("Extractor source has no file-name".into())
-                        })?;
-                        let mut out_path = into_dir.join(file_name);
-                        out_path.set_extension("");
-                        let mut out_file = fs::File::create(&out_path)?;
-                        io::copy(&mut reader, &mut out_file)?;
                     }
-                    ArchiveKind::Tar(_) => {
-                        let mut archive = tar::Archive::new(reader);
-                        archive.unpack(into_dir)?;
-                    }
-                    _ => unreachable!(),
-                };
+                    let file_name = self
+                        .source
+                        .file_name()
+                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let mut out_path = into_dir.join(file_name);
+                    out_path.set_extension("");
+                    let mut out_file = fs::File::create(&out_path)?;
+                    io::copy(&mut reader, &mut out_file)?;
+                }
+                #[cfg(feature = "archive-tar")]
+                ArchiveKind::Tar(_) => {
+                    let mut archive = tar::Archive::new(reader);
+                    archive.unpack(into_dir)?;
+                }
+                _ => unreachable!(),
+            };
+
+            Ok(())
+        };
+
+        match archive {
+            #[cfg(feature = "archive-tar")]
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+                extract_into_plain_or_tar(source, compression)?;
+            }
+            #[cfg(not(feature = "archive-tar"))]
+            ArchiveKind::Plain(compression) => {
+                extract_into_plain_or_tar(source, compression)?;
             }
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
@@ -334,45 +370,59 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
 
-        match archive {
-            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
-                let mut reader = Self::get_archive_reader(source, compression);
+        // We cannot use a feature flag in a match arm. To bypass this the code block is
+        // isolated in a closure and called accordingly.
+        let extract_file_plain_or_tar = |source: fs::File, compression: Option<Compression>| {
+            let mut reader = Self::get_archive_reader(source, compression);
 
-                match archive {
-                    ArchiveKind::Plain(_) => {
-                        match fs::create_dir_all(into_dir) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                if e.kind() != io::ErrorKind::AlreadyExists {
-                                    return Err(Error::Io(e));
-                                }
+            match archive {
+                ArchiveKind::Plain(_) => {
+                    match fs::create_dir_all(into_dir) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            if e.kind() != io::ErrorKind::AlreadyExists {
+                                return Err(Error::Io(e));
                             }
                         }
-                        let file_name = file_to_extract.file_name().ok_or_else(|| {
-                            Error::Update("Extractor source has no file-name".into())
+                    }
+                    let file_name = file_to_extract
+                        .file_name()
+                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let out_path = into_dir.join(file_name);
+                    let mut out_file = fs::File::create(&out_path)?;
+                    io::copy(&mut reader, &mut out_file)?;
+                }
+                #[cfg(feature = "archive-tar")]
+                ArchiveKind::Tar(_) => {
+                    let mut archive = tar::Archive::new(reader);
+                    let mut entry = archive
+                        .entries()?
+                        .filter_map(|e| e.ok())
+                        .find(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
+                        .ok_or_else(|| {
+                            Error::Update(format!(
+                                "Could not find the required path in the archive: {:?}",
+                                file_to_extract
+                            ))
                         })?;
-                        let out_path = into_dir.join(file_name);
-                        let mut out_file = fs::File::create(&out_path)?;
-                        io::copy(&mut reader, &mut out_file)?;
-                    }
-                    ArchiveKind::Tar(_) => {
-                        let mut archive = tar::Archive::new(reader);
-                        let mut entry = archive
-                            .entries()?
-                            .filter_map(|e| e.ok())
-                            .find(|e| e.path().ok().filter(|p| p == file_to_extract).is_some())
-                            .ok_or_else(|| {
-                                Error::Update(format!(
-                                    "Could not find the required path in the archive: {:?}",
-                                    file_to_extract
-                                ))
-                            })?;
-                        entry.unpack_in(into_dir)?;
-                    }
-                    _ => {
-                        panic!("Unreasonable code");
-                    }
-                };
+                    entry.unpack_in(into_dir)?;
+                }
+                _ => {
+                    panic!("Unreasonable code");
+                }
+            };
+
+            Ok(())
+        };
+
+        match archive {
+            #[cfg(feature = "archive-tar")]
+            ArchiveKind::Plain(compression) | ArchiveKind::Tar(compression) => {
+                extract_file_plain_or_tar(source, compression)?;
+            }
+            #[cfg(not(feature = "archive-tar"))]
+            ArchiveKind::Plain(compression) => {
+                extract_file_plain_or_tar(source, compression)?;
             }
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
@@ -564,9 +614,12 @@ mod tests {
     use super::*;
     use flate2;
     use flate2::write::GzEncoder;
-    use std::fs::{self, File};
-    use std::io::{self, Read, Write};
+    use std::fs::File;
+    use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "archive-tar")]
+    use std::{fs, io};
+    #[cfg(feature = "archive-tar")]
     use tar;
     use tempdir::TempDir;
     use zip;
@@ -587,6 +640,13 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "archive-tar"))]
+    #[test]
+    #[ignore]
+    fn detect_tar_gz() {
+        println!("WARNING: Please enable 'archive-tar' feature!");
+    }
+    #[cfg(feature = "archive-tar")]
     #[test]
     fn detect_tar_gz() {
         assert_eq!(
@@ -595,6 +655,13 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "archive-tar"))]
+    #[test]
+    #[ignore]
+    fn detect_plain_tar() {
+        println!("WARNING: Please enable 'archive-tar' feature!");
+    }
+    #[cfg(feature = "archive-tar")]
     #[test]
     fn detect_plain_tar() {
         assert_eq!(
@@ -658,6 +725,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
+    #[cfg(not(feature = "archive-tar"))]
+    #[test]
+    #[ignore]
+    fn unpack_tar_gzip() {
+        println!("WARNING: Please enable 'archive-tar' feature!");
+    }
+    #[cfg(feature = "archive-tar")]
     #[test]
     fn unpack_tar_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_tar_gzip_src").expect("tempdir fail");
@@ -724,6 +798,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
+    #[cfg(not(feature = "archive-tar"))]
+    #[test]
+    #[ignore]
+    fn unpack_file_tar_gzip() {
+        println!("WARNING: Please enable 'archive-tar' feature!");
+    }
+    #[cfg(feature = "archive-tar")]
     #[test]
     fn unpack_file_tar_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_file_tar_gzip_src").expect("tempdir fail");
