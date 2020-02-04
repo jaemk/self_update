@@ -304,9 +304,7 @@ impl<'a> Extract<'a> {
 
     fn get_archive_reader(
         source: fs::File,
-        compression: Option<
-            Compression,
-        >,
+        compression: Option<Compression>,
     ) -> GetArchiveReaderResult {
         #[cfg(feature = "compression-flate2")]
         match compression {
