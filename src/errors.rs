@@ -6,6 +6,7 @@ use reqwest;
 use semver;
 use serde_json;
 use std;
+#[cfg(feature = "archive-zip")]
 use zip::result::ZipError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -17,6 +18,7 @@ pub enum Error {
     Release(String),
     Config(String),
     Io(std::io::Error),
+    #[cfg(feature = "archive-zip")]
     Zip(ZipError),
     Json(serde_json::Error),
     Reqwest(reqwest::Error),
@@ -35,6 +37,7 @@ impl std::fmt::Display for Error {
             Json(ref e) => write!(f, "JsonError: {}", e),
             Reqwest(ref e) => write!(f, "ReqwestError: {}", e),
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
+            #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
         }
     }
@@ -92,6 +95,7 @@ impl From<semver::SemVerError> for Error {
     }
 }
 
+#[cfg(feature = "archive-zip")]
 impl From<ZipError> for Error {
     fn from(e: ZipError) -> Error {
         Error::Zip(e)
