@@ -28,10 +28,10 @@ regex = "1.3.1"
 [features]
 default = []
 archive-zip = ["zip"]
-archive-zip-bzip2 = ["zip/bzip2"]
-archive-zip-deflate = ["zip/deflate"]
+compression-zip-bzip2 = ["zip/bzip2"] #
+compression-zip-deflate = ["zip/deflate"] #
 archive-tar = ["tar"]
-archive-flate2 = ["flate2", "either"]
+compression-flate2 = ["flate2", "either"] #
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)
