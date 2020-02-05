@@ -36,6 +36,7 @@ Please active the feature(s) needed by your release files.
 
 ### Example
 
+
 ```rust
 use self_update::cargo_crate_version;
 
@@ -78,10 +79,10 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 }
 ```
 
-Separate utilities are also exposed:
+Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature):
 
 ```rust
-
+#[cfg(feature = "archive-tar")]
 fn update() -> Result<(), Box<::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
