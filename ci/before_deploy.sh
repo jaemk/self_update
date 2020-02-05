@@ -18,7 +18,7 @@ main() {
     test -f Cargo.lock || cargo generate-lockfile
 
     # TODO Update this to build the artifacts that matter to you
-    cross build --example github --target $TARGET --release
+    cross build --example github --target $TARGET --release --all-features
 
     # TODO Update this to package the right artifacts
     cp target/$TARGET/release/examples/github $stage/
