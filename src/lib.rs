@@ -654,13 +654,12 @@ mod tests {
     use super::*;
     #[cfg(feature = "compression-flate2")]
     use flate2::{self, write::GzEncoder};
-    use std::fs::File;
-    use std::io::Read;
-    #[cfg(feature = "archive-zip")]
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    #[cfg(feature = "archive-tar")]
-    use std::{fs, io};
+    #[allow(unused_imports)]
+    use std::{
+        fs::{self, File},
+        io::{self, Read, Write},
+        path::{Path, PathBuf},
+    };
     #[cfg(feature = "archive-tar")]
     use tar;
     #[cfg(feature = "archive-zip")]
@@ -791,13 +790,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(feature = "archive-tar"))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
     #[test]
     #[ignore]
     fn unpack_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar' feature!");
+        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
     }
-    #[cfg(feature = "archive-tar")]
+    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_tar_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_tar_gzip_src").expect("tempdir fail");
@@ -871,13 +870,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(feature = "archive-tar"))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
     #[test]
     #[ignore]
     fn unpack_file_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar' feature!");
+        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
     }
-    #[cfg(feature = "archive-tar")]
+    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_file_tar_gzip() {
         let tmp_dir = TempDir::new("self_update_unpack_file_tar_gzip_src").expect("tempdir fail");
