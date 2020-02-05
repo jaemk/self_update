@@ -368,7 +368,9 @@ impl<'a> Extract<'a> {
                     archive.unpack(into_dir)?;
                 }
                 #[allow(unreachable_patterns)]
-                _ => unreachable!(),
+                _ => unreachable!(
+                    "detect_archive() panics in case the proper feature flag is not enabled"
+                ),
             };
 
             Ok(())
@@ -447,9 +449,9 @@ impl<'a> Extract<'a> {
                     entry.unpack_in(into_dir)?;
                 }
                 #[allow(unreachable_patterns)]
-                _ => {
-                    panic!("Unreasonable code");
-                }
+                _ => unreachable!(
+                    "detect_archive() panics in case the proper feature flag is not enabled"
+                ),
             };
 
             Ok(())
