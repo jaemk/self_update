@@ -21,6 +21,21 @@ from `https://api.github.com/repos/jaemk/self_update/releases/latest`.
 Note, the [`trust`](https://github.com/japaric/trust) project provides a nice setup for
 producing release-builds via CI (travis/appveyor).
 
+### Features
+
+The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section) are
+available (but _disabled_ by default):
+
+* `archive-tar`: Support for _tar_ archive format;
+* `archive-zip`: Support for _zip_ archive format;
+* `compression-flate2`: Support for _gzip_ compression;
+* `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
+* `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
+
+Please active the feature(s) needed by your release files.
+
+### Example
+
 
 ```rust
 use self_update::cargo_crate_version;
