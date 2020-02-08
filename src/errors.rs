@@ -23,6 +23,7 @@ pub enum Error {
     Json(serde_json::Error),
     Reqwest(reqwest::Error),
     SemVer(semver::SemVerError),
+    ArchiveNotEnabled(String),
 }
 
 impl std::fmt::Display for Error {
@@ -39,6 +40,7 @@ impl std::fmt::Display for Error {
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
+            ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
         }
     }
 }

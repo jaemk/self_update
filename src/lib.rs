@@ -237,30 +237,26 @@ pub enum Compression {
     Gz,
 }
 
-fn detect_archive(path: &path::Path) -> ArchiveKind {
+fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
     match path.extension() {
         Some(extension) if extension == std::ffi::OsStr::new("zip") => {
             #[cfg(feature = "archive-zip")]
             {
-                ArchiveKind::Zip
+                Ok(ArchiveKind::Zip)
             }
             #[cfg(not(feature = "archive-zip"))]
             {
-                panic!(
-                    "Archive extension 'zip' not supported, please enable 'archive-zip' feature!"
-                )
+                Err(Error::ArchiveNotEnabled("zip".to_string()))
             }
         }
         Some(extension) if extension == std::ffi::OsStr::new("tar") => {
             #[cfg(feature = "archive-tar")]
             {
-                ArchiveKind::Tar(None)
+                Ok(ArchiveKind::Tar(None))
             }
             #[cfg(not(feature = "archive-tar"))]
             {
-                panic!(
-                    "Archive extension 'tar' not supported, please enable 'archive-tar' feature!"
-                )
+                Err(Error::ArchiveNotEnabled("tar".to_string()))
             }
         }
         Some(extension) if extension == std::ffi::OsStr::new("gz") => match path
@@ -271,18 +267,16 @@ fn detect_archive(path: &path::Path) -> ArchiveKind {
             Some(extension) if extension == std::ffi::OsStr::new("tar") => {
                 #[cfg(feature = "archive-tar")]
                 {
-                    ArchiveKind::Tar(Some(Compression::Gz))
+                    Ok(ArchiveKind::Tar(Some(Compression::Gz)))
                 }
                 #[cfg(not(feature = "archive-tar"))]
                 {
-                    panic!(
-                        "Archive extension 'tar' not supported, please enable 'archive-tar' feature!"
-                    )
+                    Err(Error::ArchiveNotEnabled("tar".to_string()))
                 }
             }
-            _ => ArchiveKind::Plain(Some(Compression::Gz)),
+            _ => Ok(ArchiveKind::Plain(Some(Compression::Gz))),
         },
-        _ => ArchiveKind::Plain(None),
+        _ => Ok(ArchiveKind::Plain(None)),
     }
 }
 
@@ -336,7 +330,10 @@ impl<'a> Extract<'a> {
     /// `into_dir`.
     pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
         let source = fs::File::open(self.source)?;
-        let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
+        let archive = match self.archive {
+            Some(archive) => archive,
+            None => detect_archive(&self.source)?,
+        };
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
         // isolated in a closure and called accordingly.
@@ -369,7 +366,7 @@ impl<'a> Extract<'a> {
                 }
                 #[allow(unreachable_patterns)]
                 _ => unreachable!(
-                    "detect_archive() panics in case the proper feature flag is not enabled"
+                    "detect_archive() returns in case the proper feature flag is not enabled"
                 ),
             };
 
@@ -409,7 +406,10 @@ impl<'a> Extract<'a> {
     ) -> Result<()> {
         let file_to_extract = file_to_extract.as_ref();
         let source = fs::File::open(self.source)?;
-        let archive = self.archive.unwrap_or_else(|| detect_archive(&self.source));
+        let archive = match self.archive {
+            Some(archive) => archive,
+            None => detect_archive(&self.source)?,
+        };
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
         // isolated in a closure and called accordingly.
@@ -450,7 +450,7 @@ impl<'a> Extract<'a> {
                 }
                 #[allow(unreachable_patterns)]
                 _ => unreachable!(
-                    "detect_archive() panics in case the proper feature flag is not enabled"
+                    "detect_archive() returns in case the proper feature flag is not enabled"
                 ),
             };
 
@@ -674,7 +674,7 @@ mod tests {
     fn detect_plain() {
         assert_eq!(
             ArchiveKind::Plain(None),
-            detect_archive(&PathBuf::from("Something.exe"))
+            detect_archive(&PathBuf::from("Something.exe")).unwrap()
         );
     }
 
@@ -682,7 +682,7 @@ mod tests {
     fn detect_plain_gz() {
         assert_eq!(
             ArchiveKind::Plain(Some(Compression::Gz)),
-            detect_archive(&PathBuf::from("Something.exe.gz"))
+            detect_archive(&PathBuf::from("Something.exe.gz")).unwrap()
         );
     }
 
