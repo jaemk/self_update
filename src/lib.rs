@@ -136,7 +136,7 @@ use std::path;
 mod macros;
 pub mod backends;
 pub mod errors;
-mod update;
+pub mod update;
 pub mod version;
 
 use errors::*;
