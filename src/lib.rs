@@ -698,7 +698,7 @@ mod tests {
     fn detect_tar_gz() {
         assert_eq!(
             ArchiveKind::Tar(Some(Compression::Gz)),
-            detect_archive(&PathBuf::from("Something.tar.gz"))
+            detect_archive(&PathBuf::from("Something.tar.gz")).unwrap()
         );
     }
 
@@ -713,7 +713,7 @@ mod tests {
     fn detect_plain_tar() {
         assert_eq!(
             ArchiveKind::Tar(None),
-            detect_archive(&PathBuf::from("Something.tar"))
+            detect_archive(&PathBuf::from("Something.tar")).unwrap()
         );
     }
 
@@ -728,7 +728,7 @@ mod tests {
     fn detect_zip() {
         assert_eq!(
             ArchiveKind::Zip,
-            detect_archive(&PathBuf::from("Something.zip"))
+            detect_archive(&PathBuf::from("Something.zip")).unwrap()
         );
     }
 
