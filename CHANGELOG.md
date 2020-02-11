@@ -5,6 +5,16 @@
 ### Changed
 ### Removed
 
+## [0.12.0]
+### Added
+### Changed
+- Make all archive and compression dependencies optional, available behind
+  feature flags, and off by default. The feature flags are listed in the
+  README. The common github-release use-case (tar.gz) requires the features
+  `archive-tar compression-flate2`
+- Make the `update` module public
+### Removed
+
 ## [0.11.1]
 ### Added
 ### Changed
