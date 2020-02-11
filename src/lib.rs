@@ -312,6 +312,7 @@ impl<'a> Extract<'a> {
         self
     }
 
+    #[allow(unused_variables)]
     fn get_archive_reader(
         source: fs::File,
         compression: Option<Compression>,
