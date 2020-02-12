@@ -13,7 +13,6 @@ edition = "2018"
 
 [dependencies]
 serde_json = "1"
-reqwest = { version = "0.10", features = ["blocking", "json"]}
 tempdir = "0.3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
@@ -26,13 +25,19 @@ quick-xml = "0.17.2"
 regex = "1.3.1"
 
 [features]
-default = []
+default = ["reqwest/default-tls"]
 archive-zip = ["zip"]
 compression-zip-bzip2 = ["zip/bzip2"] #
 compression-zip-deflate = ["zip/deflate"] #
 archive-tar = ["tar"]
 compression-flate2 = ["flate2", "either"] #
+rustls = ["reqwest/rustls-tls"]
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)
 all-features = true
+
+[dependencies.reqwest]
+version = "0.10"
+default-features = false
+features = ["blocking", "json"]
