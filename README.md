@@ -31,7 +31,7 @@ available (but _disabled_ by default):
 * `compression-flate2`: Support for _gzip_ compression;
 * `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
-* `rustls`: Use [pure rust TLS implementation](https://github.com/ctz/rustls) for network requests.;
+* `rustls`: Use [pure rust TLS implementation](https://github.com/ctz/rustls) for network requests. This feature does _not_ support 32bit macOS;
 
 Please active the feature(s) needed by your release files.
 
