@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.13.0]
+### Added
 - Feature flag `rustls` to enable using [rustls](https://github.com/ctz/rustls) instead of native openssl implementations.
 ### Changed
 ### Removed
