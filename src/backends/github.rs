@@ -46,6 +46,7 @@ impl Release {
         let assets = release["assets"]
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
+        let body = release["body"].as_str().map(String::from);
         let assets = assets
             .iter()
             .map(ReleaseAsset::from_asset)
@@ -54,6 +55,7 @@ impl Release {
             name: name.to_owned(),
             version: tag.trim_start_matches('v').to_owned(),
             date: date.to_owned(),
+            body,
             assets,
         })
     }
@@ -549,9 +551,7 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust-reqwest/self-update"
-            .parse()
-            .expect("github invalid user-agent"),
+        "rust-reqwest/self-update".parse().expect("github invalid user-agent"),
     );
 
     if let Some(token) = auth_token {
