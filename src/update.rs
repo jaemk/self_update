@@ -119,7 +119,8 @@ pub trait ReleaseUpdate {
     /// confirmation from the user
     fn update(&self) -> Result<Status> {
         let current_version = self.current_version();
-        self.update_extended().map(|s| s.into_status(current_version))
+        self.update_extended()
+            .map(|s| s.into_status(current_version))
     }
 
     /// Same as `update`, but returns `UpdateStatus`.
@@ -146,14 +147,21 @@ pub trait ReleaseUpdate {
 
                     println(
                         show_output,
-                        &format!("New release found! v{} --> v{}", current_version, release.version),
+                        &format!(
+                            "New release found! v{} --> v{}",
+                            current_version, release.version
+                        ),
                     );
-                    let qualifier = if version::bump_is_compatible(&current_version, &release.version)? {
-                        ""
-                    } else {
-                        "*NOT* "
-                    };
-                    println(show_output, &format!("New release is {}compatible", qualifier));
+                    let qualifier =
+                        if version::bump_is_compatible(&current_version, &release.version)? {
+                            ""
+                        } else {
+                            "*NOT* "
+                        };
+                    println(
+                        show_output,
+                        &format!("New release is {}compatible", qualifier),
+                    );
                 }
                 release
             }
@@ -163,9 +171,9 @@ pub trait ReleaseUpdate {
             }
         };
 
-        let target_asset = release
-            .asset_for(&target)
-            .ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", target))?;
+        let target_asset = release.asset_for(&target).ok_or_else(|| {
+            format_err!(Error::Release, "No asset found for target: `{}`", target)
+        })?;
 
         let bin_install_path = self.bin_install_path();
         let bin_name = self.bin_name();
@@ -206,7 +214,8 @@ pub trait ReleaseUpdate {
 
         print_flush(show_output, "Extracting archive... ")?;
         let bin_path_in_archive = self.bin_path_in_archive();
-        Extract::from_source(&tmp_archive_path).extract_file(&tmp_dir.path(), &bin_path_in_archive)?;
+        Extract::from_source(&tmp_archive_path)
+            .extract_file(&tmp_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_dir.path().join(&bin_path_in_archive);
 
         // Make executable
@@ -251,7 +260,9 @@ fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
     if auth_token.is_some() {
         headers.insert(
             header::AUTHORIZATION,
-            (String::from("token ") + &auth_token.clone().unwrap()).parse().unwrap(),
+            (String::from("token ") + &auth_token.clone().unwrap())
+                .parse()
+                .unwrap(),
         );
     };
 
