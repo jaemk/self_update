@@ -551,7 +551,9 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust-reqwest/self-update".parse().expect("github invalid user-agent"),
+        "rust-reqwest/self-update"
+            .parse()
+            .expect("github invalid user-agent"),
     );
 
     if let Some(token) = auth_token {
