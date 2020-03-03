@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.14.0]
+### Added
+- Expose `body` string in `Release` data
+### Changed
+### Removed
+
 ## [0.13.0]
 ### Added
 - Feature flag `rustls` to enable using [rustls](https://github.com/ctz/rustls) instead of native openssl implementations.
