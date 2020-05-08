@@ -458,6 +458,8 @@ fn fetch_releases_from_s3(
         bucket_name, MAX_KEYS, prefix
     );
 
+    debug!("using api url: {:?}", api_url);
+
     let download_base_url = format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region);
 
     let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
@@ -484,7 +486,7 @@ fn fetch_releases_from_s3(
 
     let mut current_tag = Tag::Other;
     let mut current_release: Option<Release> = None;
-    let regex = Regex::new(r"(?i)(?P<name>.+)-(?P<version>\d+\.\d+\.\d+)-.+").map_err(|err| {
+    let regex = Regex::new(r"(?i)(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+").map_err(|err| {
         Error::Release(format!(
             "Failed constructing regex to parse S3 filenames: {}",
             err
@@ -522,6 +524,9 @@ fn fetch_releases_from_s3(
                                     name: txt.clone(),
                                     download_url: format!("{}{}", download_base_url, txt),
                                 }];
+                                debug!("Matched release: {:?}", release);
+                            } else {
+                                debug!("Regex mismatch: {:?}", &txt);
                             }
                         }
                         Tag::LastModified => {
