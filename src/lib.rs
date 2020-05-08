@@ -134,6 +134,9 @@ use std::io;
 use std::path;
 
 #[macro_use]
+extern crate log;
+
+#[macro_use]
 mod macros;
 pub mod backends;
 pub mod errors;
