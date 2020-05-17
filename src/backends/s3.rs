@@ -442,8 +442,10 @@ impl ReleaseUpdate for Update {
     }
 }
 
-// Obtain list of releases from AWS S3 API, from bucket and region specified,
-// filtering assets which don't match the prefix string if provided
+/// Obtain list of releases from AWS S3 API, from bucket and region specified,
+/// filtering assets which don't match the prefix string if provided.
+///
+/// This will strip the prefix from provided file names, allowing use with subdirectories
 fn fetch_releases_from_s3(
     bucket_name: &str,
     region: &str,
@@ -486,12 +488,14 @@ fn fetch_releases_from_s3(
 
     let mut current_tag = Tag::Other;
     let mut current_release: Option<Release> = None;
-    let regex = Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+").map_err(|err| {
-        Error::Release(format!(
-            "Failed constructing regex to parse S3 filenames: {}",
-            err
-        ))
-    })?;
+    let regex =
+        Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
+            .map_err(|err| {
+                Error::Release(format!(
+                    "Failed constructing regex to parse S3 filenames: {}",
+                    err
+                ))
+            })?;
 
     // inspecting each XML element we populate our releases list
     let mut buf = Vec::new();
@@ -514,10 +518,7 @@ fn fetch_releases_from_s3(
                 // if we cannot decode a tag text we just ignore it
                 if let Ok(txt) = e.unescape_and_decode(&reader) {
                     match current_tag {
-                
-
                         Tag::Key => {
-
                             let p = PathBuf::from(&txt);
                             let exe_name = match p.file_name().map(|v| v.to_str()) {
                                 Some(Some(v)) => v,
