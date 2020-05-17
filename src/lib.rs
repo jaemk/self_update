@@ -438,7 +438,10 @@ impl<'a> Extract<'a> {
             None => detect_archive(&self.source)?,
         };
 
-        debug!("Attempting to extract {:?} file from {:?}", file_to_extract, self.source);
+        debug!(
+            "Attempting to extract {:?} file from {:?}",
+            file_to_extract, self.source
+        );
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
         // isolated in a closure and called accordingly.
@@ -474,7 +477,7 @@ impl<'a> Extract<'a> {
                         .find(|e| {
                             let p = e.path();
                             debug!("Archive path: {:?}", p);
-                            p.ok().filter(|p| p == file_to_extract ).is_some()
+                            p.ok().filter(|p| p == file_to_extract).is_some()
                         })
                         .ok_or_else(|| {
                             Error::Update(format!(
