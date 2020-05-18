@@ -5,7 +5,6 @@ use std::fs;
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use tempdir;
 
 use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
 
@@ -70,7 +69,7 @@ impl Release {
             .iter()
             .filter(|asset| asset.name.contains(target))
             .cloned()
-            .nth(0)
+            .next()
     }
 }
 

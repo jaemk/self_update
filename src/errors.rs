@@ -2,10 +2,6 @@
 Error type, conversions, and macros
 
 */
-use reqwest;
-use semver;
-use serde_json;
-use std;
 #[cfg(feature = "archive-zip")]
 use zip::result::ZipError;
 

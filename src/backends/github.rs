@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use hyper_old_types::header::{LinkValue, RelationType};
 use indicatif::ProgressStyle;
 use reqwest::{self, header};
-use serde_json;
 
 use crate::{
     errors::*,
@@ -200,7 +199,7 @@ impl ReleaseList {
                     None
                 }
             })
-            .nth(0);
+            .next();
 
         Ok(match next_link {
             None => releases,

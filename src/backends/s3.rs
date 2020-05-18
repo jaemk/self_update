@@ -11,7 +11,6 @@ use indicatif::ProgressStyle;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
-use reqwest;
 use std::cmp::Ordering;
 use std::env;
 use std::path::{Path, PathBuf};
