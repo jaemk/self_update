@@ -11,7 +11,7 @@
 distribution backends.
 
 ```shell
-self_update = "0.14"
+self_update = "0.15"
 ```
 
 ## Usage

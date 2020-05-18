@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.15.0]
+### Added
 - Handling for `.tgz` files
 ### Changed
 - Support version tags with or without leading `v`
