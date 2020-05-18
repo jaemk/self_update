@@ -60,7 +60,8 @@ Run the above example to see `self_update` in action: `cargo run --example githu
 Amazon S3 is also supported as the backend to check for new releases. Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format
 as a convention for the filenames: `[directory/]<asset name>-<semver>-<platform/target>.<extension>`.
-Leading directories will be stripped from the file name allowing the use of subdirectories in the S3 bucket, and any file not matching the format, or not matching the provided prefix string, will be ignored.
+Leading directories will be stripped from the file name allowing the use of subdirectories in the S3 bucket,
+and any file not matching the format, or not matching the provided prefix string, will be ignored.
 
 ```rust
 use self_update::cargo_crate_version;
