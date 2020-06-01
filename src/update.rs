@@ -194,7 +194,9 @@ pub trait ReleaseUpdate {
             bin_install_path.parent().map(PathBuf::from)
         }
         .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
-        let tmp_dir = tempdir::TempDir::new_in(&tmp_dir_parent, &format!("{}_download", bin_name))?;
+        let tmp_dir = tempfile::Builder::new()
+            .prefix(&format!("{}_download", bin_name))
+            .tempdir_in(tmp_dir_parent)?;
         let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
