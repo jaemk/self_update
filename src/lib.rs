@@ -123,7 +123,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 */
 
-pub use tempdir::TempDir;
+pub use tempfile::TempDir;
 
 #[cfg(feature = "compression-flate2")]
 use either::Either;
@@ -706,7 +706,7 @@ mod tests {
     #[cfg(feature = "archive-tar")]
     use tar;
     #[cfg(feature = "archive-zip")]
-    use tempdir::TempDir;
+    use tempfile::TempDir;
     #[cfg(feature = "archive-zip")]
     use zip;
 
