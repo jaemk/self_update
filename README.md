@@ -10,10 +10,6 @@
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
-```shell
-self_update = "0.15"
-```
-
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
@@ -98,7 +94,9 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let asset = releases[0]
         .asset_for(&self_update::get_target()).unwrap();
 
-    let tmp_dir = self_update::TempDir::new_in(::std::env::current_dir()?, "self_update")?;
+    let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update")
+            .tempdir_in(::std::env::current_dir()?)?;
     let tmp_tarball_path = tmp_dir.path().join(&asset.name);
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 

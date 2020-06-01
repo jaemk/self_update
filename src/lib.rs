@@ -10,10 +10,6 @@
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
-```shell
-self_update = "0.15"
-```
-
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
@@ -99,7 +95,9 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let asset = releases[0]
         .asset_for(&self_update::get_target()).unwrap();
 
-    let tmp_dir = self_update::TempDir::new_in(::std::env::current_dir()?, "self_update")?;
+    let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update")
+            .tempdir_in(::std::env::current_dir()?)?;
     let tmp_tarball_path = tmp_dir.path().join(&asset.name);
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 
@@ -706,7 +704,7 @@ mod tests {
     #[cfg(feature = "archive-tar")]
     use tar;
     #[cfg(feature = "archive-zip")]
-    use tempfile::TempDir;
+    use tempfile;
     #[cfg(feature = "archive-zip")]
     use zip;
 
@@ -788,14 +786,20 @@ mod tests {
     #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_plain_gzip() {
-        let tmp_dir = TempDir::new("self_update_unpack_plain_gzip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_gzip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let fp = tmp_dir.path().with_file_name("temp.gz");
         let mut tmp_file = File::create(&fp).expect("temp file create fail");
         let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
 
-        let out_tmp = TempDir::new("self_update_unpack_plain_gzip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_gzip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
             .extract_into(&out_path)
@@ -814,16 +818,20 @@ mod tests {
     #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_plain_gzip_double_ext() {
-        let tmp_dir =
-            TempDir::new("self_update_unpack_plain_gzip_double_ext_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_gzip_double_ext_src")
+            .tempdir()
+            .expect("tempdir fail");
         let fp = tmp_dir.path().with_file_name("temp.txt.gz");
         let mut tmp_file = File::create(&fp).expect("temp file create fail");
         let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
 
-        let out_tmp =
-            TempDir::new("self_update_unpack_plain_gzip_double_ext_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_gzip_double_ext_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
             .extract_into(&out_path)
@@ -842,7 +850,10 @@ mod tests {
     #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_tar_gzip() {
-        let tmp_dir = TempDir::new("self_update_unpack_tar_gzip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_tar_gzip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let tmp_path = tmp_dir.path();
 
         let archive_src = tmp_path.join("src_archive");
@@ -871,7 +882,10 @@ mod tests {
         e.finish().expect("gz finish fail");
         archive_file.sync_all().expect("sync fail");
 
-        let out_tmp = TempDir::new("self_update_unpack_tar_gzip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_tar_gzip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&archive_fp)
             .extract_into(&out_path)
@@ -895,15 +909,20 @@ mod tests {
     #[cfg(feature = "compression-flate2")]
     #[test]
     fn unpack_file_plain_gzip() {
-        let tmp_dir = TempDir::new("self_update_unpack_file_plain_gzip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_plain_gzip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let fp = tmp_dir.path().with_file_name("temp.gz");
         let mut tmp_file = File::create(&fp).expect("temp file create fail");
         let mut e = GzEncoder::new(&mut tmp_file, flate2::Compression::default());
         e.write_all(b"This is a test!").expect("gz encode fail");
         e.finish().expect("gz finish fail");
 
-        let out_tmp =
-            TempDir::new("self_update_unpack_file_plain_gzip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_plain_gzip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
             .extract_file(&out_path, "renamed_file")
@@ -922,7 +941,10 @@ mod tests {
     #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_file_tar_gzip() {
-        let tmp_dir = TempDir::new("self_update_unpack_file_tar_gzip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_tar_gzip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let tmp_path = tmp_dir.path();
 
         let archive_src = tmp_path.join("src_archive");
@@ -944,8 +966,10 @@ mod tests {
             .expect("failed writing from tar archive to gz encoder");
         e.finish().expect("gz finish fail");
 
-        let out_tmp =
-            TempDir::new("self_update_unpack_file_tar_gzip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_tar_gzip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&archive_fp)
             .extract_file(&out_path, "inner_archive/temp.txt")
@@ -964,7 +988,10 @@ mod tests {
     #[cfg(feature = "archive-zip")]
     #[test]
     fn unpack_zip() {
-        let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_zip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let tmp_path = tmp_dir.path();
 
         let archive_path = tmp_path.join("archive.zip");
@@ -982,7 +1009,10 @@ mod tests {
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
-        let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_zip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&archive_path)
             .extract_into(&out_path)
@@ -1005,7 +1035,10 @@ mod tests {
     #[cfg(feature = "archive-zip")]
     #[test]
     fn unpack_zip_file() {
-        let tmp_dir = TempDir::new("self_update_unpack_zip_src").expect("tempdir fail");
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_zip_src")
+            .tempdir()
+            .expect("tempdir fail");
         let tmp_path = tmp_dir.path();
 
         let archive_path = tmp_path.join("archive.zip");
@@ -1023,7 +1056,10 @@ mod tests {
             .expect("failed writing to second zip");
         zip.finish().expect("failed finishing zip");
 
-        let out_tmp = TempDir::new("self_update_unpack_zip_outdir").expect("tempdir fail");
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_zip_outdir")
+            .tempdir()
+            .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&archive_path)
             .extract_file(&out_path, "zipped2.txt")
