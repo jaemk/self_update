@@ -1,8 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.16.0]
 ### Added
 ### Changed
+- switch from `tempdir` to `tempfile`
 ### Removed
 
 ## [0.15.0]
