@@ -11,7 +11,7 @@ main() {
     fi
 
     # This fetches latest stable release
-    local tag="0.1.16"
+    local tag="v0.1.16"
     # local tag=$(git ls-remote --tags --refs --exit-code https://github.com/japaric/cross \
     #                    | cut -d/ -f3 \
     #                    | grep -E '^v[0.1.0-9.]+$' \
