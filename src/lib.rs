@@ -701,12 +701,6 @@ mod tests {
         io::{self, Read, Write},
         path::{Path, PathBuf},
     };
-    #[cfg(feature = "archive-tar")]
-    use tar;
-    #[cfg(feature = "archive-zip")]
-    use tempfile;
-    #[cfg(feature = "archive-zip")]
-    use zip;
 
     #[test]
     fn detect_plain() {
