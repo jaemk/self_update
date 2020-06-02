@@ -14,7 +14,6 @@ main() {
         return
     fi
 
-    export PKG_CONFIG_ALLOW_CROSS=1
     #cross test --target $TARGET
     cross test --target $TARGET --release --all-features
 
