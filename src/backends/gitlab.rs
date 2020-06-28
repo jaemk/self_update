@@ -42,10 +42,10 @@ impl Release {
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
         let name = release["name"].as_str().unwrap_or(tag);
-        let assets = release["assets"]
+        let assets = release["assets"]["links"]
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
-        let body = release["body"].as_str().map(String::from);
+        let body = release["description"].as_str().map(String::from);
         let assets = assets
             .iter()
             .map(ReleaseAsset::from_asset_gitlab)
