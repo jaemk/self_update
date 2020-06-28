@@ -142,7 +142,7 @@ impl ReleaseList {
     pub fn fetch(self) -> Result<Vec<Release>> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases",
+            "https://gitlab.com/api/v4/projects/{}%2F{}/releases",
             self.repo_owner, self.repo_name
         );
         let releases = self.fetch_releases(&api_url)?;
@@ -214,7 +214,7 @@ impl ReleaseList {
 /// `github::Update` builder
 ///
 /// Configure download and installation from
-/// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
+/// `https://gitlab.com/api/v4/projects/<repo_owner>%2F<repo_name>/releases`
 #[derive(Debug)]
 pub struct UpdateBuilder {
     repo_owner: Option<String>,
@@ -259,7 +259,7 @@ impl UpdateBuilder {
 
     /// Set the target version tag to update to. This will be used to search for a release
     /// by tag name:
-    /// `/repos/:owner/:repo/releases/tags/:tag`
+    /// `/repos/:owner%2F:repo/releases/:tag`
     ///
     /// If not specified, the latest available release is used.
     pub fn target_version_tag(&mut self, ver: &str) -> &mut Self {
@@ -440,7 +440,7 @@ impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
+            "https://gitlab.com/api/v4/projects/{}%2F{}/releases",
             self.repo_owner, self.repo_name
         );
         let resp = reqwest::blocking::Client::new()
@@ -462,7 +462,7 @@ impl ReleaseUpdate for Update {
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            "https://gitlab.com/api/v4/projects/{}%2F{}/releases/{}",
             self.repo_owner, self.repo_name, ver
         );
         let resp = reqwest::blocking::Client::new()
