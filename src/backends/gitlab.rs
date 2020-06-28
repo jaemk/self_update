@@ -1,5 +1,5 @@
 /*!
-GitHub releases
+Gitlab releases
 */
 use std::env;
 use std::path::{Path, PathBuf};
@@ -69,13 +69,13 @@ pub struct ReleaseListBuilder {
     auth_token: Option<String>,
 }
 impl ReleaseListBuilder {
-    /// Set the repo owner, used to build a github api url
+    /// Set the repo owner, used to build a gitlab api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Set the repo name, used to build a gitlab api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
@@ -87,7 +87,7 @@ impl ReleaseListBuilder {
         self
     }
 
-    /// Set the authorization token, used in requests to the github api url
+    /// Set the authorization token, used in requests to the gitlab api url
     ///
     /// This is to support private repos where you need a GitHub auth token.
     /// **Make sure not to bake the token into your app**; it is recommended
@@ -181,7 +181,7 @@ impl ReleaseList {
             .collect::<Result<Vec<Release>>>()?;
 
         // handle paged responses containing `Link` header:
-        // `Link: <https://api.github.com/resource?page=2>; rel="next"`
+        // `Link: <https://gitlab.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
         let links = headers.get_all(reqwest::header::LINK);
 
         let next_link = links
@@ -211,7 +211,7 @@ impl ReleaseList {
     }
 }
 
-/// `github::Update` builder
+/// `gitlab::Update` builder
 ///
 /// Configure download and installation from
 /// `https://gitlab.com/api/v4/projects/<repo_owner>%2F<repo_name>/releases`
@@ -238,13 +238,13 @@ impl UpdateBuilder {
         Default::default()
     }
 
-    /// Set the repo owner, used to build a github api url
+    /// Set the repo owner, used to build a gitlab api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Set the repo name, used to build a gitlab api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
@@ -311,8 +311,8 @@ impl UpdateBuilder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::Update;
-    /// # fn run() -> Result<(), Box<::std::error::Error>> {
+    /// # use self_update::backends::gitlab::Update;
+    /// # fn run() -> Result<(), Box< dyn ::std::error::Error>> {
     /// Update::configure()
     ///     .bin_path_in_archive("bin/myapp")
     /// #   .build()?;
@@ -348,7 +348,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set the authorization token, used in requests to the github api url
+    /// Set the authorization token, used in requests to the gitlab api url
     ///
     /// This is to support private repos where you need a GitHub auth token.
     /// **Make sure not to bake the token into your app**; it is recommended
@@ -552,7 +552,7 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
         header::USER_AGENT,
         "rust-reqwest/self-update"
             .parse()
-            .expect("github invalid user-agent"),
+            .expect("gitlab invalid user-agent"),
     );
 
     if let Some(token) = auth_token {
