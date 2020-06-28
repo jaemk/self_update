@@ -1,5 +1,11 @@
 # Changelog
 
+## [unreleased]
+### Added
+- Support for Gitlab
+### Changed
+### Removed
+
 ## [0.16.0]
 ### Added
 ### Changed
