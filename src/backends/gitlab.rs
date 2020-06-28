@@ -456,7 +456,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release_gitlab(&json)?)
+        Ok(Release::from_release_gitlab(&json[0])?)
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
