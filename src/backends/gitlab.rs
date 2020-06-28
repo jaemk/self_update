@@ -19,7 +19,7 @@ impl ReleaseAsset {
     ///
     /// Errors:
     ///     * Missing required name & download-url keys
-    fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
+    fn from_asset_gitlab(asset: &serde_json::Value) -> Result<ReleaseAsset> {
         let download_url = asset["url"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Asset missing `url`"))?;
@@ -34,7 +34,7 @@ impl ReleaseAsset {
 }
 
 impl Release {
-    fn from_release(release: &serde_json::Value) -> Result<Release> {
+    fn from_release_gitlab(release: &serde_json::Value) -> Result<Release> {
         let tag = release["tag_name"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
@@ -48,7 +48,7 @@ impl Release {
         let body = release["body"].as_str().map(String::from);
         let assets = assets
             .iter()
-            .map(ReleaseAsset::from_asset)
+            .map(ReleaseAsset::from_asset_gitlab)
             .collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
             name: name.to_owned(),
@@ -177,7 +177,7 @@ impl ReleaseList {
             .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
         let mut releases = releases
             .iter()
-            .map(Release::from_release)
+            .map(Release::from_release_gitlab)
             .collect::<Result<Vec<Release>>>()?;
 
         // handle paged responses containing `Link` header:
@@ -456,7 +456,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release(&json)?)
+        Ok(Release::from_release_gitlab(&json)?)
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -478,7 +478,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release(&json)?)
+        Ok(Release::from_release_gitlab(&json)?)
     }
 
     fn current_version(&self) -> String {
