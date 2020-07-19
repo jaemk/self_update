@@ -1,5 +1,5 @@
 /*!
-Example updating an executable to the latest version released via GitHub
+Example updating an executable to the latest version released via Gitlab
 */
 
 // For the `cargo_crate_version!` macro
@@ -7,7 +7,7 @@ Example updating an executable to the latest version released via GitHub
 extern crate self_update;
 
 fn run() -> Result<(), Box<dyn ::std::error::Error>> {
-    let releases = self_update::backends::github::ReleaseList::configure()
+    let releases = self_update::backends::gitlab::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .build()?
@@ -15,7 +15,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    let status = self_update::backends::github::Update::configure()
+    let status = self_update::backends::gitlab::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .bin_name("github")
@@ -24,7 +24,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         //.show_output(false)
         //.no_confirm(true)
         //
-        // For private repos, you will need to provide a GitHub auth token
+        // For private repos, you will need to provide an auth token
         // **Make sure not to bake the token into your app**; it is recommended
         // you obtain it via another mechanism, such as environment variables
         // or prompting the user for input

@@ -51,7 +51,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 }
 ```
 
-Run the above example to see `self_update` in action: `cargo run --example github --features "archive-tar compression-flate2"`
+Run the above example to see `self_update` in action: `cargo run --example github --features "archive-tar compression-flate2"`.
+There's also an equivalent example for gitlab: `cargo run --example gitlab --features "archive-tar compression-flate2"`.
 
 Amazon S3 is also supported as the backend to check for new releases. Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format
