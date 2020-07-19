@@ -2,8 +2,17 @@
 
 ## [unreleased]
 ### Added
-- Support for Gitlab
 ### Changed
+### Removed
+
+## [0.17.0]
+### Added
+- Support for Gitlab
+- Gitlab example
+### Changed
+- `UpdateBuilder.bin_name` will add the platform-specific exe suffix (defined
+  by `std::env::consts::EXE_SUFFIX`) to the end of binary names if it's missing.
+  This was a fix for windows.
 ### Removed
 
 ## [0.16.0]
