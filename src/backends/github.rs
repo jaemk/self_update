@@ -67,6 +67,7 @@ pub struct ReleaseListBuilder {
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
+    custom_url: Option<String>,
 }
 impl ReleaseListBuilder {
     /// Set the repo owner, used to build a github api url
@@ -84,6 +85,14 @@ impl ReleaseListBuilder {
     /// Set the optional arch `target` name, used to filter available releases
     pub fn with_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
+        self
+    }
+
+    /// Set the optional github url, e.g. for a github enterprise installation.
+    /// The url should provide the path to your API endpoint and end without a trailing slash,
+    /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
+    pub fn with_url(&mut self, url: &str) -> &mut Self {
+        self.custom_url = Some(url.to_owned());
         self
     }
 
@@ -113,6 +122,7 @@ impl ReleaseListBuilder {
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
+            custom_url: self.custom_url.clone(),
         })
     }
 }
@@ -125,6 +135,7 @@ pub struct ReleaseList {
     repo_name: String,
     target: Option<String>,
     auth_token: Option<String>,
+    custom_url: Option<String>,
 }
 impl ReleaseList {
     /// Initialize a ReleaseListBuilder
@@ -134,6 +145,7 @@ impl ReleaseList {
             repo_name: None,
             target: None,
             auth_token: None,
+            custom_url: None,
         }
     }
 
@@ -142,8 +154,12 @@ impl ReleaseList {
     pub fn fetch(self) -> Result<Vec<Release>> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases",
-            self.repo_owner, self.repo_name
+            "{}/repos/{}/{}/releases",
+            self.custom_url
+                .as_ref()
+                .unwrap_or(&"https://api.github.com".to_string()),
+            self.repo_owner,
+            self.repo_name
         );
         let releases = self.fetch_releases(&api_url)?;
         let releases = match self.target {
@@ -230,6 +246,7 @@ pub struct UpdateBuilder {
     target_version: Option<String>,
     progress_style: Option<ProgressStyle>,
     auth_token: Option<String>,
+    custom_url: Option<String>,
 }
 
 impl UpdateBuilder {
@@ -412,6 +429,7 @@ impl UpdateBuilder {
             show_output: self.show_output,
             no_confirm: self.no_confirm,
             auth_token: self.auth_token.clone(),
+            custom_url: self.custom_url.clone(),
         }))
     }
 }
@@ -432,6 +450,7 @@ pub struct Update {
     no_confirm: bool,
     progress_style: Option<ProgressStyle>,
     auth_token: Option<String>,
+    custom_url: Option<String>,
 }
 impl Update {
     /// Initialize a new `Update` builder
@@ -444,8 +463,12 @@ impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            self.repo_owner, self.repo_name
+            "{}/repos/{}/{}/releases/latest",
+            self.custom_url
+                .as_ref()
+                .unwrap_or(&"https://api.github.com".to_string()),
+            self.repo_owner,
+            self.repo_name
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -466,8 +489,13 @@ impl ReleaseUpdate for Update {
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/tags/{}",
-            self.repo_owner, self.repo_name, ver
+            "{}/repos/{}/{}/releases/tags/{}",
+            self.custom_url
+                .as_ref()
+                .unwrap_or(&"https://api.github.com".to_string()),
+            self.repo_owner,
+            self.repo_name,
+            ver
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -546,6 +574,7 @@ impl Default for UpdateBuilder {
             target_version: None,
             progress_style: None,
             auth_token: None,
+            custom_url: None,
         }
     }
 }
