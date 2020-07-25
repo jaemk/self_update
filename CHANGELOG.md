@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.18.0]
+### Added
+- Allow specifying a custom github api url
+### Changed
+### Removed
+
 ## [0.17.0]
 ### Added
 - Support for Gitlab
