@@ -103,6 +103,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
+        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -607,9 +608,19 @@ impl Download {
         self
     }
 
-    /// Set the download request headers
+    /// Set the download request headers, replaces the existing `HeaderMap`
     pub fn set_headers(&mut self, headers: reqwest::header::HeaderMap) -> &mut Self {
         self.headers = headers;
+        self
+    }
+
+    /// Set a download request header, inserts into the existing `HeaderMap`
+    pub fn set_header(
+        &mut self,
+        name: reqwest::header::HeaderName,
+        value: reqwest::header::HeaderValue,
+    ) -> &mut Self {
+        self.headers.insert(name, value);
         self
     }
 

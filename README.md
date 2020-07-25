@@ -102,6 +102,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
+        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");

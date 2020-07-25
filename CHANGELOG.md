@@ -5,6 +5,18 @@
 ### Changed
 ### Removed
 
+## [0.19.0]
+### Added
+- Add `Download::set_header` for inserting into the download request's headers.
+### Changed
+- Update readme example to add `Accept: application/octet-stream` header. Release parsing
+  was updated in 0.7.0 to use the github-api download url instead of the browser
+  url so auth headers can be passed. When using the github-api download url, you
+  need to pass `Accept: application/octet-stream` in order to get back a 302
+  redirecting you to the "raw" download url. This was already being handled in
+  `ReleaseUpdate::update_extended`, but wasn't added to the readme example.
+### Removed
+
 ## [0.18.0]
 ### Added
 - Allow specifying a custom github api url
