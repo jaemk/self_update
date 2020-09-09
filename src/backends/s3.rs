@@ -18,9 +18,25 @@ use std::path::{Path, PathBuf};
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
 
+/// The service end point.
+///
+/// Currently S3 and DigitalOcean Spaces supported.
+#[derive(Clone, Copy, Debug)]
+pub enum EndPoint {
+    S3,
+    DigitalOceanSpaces,
+}
+
+impl Default for EndPoint {
+    fn default() -> Self {
+        EndPoint::S3
+    }
+}
+
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
 pub struct ReleaseListBuilder {
+    end_point: EndPoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
     target: Option<String>,
@@ -46,6 +62,12 @@ impl ReleaseListBuilder {
         self
     }
 
+    /// Set the end point
+    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
+        self.end_point = end_point;
+        self
+    }
+
     /// Set the optional arch `target` name, used to filter available releases
     pub fn with_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
@@ -55,6 +77,7 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
+            end_point: self.end_point,
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -75,6 +98,7 @@ impl ReleaseListBuilder {
 /// returning a `Vec` of available `Release`s
 #[derive(Clone, Debug)]
 pub struct ReleaseList {
+    end_point: EndPoint,
     bucket_name: String,
     asset_prefix: Option<String>,
     target: Option<String>,
@@ -85,6 +109,7 @@ impl ReleaseList {
     /// Initialize a ReleaseListBuilder
     pub fn configure() -> ReleaseListBuilder {
         ReleaseListBuilder {
+            end_point: EndPoint::default(),
             bucket_name: None,
             asset_prefix: None,
             target: None,
@@ -95,7 +120,12 @@ impl ReleaseList {
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(&self) -> Result<Vec<Release>> {
-        let releases = fetch_releases_from_s3(&self.bucket_name, &self.region, &self.asset_prefix)?;
+        let releases = fetch_releases_from_s3(
+            self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+        )?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -113,6 +143,7 @@ impl ReleaseList {
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
 #[derive(Debug)]
 pub struct UpdateBuilder {
+    end_point: EndPoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
     target: Option<String>,
@@ -132,6 +163,7 @@ pub struct UpdateBuilder {
 impl Default for UpdateBuilder {
     fn default() -> Self {
         Self {
+            end_point: EndPoint::default(),
             bucket_name: None,
             asset_prefix: None,
             target: None,
@@ -155,6 +187,12 @@ impl UpdateBuilder {
     /// Initialize a new builder
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Set the end point
+    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
+        self.end_point = end_point;
+        self
     }
 
     /// Set the repo name, used to build a github api url
@@ -290,6 +328,7 @@ impl UpdateBuilder {
         };
 
         Ok(Box::new(Update {
+            end_point: self.end_point,
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -335,6 +374,7 @@ impl UpdateBuilder {
 /// Updates to a specified or latest release distributed via GitHub
 #[derive(Debug)]
 pub struct Update {
+    end_point: EndPoint,
     bucket_name: String,
     asset_prefix: Option<String>,
     target: String,
@@ -360,7 +400,12 @@ impl Update {
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        let releases = fetch_releases_from_s3(&self.bucket_name, &self.region, &self.asset_prefix)?;
+        let releases = fetch_releases_from_s3(
+            self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+        )?;
         let rel = releases
             .iter()
             .max_by(|x, y| match bump_is_greater(&y.version, &x.version) {
@@ -384,7 +429,12 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let releases = fetch_releases_from_s3(&self.bucket_name, &self.region, &self.asset_prefix)?;
+        let releases = fetch_releases_from_s3(
+            self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+        )?;
         let rel = releases.iter().find(|x| x.version == ver);
         match rel {
             Some(r) => Ok(r.clone()),
@@ -446,6 +496,7 @@ impl ReleaseUpdate for Update {
 ///
 /// This will strip the prefix from provided file names, allowing use with subdirectories
 fn fetch_releases_from_s3(
+    end_point: EndPoint,
     bucket_name: &str,
     region: &str,
     asset_prefix: &Option<String>,
@@ -454,14 +505,25 @@ fn fetch_releases_from_s3(
         Some(prefix) => format!("&prefix={}", prefix),
         None => "".to_string(),
     };
-    let api_url = format!(
-        "https://{}.s3.amazonaws.com/?list-type=2&max-keys={}{}",
-        bucket_name, MAX_KEYS, prefix
-    );
+    let api_url = match end_point {
+        EndPoint::S3 => format!(
+            "https://{}.s3.amazonaws.com/?list-type=2&max-keys={}{}",
+            bucket_name, MAX_KEYS, prefix
+        ),
+        EndPoint::DigitalOceanSpaces => format!(
+            "https://{}.{}.digitaloceanspaces.com/?list-type=2&max-keys={}{}",
+            bucket_name, region, MAX_KEYS, prefix
+        ),
+    };
 
     debug!("using api url: {:?}", api_url);
 
-    let download_base_url = format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region);
+    let download_base_url = match end_point {
+        EndPoint::S3 => format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region),
+        EndPoint::DigitalOceanSpaces => {
+            format!("https://{}.{}.digitaloceanspaces.com/", bucket_name, region,)
+        }
+    };
 
     let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
     if !resp.status().is_success() {
