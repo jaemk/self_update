@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.20.0]
+### Added
+- Add DigitalOcean Spaces support to S3 backend
+### Changed
+### Removed
+
 ## [0.19.0]
 ### Added
 - Add `Download::set_header` for inserting into the download request's headers.
