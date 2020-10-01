@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Fixed docs refering to github in s3 backend
 ### Removed
 
 ## [0.20.0]
