@@ -137,7 +137,7 @@ impl ReleaseList {
     }
 }
 
-/// `github::Update` builder
+/// `s3::Update` builder
 ///
 /// Configure download and installation from
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
@@ -182,7 +182,7 @@ impl Default for UpdateBuilder {
     }
 }
 
-/// Configure download and installation from repo
+/// Configure download and installation from bucket
 impl UpdateBuilder {
     /// Initialize a new builder
     pub fn new() -> Self {
@@ -195,7 +195,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Set the bucket name, used to build a s3 api url
     pub fn bucket_name(&mut self, name: &str) -> &mut Self {
         self.bucket_name = Some(name.to_owned());
         self
@@ -274,7 +274,7 @@ impl UpdateBuilder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::Update;
+    /// # use self_update::backends::s3::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
     /// Update::configure()
     ///     .bin_path_in_archive("bin/myapp")
@@ -371,7 +371,7 @@ impl UpdateBuilder {
     }
 }
 
-/// Updates to a specified or latest release distributed via GitHub
+/// Updates to a specified or latest release distributed via S3
 #[derive(Debug)]
 pub struct Update {
     end_point: EndPoint,
