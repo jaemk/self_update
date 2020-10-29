@@ -202,18 +202,12 @@ impl Status {
 
     /// Returns `true` if `Status::UpToDate`
     pub fn uptodate(&self) -> bool {
-        match *self {
-            Status::UpToDate(_) => true,
-            _ => false,
-        }
+        matches!(*self, Status::UpToDate(_))
     }
 
     /// Returns `true` if `Status::Updated`
     pub fn updated(&self) -> bool {
-        match *self {
-            Status::Updated(_) => true,
-            _ => false,
-        }
+        matches!(*self, Status::Updated(_))
     }
 }
 
