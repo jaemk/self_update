@@ -2,6 +2,7 @@
 
 ## [unreleased]
 ### Added
+- Add GCS support to S3 backend
 ### Changed
 ### Removed
 

@@ -20,10 +20,11 @@ const MAX_KEYS: u8 = 100;
 
 /// The service end point.
 ///
-/// Currently S3 and DigitalOcean Spaces supported.
+/// Currently S3, GCS, and DigitalOcean Spaces supported.
 #[derive(Clone, Copy, Debug)]
 pub enum EndPoint {
     S3,
+    GCS,
     DigitalOceanSpaces,
 }
 
@@ -83,11 +84,7 @@ impl ReleaseListBuilder {
             } else {
                 bail!(Error::Config, "`bucket_name` required")
             },
-            region: if let Some(ref region) = self.region {
-                region.to_owned()
-            } else {
-                bail!(Error::Config, "`region` required")
-            },
+            region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self.target.clone(),
         })
@@ -102,7 +99,7 @@ pub struct ReleaseList {
     bucket_name: String,
     asset_prefix: Option<String>,
     target: Option<String>,
-    region: String,
+    region: Option<String>,
 }
 
 impl ReleaseList {
@@ -137,7 +134,7 @@ impl ReleaseList {
     }
 }
 
-/// `github::Update` builder
+/// `s3::Update` builder
 ///
 /// Configure download and installation from
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
@@ -195,7 +192,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Set the repo name, used to build a s3 api url
     pub fn bucket_name(&mut self, name: &str) -> &mut Self {
         self.bucket_name = Some(name.to_owned());
         self
@@ -274,7 +271,7 @@ impl UpdateBuilder {
     /// The path provided should be:
     ///
     /// ```
-    /// # use self_update::backends::github::Update;
+    /// # use self_update::backends::s3::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
     /// Update::configure()
     ///     .bin_path_in_archive("bin/myapp")
@@ -334,11 +331,7 @@ impl UpdateBuilder {
             } else {
                 bail!(Error::Config, "`bucket_name` required")
             },
-            region: if let Some(ref region) = self.region {
-                region.to_owned()
-            } else {
-                bail!(Error::Config, "`region` required")
-            },
+            region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self
                 .target
@@ -378,7 +371,7 @@ pub struct Update {
     bucket_name: String,
     asset_prefix: Option<String>,
     target: String,
-    region: String,
+    region: Option<String>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -498,32 +491,43 @@ impl ReleaseUpdate for Update {
 fn fetch_releases_from_s3(
     end_point: EndPoint,
     bucket_name: &str,
-    region: &str,
+    region: &Option<String>,
     asset_prefix: &Option<String>,
 ) -> Result<Vec<Release>> {
     let prefix = match asset_prefix {
         Some(prefix) => format!("&prefix={}", prefix),
         None => "".to_string(),
     };
+
+    let download_base_url = match end_point {
+        EndPoint::S3 => {
+            let region = if let Some(region) = region {
+                region
+            } else {
+                bail!(Error::Config, "`region` required")
+            };
+            format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region)
+        }
+        EndPoint::DigitalOceanSpaces => {
+            let region = if let Some(region) = region {
+                region
+            } else {
+                bail!(Error::Config, "`region` required")
+            };
+            format!("https://{}.{}.digitaloceanspaces.com/", bucket_name, region)
+        }
+        EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
+    };
+
     let api_url = match end_point {
-        EndPoint::S3 => format!(
-            "https://{}.s3.amazonaws.com/?list-type=2&max-keys={}{}",
-            bucket_name, MAX_KEYS, prefix
+        EndPoint::S3 | EndPoint::DigitalOceanSpaces => format!(
+            "{}?list-type=2&max-keys={}{}",
+            download_base_url, MAX_KEYS, prefix
         ),
-        EndPoint::DigitalOceanSpaces => format!(
-            "https://{}.{}.digitaloceanspaces.com/?list-type=2&max-keys={}{}",
-            bucket_name, region, MAX_KEYS, prefix
-        ),
+        EndPoint::GCS => format!("{}?max-keys={}{}", download_base_url, MAX_KEYS, prefix),
     };
 
     debug!("using api url: {:?}", api_url);
-
-    let download_base_url = match end_point {
-        EndPoint::S3 => format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region),
-        EndPoint::DigitalOceanSpaces => {
-            format!("https://{}.{}.digitaloceanspaces.com/", bucket_name, region,)
-        }
-    };
 
     let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
     if !resp.status().is_success() {
