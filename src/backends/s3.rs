@@ -179,7 +179,7 @@ impl Default for UpdateBuilder {
     }
 }
 
-/// Configure download and installation from repo
+/// Configure download and installation from bucket
 impl UpdateBuilder {
     /// Initialize a new builder
     pub fn new() -> Self {
@@ -191,8 +191,8 @@ impl UpdateBuilder {
         self.end_point = end_point;
         self
     }
-
-    /// Set the repo name, used to build a s3 api url
+ 
+    /// Set the bucket name, used to build a s3 api url
     pub fn bucket_name(&mut self, name: &str) -> &mut Self {
         self.bucket_name = Some(name.to_owned());
         self
@@ -364,7 +364,7 @@ impl UpdateBuilder {
     }
 }
 
-/// Updates to a specified or latest release distributed via GitHub
+/// Updates to a specified or latest release distributed via S3
 #[derive(Debug)]
 pub struct Update {
     end_point: EndPoint,
