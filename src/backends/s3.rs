@@ -191,7 +191,7 @@ impl UpdateBuilder {
         self.end_point = end_point;
         self
     }
-
+ 
     /// Set the bucket name, used to build a s3 api url
     pub fn bucket_name(&mut self, name: &str) -> &mut Self {
         self.bucket_name = Some(name.to_owned());
