@@ -34,10 +34,7 @@ impl UpdateStatus {
 
     /// Returns `true` if `Status::UpToDate`
     pub fn uptodate(&self) -> bool {
-        match *self {
-            UpdateStatus::UpToDate => true,
-            _ => false,
-        }
+        matches!(*self, UpdateStatus::UpToDate)
     }
 
     /// Returns `true` if `Status::Updated`

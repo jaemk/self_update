@@ -54,7 +54,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 Run the above example to see `self_update` in action: `cargo run --example github --features "archive-tar compression-flate2"`.
 There's also an equivalent example for gitlab: `cargo run --example gitlab --features "archive-tar compression-flate2"`.
 
-Amazon S3 and DigitalOcean Spaces are also supported through the `S3` backend to check for new releases. Provided a `bucket_name`
+Amazon S3, Google GCS, and DigitalOcean Spaces are also supported through the `S3` backend to check for new releases. Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format
 as a convention for the filenames: `[directory/]<asset name>-<semver>-<platform/target>.<extension>`.
 Leading directories will be stripped from the file name allowing the use of subdirectories in the S3 bucket,
@@ -202,18 +202,12 @@ impl Status {
 
     /// Returns `true` if `Status::UpToDate`
     pub fn uptodate(&self) -> bool {
-        match *self {
-            Status::UpToDate(_) => true,
-            _ => false,
-        }
+        matches!(*self, Status::UpToDate(_))
     }
 
     /// Returns `true` if `Status::Updated`
     pub fn updated(&self) -> bool {
-        match *self {
-            Status::Updated(_) => true,
-            _ => false,
-        }
+        matches!(*self, Status::Updated(_))
     }
 }
 
