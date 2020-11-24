@@ -2,6 +2,11 @@
 
 ## [unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.21.0]
+### Added
 - Add GCS support to S3 backend
 ### Changed
 - Fixed docs refering to github in s3 backend
