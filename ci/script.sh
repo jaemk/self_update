@@ -7,7 +7,9 @@ main() {
     #cross build --target $TARGET
     #cross build --target $TARGET --release
 
+    cargo fmt --version
     cargo fmt --all -- --check
+    cargo clippy --version
     cargo clippy --all-targets --all-features --examples --tests
 
     if [ ! -z $DISABLE_TESTS ]; then
