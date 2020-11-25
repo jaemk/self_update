@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.22.0]
+### Added
+### Changed
+- bump dependencies
+- print out tooling versions in CI
+### Removed
+
 ## [0.21.0]
 ### Added
 - Add GCS support to S3 backend
