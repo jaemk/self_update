@@ -5,6 +5,14 @@
 ### Changed
 ### Removed
 
+## [0.23.0]
+### Added
+### Changed
+- update `reqwest` to `0.11`
+- remove `hyper-old-types` dependency, replace the rel-link-header parsing
+  with a manual parsing function: `find_rel_next_link`
+### Removed
+
 ## [0.22.0]
 ### Added
 ### Changed
