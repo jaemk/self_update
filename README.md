@@ -29,10 +29,19 @@ available (but _disabled_ by default):
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
 * `rustls`: Use [pure rust TLS implementation](https://github.com/ctz/rustls) for network requests. This feature does _not_ support 32bit macOS;
 
-Please active the feature(s) needed by your release files.
+Please activate the feature(s) needed by your release files.
 
 ### Example
 
+Run the following example to see `self_update` in action:
+
+`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+
+There's also an equivalent example for gitlab:
+
+`cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+
+which runs something roughly equivalent to:
 
 ```rust
 use self_update::cargo_crate_version;
@@ -41,7 +50,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .bin_name("self_update_example")
+        .bin_name("github")
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
         .build()?
@@ -50,9 +59,6 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     Ok(())
 }
 ```
-
-Run the above example to see `self_update` in action: `cargo run --example github --features "archive-tar compression-flate2"`.
-There's also an equivalent example for gitlab: `cargo run --example gitlab --features "archive-tar compression-flate2"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces are also supported through the `S3` backend to check for new releases. Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format

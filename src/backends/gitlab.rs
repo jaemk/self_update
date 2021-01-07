@@ -4,10 +4,10 @@ Gitlab releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use hyper_old_types::header::{LinkValue, RelationType};
 use indicatif::ProgressStyle;
 use reqwest::{self, header};
 
+use crate::backends::find_rel_next_link;
 use crate::{
     errors::*,
     get_target,
@@ -188,13 +188,7 @@ impl ReleaseList {
             .iter()
             .filter_map(|link| {
                 if let Ok(link) = link.to_str() {
-                    let lv = LinkValue::new(link.to_owned());
-                    if let Some(rels) = lv.rel() {
-                        if rels.contains(&RelationType::Next) {
-                            return Some(link);
-                        }
-                    }
-                    None
+                    find_rel_next_link(link)
                 } else {
                     None
                 }

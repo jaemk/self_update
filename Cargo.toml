@@ -17,9 +17,10 @@ tempfile = "3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "0.11"
-hyper-old-types = "0.11"
 zip = { version = "0.5", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
+hyper = "0.14"
 indicatif = "0.15"
 quick-xml = "0.20"
 regex = "1"
@@ -37,8 +38,3 @@ rustls = ["reqwest/rustls-tls"]
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)
 all-features = true
-
-[dependencies.reqwest]
-version = "0.11"
-default-features = false
-features = ["blocking", "json"]
