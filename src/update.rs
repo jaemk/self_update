@@ -185,12 +185,10 @@ pub trait ReleaseUpdate {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir_parent = if cfg!(windows) {
-            env::var_os("TEMP").map(PathBuf::from)
-        } else {
-            bin_install_path.parent().map(PathBuf::from)
-        }
-        .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
+        let tmp_dir_parent = bin_install_path
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
         let tmp_dir = tempfile::Builder::new()
             .prefix(&format!("{}_download", bin_name))
             .tempdir_in(tmp_dir_parent)?;
