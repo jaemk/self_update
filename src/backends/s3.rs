@@ -12,7 +12,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
 use std::cmp::Ordering;
-use std::env;
+use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
 /// Maximum number of items to retrieve from S3 API
@@ -237,9 +237,10 @@ impl UpdateBuilder {
 
     /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
     pub fn bin_name(&mut self, name: &str) -> &mut Self {
-        self.bin_name = Some(name.to_owned());
+        let raw_bin_name = format!("{}{}", name.trim_end_matches(EXE_SUFFIX), EXE_SUFFIX);
+        self.bin_name = Some(raw_bin_name.clone());
         if self.bin_path_in_archive.is_none() {
-            self.bin_path_in_archive = Some(PathBuf::from(name));
+            self.bin_path_in_archive = Some(PathBuf::from(raw_bin_name));
         }
         self
     }
