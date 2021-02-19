@@ -3,6 +3,11 @@
 ## [unreleased]
 ### Added
 ### Changed
+### Removed
+
+## [0.24.0]
+### Added
+### Changed
 - `UpdateBuilder.bin_name` will add the platform-specific exe suffix on the S3 backend.
 ### Removed
 
