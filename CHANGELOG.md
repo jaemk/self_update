@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Fix issues updating Windows binaries on non-`C:` drives.
 ### Removed
 
 ## [0.24.0]
