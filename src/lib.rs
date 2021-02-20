@@ -415,9 +415,19 @@ impl<'a> Extract<'a> {
                 let mut archive = zip::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
-                    let path = into_dir.join(file.name());
-                    let mut output = fs::File::create(path)?;
-                    io::copy(&mut file, &mut output)?;
+                    let outpath = into_dir.join(file.sanitized_name());
+
+                    if (&*file.name()).ends_with('/') {
+                        fs::create_dir_all(&outpath)?;
+                    } else {
+                        if let Some(p) = outpath.parent() {
+                            if !p.exists() {
+                                fs::create_dir_all(&p)?;
+                            }
+                        }
+                        let mut outfile = fs::File::create(&outpath)?;
+                        io::copy(&mut file, &mut outfile)?;
+                    }
                 }
             }
         };
