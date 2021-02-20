@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Fix io error triggered when updating binary contained in a zipped folder.
 ### Removed
 
 ## [0.24.0]
