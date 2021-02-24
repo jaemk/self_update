@@ -415,8 +415,17 @@ impl<'a> Extract<'a> {
                 let mut archive = zip::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
-                    let path = into_dir.join(file.name());
-                    let mut output = fs::File::create(path)?;
+
+                    let output_path = into_dir.join(file.name());
+                    if let Some(parent_dir) = output_path.parent() {
+                        if let Err(e) = fs::create_dir_all(parent_dir) {
+                            if e.kind() != io::ErrorKind::AlreadyExists {
+                                return Err(Error::Io(e));
+                            }
+                        }
+                    }
+
+                    let mut output = fs::File::create(output_path)?;
                     io::copy(&mut file, &mut output)?;
                 }
             }
@@ -510,7 +519,17 @@ impl<'a> Extract<'a> {
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
                 let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
-                let mut output = fs::File::create(into_dir.join(file.name()))?;
+
+                let output_path = into_dir.join(file.name());
+                if let Some(parent_dir) = output_path.parent() {
+                    if let Err(e) = fs::create_dir_all(parent_dir) {
+                        if e.kind() != io::ErrorKind::AlreadyExists {
+                            return Err(Error::Io(e));
+                        }
+                    }
+                }
+
+                let mut output = fs::File::create(output_path)?;
                 io::copy(&mut file, &mut output)?;
             }
         };
@@ -859,54 +878,11 @@ mod tests {
     #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_tar_gzip() {
-        let tmp_dir = tempfile::Builder::new()
-            .prefix("self_update_unpack_tar_gzip_src")
-            .tempdir()
-            .expect("tempdir fail");
-        let tmp_path = tmp_dir.path();
-
-        let archive_src = tmp_path.join("src_archive");
-        fs::create_dir_all(&archive_src).expect("tmp archive-dir create fail");
-
-        let fp = archive_src.join("temp.txt");
-        let mut tmp_file = File::create(&fp).expect("temp file create fail");
-        tmp_file.write_all(b"This is a test!").unwrap();
-        tmp_file.sync_all().expect("sync fail");
-
-        let fp2 = archive_src.join("temp2.txt");
-        let mut tmp_file = File::create(&fp2).expect("temp file 2 create fail");
-        tmp_file.write_all(b"This is a second test!").unwrap();
-        tmp_file.sync_all().expect("sync fail");
-
-        let mut ar = tar::Builder::new(vec![]);
-        ar.append_dir_all("inner_archive", &archive_src)
-            .expect("tar append dir all fail");
-        let tar_writer = ar.into_inner().expect("failed getting tar writer");
-
-        let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
-        let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
-        let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
-        io::copy(&mut tar_writer.as_slice(), &mut e)
-            .expect("failed writing from tar archive to gz encoder");
-        e.finish().expect("gz finish fail");
-        archive_file.sync_all().expect("sync fail");
-
-        let out_tmp = tempfile::Builder::new()
-            .prefix("self_update_unpack_tar_gzip_outdir")
-            .tempdir()
-            .expect("tempdir fail");
-        let out_path = out_tmp.path();
-        Extract::from_source(&archive_fp)
-            .extract_into(&out_path)
-            .expect("extract fail");
-
-        let out_file = out_path.join("inner_archive/temp.txt");
-        assert!(out_file.exists());
-        cmp_content(&out_file, "This is a test!");
-
-        let out_file = out_path.join("inner_archive/temp2.txt");
-        assert!(out_file.exists());
-        cmp_content(&out_file, "This is a second test!");
+        test_extract_into(
+            "self_update_unpack_tar_gzip_src",
+            "archive.tar.gz",
+            ArchiveKind::Tar(Some(Compression::Gz)),
+        );
     }
 
     #[cfg(not(feature = "compression-flate2"))]
@@ -950,42 +926,11 @@ mod tests {
     #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
     #[test]
     fn unpack_file_tar_gzip() {
-        let tmp_dir = tempfile::Builder::new()
-            .prefix("self_update_unpack_file_tar_gzip_src")
-            .tempdir()
-            .expect("tempdir fail");
-        let tmp_path = tmp_dir.path();
-
-        let archive_src = tmp_path.join("src_archive");
-        fs::create_dir_all(&archive_src).expect("tmp archive-dir create fail");
-
-        let fp = archive_src.join("temp.txt");
-        let mut tmp_file = File::create(&fp).expect("temp file create fail");
-        tmp_file.write_all(b"This is a test!").unwrap();
-
-        let mut ar = tar::Builder::new(vec![]);
-        ar.append_dir_all("inner_archive", &archive_src)
-            .expect("tar append dir all fail");
-        let tar_writer = ar.into_inner().expect("failed getting tar writer");
-
-        let archive_fp = tmp_path.with_file_name("archive_file.tar.gz");
-        let mut archive_file = File::create(&archive_fp).expect("failed creating archive file");
-        let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
-        io::copy(&mut tar_writer.as_slice(), &mut e)
-            .expect("failed writing from tar archive to gz encoder");
-        e.finish().expect("gz finish fail");
-
-        let out_tmp = tempfile::Builder::new()
-            .prefix("self_update_unpack_file_tar_gzip_outdir")
-            .tempdir()
-            .expect("tempdir fail");
-        let out_path = out_tmp.path();
-        Extract::from_source(&archive_fp)
-            .extract_file(&out_path, "inner_archive/temp.txt")
-            .expect("extract fail");
-        let out_file = out_path.join("inner_archive/temp.txt");
-        assert!(out_file.exists());
-        cmp_content(&out_file, "This is a test!");
+        test_extract_file(
+            "self_update_unpack_file_tar_gzip_src",
+            "archive.tar.gz",
+            ArchiveKind::Tar(Some(Compression::Gz)),
+        );
     }
 
     #[cfg(not(feature = "archive-zip"))]
@@ -997,84 +942,148 @@ mod tests {
     #[cfg(feature = "archive-zip")]
     #[test]
     fn unpack_zip() {
-        let tmp_dir = tempfile::Builder::new()
-            .prefix("self_update_unpack_zip_src")
-            .tempdir()
-            .expect("tempdir fail");
-        let tmp_path = tmp_dir.path();
+        test_extract_into(
+            "self_update_unpack_zip_src",
+            "archive.zip",
+            ArchiveKind::Zip,
+        );
+    }
 
-        let archive_path = tmp_path.join("archive.zip");
-        let archive_file = File::create(&archive_path).expect("create file fail");
-        let mut zip = zip::ZipWriter::new(archive_file);
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("zipped.txt", options)
-            .expect("failed starting zip file");
-        zip.write_all(b"This is a test!")
-            .expect("failed writing to zip");
-        zip.start_file("zipped2.txt", options)
-            .expect("failed starting second zip file");
-        zip.write_all(b"This is a second test!")
-            .expect("failed writing to second zip");
-        zip.finish().expect("failed finishing zip");
+    #[cfg(not(feature = "archive-zip"))]
+    #[test]
+    #[ignore]
+    fn unpack_zip_file() {
+        println!("WARNING: Please enable 'archive-zip' feature!");
+    }
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn unpack_zip_file() {
+        test_extract_file(
+            "self_update_unpack_zip_src",
+            "archive.zip",
+            ArchiveKind::Zip,
+        );
+    }
+
+    fn test_extract_into(tmpfile_prefix: &str, src_archive_path: &str, archive_kind: ArchiveKind) {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix(tmpfile_prefix)
+            .tempdir()
+            .expect("Failed to create temp dir");
+
+        let tmp_path = tmp_dir.path();
+        let archive_file_path = tmp_path.join(src_archive_path);
+        let archive_file = File::create(&archive_file_path).expect("Failed to create archive file");
+
+        build_test_archive(archive_file, &archive_file_path, archive_kind);
 
         let out_tmp = tempfile::Builder::new()
-            .prefix("self_update_unpack_zip_outdir")
+            .prefix(&format!("{}_outdir", tmpfile_prefix))
             .tempdir()
             .expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_path)
+
+        Extract::from_source(&archive_file_path)
             .extract_into(&out_path)
             .expect("extract fail");
-        let out_file = out_path.join("zipped.txt");
+
+        let out_file = out_path.join("temp.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
 
-        let out_file2 = out_path.join("zipped2.txt");
-        assert!(out_file2.exists());
-        cmp_content(&out_file2, "This is a second test!");
+        let out_file = out_path.join("inner_archive/temp2.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a second test!");
     }
 
-    #[cfg(not(feature = "archive-zip"))]
-    #[test]
-    #[ignore]
-    fn unpack_zip_file() {
-        println!("WARNING: Please enable 'archive-zip' feature!");
-    }
-    #[cfg(feature = "archive-zip")]
-    #[test]
-    fn unpack_zip_file() {
+    fn test_extract_file(tmpfile_prefix: &str, src_archive_path: &str, archive_kind: ArchiveKind) {
         let tmp_dir = tempfile::Builder::new()
-            .prefix("self_update_unpack_zip_src")
+            .prefix(tmpfile_prefix)
             .tempdir()
-            .expect("tempdir fail");
-        let tmp_path = tmp_dir.path();
+            .expect("Failed to create temp dir");
 
-        let archive_path = tmp_path.join("archive.zip");
-        let archive_file = File::create(&archive_path).expect("create file fail");
-        let mut zip = zip::ZipWriter::new(archive_file);
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("zipped.txt", options)
-            .expect("failed starting zip file");
-        zip.write_all(b"This is a test!")
-            .expect("failed writing to zip");
-        zip.start_file("zipped2.txt", options)
-            .expect("failed starting second zip file");
-        zip.write_all(b"This is a second test!")
-            .expect("failed writing to second zip");
-        zip.finish().expect("failed finishing zip");
+        let tmp_path = tmp_dir.path();
+        let archive_file_path = tmp_path.join(src_archive_path);
+        let archive_file = File::create(&archive_file_path).expect("Failed to create archive file");
+
+        build_test_archive(archive_file, &archive_file_path, archive_kind);
 
         let out_tmp = tempfile::Builder::new()
-            .prefix("self_update_unpack_zip_outdir")
+            .prefix(&format!("{}_outdir", tmpfile_prefix))
             .tempdir()
             .expect("tempdir fail");
         let out_path = out_tmp.path();
-        Extract::from_source(&archive_path)
-            .extract_file(&out_path, "zipped2.txt")
+
+        Extract::from_source(&archive_file_path)
+            .extract_file(&out_path, "temp.txt")
             .expect("extract fail");
-        let out_file = out_path.join("zipped2.txt");
+        let out_file = out_path.join("temp.txt");
+        assert!(out_file.exists());
+        cmp_content(&out_file, "This is a test!");
+
+        Extract::from_source(&archive_file_path)
+            .extract_file(&out_path, "inner_archive/temp2.txt")
+            .expect("extract fail");
+        let out_file = out_path.join("inner_archive/temp2.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a second test!");
+    }
+
+    fn build_test_archive<T: AsRef<Path>>(
+        mut archive_file: fs::File,
+        archive_file_path: T,
+        archive_kind: ArchiveKind,
+    ) {
+        let archive_file_path = archive_file_path.as_ref();
+
+        match archive_kind {
+            #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+            ArchiveKind::Tar(Some(Compression::Gz)) => {
+                let tmp_tar_path = archive_file_path
+                    .parent()
+                    .expect("Missing archive file path parent")
+                    .join("tar_contents");
+                let tmp_tar_inner_path = tmp_tar_path.join("inner_archive");
+                fs::create_dir_all(&tmp_tar_inner_path).expect("Failed to create temp tar path");
+
+                let fp = tmp_tar_path.join("temp.txt");
+                let mut tmp_file = File::create(&fp).expect("temp file create fail");
+                tmp_file.write_all(b"This is a test!").unwrap();
+
+                let fp = tmp_tar_inner_path.join("temp2.txt");
+                let mut tmp_file = File::create(&fp).expect("temp file create fail");
+                tmp_file.write_all(b"This is a second test!").unwrap();
+
+                let mut ar = tar::Builder::new(vec![]);
+                ar.append_dir_all(".", &tmp_tar_path)
+                    .expect("tar append dir all fail");
+                let tar_writer = ar.into_inner().expect("failed getting tar writer");
+
+                let mut e = GzEncoder::new(&mut archive_file, flate2::Compression::default());
+                io::copy(&mut tar_writer.as_slice(), &mut e)
+                    .expect("failed writing from tar archive to gz encoder");
+                e.finish().expect("gz finish fail");
+            }
+
+            #[cfg(feature = "archive-zip")]
+            ArchiveKind::Zip => {
+                let mut zip = zip::ZipWriter::new(archive_file);
+                let options = zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                zip.start_file("temp.txt", options)
+                    .expect("failed starting zip file");
+                zip.write_all(b"This is a test!")
+                    .expect("failed writing to zip");
+                zip.start_file("inner_archive/temp2.txt", options)
+                    .expect("failed starting second zip file");
+                zip.write_all(b"This is a second test!")
+                    .expect("failed writing to second zip");
+                zip.finish().expect("failed finishing zip");
+            }
+
+            _ => {
+                unimplemented!("{:?} not handled", archive_kind);
+            }
+        }
     }
 }

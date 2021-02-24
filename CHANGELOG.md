@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Fix io error triggered when updating binary contained in a zipped folder.
 - Fix issues updating Windows binaries on non-`C:` drives.
 ### Removed
 
