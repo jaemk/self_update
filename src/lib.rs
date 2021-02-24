@@ -559,7 +559,10 @@ impl<'a> Move<'a> {
             }
             Some(temp) => {
                 if dest.exists() {
-                    fs::rename(dest, temp)?;
+                    // Copy the destination file rather than renaming it, so that
+                    // if it is a running executable the temp file can be removed
+                    // on Windows while the executable is running.
+                    fs::copy(dest, temp)?;
                     if let Err(e) = fs::rename(self.source, dest) {
                         fs::rename(temp, dest)?;
                         return Err(Error::from(e));
