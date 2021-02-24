@@ -542,6 +542,9 @@ impl<'a> Extract<'a> {
 /// `source` and `dest` must be on the same filesystem.
 /// If `replace_using_temp` is specified, the destination file will be
 /// replaced using the given temporary path.
+/// If the existing `dest` file is a currently running long running program,
+/// `replace_using_temp` may run into errors cleaning up the temp dir.
+/// If that's the case for your use-case, consider not specifying a temp dir to use.
 ///
 /// * Errors:
 ///     * Io - copying / renaming
@@ -578,10 +581,11 @@ impl<'a> Move<'a> {
             }
             Some(temp) => {
                 if dest.exists() {
-                    // Copy the destination file rather than renaming it, so that
-                    // if it is a running executable the temp file can be removed
-                    // on Windows while the executable is running.
-                    fs::copy(dest, temp)?;
+                    // Move the existing dest to a temp location so we can move it
+                    // back it there's an error. If the existing `dest` file is a
+                    // long running program, this may prevent the temp dir from
+                    // being cleaned up.
+                    fs::rename(dest, temp)?;
                     if let Err(e) = fs::rename(self.source, dest) {
                         fs::rename(temp, dest)?;
                         return Err(Error::from(e));

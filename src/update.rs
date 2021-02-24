@@ -1,6 +1,5 @@
 use indicatif::ProgressStyle;
 use reqwest::{self, header};
-use std::env;
 use std::fs;
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
