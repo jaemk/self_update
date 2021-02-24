@@ -3,7 +3,7 @@ use reqwest::{self, header};
 use std::fs;
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
 
@@ -120,6 +120,28 @@ pub trait ReleaseUpdate {
 
     /// Same as `update`, but returns `UpdateStatus`.
     fn update_extended(&self) -> Result<UpdateStatus> {
+        let bin_install_path = self.bin_install_path();
+        let bin_name = self.bin_name();
+
+        let tmp_dir_parent = bin_install_path
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
+        let tmp_backup_dir_prefix = format!("__{}_backup", bin_name);
+        let tmp_backup_filename = tmp_backup_dir_prefix.clone();
+
+        if cfg!(windows) {
+            // Windows executables can not be removed while they are running, which prevents clean up
+            // of the temporary directory by the `tempfile` crate after we move the running executable
+            // into it during an update. We clean up any previously created temporary directories here.
+            // Ignore errors during cleanup since this is not critical for completing the update.
+            let _ = cleanup_temp_directories(
+                &tmp_dir_parent,
+                &tmp_backup_dir_prefix,
+                &tmp_backup_filename,
+            );
+        }
+
         let current_version = self.current_version();
         let target = self.target();
         let show_output = self.show_output();
@@ -170,8 +192,6 @@ pub trait ReleaseUpdate {
             format_err!(Error::Release, "No asset found for target: `{}`", target)
         })?;
 
-        let bin_install_path = self.bin_install_path();
-        let bin_name = self.bin_name();
         let prompt_confirmation = !self.no_confirm();
         if self.show_output() || prompt_confirmation {
             println!("\n{} release status:", bin_name);
@@ -184,14 +204,11 @@ pub trait ReleaseUpdate {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_dir_parent = bin_install_path
-            .parent()
-            .map(PathBuf::from)
-            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
-        let tmp_dir = tempfile::Builder::new()
-            .prefix(&format!("{}_download", bin_name))
-            .tempdir_in(tmp_dir_parent)?;
-        let tmp_archive_path = tmp_dir.path().join(&target_asset.name);
+        let tmp_archive_dir_prefix = format!("{}_download", bin_name);
+        let tmp_archive_dir = tempfile::Builder::new()
+            .prefix(&tmp_archive_dir_prefix)
+            .tempdir_in(&tmp_dir_parent)?;
+        let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
         println(show_output, "Downloading...");
@@ -210,8 +227,8 @@ pub trait ReleaseUpdate {
         print_flush(show_output, "Extracting archive... ")?;
         let bin_path_in_archive = self.bin_path_in_archive();
         Extract::from_source(&tmp_archive_path)
-            .extract_file(&tmp_dir.path(), &bin_path_in_archive)?;
-        let new_exe = tmp_dir.path().join(&bin_path_in_archive);
+            .extract_file(&tmp_archive_dir.path(), &bin_path_in_archive)?;
+        let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
 
         // Make executable
         #[cfg(not(windows))]
@@ -224,9 +241,14 @@ pub trait ReleaseUpdate {
         println(show_output, "Done");
 
         print_flush(show_output, "Replacing binary file... ")?;
-        let tmp_file = tmp_dir.path().join(&format!("__{}_backup", bin_name));
+
+        let tmp_backup_dir = tempfile::Builder::new()
+            .prefix(&tmp_backup_dir_prefix)
+            .tempdir_in(&tmp_dir_parent)?;
+        let tmp_file_path = tmp_backup_dir.path().join(&tmp_backup_filename);
+
         Move::from_source(&new_exe)
-            .replace_using_temp(&tmp_file)
+            .replace_using_temp(&tmp_file_path)
             .to_dest(&bin_install_path)?;
         println(show_output, "Done");
         Ok(UpdateStatus::Updated(release))
@@ -262,4 +284,34 @@ fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
     };
 
     headers
+}
+
+fn cleanup_temp_directories<P: AsRef<Path>>(
+    tmp_dir_parent: P,
+    tmp_dir_prefix: &str,
+    expected_tmp_filename: &str,
+) -> Result<()> {
+    for entry in fs::read_dir(tmp_dir_parent)? {
+        let entry = entry?;
+        let tmp_dir_name = if let Ok(tmp_dir_name) = entry.file_name().into_string() {
+            tmp_dir_name
+        } else {
+            continue;
+        };
+
+        // For safety, check that temporary directory contains only expected file before removing.
+        let is_expected_tmp_file = |tmp_file_entry: std::io::Result<fs::DirEntry>| {
+            tmp_file_entry
+                .ok()
+                .filter(|e| e.file_name() == expected_tmp_filename)
+                .is_some()
+        };
+
+        if tmp_dir_name.starts_with(tmp_dir_prefix)
+            && fs::read_dir(entry.path())?.all(is_expected_tmp_file)
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
 }
