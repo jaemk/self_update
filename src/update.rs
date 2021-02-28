@@ -135,7 +135,7 @@ pub trait ReleaseUpdate {
             // of the temporary directory by the `tempfile` crate after we move the running executable
             // into it during an update. We clean up any previously created temporary directories here.
             // Ignore errors during cleanup since this is not critical for completing the update.
-            let _ = cleanup_temp_directories(
+            let _ = cleanup_backup_temp_directories(
                 &tmp_dir_parent,
                 &tmp_backup_dir_prefix,
                 &tmp_backup_filename,
@@ -286,7 +286,7 @@ fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
     headers
 }
 
-fn cleanup_temp_directories<P: AsRef<Path>>(
+fn cleanup_backup_temp_directories<P: AsRef<Path>>(
     tmp_dir_parent: P,
     tmp_dir_prefix: &str,
     expected_tmp_filename: &str,
@@ -299,7 +299,10 @@ fn cleanup_temp_directories<P: AsRef<Path>>(
             continue;
         };
 
-        // For safety, check that temporary directory contains only expected file before removing.
+        // For safety, check that the temporary directory contains only the expected backup
+        // binary file before removing. If subdirectories or other files exist then the user
+        // is using the temp directory for something else. This is unlikely, but we should
+        // be careful with `fs::remove_dir_all`.
         let is_expected_tmp_file = |tmp_file_entry: std::io::Result<fs::DirEntry>| {
             tmp_file_entry
                 .ok()
