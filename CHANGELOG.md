@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Clean up dangling temporary directories on Windows.
 ### Removed
 
 ## [0.25.0]
