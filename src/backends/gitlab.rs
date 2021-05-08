@@ -556,7 +556,7 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     if let Some(token) = auth_token {
         headers.insert(
             header::AUTHORIZATION,
-            format!("token {}", token)
+            format!("bearer {}", token)
                 .parse()
                 .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
         );
