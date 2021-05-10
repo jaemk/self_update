@@ -21,6 +21,7 @@ const MAX_KEYS: u8 = 100;
 /// The service end point.
 ///
 /// Currently S3, GCS, and DigitalOcean Spaces supported.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug)]
 pub enum EndPoint {
     S3,
@@ -550,7 +551,7 @@ fn fetch_releases_from_s3(
         Key,
         LastModified,
         Other,
-    };
+    }
 
     let mut current_tag = Tag::Other;
     let mut current_release: Option<Release> = None;
