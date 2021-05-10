@@ -477,7 +477,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release(&json)?)
+        Release::from_release(&json)
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -504,7 +504,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release(&json)?)
+        Release::from_release(&json)
     }
 
     fn current_version(&self) -> String {

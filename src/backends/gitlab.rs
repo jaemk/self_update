@@ -454,7 +454,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release_gitlab(&json[0])?)
+        Release::from_release_gitlab(&json[0])
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -476,7 +476,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Ok(Release::from_release_gitlab(&json)?)
+        Release::from_release_gitlab(&json)
     }
 
     fn current_version(&self) -> String {
@@ -556,7 +556,7 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     if let Some(token) = auth_token {
         headers.insert(
             header::AUTHORIZATION,
-            format!("bearer {}", token)
+            format!("Bearer {}", token)
                 .parse()
                 .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
         );
