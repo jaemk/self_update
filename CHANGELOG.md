@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.27.0]
+### Added
+### Changed
+- Switch gitlab authorization header prefix from `token` to `Bearer`
+### Removed
+
 ## [0.26.0]
 ### Added
 ### Changed
