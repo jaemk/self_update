@@ -19,8 +19,13 @@ impl ReleaseAsset {
     ///
     /// Errors:
     ///     * Missing required name & download-url keys
-    fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["url"]
+    fn from_asset(asset: &serde_json::Value, is_private: bool) -> Result<ReleaseAsset> {
+        let download_url_field = if is_private {
+            "url"
+        } else {
+            "browser_download_url"
+        };
+        let download_url = asset[&download_url_field]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Asset missing `url`"))?;
         let name = asset["name"]
@@ -34,7 +39,7 @@ impl ReleaseAsset {
 }
 
 impl Release {
-    fn from_release(release: &serde_json::Value) -> Result<Release> {
+    fn from_release(release: &serde_json::Value, is_private: bool) -> Result<Release> {
         let tag = release["tag_name"]
             .as_str()
             .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
@@ -48,7 +53,7 @@ impl Release {
         let body = release["body"].as_str().map(String::from);
         let assets = assets
             .iter()
-            .map(ReleaseAsset::from_asset)
+            .map(|x| ReleaseAsset::from_asset(x, is_private))
             .collect::<Result<Vec<ReleaseAsset>>>()?;
         Ok(Release {
             name: name.to_owned(),
@@ -193,7 +198,7 @@ impl ReleaseList {
             .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
         let mut releases = releases
             .iter()
-            .map(Release::from_release)
+            .map(|x| Release::from_release(x, self.auth_token.is_some()))
             .collect::<Result<Vec<Release>>>()?;
 
         // handle paged responses containing `Link` header:
@@ -477,7 +482,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Release::from_release(&json)
+        Release::from_release(&json, self.auth_token.is_some())
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -504,7 +509,7 @@ impl ReleaseUpdate for Update {
             )
         }
         let json = resp.json::<serde_json::Value>()?;
-        Release::from_release(&json)
+        Release::from_release(&json, self.auth_token.is_some())
     }
 
     fn current_version(&self) -> String {
