@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.28.0]
+### Added
+### Changed
+- Bump indicatif 0.15 -> 0.16
+### Removed
+
 ## [0.27.0]
 ### Added
 ### Changed
