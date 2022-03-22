@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.29.0]
+### Added
+### Changed
+- Bump `zip` 0.5 -> 0.6
+- Bump `quick-xml` 0.20 -> 0.22
+### Removed
+
 ## [0.28.0]
 ### Added
 ### Changed
