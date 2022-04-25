@@ -18,7 +18,7 @@ pub enum Error {
     Zip(ZipError),
     Json(serde_json::Error),
     Reqwest(reqwest::Error),
-    SemVer(semver::SemVerError),
+    SemVer(semver::Error),
     ArchiveNotEnabled(String),
 }
 
@@ -87,8 +87,8 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-impl From<semver::SemVerError> for Error {
-    fn from(e: semver::SemVerError) -> Error {
+impl From<semver::Error> for Error {
+    fn from(e: semver::Error) -> Error {
         Error::SemVer(e)
     }
 }
