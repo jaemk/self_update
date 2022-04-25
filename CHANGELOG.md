@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.30.0]
+### Added
+### Changed
+- Bump `semver` 0.11 -> 1.0
+### Removed
+
 ## [0.29.0]
 ### Added
 ### Changed
