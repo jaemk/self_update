@@ -25,6 +25,7 @@ const MAX_KEYS: u8 = 100;
 #[derive(Clone, Copy, Debug)]
 pub enum EndPoint {
     S3,
+    S3DualStack,
     GCS,
     DigitalOceanSpaces,
 }
@@ -501,28 +502,25 @@ fn fetch_releases_from_s3(
         None => "".to_string(),
     };
 
+    let region = region
+        .as_ref()
+        .ok_or_else(|| Error::Config("`region` required".to_string()));
+
     let download_base_url = match end_point {
-        EndPoint::S3 => {
-            let region = if let Some(region) = region {
-                region
-            } else {
-                bail!(Error::Config, "`region` required")
-            };
-            format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region)
-        }
-        EndPoint::DigitalOceanSpaces => {
-            let region = if let Some(region) = region {
-                region
-            } else {
-                bail!(Error::Config, "`region` required")
-            };
-            format!("https://{}.{}.digitaloceanspaces.com/", bucket_name, region)
-        }
+        EndPoint::S3 => format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region?),
+        EndPoint::S3DualStack => format!(
+            "https://{}.s3.dualstack.{}.amazonaws.com/",
+            bucket_name, region?
+        ),
+        EndPoint::DigitalOceanSpaces => format!(
+            "https://{}.{}.digitaloceanspaces.com/",
+            bucket_name, region?
+        ),
         EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
     };
 
     let api_url = match end_point {
-        EndPoint::S3 | EndPoint::DigitalOceanSpaces => format!(
+        EndPoint::S3 | EndPoint::S3DualStack | EndPoint::DigitalOceanSpaces => format!(
             "{}?list-type=2&max-keys={}{}",
             download_base_url, MAX_KEYS, prefix
         ),
