@@ -1,4 +1,3 @@
-use indicatif::ProgressStyle;
 use reqwest::{self, header};
 use std::fs;
 #[cfg(not(windows))]
@@ -104,8 +103,11 @@ pub trait ReleaseUpdate {
     /// Flag indicating if the user shouldn't be prompted to confirm an update
     fn no_confirm(&self) -> bool;
 
-    /// Styling for progress information if `show_download_progress` is set (see `indicatif::ProgressStyle`)
-    fn progress_style(&self) -> Option<ProgressStyle>;
+    // message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    fn progress_template(&self) -> String;
+
+    // progress_chars to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    fn progress_chars(&self) -> String;
 
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<String>;
@@ -218,9 +220,8 @@ pub trait ReleaseUpdate {
         download.set_headers(headers);
         download.show_progress(self.show_download_progress());
 
-        if let Some(ref progress_style) = self.progress_style() {
-            download.set_progress_style(progress_style.clone());
-        }
+        download.progress_template = self.progress_template();
+        download.progress_chars = self.progress_chars();
 
         download.download_to(&mut tmp_archive)?;
 
