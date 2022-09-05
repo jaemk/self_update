@@ -329,7 +329,11 @@ impl UpdateBuilder {
     }
 
     /// Set download progress style.
-    pub fn set_progress_style(&mut self, progress_template: String, progress_chars: String) -> &mut Self {
+    pub fn set_progress_style(
+        &mut self,
+        progress_template: String,
+        progress_chars: String,
+    ) -> &mut Self {
         self.progress_template = progress_template;
         self.progress_chars = progress_chars;
         self
@@ -545,7 +549,8 @@ impl Default for UpdateBuilder {
             no_confirm: false,
             current_version: None,
             target_version: None,
-            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}".to_string(),
+            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}"
+                .to_string(),
             progress_chars: "=>-".to_string(),
             auth_token: None,
         }

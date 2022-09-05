@@ -617,7 +617,8 @@ impl Download {
             show_progress: false,
             url: url.to_owned(),
             headers: reqwest::header::HeaderMap::new(),
-            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}".to_string(),
+            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}"
+                .to_string(),
             progress_chars: "=>-".to_string(),
         }
     }
@@ -629,7 +630,11 @@ impl Download {
     }
 
     /// Set the progress style
-    pub fn set_progress_style(&mut self, progress_template: String, progress_chars: String) -> &mut Self {
+    pub fn set_progress_style(
+        &mut self,
+        progress_template: String,
+        progress_chars: String,
+    ) -> &mut Self {
         self.progress_template = progress_template;
         self.progress_chars = progress_chars;
         self
@@ -702,9 +707,10 @@ impl Download {
             let pb = ProgressBar::new(size);
             pb.set_style(
                 ProgressStyle::default_bar()
-                .template(&self.progress_template).unwrap()
-                .progress_chars(&self.progress_chars)
-                );
+                    .template(&self.progress_template)
+                    .unwrap()
+                    .progress_chars(&self.progress_chars),
+            );
 
             Some(pb)
         } else {
