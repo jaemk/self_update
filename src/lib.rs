@@ -708,7 +708,7 @@ impl Download {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template(&self.progress_template)
-                    .unwrap()
+                    .expect("set ProgressStyle template failed")
                     .progress_chars(&self.progress_chars),
             );
 
