@@ -150,6 +150,10 @@ pub mod errors;
 pub mod update;
 pub mod version;
 
+pub const DEFAULT_PROGRESS_TEMPLATE: &str =
+    "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
+pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
+
 use errors::*;
 
 /// Get the current target triple.
@@ -617,9 +621,8 @@ impl Download {
             show_progress: false,
             url: url.to_owned(),
             headers: reqwest::header::HeaderMap::new(),
-            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}"
-                .to_string(),
-            progress_chars: "=>-".to_string(),
+            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
         }
     }
 

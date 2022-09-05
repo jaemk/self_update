@@ -11,6 +11,7 @@ use crate::{
     errors::*,
     get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
+    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
 
 impl ReleaseAsset {
@@ -549,9 +550,8 @@ impl Default for UpdateBuilder {
             no_confirm: false,
             current_version: None,
             target_version: None,
-            progress_template: "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}"
-                .to_string(),
-            progress_chars: "=>-".to_string(),
+            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
         }
     }
