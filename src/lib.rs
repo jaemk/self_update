@@ -150,6 +150,10 @@ pub mod errors;
 pub mod update;
 pub mod version;
 
+pub const DEFAULT_PROGRESS_TEMPLATE: &str =
+    "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
+pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
+
 use errors::*;
 
 /// Get the current target triple.
@@ -607,7 +611,8 @@ pub struct Download {
     show_progress: bool,
     url: String,
     headers: reqwest::header::HeaderMap,
-    progress_style: ProgressStyle,
+    progress_template: String,
+    progress_chars: String,
 }
 impl Download {
     /// Specify download url
@@ -616,9 +621,8 @@ impl Download {
             show_progress: false,
             url: url.to_owned(),
             headers: reqwest::header::HeaderMap::new(),
-            progress_style: ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}")
-                .progress_chars("=>-"),
+            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
         }
     }
 
@@ -629,8 +633,13 @@ impl Download {
     }
 
     /// Set the progress style
-    pub fn set_progress_style(&mut self, progress_style: ProgressStyle) -> &mut Self {
-        self.progress_style = progress_style;
+    pub fn set_progress_style(
+        &mut self,
+        progress_template: String,
+        progress_chars: String,
+    ) -> &mut Self {
+        self.progress_template = progress_template;
+        self.progress_chars = progress_chars;
         self
     }
 
@@ -699,7 +708,12 @@ impl Download {
         let mut downloaded = 0;
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
-            pb.set_style(self.progress_style.clone());
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(&self.progress_template)
+                    .expect("set ProgressStyle template failed")
+                    .progress_chars(&self.progress_chars),
+            );
 
             Some(pb)
         } else {

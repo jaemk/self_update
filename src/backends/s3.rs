@@ -6,8 +6,8 @@ use crate::{
     get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
     version::bump_is_greater,
+    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
-use indicatif::ProgressStyle;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
@@ -154,7 +154,8 @@ pub struct UpdateBuilder {
     no_confirm: bool,
     current_version: Option<String>,
     target_version: Option<String>,
-    progress_style: Option<ProgressStyle>,
+    progress_template: String,
+    progress_chars: String,
     auth_token: Option<String>,
 }
 
@@ -174,7 +175,8 @@ impl Default for UpdateBuilder {
             no_confirm: false,
             current_version: None,
             target_version: None,
-            progress_style: None,
+            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
         }
     }
@@ -292,9 +294,14 @@ impl UpdateBuilder {
         self
     }
 
-    /// Toggle download progress bar, defaults to `off`.
-    pub fn set_progress_style(&mut self, progress_style: ProgressStyle) -> &mut Self {
-        self.progress_style = Some(progress_style);
+    /// Set download progress style.
+    pub fn set_progress_style(
+        &mut self,
+        progress_template: String,
+        progress_chars: String,
+    ) -> &mut Self {
+        self.progress_template = progress_template;
+        self.progress_chars = progress_chars;
         self
     }
 
@@ -358,7 +365,8 @@ impl UpdateBuilder {
             },
             target_version: self.target_version.as_ref().map(|v| v.to_owned()),
             show_download_progress: self.show_download_progress,
-            progress_style: self.progress_style.clone(),
+            progress_template: self.progress_template.clone(),
+            progress_chars: self.progress_chars.clone(),
             show_output: self.show_output,
             no_confirm: self.no_confirm,
             auth_token: self.auth_token.clone(),
@@ -382,7 +390,8 @@ pub struct Update {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
-    progress_style: Option<ProgressStyle>,
+    progress_template: String,
+    progress_chars: String,
     auth_token: Option<String>,
 }
 
@@ -477,8 +486,12 @@ impl ReleaseUpdate for Update {
         self.no_confirm
     }
 
-    fn progress_style(&self) -> Option<ProgressStyle> {
-        self.progress_style.clone()
+    fn progress_template(&self) -> String {
+        self.progress_template.to_owned()
+    }
+
+    fn progress_chars(&self) -> String {
+        self.progress_chars.to_owned()
     }
 
     fn auth_token(&self) -> Option<String> {
