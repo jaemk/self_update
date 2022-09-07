@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.31.0]
+### Added
+- Support S3 dualstack endpoints
+### Changed
+- Update `indicatif` 0.16.0 -> 0.17.0
+### Removed
+
 ## [0.30.0]
 ### Added
 ### Changed
