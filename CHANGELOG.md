@@ -2,6 +2,11 @@
 
 ## [unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.32.0]
+### Added
 - Support for self hosted gitlab servers
 ### Changed
 ### Removed
