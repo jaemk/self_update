@@ -63,12 +63,19 @@ impl Release {
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
 pub struct ReleaseListBuilder {
+    host: String,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
 }
 impl ReleaseListBuilder {
+    /// Set the gitlab `host` url
+    pub fn with_host(&mut self, host: &str) -> &mut Self {
+        self.host = host.to_owned();
+        self
+    }
+
     /// Set the repo owner, used to build a gitlab api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
@@ -89,7 +96,7 @@ impl ReleaseListBuilder {
 
     /// Set the authorization token, used in requests to the gitlab api url
     ///
-    /// This is to support private repos where you need a GitHub auth token.
+    /// This is to support private repos where you need a Gitlab auth token.
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
@@ -101,6 +108,7 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
+            host: self.host.clone(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -117,10 +125,11 @@ impl ReleaseListBuilder {
     }
 }
 
-/// `ReleaseList` provides a builder api for querying a GitHub repo,
+/// `ReleaseList` provides a builder api for querying a Gitlab repo,
 /// returning a `Vec` of available `Release`s
 #[derive(Clone, Debug)]
 pub struct ReleaseList {
+    host: String,
     repo_owner: String,
     repo_name: String,
     target: Option<String>,
@@ -130,6 +139,7 @@ impl ReleaseList {
     /// Initialize a ReleaseListBuilder
     pub fn configure() -> ReleaseListBuilder {
         ReleaseListBuilder {
+            host: String::from("https://gitlab.com"),
             repo_owner: None,
             repo_name: None,
             target: None,
@@ -142,8 +152,8 @@ impl ReleaseList {
     pub fn fetch(self) -> Result<Vec<Release>> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://gitlab.com/api/v4/projects/{}%2F{}/releases",
-            self.repo_owner, self.repo_name
+            "{}/api/v4/projects/{}%2F{}/releases",
+            self.host, self.repo_owner, self.repo_name
         );
         let releases = self.fetch_releases(&api_url)?;
         let releases = match self.target {
@@ -211,6 +221,7 @@ impl ReleaseList {
 /// `https://gitlab.com/api/v4/projects/<repo_owner>%2F<repo_name>/releases`
 #[derive(Debug)]
 pub struct UpdateBuilder {
+    host: String,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
@@ -231,6 +242,12 @@ impl UpdateBuilder {
     /// Initialize a new builder
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Set the gitlab `host` url
+    pub fn with_host(&mut self, host: &str) -> &mut Self {
+        self.host = host.to_owned();
+        self
     }
 
     /// Set the repo owner, used to build a gitlab api url
@@ -354,7 +371,7 @@ impl UpdateBuilder {
 
     /// Set the authorization token, used in requests to the gitlab api url
     ///
-    /// This is to support private repos where you need a GitHub auth token.
+    /// This is to support private repos where you need a Gitlab auth token.
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
@@ -375,6 +392,7 @@ impl UpdateBuilder {
         };
 
         Ok(Box::new(Update {
+            host: self.host.to_owned(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -417,9 +435,10 @@ impl UpdateBuilder {
     }
 }
 
-/// Updates to a specified or latest release distributed via GitHub
+/// Updates to a specified or latest release distributed via Gitlab
 #[derive(Debug)]
 pub struct Update {
+    host: String,
     repo_owner: String,
     repo_name: String,
     target: String,
@@ -446,8 +465,8 @@ impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://gitlab.com/api/v4/projects/{}%2F{}/releases",
-            self.repo_owner, self.repo_name
+            "{}/api/v4/projects/{}%2F{}/releases",
+            self.host, self.repo_owner, self.repo_name
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -468,8 +487,8 @@ impl ReleaseUpdate for Update {
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "https://gitlab.com/api/v4/projects/{}%2F{}/releases/{}",
-            self.repo_owner, self.repo_name, ver
+            "{}/api/v4/projects/{}%2F{}/releases/{}",
+            self.host, self.repo_owner, self.repo_name, ver
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -539,6 +558,7 @@ impl ReleaseUpdate for Update {
 impl Default for UpdateBuilder {
     fn default() -> Self {
         Self {
+            host: String::from("https://gitlab.com"),
             repo_owner: None,
             repo_name: None,
             target: None,

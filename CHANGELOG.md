@@ -2,6 +2,7 @@
 
 ## [unreleased]
 ### Added
+- Support for self hosted gitlab servers
 ### Changed
 ### Removed
 
