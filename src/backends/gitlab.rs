@@ -63,16 +63,16 @@ impl Release {
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
 pub struct ReleaseListBuilder {
-    server: String,
+    host: String,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
 }
 impl ReleaseListBuilder {
-    /// Set the gitlab `server` url
-    pub fn use_server(&mut self, server: &str) -> &mut Self {
-        self.server = server.to_owned();
+    /// Set the gitlab `host` url
+    pub fn with_host(&mut self, host: &str) -> &mut Self {
+        self.host = host.to_owned();
         self
     }
 
@@ -108,7 +108,7 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
-            server: self.server.clone(),
+            host: self.host.clone(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -129,7 +129,7 @@ impl ReleaseListBuilder {
 /// returning a `Vec` of available `Release`s
 #[derive(Clone, Debug)]
 pub struct ReleaseList {
-    server: String,
+    host: String,
     repo_owner: String,
     repo_name: String,
     target: Option<String>,
@@ -139,7 +139,7 @@ impl ReleaseList {
     /// Initialize a ReleaseListBuilder
     pub fn configure() -> ReleaseListBuilder {
         ReleaseListBuilder {
-            server: String::from("https://gitlab.com"),
+            host: String::from("https://gitlab.com"),
             repo_owner: None,
             repo_name: None,
             target: None,
@@ -153,7 +153,7 @@ impl ReleaseList {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
-            self.server, self.repo_owner, self.repo_name
+            self.host, self.repo_owner, self.repo_name
         );
         let releases = self.fetch_releases(&api_url)?;
         let releases = match self.target {
@@ -221,7 +221,7 @@ impl ReleaseList {
 /// `https://gitlab.com/api/v4/projects/<repo_owner>%2F<repo_name>/releases`
 #[derive(Debug)]
 pub struct UpdateBuilder {
-    server: String,
+    host: String,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
@@ -244,9 +244,9 @@ impl UpdateBuilder {
         Default::default()
     }
 
-    /// Set the gitlab `server` url
-    pub fn use_server(&mut self, server: &str) -> &mut Self {
-        self.server = server.to_owned();
+    /// Set the gitlab `host` url
+    pub fn with_host(&mut self, host: &str) -> &mut Self {
+        self.host = host.to_owned();
         self
     }
 
@@ -392,7 +392,7 @@ impl UpdateBuilder {
         };
 
         Ok(Box::new(Update {
-            server: self.server.to_owned(),
+            host: self.host.to_owned(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -438,7 +438,7 @@ impl UpdateBuilder {
 /// Updates to a specified or latest release distributed via Gitlab
 #[derive(Debug)]
 pub struct Update {
-    server: String,
+    host: String,
     repo_owner: String,
     repo_name: String,
     target: String,
@@ -466,7 +466,7 @@ impl ReleaseUpdate for Update {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
-            self.server, self.repo_owner, self.repo_name
+            self.host, self.repo_owner, self.repo_name
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -488,7 +488,7 @@ impl ReleaseUpdate for Update {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases/{}",
-            self.server, self.repo_owner, self.repo_name, ver
+            self.host, self.repo_owner, self.repo_name, ver
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -558,7 +558,7 @@ impl ReleaseUpdate for Update {
 impl Default for UpdateBuilder {
     fn default() -> Self {
         Self {
-            server: String::from("https://gitlab.com"),
+            host: String::from("https://gitlab.com"),
             repo_owner: None,
             repo_name: None,
             target: None,
