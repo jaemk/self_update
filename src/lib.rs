@@ -136,6 +136,7 @@ use either::Either;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header;
 use std::cmp::min;
+use std::env;
 use std::fs;
 use std::io;
 use std::path;
@@ -682,7 +683,31 @@ impl Download {
         }
 
         set_ssl_vars!();
-        let resp = reqwest::blocking::Client::new()
+        let mut client_builder = reqwest::blocking::Client::builder();
+        let https_proxy = env::var("HTTPS_PROXY")
+            .and(env::var("https_proxy"))
+            .and(env::var("ALL_PROXY"))
+            .and(env::var("all_proxy"));
+        match https_proxy {
+            Ok(v) => {
+                client_builder = client_builder.proxy(reqwest::Proxy::https(v)?)
+            },
+            // env::var will return an error if the environment variable isn't set.
+            // In that case we just don't set proxy
+            Err(_) => {},
+        }
+        let http_proxy = env::var("HTTP_PROXY")
+            .and(env::var("http_proxy"))
+            .and(env::var("ALL_PROXY"))
+            .and(env::var("all_proxy"));
+        match http_proxy {
+            Ok(v) => {
+                client_builder = client_builder.proxy(reqwest::Proxy::http(v)?)
+            },
+            Err(_) => {},
+        }
+        let resp = client_builder
+            .build()?
             .get(&self.url)
             .headers(headers)
             .send()?;
