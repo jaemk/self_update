@@ -614,6 +614,7 @@ pub struct Download {
     headers: reqwest::header::HeaderMap,
     progress_template: String,
     progress_chars: String,
+    ignore_env_proxy: bool,
 }
 impl Download {
     /// Specify download url
@@ -624,6 +625,7 @@ impl Download {
             headers: reqwest::header::HeaderMap::new(),
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
+            ignore_env_proxy: false
         }
     }
 
@@ -660,6 +662,12 @@ impl Download {
         self
     }
 
+    /// Set proxy from environment vars
+    pub fn set_ignore_env_proxy(&mut self, value: bool) -> &mut Self {
+        self.ignore_env_proxy = value;
+        self
+    }
+
     /// Download the file behind the given `url` into the specified `dest`.
     /// Show a sliding progress bar if specified.
     /// If the resource doesn't specify a content-length, the progress bar will not be shown
@@ -684,27 +692,29 @@ impl Download {
 
         set_ssl_vars!();
         let mut client_builder = reqwest::blocking::Client::builder();
-        let https_proxy = env::var("HTTPS_PROXY")
-            .and(env::var("https_proxy"))
-            .and(env::var("ALL_PROXY"))
-            .and(env::var("all_proxy"));
-        match https_proxy {
-            Ok(v) => {
-                client_builder = client_builder.proxy(reqwest::Proxy::https(v)?)
-            },
-            // env::var will return an error if the environment variable isn't set.
-            // In that case we just don't set proxy
-            Err(_) => {},
-        }
-        let http_proxy = env::var("HTTP_PROXY")
-            .and(env::var("http_proxy"))
-            .and(env::var("ALL_PROXY"))
-            .and(env::var("all_proxy"));
-        match http_proxy {
-            Ok(v) => {
-                client_builder = client_builder.proxy(reqwest::Proxy::http(v)?)
-            },
-            Err(_) => {},
+        if !self.ignore_env_proxy {
+            let https_proxy = env::var("HTTPS_PROXY")
+                .and(env::var("https_proxy"))
+                .and(env::var("ALL_PROXY"))
+                .and(env::var("all_proxy"));
+            match https_proxy {
+                Ok(v) => {
+                    client_builder = client_builder.proxy(reqwest::Proxy::https(v)?)
+                },
+                // env::var will return an error if the environment variable isn't set.
+                // In that case we just don't set proxy
+                Err(_) => {},
+            }
+            let http_proxy = env::var("HTTP_PROXY")
+                .and(env::var("http_proxy"))
+                .and(env::var("ALL_PROXY"))
+                .and(env::var("all_proxy"));
+            match http_proxy {
+                Ok(v) => {
+                    client_builder = client_builder.proxy(reqwest::Proxy::http(v)?)
+                },
+                Err(_) => {},
+            }
         }
         let resp = client_builder
             .build()?
