@@ -2,6 +2,11 @@
 
 ## [unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.33.0]
+### Added
 - Support for Gitea / Forgejo
 ### Changed
 ### Removed
