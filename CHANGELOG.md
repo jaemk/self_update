@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.34.0]
+### Added
+- Add `with_url` method to `UpdateBuilder`
+### Changed
+### Removed
+
 ## [0.33.0]
 ### Added
 - Support for Gitea / Forgejo
