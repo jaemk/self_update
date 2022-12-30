@@ -262,6 +262,14 @@ impl UpdateBuilder {
         self
     }
 
+    /// Set the optional github url, e.g. for a github enterprise installation.
+    /// The url should provide the path to your API endpoint and end without a trailing slash,
+    /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
+    pub fn with_url(&mut self, url: &str) -> &mut Self {
+        self.custom_url = Some(url.to_owned());
+        self
+    }
+
     /// Set the current app version, used to compare against the latest available version.
     /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
     pub fn current_version(&mut self, ver: &str) -> &mut Self {
