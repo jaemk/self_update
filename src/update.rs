@@ -62,9 +62,8 @@ impl Release {
     pub fn asset_for(&self, target: &str) -> Option<ReleaseAsset> {
         self.assets
             .iter()
-            .filter(|asset| asset.name.contains(target))
+            .find(|asset| asset.name.contains(target))
             .cloned()
-            .next()
     }
 }
 
@@ -228,7 +227,7 @@ pub trait ReleaseUpdate {
         print_flush(show_output, "Extracting archive... ")?;
         let bin_path_in_archive = self.bin_path_in_archive();
         Extract::from_source(&tmp_archive_path)
-            .extract_file(&tmp_archive_dir.path(), &bin_path_in_archive)?;
+            .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
 
         // Make executable

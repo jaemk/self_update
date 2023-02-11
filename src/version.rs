@@ -59,43 +59,43 @@ mod test {
 
     #[test]
     fn test_bump_is_compatible() {
-        assert_eq!(false, bump_is_compatible("1.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_compatible("0.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_compatible("1.2.3", "3.3.0").unwrap());
-        assert_eq!(false, bump_is_compatible("1.2.3", "0.2.0").unwrap());
-        assert_eq!(false, bump_is_compatible("0.2.0", "0.3.0").unwrap());
-        assert_eq!(false, bump_is_compatible("0.3.0", "0.2.0").unwrap());
-        assert_eq!(false, bump_is_compatible("1.2.3", "1.1.0").unwrap());
-        assert_eq!(true, bump_is_compatible("1.2.0", "1.2.3").unwrap());
-        assert_eq!(true, bump_is_compatible("0.2.0", "0.2.3").unwrap());
-        assert_eq!(true, bump_is_compatible("1.2.0", "1.3.3").unwrap());
+        assert!(!bump_is_compatible("1.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_compatible("0.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_compatible("1.2.3", "3.3.0").unwrap());
+        assert!(!bump_is_compatible("1.2.3", "0.2.0").unwrap());
+        assert!(!bump_is_compatible("0.2.0", "0.3.0").unwrap());
+        assert!(!bump_is_compatible("0.3.0", "0.2.0").unwrap());
+        assert!(!bump_is_compatible("1.2.3", "1.1.0").unwrap());
+        assert!(bump_is_compatible("1.2.0", "1.2.3").unwrap());
+        assert!(bump_is_compatible("0.2.0", "0.2.3").unwrap());
+        assert!(bump_is_compatible("1.2.0", "1.3.3").unwrap());
     }
 
     #[test]
     fn test_bump_is_major() {
-        assert_eq!(true, bump_is_major("1.2.0", "2.3.1").unwrap());
-        assert_eq!(true, bump_is_major("0.2.0", "2.3.1").unwrap());
-        assert_eq!(true, bump_is_major("1.2.3", "3.3.0").unwrap());
-        assert_eq!(false, bump_is_major("1.2.3", "1.2.0").unwrap());
-        assert_eq!(false, bump_is_major("1.2.3", "0.2.0").unwrap());
+        assert!(bump_is_major("1.2.0", "2.3.1").unwrap());
+        assert!(bump_is_major("0.2.0", "2.3.1").unwrap());
+        assert!(bump_is_major("1.2.3", "3.3.0").unwrap());
+        assert!(!bump_is_major("1.2.3", "1.2.0").unwrap());
+        assert!(!bump_is_major("1.2.3", "0.2.0").unwrap());
     }
 
     #[test]
     fn test_bump_is_minor() {
-        assert_eq!(false, bump_is_minor("1.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_minor("0.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_minor("1.2.3", "3.3.0").unwrap());
-        assert_eq!(true, bump_is_minor("1.2.3", "1.3.0").unwrap());
-        assert_eq!(true, bump_is_minor("0.2.3", "0.4.0").unwrap());
+        assert!(!bump_is_minor("1.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_minor("0.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_minor("1.2.3", "3.3.0").unwrap());
+        assert!(bump_is_minor("1.2.3", "1.3.0").unwrap());
+        assert!(bump_is_minor("0.2.3", "0.4.0").unwrap());
     }
 
     #[test]
     fn test_bump_is_patch() {
-        assert_eq!(false, bump_is_patch("1.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_patch("0.2.0", "2.3.1").unwrap());
-        assert_eq!(false, bump_is_patch("1.2.3", "3.3.0").unwrap());
-        assert_eq!(false, bump_is_patch("1.2.3", "1.2.3").unwrap());
-        assert_eq!(true, bump_is_patch("1.2.0", "1.2.3").unwrap());
-        assert_eq!(true, bump_is_patch("0.2.3", "0.2.4").unwrap());
+        assert!(!bump_is_patch("1.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_patch("0.2.0", "2.3.1").unwrap());
+        assert!(!bump_is_patch("1.2.3", "3.3.0").unwrap());
+        assert!(!bump_is_patch("1.2.3", "1.2.3").unwrap());
+        assert!(bump_is_patch("1.2.0", "1.2.3").unwrap());
+        assert!(bump_is_patch("0.2.3", "0.2.4").unwrap());
     }
 }
