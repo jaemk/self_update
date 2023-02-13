@@ -25,11 +25,12 @@ indicatif = "0.17"
 quick-xml = "0.23"
 regex = "1"
 log = "0.4"
+urlencoding = "2.1"
 
 [features]
 default = ["reqwest/default-tls"]
 archive-zip = ["zip"]
-compression-zip-bzip2 = ["zip/bzip2"] #
+compression-zip-bzip2 = ["zip/bzip2"]     #
 compression-zip-deflate = ["zip/deflate"] #
 archive-tar = ["tar"]
 compression-flate2 = ["flate2", "either"] #

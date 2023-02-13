@@ -153,7 +153,9 @@ impl ReleaseList {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            self.repo_name
         );
         let releases = self.fetch_releases(&api_url)?;
         let releases = match self.target {
@@ -466,7 +468,9 @@ impl ReleaseUpdate for Update {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            self.repo_name
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
@@ -488,7 +492,10 @@ impl ReleaseUpdate for Update {
         set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases/{}",
-            self.host, self.repo_owner, self.repo_name, ver
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            self.repo_name,
+            ver
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
