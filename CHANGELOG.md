@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.35.0]
+### Added
+### Changed
+- Support selecting from multiple release artifacts by specifying an `identifier`
+- Update `quick-xml` to `0.23.0`
+### Removed
+
 ## [0.34.0]
 ### Added
 - Add `with_url` method to `UpdateBuilder`
