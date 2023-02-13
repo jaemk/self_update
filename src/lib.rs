@@ -287,7 +287,7 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
         }
         Some(extension) if extension == std::ffi::OsStr::new("gz") => match path
             .file_stem()
-            .map(|e| path::Path::new(e))
+            .map(path::Path::new)
             .and_then(|f| f.extension())
         {
             Some(extension) if extension == std::ffi::OsStr::new("tar") => {
@@ -364,7 +364,7 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(&self.source)?,
+            None => detect_archive(self.source)?,
         };
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
@@ -449,7 +449,7 @@ impl<'a> Extract<'a> {
         let source = fs::File::open(self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(&self.source)?,
+            None => detect_archive(self.source)?,
         };
 
         debug!(
@@ -477,7 +477,7 @@ impl<'a> Extract<'a> {
                         .file_name()
                         .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
                     let out_path = into_dir.join(file_name);
-                    let mut out_file = fs::File::create(&out_path)?;
+                    let mut out_file = fs::File::create(out_path)?;
                     io::copy(&mut reader, &mut out_file)?;
                 }
                 #[cfg(feature = "archive-tar")]
@@ -722,7 +722,7 @@ impl Download {
         loop {
             let n = {
                 let buf = src.fill_buf()?;
-                dest.write_all(&buf)?;
+                dest.write_all(buf)?;
                 buf.len()
             };
             if n == 0 {
@@ -848,7 +848,7 @@ mod tests {
             .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
-            .extract_into(&out_path)
+            .extract_into(out_path)
             .expect("extract fail");
         let out_file = out_path.join("temp");
         assert!(out_file.exists());
@@ -880,7 +880,7 @@ mod tests {
             .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
-            .extract_into(&out_path)
+            .extract_into(out_path)
             .expect("extract fail");
         let out_file = out_path.join("temp.txt");
         assert!(out_file.exists());
@@ -928,7 +928,7 @@ mod tests {
             .expect("tempdir fail");
         let out_path = out_tmp.path();
         Extract::from_source(&fp)
-            .extract_file(&out_path, "renamed_file")
+            .extract_file(out_path, "renamed_file")
             .expect("extract fail");
         let out_file = out_path.join("renamed_file");
         assert!(out_file.exists());
@@ -1002,7 +1002,7 @@ mod tests {
         let out_path = out_tmp.path();
 
         Extract::from_source(&archive_file_path)
-            .extract_into(&out_path)
+            .extract_into(out_path)
             .expect("extract fail");
 
         let out_file = out_path.join("temp.txt");
@@ -1033,14 +1033,14 @@ mod tests {
         let out_path = out_tmp.path();
 
         Extract::from_source(&archive_file_path)
-            .extract_file(&out_path, "temp.txt")
+            .extract_file(out_path, "temp.txt")
             .expect("extract fail");
         let out_file = out_path.join("temp.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a test!");
 
         Extract::from_source(&archive_file_path)
-            .extract_file(&out_path, "inner_archive/temp2.txt")
+            .extract_file(out_path, "inner_archive/temp2.txt")
             .expect("extract fail");
         let out_file = out_path.join("inner_archive/temp2.txt");
         assert!(out_file.exists());
@@ -1065,11 +1065,11 @@ mod tests {
                 fs::create_dir_all(&tmp_tar_inner_path).expect("Failed to create temp tar path");
 
                 let fp = tmp_tar_path.join("temp.txt");
-                let mut tmp_file = File::create(&fp).expect("temp file create fail");
+                let mut tmp_file = File::create(fp).expect("temp file create fail");
                 tmp_file.write_all(b"This is a test!").unwrap();
 
                 let fp = tmp_tar_inner_path.join("temp2.txt");
-                let mut tmp_file = File::create(&fp).expect("temp file create fail");
+                let mut tmp_file = File::create(fp).expect("temp file create fail");
                 tmp_file.write_all(b"This is a second test!").unwrap();
 
                 let mut ar = tar::Builder::new(vec![]);
