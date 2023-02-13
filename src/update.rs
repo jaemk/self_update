@@ -58,11 +58,18 @@ impl Release {
     }
 
     /// Return the first `ReleaseAsset` for the current release who's name
-    /// contains the specified `target`
-    pub fn asset_for(&self, target: &str) -> Option<ReleaseAsset> {
+    /// contains the specified `target` and possibly `identifier`
+    pub fn asset_for(&self, target: &str, identifier: Option<&str>) -> Option<ReleaseAsset> {
         self.assets
             .iter()
-            .find(|asset| asset.name.contains(target))
+            .find(|asset| {
+                asset.name.contains(target)
+                    && if let Some(i) = identifier {
+                        asset.name.contains(i)
+                    } else {
+                        true
+                    }
+            })
             .cloned()
     }
 }
@@ -83,6 +90,11 @@ pub trait ReleaseUpdate {
 
     /// Target version optionally specified for the update
     fn target_version(&self) -> Option<String>;
+
+    /// Optional identifier of determining the asset among multiple matches
+    fn identifier(&self) -> Option<String> {
+        None
+    }
 
     /// Name of the binary being updated
     fn bin_name(&self) -> String;
@@ -189,9 +201,11 @@ pub trait ReleaseUpdate {
             }
         };
 
-        let target_asset = release.asset_for(&target).ok_or_else(|| {
-            format_err!(Error::Release, "No asset found for target: `{}`", target)
-        })?;
+        let target_asset = release
+            .asset_for(&target, self.identifier().as_deref())
+            .ok_or_else(|| {
+                format_err!(Error::Release, "No asset found for target: `{}`", target)
+            })?;
 
         let prompt_confirmation = !self.no_confirm();
         if self.show_output() || prompt_confirmation {

@@ -230,6 +230,7 @@ pub struct UpdateBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
+    identifier: Option<String>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<PathBuf>,
@@ -292,6 +293,14 @@ impl UpdateBuilder {
     /// If unspecified, the build target of the crate will be used
     pub fn target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
+        self
+    }
+
+    /// Set the identifiable token for the asset in case of multiple compatible assets
+    ///
+    /// If unspecified, the first asset matching the target will be chosen
+    pub fn identifier(&mut self, identifier: &str) -> &mut Self {
+        self.identifier = Some(identifier.to_owned());
         self
     }
 
@@ -415,6 +424,7 @@ impl UpdateBuilder {
                 .as_ref()
                 .map(|t| t.to_owned())
                 .unwrap_or_else(|| get_target().to_owned()),
+            identifier: self.identifier.clone(),
             bin_name: if let Some(ref name) = self.bin_name {
                 name.to_owned()
             } else {
@@ -449,6 +459,7 @@ pub struct Update {
     repo_owner: String,
     repo_name: String,
     target: String,
+    identifier: Option<String>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -535,6 +546,10 @@ impl ReleaseUpdate for Update {
         self.target_version.clone()
     }
 
+    fn identifier(&self) -> Option<String> {
+        self.identifier.clone()
+    }
+
     fn bin_name(&self) -> String {
         self.bin_name.clone()
     }
@@ -578,6 +593,7 @@ impl Default for UpdateBuilder {
             repo_owner: None,
             repo_name: None,
             target: None,
+            identifier: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
