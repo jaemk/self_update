@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.36.0]
+### Added
+### Changed
+- For the gitlab backend, urlencode the repo owner in API calls to handle cases where the repo is owned by a subgroup
+### Removed
+
 ## [0.35.0]
 ### Added
 ### Changed
