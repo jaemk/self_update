@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Bugfix: use appropriate auth headers for each backend (fix gitlab private repo updates)
 ### Removed
 
 ## [0.36.0]
