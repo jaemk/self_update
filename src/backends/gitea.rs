@@ -479,7 +479,7 @@ impl ReleaseUpdate for Update {
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
-            .headers(api_headers(&self.auth_token)?)
+            .headers(self.api_headers(&self.auth_token)?)
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -501,7 +501,7 @@ impl ReleaseUpdate for Update {
         );
         let resp = reqwest::blocking::Client::new()
             .get(&api_url)
-            .headers(api_headers(&self.auth_token)?)
+            .headers(self.api_headers(&self.auth_token)?)
             .send()?;
         if !resp.status().is_success() {
             bail!(
@@ -561,6 +561,10 @@ impl ReleaseUpdate for Update {
 
     fn auth_token(&self) -> Option<String> {
         self.auth_token.clone()
+    }
+
+    fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
+        api_headers(auth_token)
     }
 }
 

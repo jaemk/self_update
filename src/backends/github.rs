@@ -1,6 +1,7 @@
 /*!
 GitHub releases
 */
+use hyper::HeaderMap;
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
@@ -584,6 +585,10 @@ impl ReleaseUpdate for Update {
 
     fn auth_token(&self) -> Option<String> {
         self.auth_token.clone()
+    }
+
+    fn api_headers(&self, auth_token: &Option<String>) -> Result<HeaderMap> {
+        api_headers(auth_token)
     }
 }
 
