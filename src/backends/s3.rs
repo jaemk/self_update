@@ -22,18 +22,13 @@ const MAX_KEYS: u8 = 100;
 ///
 /// Currently S3, GCS, and DigitalOcean Spaces supported.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum EndPoint {
+    #[default]
     S3,
     S3DualStack,
     GCS,
     DigitalOceanSpaces,
-}
-
-impl Default for EndPoint {
-    fn default() -> Self {
-        EndPoint::S3
-    }
 }
 
 /// `ReleaseList` Builder
