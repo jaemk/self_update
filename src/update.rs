@@ -123,6 +123,22 @@ pub trait ReleaseUpdate {
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<String>;
 
+    /// Construct a header with an authorisation entry if an auth token is provided
+    fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
+        let mut headers = header::HeaderMap::new();
+
+        if auth_token.is_some() {
+            headers.insert(
+                header::AUTHORIZATION,
+                (String::from("token ") + &auth_token.clone().unwrap())
+                    .parse()
+                    .unwrap(),
+            );
+        };
+
+        Ok(headers)
+    }
+
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user
     fn update(&self) -> Result<Status> {
@@ -228,7 +244,7 @@ pub trait ReleaseUpdate {
 
         println(show_output, "Downloading...");
         let mut download = Download::from_url(&target_asset.download_url);
-        let mut headers = api_headers(&self.auth_token());
+        let mut headers = self.api_headers(&self.auth_token())?;
         headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
         download.set_headers(headers);
         download.show_progress(self.show_download_progress());
@@ -282,22 +298,6 @@ fn println(show_output: bool, msg: &str) {
     if show_output {
         println!("{}", msg);
     }
-}
-
-// Construct a header with an authorisation entry if an auth token is provided
-fn api_headers(auth_token: &Option<String>) -> header::HeaderMap {
-    let mut headers = header::HeaderMap::new();
-
-    if auth_token.is_some() {
-        headers.insert(
-            header::AUTHORIZATION,
-            (String::from("token ") + &auth_token.clone().unwrap())
-                .parse()
-                .unwrap(),
-        );
-    };
-
-    headers
 }
 
 fn cleanup_backup_temp_directories<P: AsRef<Path>>(
