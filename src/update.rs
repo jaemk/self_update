@@ -1,10 +1,8 @@
 use reqwest::{self, header};
 use std::fs;
-#[cfg(not(windows))]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
+use crate::{confirm, errors::*, version, Download, Extract, Status};
 
 /// Release asset information
 #[derive(Clone, Debug, Default)]
@@ -152,25 +150,6 @@ pub trait ReleaseUpdate {
         let bin_install_path = self.bin_install_path();
         let bin_name = self.bin_name();
 
-        let tmp_dir_parent = bin_install_path
-            .parent()
-            .map(PathBuf::from)
-            .ok_or_else(|| Error::Update("Failed to determine parent dir".into()))?;
-        let tmp_backup_dir_prefix = format!("__{}_backup", bin_name);
-        let tmp_backup_filename = tmp_backup_dir_prefix.clone();
-
-        if cfg!(windows) {
-            // Windows executables can not be removed while they are running, which prevents clean up
-            // of the temporary directory by the `tempfile` crate after we move the running executable
-            // into it during an update. We clean up any previously created temporary directories here.
-            // Ignore errors during cleanup since this is not critical for completing the update.
-            let _ = cleanup_backup_temp_directories(
-                &tmp_dir_parent,
-                &tmp_backup_dir_prefix,
-                &tmp_backup_filename,
-            );
-        }
-
         let current_version = self.current_version();
         let target = self.target();
         let show_output = self.show_output();
@@ -235,10 +214,7 @@ pub trait ReleaseUpdate {
             confirm("Do you want to continue? [Y/n] ")?;
         }
 
-        let tmp_archive_dir_prefix = format!("{}_download", bin_name);
-        let tmp_archive_dir = tempfile::Builder::new()
-            .prefix(&tmp_archive_dir_prefix)
-            .tempdir_in(&tmp_dir_parent)?;
+        let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
@@ -260,26 +236,9 @@ pub trait ReleaseUpdate {
             .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
 
-        // Make executable
-        #[cfg(not(windows))]
-        {
-            let mut permissions = fs::metadata(&new_exe)?.permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&new_exe, permissions)?;
-        }
-
-        println(show_output, "Done");
-
         print_flush(show_output, "Replacing binary file... ")?;
+        self_replace::self_replace(new_exe)?;
 
-        let tmp_backup_dir = tempfile::Builder::new()
-            .prefix(&tmp_backup_dir_prefix)
-            .tempdir_in(&tmp_dir_parent)?;
-        let tmp_file_path = tmp_backup_dir.path().join(&tmp_backup_filename);
-
-        Move::from_source(&new_exe)
-            .replace_using_temp(&tmp_file_path)
-            .to_dest(&bin_install_path)?;
         println(show_output, "Done");
         Ok(UpdateStatus::Updated(release))
     }
@@ -298,37 +257,4 @@ fn println(show_output: bool, msg: &str) {
     if show_output {
         println!("{}", msg);
     }
-}
-
-fn cleanup_backup_temp_directories<P: AsRef<Path>>(
-    tmp_dir_parent: P,
-    tmp_dir_prefix: &str,
-    expected_tmp_filename: &str,
-) -> Result<()> {
-    for entry in fs::read_dir(tmp_dir_parent)? {
-        let entry = entry?;
-        let tmp_dir_name = if let Ok(tmp_dir_name) = entry.file_name().into_string() {
-            tmp_dir_name
-        } else {
-            continue;
-        };
-
-        // For safety, check that the temporary directory contains only the expected backup
-        // binary file before removing. If subdirectories or other files exist then the user
-        // is using the temp directory for something else. This is unlikely, but we should
-        // be careful with `fs::remove_dir_all`.
-        let is_expected_tmp_file = |tmp_file_entry: std::io::Result<fs::DirEntry>| {
-            tmp_file_entry
-                .ok()
-                .filter(|e| e.file_name() == expected_tmp_filename)
-                .is_some()
-        };
-
-        if tmp_dir_name.starts_with(tmp_dir_prefix)
-            && fs::read_dir(entry.path())?.all(is_expected_tmp_file)
-        {
-            fs::remove_dir_all(entry.path())?;
-        }
-    }
-    Ok(())
 }
