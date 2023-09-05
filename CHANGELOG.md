@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Use `self-replace` to replace current executable
 ### Removed
 
 ## [0.37.0]

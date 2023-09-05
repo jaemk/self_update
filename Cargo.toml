@@ -26,6 +26,7 @@ quick-xml = "0.23"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
+self-replace = "1"
 
 [features]
 default = ["reqwest/default-tls"]
