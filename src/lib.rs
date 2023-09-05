@@ -85,7 +85,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature,
-see the [features](#features) section above):
+see the [features](#features) section above). The `self_replace` crate is re-exported for convenience:
 
 ```rust
 # #[cfg(feature = "archive-tar")]
@@ -117,11 +117,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
         .extract_file(&tmp_dir.path(), &bin_name)?;
 
-    let tmp_file = tmp_dir.path().join("replacement_tmp");
-    let bin_path = tmp_dir.path().join(bin_name);
-    self_update::Move::from_source(&bin_path)
-        .replace_using_temp(&tmp_file)
-        .to_dest(&::std::env::current_exe()?)?;
+    let new_exe = tmp_dir.path().join(bin_name);
+    self_replace::self_replace(new_exe)?;
 
     Ok(())
 }
@@ -129,6 +126,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 */
 
+pub use self_replace;
 pub use tempfile::TempDir;
 
 #[cfg(feature = "compression-flate2")]

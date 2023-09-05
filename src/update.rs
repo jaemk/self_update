@@ -235,11 +235,12 @@ pub trait ReleaseUpdate {
         Extract::from_source(&tmp_archive_path)
             .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
+        println(show_output, "Done");
 
         print_flush(show_output, "Replacing binary file... ")?;
         self_replace::self_replace(new_exe)?;
-
         println(show_output, "Done");
+
         Ok(UpdateStatus::Updated(release))
     }
 }
