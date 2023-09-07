@@ -121,6 +121,9 @@ pub trait ReleaseUpdate {
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<String>;
 
+    #[cfg(feature = "signatures")]
+    fn verifying_keys(&self) -> &[[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]];
+
     /// Construct a header with an authorisation entry if an auth token is provided
     fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
         let mut headers = header::HeaderMap::new();
@@ -235,6 +238,38 @@ pub trait ReleaseUpdate {
         Extract::from_source(&tmp_archive_path)
             .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
+
+        #[cfg(feature = "signatures")]
+        {
+            use std::io::Read;
+
+            let verifying_keys = self.verifying_keys();
+            if !verifying_keys.is_empty() {
+                // TODO: FIXME: this only works for signed .zip files, not .tar
+                let mut signature = [0; ed25519_dalek::SIGNATURE_LENGTH];
+                fs::File::open(&tmp_archive_path)?.read_exact(&mut signature)?;
+                let signature = ed25519_dalek::Signature::from_bytes(&signature);
+
+                let exe = fs::File::open(&new_exe)?;
+                let exe = unsafe { memmap2::Mmap::map(&exe)? };
+
+                let mut valid_signature = false;
+                for (idx, bytes) in verifying_keys.into_iter().enumerate() {
+                    let key = match ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
+                        Ok(key) => key,
+                        Err(_) => panic!("Key #{} is invalid", idx),
+                    };
+                    if key.verify_strict(&exe, &signature).is_ok() {
+                        valid_signature = true;
+                        break;
+                    }
+                }
+                if !valid_signature {
+                    return Err(Error::NoValidSignature);
+                }
+            }
+        }
+
         println(show_output, "Done");
 
         print_flush(show_output, "Replacing binary file... ")?;

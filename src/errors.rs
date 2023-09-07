@@ -20,6 +20,7 @@ pub enum Error {
     Reqwest(reqwest::Error),
     SemVer(semver::Error),
     ArchiveNotEnabled(String),
+    NoValidSignature,
 }
 
 impl std::fmt::Display for Error {
@@ -37,6 +38,7 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
+            NoValidSignature => write!(f, "No valid signature found"),
         }
     }
 }

@@ -238,6 +238,8 @@ pub struct UpdateBuilder {
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
+    #[cfg(feature = "signatures")]
+    verifying_keys: Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>,
 }
 
 impl UpdateBuilder {
@@ -382,6 +384,15 @@ impl UpdateBuilder {
         self
     }
 
+    #[cfg(feature = "signatures")]
+    pub fn verifying_keys(
+        &mut self,
+        keys: impl Into<Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>>,
+    ) -> &mut Self {
+        self.verifying_keys = keys.into();
+        self
+    }
+
     /// Confirm config and create a ready-to-use `Update`
     ///
     /// * Errors:
@@ -433,6 +444,8 @@ impl UpdateBuilder {
             show_output: self.show_output,
             no_confirm: self.no_confirm,
             auth_token: self.auth_token.clone(),
+            #[cfg(feature = "signatures")]
+            verifying_keys: self.verifying_keys.clone(),
         }))
     }
 }
@@ -455,6 +468,8 @@ pub struct Update {
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
+    #[cfg(feature = "signatures")]
+    verifying_keys: Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>,
 }
 impl Update {
     /// Initialize a new `Update` builder
@@ -564,6 +579,11 @@ impl ReleaseUpdate for Update {
     fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
         api_headers(auth_token)
     }
+
+    #[cfg(feature = "signatures")]
+    fn verifying_keys(&self) -> &[[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]] {
+        &self.verifying_keys
+    }
 }
 
 impl Default for UpdateBuilder {
@@ -584,6 +604,8 @@ impl Default for UpdateBuilder {
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
+            #[cfg(feature = "signatures")]
+            verifying_keys: vec![],
         }
     }
 }
