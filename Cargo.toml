@@ -27,8 +27,7 @@ regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-ed25519-dalek = { version = "2", optional = true }
-memmap2 = { version = "0.7", optional = true }
+ed25519-dalek = { version = "2", features = ["digest"], optional = true }
 
 [features]
 default = ["reqwest/default-tls"]
@@ -38,7 +37,7 @@ compression-zip-deflate = ["zip/deflate"] #
 archive-tar = ["tar"]
 compression-flate2 = ["flate2", "either"] #
 rustls = ["reqwest/rustls-tls"]
-signatures = ["ed25519-dalek", "memmap2"]
+signatures = ["ed25519-dalek"]
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)

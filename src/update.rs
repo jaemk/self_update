@@ -233,42 +233,14 @@ pub trait ReleaseUpdate {
 
         download.download_to(&mut tmp_archive)?;
 
+        #[cfg(feature = "signatures")]
+        crate::signatures::verify(&tmp_archive_path, self.verifying_keys())?;
+
         print_flush(show_output, "Extracting archive... ")?;
         let bin_path_in_archive = self.bin_path_in_archive();
         Extract::from_source(&tmp_archive_path)
             .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
         let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
-
-        #[cfg(feature = "signatures")]
-        {
-            use std::io::Read;
-
-            let verifying_keys = self.verifying_keys();
-            if !verifying_keys.is_empty() {
-                // TODO: FIXME: this only works for signed .zip files, not .tar
-                let mut signature = [0; ed25519_dalek::SIGNATURE_LENGTH];
-                fs::File::open(&tmp_archive_path)?.read_exact(&mut signature)?;
-                let signature = ed25519_dalek::Signature::from_bytes(&signature);
-
-                let exe = fs::File::open(&new_exe)?;
-                let exe = unsafe { memmap2::Mmap::map(&exe)? };
-
-                let mut valid_signature = false;
-                for (idx, bytes) in verifying_keys.into_iter().enumerate() {
-                    let key = match ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
-                        Ok(key) => key,
-                        Err(_) => panic!("Key #{} is invalid", idx),
-                    };
-                    if key.verify_strict(&exe, &signature).is_ok() {
-                        valid_signature = true;
-                        break;
-                    }
-                }
-                if !valid_signature {
-                    return Err(Error::NoValidSignature);
-                }
-            }
-        }
 
         println(show_output, "Done");
 
