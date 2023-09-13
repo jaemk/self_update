@@ -27,17 +27,17 @@ regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-ed25519-dalek = { version = "2", features = ["digest"], optional = true }
+zipsign-api = { version = "0.1.0", git = "https://github.com/Kijewski/zipsign.git", default-features = false, optional = true }
 
 [features]
 default = ["reqwest/default-tls"]
-archive-zip = ["zip"]
-compression-zip-bzip2 = ["zip/bzip2"]     #
-compression-zip-deflate = ["zip/deflate"] #
-archive-tar = ["tar"]
-compression-flate2 = ["flate2", "either"] #
+archive-zip = ["zip", "zipsign-api?/verify-zip"]
+compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
+compression-zip-deflate = ["archive-zip", "zip/deflate"]
+archive-tar = ["tar", "zipsign-api?/verify-tar"]
+compression-flate2 = ["archive-tar", "flate2", "either"]
 rustls = ["reqwest/rustls-tls"]
-signatures = ["ed25519-dalek"]
+signatures = ["dep:zipsign-api"]
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)

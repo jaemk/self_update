@@ -141,8 +141,6 @@ use std::path;
 #[macro_use]
 extern crate log;
 
-#[cfg(feature = "signatures")]
-mod signatures;
 #[macro_use]
 mod macros;
 pub mod backends;

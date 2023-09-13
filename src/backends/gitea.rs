@@ -242,7 +242,7 @@ pub struct UpdateBuilder {
     progress_chars: String,
     auth_token: Option<String>,
     #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>,
+    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }
 
 impl UpdateBuilder {
@@ -390,7 +390,7 @@ impl UpdateBuilder {
     #[cfg(feature = "signatures")]
     pub fn verifying_keys(
         &mut self,
-        keys: impl Into<Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>>,
+        keys: impl Into<Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>>,
     ) -> &mut Self {
         self.verifying_keys = keys.into();
         self
@@ -476,7 +476,7 @@ pub struct Update {
     progress_chars: String,
     auth_token: Option<String>,
     #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]>,
+    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }
 impl Update {
     /// Initialize a new `Update` builder
@@ -583,7 +583,7 @@ impl ReleaseUpdate for Update {
     }
 
     #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]] {
+    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
         &self.verifying_keys
     }
 }

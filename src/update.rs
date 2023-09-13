@@ -122,7 +122,7 @@ pub trait ReleaseUpdate {
     fn auth_token(&self) -> Option<String>;
 
     #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; ed25519_dalek::PUBLIC_KEY_LENGTH]];
+    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]];
 
     /// Construct a header with an authorisation entry if an auth token is provided
     fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
@@ -234,7 +234,7 @@ pub trait ReleaseUpdate {
         download.download_to(&mut tmp_archive)?;
 
         #[cfg(feature = "signatures")]
-        crate::signatures::verify(&tmp_archive_path, self.verifying_keys())?;
+        verify_signature(&tmp_archive_path, self.verifying_keys())?;
 
         print_flush(show_output, "Extracting archive... ")?;
         let bin_path_in_archive = self.bin_path_in_archive();
@@ -265,4 +265,36 @@ fn println(show_output: bool, msg: &str) {
     if show_output {
         println!("{}", msg);
     }
+}
+
+#[cfg(feature = "signatures")]
+fn verify_signature(
+    archive_path: &std::path::Path,
+    keys: &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]],
+) -> crate::Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    println!("Verifying downloaded file...");
+
+    let file_name = archive_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.as_bytes())
+        .ok_or(Error::NonUTF8)?;
+    let archive_kind = crate::detect_archive(&archive_path)?;
+
+    let mut exe = std::fs::File::open(&archive_path)?;
+
+    let result = match archive_kind {
+        #[cfg(feature = "archive-tar")]
+        crate::ArchiveKind::Tar(Some(crate::Compression::Gz)) => {
+            zipsign_api::verify::verify_tar(&mut exe, keys, Some(file_name))
+        }
+        #[cfg(feature = "archive-zip")]
+        crate::ArchiveKind::Zip => zipsign_api::verify::verify_zip(&mut exe, keys, Some(file_name)),
+        archive_kind => return Err(Error::NoSignatures(archive_kind)),
+    };
+    result.map(|_| ()).map_err(Error::SignatureError)
 }

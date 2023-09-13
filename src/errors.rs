@@ -20,7 +20,12 @@ pub enum Error {
     Reqwest(reqwest::Error),
     SemVer(semver::Error),
     ArchiveNotEnabled(String),
-    NoValidSignature,
+    #[cfg(feature = "signatures")]
+    NoSignatures(crate::ArchiveKind),
+    #[cfg(feature = "signatures")]
+    SignatureError(zipsign_api::verify::Error),
+    #[cfg(feature = "signatures")]
+    NonUTF8,
 }
 
 impl std::fmt::Display for Error {
@@ -38,7 +43,14 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
-            NoValidSignature => write!(f, "No valid signature found"),
+            #[cfg(feature = "signatures")]
+            NoSignatures(kind) => {
+                write!(f, "No signature verification implemented for {:?} files", kind)
+            }
+            #[cfg(feature = "signatures")]
+            SignatureError(ref e) => write!(f, "SignatureError: {}", e),
+            #[cfg(feature = "signatures")]
+            NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
         }
     }
 }
@@ -49,23 +61,25 @@ impl std::error::Error for Error {
     }
 
     fn cause(&self) -> Option<&dyn std::error::Error> {
-        use Error::*;
         Some(match *self {
-            Io(ref e) => e,
-            Json(ref e) => e,
-            Reqwest(ref e) => e,
-            SemVer(ref e) => e,
+            Error::Io(ref e) => e,
+            Error::Json(ref e) => e,
+            Error::Reqwest(ref e) => e,
+            Error::SemVer(ref e) => e,
+            #[cfg(feature = "signatures")]
+            Error::SignatureError(ref e) => e,
             _ => return None,
         })
     }
 
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        use Error::*;
         Some(match *self {
-            Io(ref e) => e,
-            Json(ref e) => e,
-            Reqwest(ref e) => e,
-            SemVer(ref e) => e,
+            Error::Io(ref e) => e,
+            Error::Json(ref e) => e,
+            Error::Reqwest(ref e) => e,
+            Error::SemVer(ref e) => e,
+            #[cfg(feature = "signatures")]
+            Error::SignatureError(ref e) => e,
             _ => return None,
         })
     }
