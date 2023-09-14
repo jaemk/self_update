@@ -23,7 +23,7 @@ pub enum Error {
     #[cfg(feature = "signatures")]
     NoSignatures(crate::ArchiveKind),
     #[cfg(feature = "signatures")]
-    SignatureError(zipsign_api::verify::Error),
+    Signature(zipsign_api::ZipsignError),
     #[cfg(feature = "signatures")]
     NonUTF8,
 }
@@ -48,7 +48,7 @@ impl std::fmt::Display for Error {
                 write!(f, "No signature verification implemented for {:?} files", kind)
             }
             #[cfg(feature = "signatures")]
-            SignatureError(ref e) => write!(f, "SignatureError: {}", e),
+            Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
             NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
         }
@@ -60,18 +60,6 @@ impl std::error::Error for Error {
         "Self Update Error"
     }
 
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        Some(match *self {
-            Error::Io(ref e) => e,
-            Error::Json(ref e) => e,
-            Error::Reqwest(ref e) => e,
-            Error::SemVer(ref e) => e,
-            #[cfg(feature = "signatures")]
-            Error::SignatureError(ref e) => e,
-            _ => return None,
-        })
-    }
-
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match *self {
             Error::Io(ref e) => e,
@@ -79,7 +67,7 @@ impl std::error::Error for Error {
             Error::Reqwest(ref e) => e,
             Error::SemVer(ref e) => e,
             #[cfg(feature = "signatures")]
-            Error::SignatureError(ref e) => e,
+            Error::Signature(ref e) => e,
             _ => return None,
         })
     }
@@ -113,5 +101,12 @@ impl From<semver::Error> for Error {
 impl From<ZipError> for Error {
     fn from(e: ZipError) -> Error {
         Error::Zip(e)
+    }
+}
+
+#[cfg(feature = "signatures")]
+impl From<zipsign_api::ZipsignError> for Error {
+    fn from(e: zipsign_api::ZipsignError) -> Error {
+        Error::Signature(e)
     }
 }

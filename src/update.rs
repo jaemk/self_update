@@ -121,8 +121,10 @@ pub trait ReleaseUpdate {
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<String>;
 
-    #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]];
+    /// ed25519ph verifying keys to validate a download's authenticy
+    fn verifying_keys(&self) -> &[[u8; crate::PUBLIC_KEY_LENGTH]] {
+        &[]
+    }
 
     /// Construct a header with an authorisation entry if an auth token is provided
     fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
@@ -278,23 +280,36 @@ fn verify_signature(
 
     println!("Verifying downloaded file...");
 
-    let file_name = archive_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.as_bytes())
-        .ok_or(Error::NonUTF8)?;
-    let archive_kind = crate::detect_archive(&archive_path)?;
+    let archive_kind = crate::detect_archive(archive_path)?;
+    #[cfg(any(feature = "archive-tar", feature = "archive-zip"))]
+    {
+        let context = archive_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.as_bytes())
+            .ok_or(Error::NonUTF8)?;
 
-    let mut exe = std::fs::File::open(&archive_path)?;
+        let keys = keys.iter().copied().map(Ok);
+        let keys =
+            zipsign_api::verify::collect_keys(keys).map_err(zipsign_api::ZipsignError::from)?;
 
-    let result = match archive_kind {
-        #[cfg(feature = "archive-tar")]
-        crate::ArchiveKind::Tar(Some(crate::Compression::Gz)) => {
-            zipsign_api::verify::verify_tar(&mut exe, keys, Some(file_name))
+        let mut exe = std::fs::File::open(&archive_path)?;
+
+        match archive_kind {
+            #[cfg(feature = "archive-tar")]
+            crate::ArchiveKind::Tar(Some(crate::Compression::Gz)) => {
+                zipsign_api::verify::verify_tar(&mut exe, &keys, Some(context))
+                    .map_err(zipsign_api::ZipsignError::from)?;
+                return Ok(());
+            }
+            #[cfg(feature = "archive-zip")]
+            crate::ArchiveKind::Zip => {
+                zipsign_api::verify::verify_zip(&mut exe, &keys, Some(context))
+                    .map_err(zipsign_api::ZipsignError::from)?;
+                return Ok(());
+            }
+            _ => {}
         }
-        #[cfg(feature = "archive-zip")]
-        crate::ArchiveKind::Zip => zipsign_api::verify::verify_zip(&mut exe, keys, Some(file_name)),
-        archive_kind => return Err(Error::NoSignatures(archive_kind)),
-    };
-    result.map(|_| ()).map_err(Error::SignatureError)
+    }
+    Err(Error::NoSignatures(archive_kind))
 }

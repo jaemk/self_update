@@ -27,7 +27,7 @@ regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-zipsign-api = { version = "0.1.0", git = "https://github.com/Kijewski/zipsign.git", default-features = false, optional = true }
+zipsign-api = { version = "0.1.0-a.1", default-features = false, optional = true }
 
 [features]
 default = ["reqwest/default-tls"]
