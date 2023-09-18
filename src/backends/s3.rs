@@ -1,6 +1,14 @@
 /*!
 Amazon S3 releases
 */
+use std::cmp::Ordering;
+use std::env::{self, consts::EXE_SUFFIX};
+use std::path::{Path, PathBuf};
+
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use regex::Regex;
+
 use crate::{
     errors::*,
     get_target,
@@ -8,12 +16,6 @@ use crate::{
     version::bump_is_greater,
     DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
-use quick_xml::events::Event;
-use quick_xml::Reader;
-use regex::Regex;
-use std::cmp::Ordering;
-use std::env::{self, consts::EXE_SUFFIX};
-use std::path::{Path, PathBuf};
 
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
@@ -537,17 +539,7 @@ fn fetch_releases_from_s3(
 
     debug!("using api url: {:?}", api_url);
 
-    let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
-    if !resp.status().is_success() {
-        bail!(
-            Error::Network,
-            "S3 API request failed with status: {:?} - for: {:?}",
-            resp.status(),
-            api_url
-        )
-    }
-
-    let body = resp.text()?;
+    let body = crate::get(&api_url, &[])?.into_string()?;
     let mut reader = Reader::from_str(&body);
     reader.trim_text(true);
 

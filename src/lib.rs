@@ -109,7 +109,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+        .set_header(header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -126,17 +126,19 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 */
 
-pub use self_replace;
-pub use tempfile::TempDir;
-
-#[cfg(feature = "compression-flate2")]
-use either::Either;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header;
+use std::borrow::Cow;
 use std::cmp::min;
 use std::fs;
 use std::io;
 use std::path;
+use std::sync::Arc;
+
+#[cfg(feature = "compression-flate2")]
+use either::Either;
+use indicatif::{ProgressBar, ProgressStyle};
+use once_cell::sync::OnceCell;
+pub use self_replace;
+pub use tempfile::TempDir;
 
 #[macro_use]
 extern crate log;
@@ -153,6 +155,7 @@ pub const DEFAULT_PROGRESS_TEMPLATE: &str =
 pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 use errors::*;
+use ureq::AgentBuilder;
 
 /// Get the current target triple.
 ///
@@ -608,17 +611,18 @@ impl<'a> Move<'a> {
 pub struct Download {
     show_progress: bool,
     url: String,
-    headers: reqwest::header::HeaderMap,
+    headers: Vec<(&'static str, Cow<'static, str>)>,
     progress_template: String,
     progress_chars: String,
 }
+
 impl Download {
     /// Specify download url
     pub fn from_url(url: &str) -> Self {
         Self {
             show_progress: false,
             url: url.to_owned(),
-            headers: reqwest::header::HeaderMap::new(),
+            headers: vec![],
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
         }
@@ -642,18 +646,14 @@ impl Download {
     }
 
     /// Set the download request headers, replaces the existing `HeaderMap`
-    pub fn set_headers(&mut self, headers: reqwest::header::HeaderMap) -> &mut Self {
+    pub fn set_headers(&mut self, headers: Vec<(&'static str, Cow<'static, str>)>) -> &mut Self {
         self.headers = headers;
         self
     }
 
     /// Set a download request header, inserts into the existing `HeaderMap`
-    pub fn set_header(
-        &mut self,
-        name: reqwest::header::HeaderName,
-        value: reqwest::header::HeaderValue,
-    ) -> &mut Self {
-        self.headers.insert(name, value);
+    pub fn set_header(&mut self, name: &'static str, value: Cow<'static, str>) -> &mut Self {
+        self.headers.push((name, value));
         self
     }
 
@@ -669,37 +669,14 @@ impl Download {
     ///     * Writing from `BufReader`-buffer to `File`
     pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use io::BufRead;
-        let mut headers = self.headers.clone();
-        if !headers.contains_key(header::USER_AGENT) {
-            headers.insert(
-                header::USER_AGENT,
-                "rust-reqwest/self-update"
-                    .parse()
-                    .expect("invalid user-agent"),
-            );
-        }
 
-        set_ssl_vars!();
-        let resp = reqwest::blocking::Client::new()
-            .get(&self.url)
-            .headers(headers)
-            .send()?;
+        let resp = get(&self.url, &self.headers)?;
+
         let size = resp
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .map(|val| {
-                val.to_str()
-                    .map(|s| s.parse::<u64>().unwrap_or(0))
-                    .unwrap_or(0)
-            })
+            .header("content-length")
+            .map(|s| s.parse::<u64>().unwrap_or(0))
             .unwrap_or(0);
-        if !resp.status().is_success() {
-            bail!(
-                Error::Update,
-                "Download request failed with status: {:?}",
-                resp.status()
-            )
-        }
+        let resp = resp.into_reader();
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp);
@@ -738,6 +715,41 @@ impl Download {
         }
         Ok(())
     }
+}
+
+fn get(url: &str, headers: &[(&str, Cow<'_, str>)]) -> Result<ureq::Response> {
+    #[cfg(target_os = "linux")]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if std::env::var_os("SSL_CERT_FILE").is_none() {
+                std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
+            }
+            if std::env::var_os("SSL_CERT_DIR").is_none() {
+                std::env::set_var("SSL_CERT_DIR", "/etc/ssl/certs");
+            }
+        });
+    }
+
+    static TLS_CONNECTOR: OnceCell<Arc<native_tls::TlsConnector>> = OnceCell::new();
+    let tls_connector = TLS_CONNECTOR
+        .get_or_try_init::<_, native_tls::Error>(|| {
+            let tls_connector = native_tls::TlsConnector::builder()
+                .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+                .build()?;
+            Ok(Arc::new(tls_connector))
+        })?
+        .clone();
+
+    let mut req = AgentBuilder::new()
+        .tls_connector(tls_connector)
+        .build()
+        .request("GET", url)
+        .set("user-agent", "rust-reqwest/self-update");
+    for (key, value) in headers {
+        req = req.set(key, value);
+    }
+    Ok(req.call()?)
 }
 
 #[cfg(test)]

@@ -4,9 +4,8 @@ gitea releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
-
 use crate::backends::find_rel_next_link;
+use crate::update::api_headers;
 use crate::{
     errors::*,
     get_target,
@@ -154,7 +153,6 @@ impl ReleaseList {
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(self) -> Result<Vec<Release>> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
             self.host, self.repo_owner, self.repo_name
@@ -172,21 +170,17 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let resp = reqwest::blocking::Client::new()
-            .get(url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                url
-            )
-        }
-        let headers = resp.headers().clone();
+        let resp = crate::get(url, &api_headers(self.auth_token.as_deref())?)?;
 
-        let releases = resp.json::<serde_json::Value>()?;
+        // handle paged responses containing `Link` header:
+        // `Link: <https://gitea.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
+        let next_link = resp
+            .all("link")
+            .into_iter()
+            .find_map(|link| find_rel_next_link(link))
+            .map(|s| s.to_owned());
+
+        let releases = resp.into_json::<serde_json::Value>()?;
         let releases = releases
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
@@ -195,25 +189,10 @@ impl ReleaseList {
             .map(Release::from_release_gitea)
             .collect::<Result<Vec<Release>>>()?;
 
-        // handle paged responses containing `Link` header:
-        // `Link: <https://gitea.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
-        let links = headers.get_all(reqwest::header::LINK);
-
-        let next_link = links
-            .iter()
-            .filter_map(|link| {
-                if let Ok(link) = link.to_str() {
-                    find_rel_next_link(link)
-                } else {
-                    None
-                }
-            })
-            .next();
-
         Ok(match next_link {
             None => releases,
             Some(link) => {
-                releases.extend(self.fetch_releases(link)?);
+                releases.extend(self.fetch_releases(&link)?);
                 releases
             }
         })
@@ -472,46 +451,24 @@ impl Update {
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
             self.host, self.repo_owner, self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                api_url
-            )
-        }
-        let json = resp.json::<serde_json::Value>()?;
+
+        let req = crate::get(&api_url, &api_headers(self.auth_token.as_deref())?)?;
+        let json = req.into_json::<serde_json::Value>()?;
         Release::from_release_gitea(&json[0])
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases/{}",
             self.host, self.repo_owner, self.repo_name, ver
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                api_url
-            )
-        }
-        let json = resp.json::<serde_json::Value>()?;
+
+        let req = crate::get(&api_url, &api_headers(self.auth_token.as_deref())?)?;
+        let json = req.into_json::<serde_json::Value>()?;
         Release::from_release_gitea(&json)
     }
 
@@ -562,10 +519,6 @@ impl ReleaseUpdate for Update {
     fn auth_token(&self) -> Option<String> {
         self.auth_token.clone()
     }
-
-    fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
-        api_headers(auth_token)
-    }
 }
 
 impl Default for UpdateBuilder {
@@ -588,25 +541,4 @@ impl Default for UpdateBuilder {
             auth_token: None,
         }
     }
-}
-
-fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::USER_AGENT,
-        "rust-reqwest/self-update"
-            .parse()
-            .expect("gitea invalid user-agent"),
-    );
-
-    if let Some(token) = auth_token {
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("token {}", token)
-                .parse()
-                .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
-        );
-    };
-
-    Ok(headers)
 }
