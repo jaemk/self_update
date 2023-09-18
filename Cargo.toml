@@ -19,23 +19,23 @@ tar = { version = "0.4", optional = true }
 semver = "1.0"
 zip = { version = "0.6", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
-hyper = "0.14"
 indicatif = "0.17"
 quick-xml = "0.23"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
+ureq = { version = "2.7", default-features = false, features = ["gzip", "json", "native-tls"] }
+native-tls = "0.2"
+once_cell = "1"
 
 [features]
-default = ["reqwest/default-tls"]
+default = []
 archive-zip = ["zip"]
 compression-zip-bzip2 = ["zip/bzip2"]     #
 compression-zip-deflate = ["zip/deflate"] #
 archive-tar = ["tar"]
 compression-flate2 = ["flate2", "either"] #
-rustls = ["reqwest/rustls-tls"]
 
 [package.metadata.docs.rs]
 # Whether to pass `--all-features` to Cargo (default: false)

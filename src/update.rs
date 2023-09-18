@@ -1,4 +1,4 @@
-use reqwest::{self, header};
+use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 
@@ -122,19 +122,11 @@ pub trait ReleaseUpdate {
     fn auth_token(&self) -> Option<String>;
 
     /// Construct a header with an authorisation entry if an auth token is provided
-    fn api_headers(&self, auth_token: &Option<String>) -> Result<header::HeaderMap> {
-        let mut headers = header::HeaderMap::new();
-
-        if auth_token.is_some() {
-            headers.insert(
-                header::AUTHORIZATION,
-                (String::from("token ") + &auth_token.clone().unwrap())
-                    .parse()
-                    .unwrap(),
-            );
-        };
-
-        Ok(headers)
+    fn api_headers(
+        &self,
+        auth_token: Option<&str>,
+    ) -> Result<Vec<(&'static str, Cow<'static, str>)>> {
+        api_headers(auth_token)
     }
 
     /// Display release information and update the current binary to the latest release, pending
@@ -220,8 +212,8 @@ pub trait ReleaseUpdate {
 
         println(show_output, "Downloading...");
         let mut download = Download::from_url(&target_asset.download_url);
-        let mut headers = self.api_headers(&self.auth_token())?;
-        headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
+        let mut headers = self.api_headers(self.auth_token().as_deref())?;
+        headers.push(("accept", "application/octet-stream".into()));
         download.set_headers(headers);
         download.show_progress(self.show_download_progress());
 
@@ -257,5 +249,14 @@ fn print_flush(show_output: bool, msg: &str) -> Result<()> {
 fn println(show_output: bool, msg: &str) {
     if show_output {
         println!("{}", msg);
+    }
+}
+
+pub(crate) fn api_headers(
+    auth_token: Option<&str>,
+) -> Result<Vec<(&'static str, Cow<'static, str>)>> {
+    match auth_token {
+        Some(token) => Ok(vec![("authorization", format!("token {token}").into())]),
+        None => Ok(vec![]),
     }
 }
