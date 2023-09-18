@@ -17,9 +17,10 @@ pub enum Error {
     #[cfg(feature = "archive-zip")]
     Zip(ZipError),
     Json(serde_json::Error),
-    Reqwest(reqwest::Error),
     SemVer(semver::Error),
     ArchiveNotEnabled(String),
+    Isahc(isahc::Error),
+    Http(isahc::http::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -32,11 +33,12 @@ impl std::fmt::Display for Error {
             Config(ref s) => write!(f, "ConfigError: {}", s),
             Io(ref e) => write!(f, "IoError: {}", e),
             Json(ref e) => write!(f, "JsonError: {}", e),
-            Reqwest(ref e) => write!(f, "ReqwestError: {}", e),
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
+            Isahc(ref e) => write!(f, "HTTP configuration error: {}", e),
+            Http(ref e) => write!(f, "HTTP error: {}", e),
         }
     }
 }
@@ -51,7 +53,6 @@ impl std::error::Error for Error {
         Some(match *self {
             Io(ref e) => e,
             Json(ref e) => e,
-            Reqwest(ref e) => e,
             SemVer(ref e) => e,
             _ => return None,
         })
@@ -62,7 +63,6 @@ impl std::error::Error for Error {
         Some(match *self {
             Io(ref e) => e,
             Json(ref e) => e,
-            Reqwest(ref e) => e,
             SemVer(ref e) => e,
             _ => return None,
         })
@@ -81,12 +81,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(e: reqwest::Error) -> Error {
-        Error::Reqwest(e)
-    }
-}
-
 impl From<semver::Error> for Error {
     fn from(e: semver::Error) -> Error {
         Error::SemVer(e)
@@ -97,5 +91,17 @@ impl From<semver::Error> for Error {
 impl From<ZipError> for Error {
     fn from(e: ZipError) -> Error {
         Error::Zip(e)
+    }
+}
+
+impl From<isahc::Error> for Error {
+    fn from(value: isahc::Error) -> Self {
+        Self::Isahc(value)
+    }
+}
+
+impl From<isahc::http::Error> for Error {
+    fn from(value: isahc::http::Error) -> Self {
+        Self::Http(value)
     }
 }

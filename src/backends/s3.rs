@@ -1,6 +1,16 @@
 /*!
 Amazon S3 releases
 */
+use std::cmp::Ordering;
+use std::env::{self, consts::EXE_SUFFIX};
+use std::path::{Path, PathBuf};
+
+use isahc::config::{Configurable, RedirectPolicy};
+use isahc::{HttpClient, ReadResponseExt, Request};
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use regex::Regex;
+
 use crate::{
     errors::*,
     get_target,
@@ -8,12 +18,6 @@ use crate::{
     version::bump_is_greater,
     DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
-use quick_xml::events::Event;
-use quick_xml::Reader;
-use regex::Regex;
-use std::cmp::Ordering;
-use std::env::{self, consts::EXE_SUFFIX};
-use std::path::{Path, PathBuf};
 
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
@@ -537,7 +541,11 @@ fn fetch_releases_from_s3(
 
     debug!("using api url: {:?}", api_url);
 
-    let resp = reqwest::blocking::Client::new().get(&api_url).send()?;
+    let req = Request::builder()
+        .uri(&api_url)
+        .redirect_policy(RedirectPolicy::Limit(10));
+    let mut resp = HttpClient::new()?.send(req.body(())?)?;
+
     if !resp.status().is_success() {
         bail!(
             Error::Network,

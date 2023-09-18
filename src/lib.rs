@@ -109,7 +109,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
     let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+        .set_header(header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -126,17 +126,19 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
 */
 
-pub use self_replace;
-pub use tempfile::TempDir;
-
-#[cfg(feature = "compression-flate2")]
-use either::Either;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header;
 use std::cmp::min;
 use std::fs;
 use std::io;
 use std::path;
+
+#[cfg(feature = "compression-flate2")]
+use either::Either;
+use indicatif::{ProgressBar, ProgressStyle};
+use isahc::config::{Configurable, RedirectPolicy};
+use isahc::http::header;
+use isahc::{HttpClient, Request};
+pub use self_replace;
+pub use tempfile::TempDir;
 
 #[macro_use]
 extern crate log;
@@ -608,7 +610,7 @@ impl<'a> Move<'a> {
 pub struct Download {
     show_progress: bool,
     url: String,
-    headers: reqwest::header::HeaderMap,
+    headers: header::HeaderMap,
     progress_template: String,
     progress_chars: String,
 }
@@ -618,7 +620,7 @@ impl Download {
         Self {
             show_progress: false,
             url: url.to_owned(),
-            headers: reqwest::header::HeaderMap::new(),
+            headers: header::HeaderMap::new(),
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
         }
@@ -642,7 +644,7 @@ impl Download {
     }
 
     /// Set the download request headers, replaces the existing `HeaderMap`
-    pub fn set_headers(&mut self, headers: reqwest::header::HeaderMap) -> &mut Self {
+    pub fn set_headers(&mut self, headers: header::HeaderMap) -> &mut Self {
         self.headers = headers;
         self
     }
@@ -650,8 +652,8 @@ impl Download {
     /// Set a download request header, inserts into the existing `HeaderMap`
     pub fn set_header(
         &mut self,
-        name: reqwest::header::HeaderName,
-        value: reqwest::header::HeaderValue,
+        name: header::HeaderName,
+        value: header::HeaderValue,
     ) -> &mut Self {
         self.headers.insert(name, value);
         self
@@ -680,13 +682,16 @@ impl Download {
         }
 
         set_ssl_vars!();
-        let resp = reqwest::blocking::Client::new()
-            .get(&self.url)
-            .headers(headers)
-            .send()?;
+
+        let mut req = Request::builder()
+            .uri(&self.url)
+            .redirect_policy(RedirectPolicy::Limit(10));
+        req.headers_mut().unwrap().extend(headers);
+        let mut resp = HttpClient::new()?.send(req.body(())?)?;
+
         let size = resp
             .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
+            .get(header::CONTENT_LENGTH)
             .map(|val| {
                 val.to_str()
                     .map(|s| s.parse::<u64>().unwrap_or(0))
@@ -700,6 +705,7 @@ impl Download {
                 resp.status()
             )
         }
+        let resp = resp.body_mut();
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp);

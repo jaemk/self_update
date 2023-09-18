@@ -1,6 +1,7 @@
-use reqwest::{self, header};
 use std::fs;
 use std::path::PathBuf;
+
+use isahc::http::header;
 
 use crate::{confirm, errors::*, version, Download, Extract, Status};
 

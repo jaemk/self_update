@@ -4,7 +4,9 @@ Gitlab releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use isahc::config::{Configurable, RedirectPolicy};
+use isahc::http::header;
+use isahc::{HttpClient, ReadResponseExt, Request};
 
 use crate::backends::find_rel_next_link;
 use crate::{
@@ -169,10 +171,14 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let resp = reqwest::blocking::Client::new()
-            .get(url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let mut req = Request::builder()
+            .uri(url)
+            .redirect_policy(RedirectPolicy::Limit(10));
+        req.headers_mut()
+            .unwrap()
+            .extend(api_headers(&self.auth_token)?);
+        let mut resp = HttpClient::new()?.send(req.body(())?)?;
+
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -181,8 +187,6 @@ impl ReleaseList {
                 url
             )
         }
-        let headers = resp.headers().clone();
-
         let releases = resp.json::<serde_json::Value>()?;
         let releases = releases
             .as_array()
@@ -194,7 +198,7 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://gitlab.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
-        let links = headers.get_all(reqwest::header::LINK);
+        let links = resp.headers().get_all(header::LINK);
 
         let next_link = links
             .iter()
@@ -472,10 +476,15 @@ impl ReleaseUpdate for Update {
             urlencoding::encode(&self.repo_owner),
             self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+
+        let mut req = Request::builder()
+            .uri(&api_url)
+            .redirect_policy(RedirectPolicy::Limit(10));
+        req.headers_mut()
+            .unwrap()
+            .extend(api_headers(&self.auth_token)?);
+        let mut resp = HttpClient::new()?.send(req.body(())?)?;
+
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -497,10 +506,15 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+
+        let mut req = Request::builder()
+            .uri(&api_url)
+            .redirect_policy(RedirectPolicy::Limit(10));
+        req.headers_mut()
+            .unwrap()
+            .extend(api_headers(&self.auth_token)?);
+        let mut resp = HttpClient::new()?.send(req.body(())?)?;
+
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
