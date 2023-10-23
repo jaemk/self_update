@@ -154,6 +154,9 @@ pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 use errors::*;
 
+/// The length of a verifying key for `feature = "signatures"`
+pub const PUBLIC_KEY_LENGTH: usize = 32;
+
 /// Get the current target triple.
 ///
 /// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`)

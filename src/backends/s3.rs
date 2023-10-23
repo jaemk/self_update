@@ -153,6 +153,8 @@ pub struct UpdateBuilder {
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
+    #[cfg(feature = "signatures")]
+    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }
 
 impl Default for UpdateBuilder {
@@ -174,6 +176,8 @@ impl Default for UpdateBuilder {
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
+            #[cfg(feature = "signatures")]
+            verifying_keys: vec![],
         }
     }
 }
@@ -318,6 +322,24 @@ impl UpdateBuilder {
         self
     }
 
+    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticy
+    ///
+    /// Unless the feature `"signatures"` is activated, this methods does nothing.
+    /// If the feature is activated AND at least one key was provided, a download is verifying.
+    /// At least one key has to match.
+    pub fn verifying_keys(
+        &mut self,
+        keys: impl Into<Vec<[u8; crate::PUBLIC_KEY_LENGTH]>>,
+    ) -> &mut Self {
+        #[cfg(feature = "signatures")]
+        {
+            self.verifying_keys = keys.into();
+        }
+        #[cfg(not(feature = "signatures"))]
+        drop(keys);
+        self
+    }
+
     /// Confirm config and create a ready-to-use `Update`
     ///
     /// * Errors:
@@ -366,6 +388,8 @@ impl UpdateBuilder {
             show_output: self.show_output,
             no_confirm: self.no_confirm,
             auth_token: self.auth_token.clone(),
+            #[cfg(feature = "signatures")]
+            verifying_keys: self.verifying_keys.clone(),
         }))
     }
 }
@@ -389,6 +413,8 @@ pub struct Update {
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
+    #[cfg(feature = "signatures")]
+    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }
 
 impl Update {
@@ -492,6 +518,11 @@ impl ReleaseUpdate for Update {
 
     fn auth_token(&self) -> Option<String> {
         self.auth_token.clone()
+    }
+
+    #[cfg(feature = "signatures")]
+    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
+        &self.verifying_keys
     }
 }
 

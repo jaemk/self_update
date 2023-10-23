@@ -20,6 +20,12 @@ pub enum Error {
     Reqwest(reqwest::Error),
     SemVer(semver::Error),
     ArchiveNotEnabled(String),
+    #[cfg(feature = "signatures")]
+    NoSignatures(crate::ArchiveKind),
+    #[cfg(feature = "signatures")]
+    Signature(zipsign_api::ZipsignError),
+    #[cfg(feature = "signatures")]
+    NonUTF8,
 }
 
 impl std::fmt::Display for Error {
@@ -37,6 +43,14 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
+            #[cfg(feature = "signatures")]
+            NoSignatures(kind) => {
+                write!(f, "No signature verification implemented for {:?} files", kind)
+            }
+            #[cfg(feature = "signatures")]
+            Signature(ref e) => write!(f, "SignatureError: {}", e),
+            #[cfg(feature = "signatures")]
+            NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
         }
     }
 }
@@ -46,24 +60,14 @@ impl std::error::Error for Error {
         "Self Update Error"
     }
 
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        use Error::*;
-        Some(match *self {
-            Io(ref e) => e,
-            Json(ref e) => e,
-            Reqwest(ref e) => e,
-            SemVer(ref e) => e,
-            _ => return None,
-        })
-    }
-
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        use Error::*;
         Some(match *self {
-            Io(ref e) => e,
-            Json(ref e) => e,
-            Reqwest(ref e) => e,
-            SemVer(ref e) => e,
+            Error::Io(ref e) => e,
+            Error::Json(ref e) => e,
+            Error::Reqwest(ref e) => e,
+            Error::SemVer(ref e) => e,
+            #[cfg(feature = "signatures")]
+            Error::Signature(ref e) => e,
             _ => return None,
         })
     }
@@ -97,5 +101,12 @@ impl From<semver::Error> for Error {
 impl From<ZipError> for Error {
     fn from(e: ZipError) -> Error {
         Error::Zip(e)
+    }
+}
+
+#[cfg(feature = "signatures")]
+impl From<zipsign_api::ZipsignError> for Error {
+    fn from(e: zipsign_api::ZipsignError) -> Error {
+        Error::Signature(e)
     }
 }

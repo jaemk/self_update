@@ -8,7 +8,7 @@ extern crate self_update;
 
 fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("jaemk")
+        .repo_owner("Kijewski")
         .repo_name("self_update")
         .build()?
         .fetch()?;
@@ -16,7 +16,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     println!("{:#?}\n", releases);
 
     let status = self_update::backends::github::Update::configure()
-        .repo_owner("jaemk")
+        .repo_owner("Kijewski")
         .repo_name("self_update")
         .bin_name("github")
         .show_download_progress(true)
@@ -30,6 +30,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         // or prompting the user for input
         //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
         .current_version(cargo_crate_version!())
+        .verifying_keys([*include_bytes!("github-public.key")])
         .build()?
         .update()?;
     println!("Update status: `{}`!", status.version());
