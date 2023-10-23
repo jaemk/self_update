@@ -1,5 +1,9 @@
 /*!
 Example updating an executable to the latest version released via GitHub
+
+`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+
+Include `signatures` in the features list to enable zipsign verification
 */
 
 // For the `cargo_crate_version!` macro
@@ -7,16 +11,27 @@ Example updating an executable to the latest version released via GitHub
 extern crate self_update;
 
 fn run() -> Result<(), Box<dyn ::std::error::Error>> {
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("Kijewski")
-        .repo_name("self_update")
-        .build()?
-        .fetch()?;
+    let mut rel_builder = self_update::backends::github::ReleaseList::configure();
+
+    #[cfg(feature = "signatures")]
+    rel_builder.repo_owner("Kijewski");
+    #[cfg(not(feature = "signatures"))]
+    rel_builder.repo_owner("jaemk");
+
+    let releases = rel_builder.repo_name("self_update").build()?.fetch()?;
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    let status = self_update::backends::github::Update::configure()
+    let mut status_builder = self_update::backends::github::Update::configure();
+
+    #[cfg(feature = "signatures")]
+    status_builder
         .repo_owner("Kijewski")
+        .verifying_keys([*include_bytes!("github-public.key")]);
+    #[cfg(not(feature = "signatures"))]
+    status_builder.repo_owner("jaemk");
+
+    let status = status_builder
         .repo_name("self_update")
         .bin_name("github")
         .show_download_progress(true)
@@ -30,7 +45,6 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         // or prompting the user for input
         //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
         .current_version(cargo_crate_version!())
-        .verifying_keys([*include_bytes!("github-public.key")])
         .build()?
         .update()?;
     println!("Update status: `{}`!", status.version());

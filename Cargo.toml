@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "0.38.0"
+version = "0.39.0"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -10,6 +10,7 @@ readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2018"
+rust = "1.64"
 
 [dependencies]
 serde_json = "1"

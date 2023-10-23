@@ -324,19 +324,14 @@ impl UpdateBuilder {
 
     /// Specify a slice of ed25519ph verifying keys to validate a download's authenticy
     ///
-    /// Unless the feature `"signatures"` is activated, this methods does nothing.
     /// If the feature is activated AND at least one key was provided, a download is verifying.
     /// At least one key has to match.
+    #[cfg(feature = "signatures")]
     pub fn verifying_keys(
         &mut self,
-        keys: impl Into<Vec<[u8; crate::PUBLIC_KEY_LENGTH]>>,
+        keys: impl Into<Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>>,
     ) -> &mut Self {
-        #[cfg(feature = "signatures")]
-        {
-            self.verifying_keys = keys.into();
-        }
-        #[cfg(not(feature = "signatures"))]
-        drop(keys);
+        self.verifying_keys = keys.into();
         self
     }
 

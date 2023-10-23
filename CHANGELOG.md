@@ -5,6 +5,13 @@
 ### Changed
 ### Removed
 
+## [0.39.0]
+### Added
+- Add `signatures` feature to support verifying zip/tar.gz artifacts using [zipsign](https://github.com/Kijewski/zipsign)
+### Changed
+- MSRV = 1.64
+### Removed
+
 ## [0.38.0]
 ### Added
 ### Changed

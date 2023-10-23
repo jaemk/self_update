@@ -122,7 +122,8 @@ pub trait ReleaseUpdate {
     fn auth_token(&self) -> Option<String>;
 
     /// ed25519ph verifying keys to validate a download's authenticy
-    fn verifying_keys(&self) -> &[[u8; crate::PUBLIC_KEY_LENGTH]] {
+    #[cfg(feature = "signatures")]
+    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
         &[]
     }
 
@@ -293,7 +294,7 @@ fn verify_signature(
         let keys =
             zipsign_api::verify::collect_keys(keys).map_err(zipsign_api::ZipsignError::from)?;
 
-        let mut exe = std::fs::File::open(&archive_path)?;
+        let mut exe = std::fs::File::open(archive_path)?;
 
         match archive_kind {
             #[cfg(feature = "archive-tar")]

@@ -28,6 +28,7 @@ available (but _disabled_ by default):
 * `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
 * `rustls`: Use [pure rust TLS implementation](https://github.com/ctz/rustls) for network requests. This feature does _not_ support 32bit macOS;
+* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign.
 
 Please activate the feature(s) needed by your release files.
 
@@ -153,9 +154,6 @@ pub const DEFAULT_PROGRESS_TEMPLATE: &str =
 pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 use errors::*;
-
-/// The length of a verifying key for `feature = "signatures"`
-pub const PUBLIC_KEY_LENGTH: usize = 32;
 
 /// Get the current target triple.
 ///
