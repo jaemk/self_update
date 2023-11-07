@@ -9,21 +9,37 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
+    /// Used as a catch-most for when the program fails to update.
     Update(String),
+    /// Used when a web request to a repository archive fails.  
     Network(String),
+    /// If there is an issue with the most recent release (such as no
+    /// binary for the current platform), this error is returned.
     Release(String),
+    /// Used when a there is an error with setting up the configuration
+    /// for a repository archive. An example would be failing to provide the username a
+    /// repository archive is under.
     Config(String),
+    /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
     #[cfg(feature = "archive-zip")]
     Zip(ZipError),
+    /// A wrapper over a `serde_json::Error`.
     Json(serde_json::Error),
+    /// A wrapper over a `reqwest::Error`.
     Reqwest(reqwest::Error),
+    /// A wrapper over a `semver::Error`.
     SemVer(semver::Error),
+    /// Used when the `archive-zip` feature is not enabled.
     ArchiveNotEnabled(String),
+    /// Used when the repository archive does not contain any signatures to verify with.
     #[cfg(feature = "signatures")]
     NoSignatures(crate::ArchiveKind),
+    /// A wrapper over a `zipsign_api::ZipsignError`.
     #[cfg(feature = "signatures")]
     Signature(zipsign_api::ZipsignError),
+    /// Used when the path generated to store the repository archive
+    /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
     NonUTF8,
 }
