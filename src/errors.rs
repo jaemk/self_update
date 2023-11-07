@@ -22,6 +22,7 @@ pub enum Error {
     Config(String),
     /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
+    /// A wrapper over a `zip::result::ZipError`.
     #[cfg(feature = "archive-zip")]
     Zip(ZipError),
     /// A wrapper over a `serde_json::Error`.
