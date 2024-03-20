@@ -1,4 +1,5 @@
 use reqwest::{self, header};
+use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::path::PathBuf;
 
@@ -62,11 +63,12 @@ impl Release {
             .iter()
             .find(|asset| {
                 asset.name.contains(target)
-                    && if let Some(i) = identifier {
-                        asset.name.contains(i)
-                    } else {
-                        true
-                    }
+                    || (asset.name.contains(OS) && asset.name.contains(ARCH))
+                        && if let Some(i) = identifier {
+                            asset.name.contains(i)
+                        } else {
+                            true
+                        }
             })
             .cloned()
     }

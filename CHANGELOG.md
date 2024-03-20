@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- `Release::asset_for` now searches for current `OS` and `ARCH` inside `asset.name` if `target` failed to match
 ### Removed
 
 ## [0.39.0]
