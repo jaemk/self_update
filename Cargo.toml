@@ -20,8 +20,8 @@ tar = { version = "0.4", optional = true }
 semver = "1.0"
 zip = { version = "0.6", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
-hyper = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+hyper = "1"
 indicatif = "0.17"
 quick-xml = "0.23"
 regex = "1"
