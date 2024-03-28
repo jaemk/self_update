@@ -234,7 +234,7 @@ pub struct UpdateBuilder {
     identifier: Option<String>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
-    bin_path_in_archive: Option<PathBuf>,
+    bin_path_in_archive: Option<String>,
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
@@ -313,10 +313,10 @@ impl UpdateBuilder {
     /// (see `std::env::consts::EXE_SUFFIX`) to the name if it's missing.
     pub fn bin_name(&mut self, name: &str) -> &mut Self {
         let raw_bin_name = format!("{}{}", name.trim_end_matches(EXE_SUFFIX), EXE_SUFFIX);
-        self.bin_name = Some(raw_bin_name.clone());
         if self.bin_path_in_archive.is_none() {
-            self.bin_path_in_archive = Some(PathBuf::from(raw_bin_name));
+            self.bin_path_in_archive = Some(raw_bin_name.clone());
         }
+        self.bin_name = Some(raw_bin_name);
         self
     }
 
@@ -334,13 +334,20 @@ impl UpdateBuilder {
     /// the path to the binary (from the root of the tarball) is not equal to just
     /// the `bin_name`.
     ///
+    /// This also supports variable paths:
+    /// - `{{ bin }}` is replaced with the value of `bin_name`
+    /// - `{{ target }}` is replaced with the value of `target`
+    /// - `{{ version }}` is replaced with the value of `target_version` if set,
+    /// otherwise the value of the latest available release version is used.
+    ///
     /// # Example
     ///
-    /// For a tarball `myapp.tar.gz` with the contents:
+    /// For a `myapp` binary with `windows` target and latest release version `1.2.3`,
+    /// the tarball `myapp.tar.gz` has the contents:
     ///
     /// ```shell
     /// myapp.tar/
-    ///  |------- bin/
+    ///  |------- windows-1.2.3-bin/
     ///  |         |--- myapp  # <-- executable
     /// ```
     ///
@@ -350,13 +357,13 @@ impl UpdateBuilder {
     /// # use self_update::backends::github::Update;
     /// # fn run() -> Result<(), Box<::std::error::Error>> {
     /// Update::configure()
-    ///     .bin_path_in_archive("bin/myapp")
+    ///     .bin_path_in_archive("{{ target }}-{{ version }}-bin/{{ bin }}")
     /// #   .build()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn bin_path_in_archive(&mut self, bin_path: &str) -> &mut Self {
-        self.bin_path_in_archive = Some(PathBuf::from(bin_path));
+        self.bin_path_in_archive = Some(bin_path.to_owned());
         self
     }
 
@@ -447,8 +454,8 @@ impl UpdateBuilder {
                 bail!(Error::Config, "`bin_name` required")
             },
             bin_install_path,
-            bin_path_in_archive: if let Some(ref path) = self.bin_path_in_archive {
-                path.to_owned()
+            bin_path_in_archive: if let Some(ref bin_path) = self.bin_path_in_archive {
+                bin_path.to_owned()
             } else {
                 bail!(Error::Config, "`bin_path_in_archive` required")
             },
@@ -482,7 +489,7 @@ pub struct Update {
     target_version: Option<String>,
     bin_name: String,
     bin_install_path: PathBuf,
-    bin_path_in_archive: PathBuf,
+    bin_path_in_archive: String,
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
@@ -578,7 +585,7 @@ impl ReleaseUpdate for Update {
         self.bin_install_path.clone()
     }
 
-    fn bin_path_in_archive(&self) -> PathBuf {
+    fn bin_path_in_archive(&self) -> String {
         self.bin_path_in_archive.clone()
     }
 

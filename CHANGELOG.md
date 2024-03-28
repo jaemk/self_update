@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- Support variable substitutions in `bin_path_in_archive` at runtime
 ### Removed
 
 ## [0.39.0]

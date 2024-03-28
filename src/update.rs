@@ -1,6 +1,7 @@
+use regex::Regex;
 use reqwest::{self, header};
-use std::fs;
 use std::path::PathBuf;
+use std::{borrow::Cow, fs};
 
 use crate::{confirm, errors::*, version, Download, Extract, Status};
 
@@ -101,7 +102,7 @@ pub trait ReleaseUpdate {
     fn bin_install_path(&self) -> PathBuf;
 
     /// Path of the binary to be extracted from release package
-    fn bin_path_in_archive(&self) -> PathBuf;
+    fn bin_path_in_archive(&self) -> String;
 
     /// Flag indicating if progress information shall be output when downloading a release
     fn show_download_progress(&self) -> bool;
@@ -240,10 +241,16 @@ pub trait ReleaseUpdate {
         verify_signature(&tmp_archive_path, self.verifying_keys())?;
 
         print_flush(show_output, "Extracting archive... ")?;
-        let bin_path_in_archive = self.bin_path_in_archive();
+
+        let bin_path_str = Cow::Owned(self.bin_path_in_archive());
+        let bin_path_str = substitute(&bin_path_str, "version", &release.version);
+        let bin_path_str = substitute(&bin_path_str, "target", &target);
+        let bin_path_str = substitute(&bin_path_str, "bin", &bin_name);
+        let bin_path_str = bin_path_str.as_ref();
+
         Extract::from_source(&tmp_archive_path)
-            .extract_file(tmp_archive_dir.path(), &bin_path_in_archive)?;
-        let new_exe = tmp_archive_dir.path().join(&bin_path_in_archive);
+            .extract_file(tmp_archive_dir.path(), bin_path_str)?;
+        let new_exe = tmp_archive_dir.path().join(bin_path_str);
 
         println(show_output, "Done");
 
@@ -253,6 +260,14 @@ pub trait ReleaseUpdate {
 
         Ok(UpdateStatus::Updated(release))
     }
+}
+
+/// Substitute the `var` variable in a string with the given `val` value.
+///
+/// Variable format: `{{ var }}`
+fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
+    let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
+    Regex::new(&format).unwrap().replace_all(str, val)
 }
 
 // Print out message based on provided flag and flush the output buffer
