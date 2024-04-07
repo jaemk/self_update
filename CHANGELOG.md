@@ -4,6 +4,8 @@
 ### Added
 ### Changed
 - `Release::asset_for` now searches for current `OS` and `ARCH` inside `asset.name` if `target` failed to match
+- Update `reqwest` to `0.12.0`
+- Update `hyper` to `1.2.0`
 ### Removed
 
 ## [0.39.0]
