@@ -246,6 +246,15 @@ pub trait ReleaseUpdate {
         print_flush(show_output, "Extracting archive... ")?;
 
         let bin_path_str = Cow::Owned(self.bin_path_in_archive());
+
+        /// Substitute the `var` variable in a string with the given `val` value.
+        ///
+        /// Variable format: `{{ var }}`
+        fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
+            let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
+            Regex::new(&format).unwrap().replace_all(str, val)
+        }
+
         let bin_path_str = substitute(&bin_path_str, "version", &release.version);
         let bin_path_str = substitute(&bin_path_str, "target", &target);
         let bin_path_str = substitute(&bin_path_str, "bin", &bin_name);
@@ -263,14 +272,6 @@ pub trait ReleaseUpdate {
 
         Ok(UpdateStatus::Updated(release))
     }
-}
-
-/// Substitute the `var` variable in a string with the given `val` value.
-///
-/// Variable format: `{{ var }}`
-fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
-    let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
-    Regex::new(&format).unwrap().replace_all(str, val)
 }
 
 // Print out message based on provided flag and flush the output buffer
