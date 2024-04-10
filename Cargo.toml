@@ -10,7 +10,7 @@ readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2018"
-rust = "1.64"
+rust-version = "1.67"
 
 [dependencies]
 serde_json = "1"
@@ -18,7 +18,7 @@ tempfile = "3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "0.6", default-features = false, features = ["time"], optional = true }
+zip_next = { version = "1.0", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 hyper = "1"
@@ -32,9 +32,9 @@ zipsign-api = { version = "0.1.0-a.3", default-features = false, optional = true
 
 [features]
 default = ["reqwest/default-tls"]
-archive-zip = ["zip", "zipsign-api?/verify-zip"]
-compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
-compression-zip-deflate = ["archive-zip", "zip/deflate"]
+archive-zip = ["zip_next", "zipsign-api?/verify-zip"]
+compression-zip-bzip2 = ["archive-zip", "zip_next/bzip2"]
+compression-zip-deflate = ["archive-zip", "zip_next/deflate"]
 archive-tar = ["tar", "zipsign-api?/verify-tar"]
 compression-flate2 = ["archive-tar", "flate2", "either"]
 rustls = ["reqwest/rustls-tls"]

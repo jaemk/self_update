@@ -4,7 +4,7 @@ gitea releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use reqwest::header;
 
 use crate::backends::find_rel_next_link;
 use crate::{

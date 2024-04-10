@@ -47,7 +47,7 @@ which runs something roughly equivalent to:
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -70,7 +70,7 @@ and any file not matching the format, or not matching the provided prefix string
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")

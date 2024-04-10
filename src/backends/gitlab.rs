@@ -4,7 +4,7 @@ Gitlab releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use reqwest::header;
 
 use crate::backends::find_rel_next_link;
 use crate::{
@@ -72,7 +72,7 @@ pub struct ReleaseListBuilder {
 impl ReleaseListBuilder {
     /// Set the gitlab `host` url
     pub fn with_host(&mut self, host: &str) -> &mut Self {
-        self.host = host.to_owned();
+        host.clone_into(&mut self.host);
         self
     }
 
@@ -250,7 +250,7 @@ impl UpdateBuilder {
 
     /// Set the gitlab `host` url
     pub fn with_host(&mut self, host: &str) -> &mut Self {
-        self.host = host.to_owned();
+        host.clone_into(&mut self.host);
         self
     }
 

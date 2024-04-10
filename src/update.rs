@@ -1,4 +1,4 @@
-use reqwest::{self, header};
+use reqwest::header;
 use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::path::PathBuf;
