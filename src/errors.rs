@@ -3,7 +3,7 @@ Error type, conversions, and macros
 
 */
 #[cfg(feature = "archive-zip")]
-use zip::result::ZipError;
+use zip_next::result::ZipError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -48,7 +48,7 @@ impl std::fmt::Display for Error {
                 write!(f, "No signature verification implemented for {:?} files", kind)
             }
             #[cfg(feature = "signatures")]
-            Signature(ref e) => write!(f, "SignatureError: {}", e),
+            Signature(ref e) => write!(f, "SignatureError: {:?}", e),
             #[cfg(feature = "signatures")]
             NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
         }

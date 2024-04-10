@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "cargo-clippy", deny(clippy::all))]
+#![deny(clippy::all)]
 /*!
 
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
@@ -47,7 +47,7 @@ which runs something roughly equivalent to:
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -70,7 +70,7 @@ and any file not matching the format, or not matching the provided prefix string
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
@@ -415,7 +415,7 @@ impl<'a> Extract<'a> {
             }
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
-                let mut archive = zip::ZipArchive::new(source)?;
+                let mut archive = zip_next::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
 
@@ -520,8 +520,10 @@ impl<'a> Extract<'a> {
             }
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
-                let mut archive = zip::ZipArchive::new(source)?;
-                let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
+                let mut archive = zip_next::ZipArchive::new(source)?;
+                let mut file = archive
+                    .by_name(file_to_extract.to_str().unwrap())
+                    .map_err(Error::Zip)?;
 
                 let output_path = into_dir.join(file.name());
                 if let Some(parent_dir) = output_path.parent() {
@@ -745,7 +747,7 @@ impl Download {
 mod tests {
     use super::*;
     #[cfg(feature = "compression-flate2")]
-    use flate2::{self, write::GzEncoder};
+    use flate2::write::GzEncoder;
     #[allow(unused_imports)]
     use std::{
         fs::{self, File},
@@ -1084,10 +1086,10 @@ mod tests {
 
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
-                let mut zip = zip::ZipWriter::new(archive_file);
-                let options = zip::write::FileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored);
-                zip.start_file("temp.txt", options)
+                let mut zip = zip_next::ZipWriter::new(archive_file);
+                let options = zip_next::write::FileOptions::default()
+                    .compression_method(zip_next::CompressionMethod::Stored);
+                zip.start_file("temp.txt", options.clone())
                     .expect("failed starting zip file");
                 zip.write_all(b"This is a test!")
                     .expect("failed writing to zip");

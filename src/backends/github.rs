@@ -5,7 +5,7 @@ use hyper::HeaderMap;
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use reqwest::header;
 
 use crate::backends::find_rel_next_link;
 use crate::{
@@ -348,7 +348,7 @@ impl UpdateBuilder {
     ///
     /// ```
     /// # use self_update::backends::github::Update;
-    /// # fn run() -> Result<(), Box<::std::error::Error>> {
+    /// # fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     /// Update::configure()
     ///     .bin_path_in_archive("bin/myapp")
     /// #   .build()?;
