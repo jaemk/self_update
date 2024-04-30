@@ -2,6 +2,7 @@
 
 ## [unreleased]
 ### Added
+- Docs: add documentation for [`self_update::errors::Error`]
 ### Changed
 ### Removed
 
