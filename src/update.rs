@@ -64,6 +64,12 @@ impl Release {
         self.assets
             .iter()
             .find(|asset| {
+                // Skip .sha(1|256|512) checksum files
+                let extension = asset.name.split('.').last().unwrap_or_default();
+                if extension.starts_with("sha") {
+                    return false;
+                }
+
                 asset.name.contains(target)
                     || (asset.name.contains(OS) && asset.name.contains(ARCH))
                         && if let Some(i) = identifier {

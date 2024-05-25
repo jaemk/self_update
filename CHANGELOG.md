@@ -3,6 +3,7 @@
 ## [unreleased]
 ### Added
 ### Changed
+- skip `sha` (`sha1`, `sha256`, `sha512`) checksum files when determining the release asset 
 ### Removed
 
 ## [0.40.0]
