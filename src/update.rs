@@ -116,10 +116,13 @@ pub trait ReleaseUpdate {
     /// Flag indicating if the user shouldn't be prompted to confirm an update
     fn no_confirm(&self) -> bool;
 
-    // message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    /// Locale to use to display informative messages
+    fn locale(&self) -> &str;
+
+    /// message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
     fn progress_template(&self) -> String;
 
-    // progress_chars to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    /// progress_chars to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
     fn progress_chars(&self) -> String;
 
     /// Authorisation token for communicating with backend
@@ -163,18 +166,36 @@ pub trait ReleaseUpdate {
         let current_version = self.current_version();
         let target = self.target();
         let show_output = self.show_output();
-        println(show_output, &format!("Checking target-arch... {}", target));
+        let locale = self.locale();
         println(
             show_output,
-            &format!("Checking current version... v{}", current_version),
+            &t!(
+                "checking_target_architecture",
+                locale = locale,
+                target = target
+            ),
+        );
+        println(
+            show_output,
+            &t!(
+                "checking_current_version",
+                locale = locale,
+                version = current_version
+            ),
         );
 
         let release = match self.target_version() {
             None => {
-                print_flush(show_output, "Checking latest released version... ")?;
+                print_flush(
+                    show_output,
+                    &t!("checking_latest_released_version", locale = locale),
+                )?;
                 let release = self.get_latest_release()?;
                 {
-                    println(show_output, &format!("v{}", release.version));
+                    println(
+                        show_output,
+                        &t!("version", locale = locale, version = release.version),
+                    );
 
                     if !version::bump_is_greater(&current_version, &release.version)? {
                         return Ok(UpdateStatus::UpToDate);
@@ -182,26 +203,31 @@ pub trait ReleaseUpdate {
 
                     println(
                         show_output,
-                        &format!(
-                            "New release found! v{} --> v{}",
-                            current_version, release.version
+                        &t!(
+                            "new_release_found",
+                            locale = locale,
+                            current_version = current_version,
+                            release_version = release.version
                         ),
                     );
-                    let qualifier =
+                    let release_compatability_message =
                         if version::bump_is_compatible(&current_version, &release.version)? {
-                            ""
+                            "new_release_compatible"
                         } else {
-                            "*NOT* "
+                            "new_release_not_compatible"
                         };
                     println(
                         show_output,
-                        &format!("New release is {}compatible", qualifier),
+                        &t!(release_compatability_message, locale = locale),
                     );
                 }
                 release
             }
             Some(ref ver) => {
-                println(show_output, &format!("Looking for tag: {}", ver));
+                println(
+                    show_output,
+                    &t!("looking_for_tag", locale = locale, version = ver),
+                );
                 self.get_release_version(ver)?
             }
         };
@@ -209,26 +235,61 @@ pub trait ReleaseUpdate {
         let target_asset = release
             .asset_for(&target, self.identifier().as_deref())
             .ok_or_else(|| {
-                format_err!(Error::Release, "No asset found for target: `{}`", target)
+                format_err!(
+                    Error::Release,
+                    "{}",
+                    &t!(
+                        "no_asset_found_for_target",
+                        locale = locale,
+                        target = target
+                    )
+                    .to_string()
+                )
             })?;
 
         let prompt_confirmation = !self.no_confirm();
         if self.show_output() || prompt_confirmation {
-            println!("\n{} release status:", bin_name);
-            println!("  * Current exe: {:?}", bin_install_path);
-            println!("  * New exe release: {:?}", target_asset.name);
-            println!("  * New exe download url: {:?}", target_asset.download_url);
-            println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+            println!();
+            println!(
+                "{}",
+                t!("release_status", locale = locale, bin_name = bin_name)
+            );
+            println!(
+                "{}",
+                t!(
+                    "current_executable",
+                    locale = locale,
+                    executable = bin_install_path.to_string_lossy()
+                )
+            );
+            println!(
+                "{}",
+                t!(
+                    "new_executable_release",
+                    locale = locale,
+                    release = target_asset.name
+                )
+            );
+            println!(
+                "{}",
+                t!(
+                    "new_executable_download_url",
+                    locale = locale,
+                    download_url = target_asset.download_url
+                )
+            );
+            println!();
+            println!("{}", t!("release_message", locale = locale));
         }
         if prompt_confirmation {
-            confirm("Do you want to continue? [Y/n] ")?;
+            confirm("prompt_confirmation", locale)?;
         }
 
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
-        println(show_output, "Downloading...");
+        println(show_output, &t!("downloading", locale = locale));
         let mut download = Download::from_url(&target_asset.download_url);
         let mut headers = self.api_headers(&self.auth_token())?;
         headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
@@ -241,9 +302,9 @@ pub trait ReleaseUpdate {
         download.download_to(&mut tmp_archive)?;
 
         #[cfg(feature = "signatures")]
-        verify_signature(&tmp_archive_path, self.verifying_keys())?;
+        verify_signature(&tmp_archive_path, self.verifying_keys(), locale)?;
 
-        print_flush(show_output, "Extracting archive... ")?;
+        print_flush(show_output, &t!("extracting_archive", locale = locale))?;
 
         let bin_path_str = Cow::Owned(self.bin_path_in_archive());
 
@@ -264,11 +325,11 @@ pub trait ReleaseUpdate {
             .extract_file(tmp_archive_dir.path(), bin_path_str)?;
         let new_exe = tmp_archive_dir.path().join(bin_path_str);
 
-        println(show_output, "Done");
+        println(show_output, &t!("done", locale = locale));
 
-        print_flush(show_output, "Replacing binary file... ")?;
+        print_flush(show_output, &t!("replacing_binary_file", locale = locale))?;
         self_replace::self_replace(new_exe)?;
-        println(show_output, "Done");
+        println(show_output, &t!("done", locale = locale));
 
         Ok(UpdateStatus::Updated(release))
     }
@@ -293,12 +354,16 @@ fn println(show_output: bool, msg: &str) {
 fn verify_signature(
     archive_path: &std::path::Path,
     keys: &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]],
+    locale: &str,
 ) -> crate::Result<()> {
     if keys.is_empty() {
         return Ok(());
     }
 
-    println!("Verifying downloaded file...");
+    println!(
+        "{}",
+        &t!("verifying_downloaded_file", locale = locale).to_string()
+    );
 
     let archive_kind = crate::detect_archive(archive_path)?;
     #[cfg(any(feature = "archive-tar", feature = "archive-zip"))]

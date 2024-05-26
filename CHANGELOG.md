@@ -2,6 +2,7 @@
 
 ## [unreleased]
 ### Added
+- Add internationalization support and initial machine localization for 40+ languages
 ### Changed
 ### Removed
 

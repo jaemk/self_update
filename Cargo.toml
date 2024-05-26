@@ -27,6 +27,7 @@ quick-xml = "0.23"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
+rust-i18n = "3"
 self-replace = "1"
 zipsign-api = { version = "0.1.0-a.3", default-features = false, optional = true }
 
