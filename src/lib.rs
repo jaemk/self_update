@@ -1085,7 +1085,7 @@ mod tests {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut zip = zip::ZipWriter::new(archive_file);
-                let options = zip::write::FileOptions::default()
+                let options = zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored);
                 zip.start_file("temp.txt", options)
                     .expect("failed starting zip file");
