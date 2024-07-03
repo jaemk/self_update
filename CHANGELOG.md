@@ -5,6 +5,12 @@
 ### Changed
 ### Removed
 
+## [0.41.0]
+### Added
+### Changed
+- Update to zip 2.x
+### Removed
+
 ## [0.40.0]
 ### Added
 ### Changed
