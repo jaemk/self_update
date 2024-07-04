@@ -14,6 +14,7 @@ use crate::{
     update::{Release, ReleaseAsset, ReleaseUpdate},
     DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
+use crate::update::AssetMatchFn;
 
 impl ReleaseAsset {
     /// Parse a release-asset json object
@@ -232,6 +233,7 @@ pub struct UpdateBuilder {
     repo_name: Option<String>,
     target: Option<String>,
     identifier: Option<String>,
+    asset_match_fn: Option<AssetMatchFn>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<String>,
@@ -304,6 +306,14 @@ impl UpdateBuilder {
     /// If unspecified, the first asset matching the target will be chosen
     pub fn identifier(&mut self, identifier: &str) -> &mut Self {
         self.identifier = Some(identifier.to_owned());
+        self
+    }
+
+    /// Set the function to match assets
+    ///
+    /// If unspecified, the first asset matching the target will be chosen
+    pub fn asset_match_fn(&mut self, asset_match_fn: AssetMatchFn) -> &mut Self {
+        self.asset_match_fn = Some(asset_match_fn);
         self
     }
 
@@ -448,6 +458,7 @@ impl UpdateBuilder {
                 .map(|t| t.to_owned())
                 .unwrap_or_else(|| get_target().to_owned()),
             identifier: self.identifier.clone(),
+            asset_match_fn: self.asset_match_fn.clone(),
             bin_name: if let Some(ref name) = self.bin_name {
                 name.to_owned()
             } else {
@@ -485,6 +496,7 @@ pub struct Update {
     repo_name: String,
     target: String,
     identifier: Option<String>,
+    asset_match_fn: Option<AssetMatchFn>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -577,6 +589,10 @@ impl ReleaseUpdate for Update {
         self.identifier.clone()
     }
 
+    fn asset_match_fn(&self) -> Option<AssetMatchFn> {
+        self.asset_match_fn.clone()
+    }
+
     fn bin_name(&self) -> String {
         self.bin_name.clone()
     }
@@ -630,6 +646,7 @@ impl Default for UpdateBuilder {
             repo_name: None,
             target: None,
             identifier: None,
+            asset_match_fn: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,

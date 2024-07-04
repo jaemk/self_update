@@ -76,6 +76,9 @@ impl Release {
     }
 }
 
+/// Function type for determining the asset among multiple matches
+pub type AssetMatchFn = fn(&Release, &str, Option<&str>) -> Option<ReleaseAsset>;
+
 /// Updates to a specified or latest release
 pub trait ReleaseUpdate {
     /// Fetch details of the latest release from the backend
@@ -97,6 +100,9 @@ pub trait ReleaseUpdate {
     fn identifier(&self) -> Option<String> {
         None
     }
+
+    /// Optional function for determining the asset among multiple matches
+    fn asset_match_fn(&self) -> Option<AssetMatchFn>;
 
     /// Name of the binary being updated
     fn bin_name(&self) -> String;
@@ -206,11 +212,13 @@ pub trait ReleaseUpdate {
             }
         };
 
-        let target_asset = release
-            .asset_for(&target, self.identifier().as_deref())
-            .ok_or_else(|| {
-                format_err!(Error::Release, "No asset found for target: `{}`", target)
-            })?;
+        let target_asset = if let Some(asset_match_fn) = self.asset_match_fn() {
+            asset_match_fn(&release, &target, self.identifier().as_deref())
+        } else {
+            release.asset_for(&target, self.identifier().as_deref())
+        }.ok_or_else(|| {
+            format_err!(Error::Release, "No asset found for target: `{}`", target)
+        })?;
 
         let prompt_confirmation = !self.no_confirm();
         if self.show_output() || prompt_confirmation {
