@@ -14,6 +14,7 @@ use regex::Regex;
 use std::cmp::Ordering;
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
+use crate::update::AssetMatchFn;
 
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
@@ -142,6 +143,7 @@ pub struct UpdateBuilder {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    asset_match_fn: Option<AssetMatchFn>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<String>,
@@ -165,6 +167,7 @@ impl Default for UpdateBuilder {
             asset_prefix: None,
             target: None,
             region: None,
+            asset_match_fn: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
@@ -367,6 +370,7 @@ impl UpdateBuilder {
                 .as_ref()
                 .map(|t| t.to_owned())
                 .unwrap_or_else(|| get_target().to_owned()),
+            asset_match_fn: self.asset_match_fn.clone(),
             bin_name: if let Some(ref name) = self.bin_name {
                 name.to_owned()
             } else {
@@ -406,6 +410,7 @@ pub struct Update {
     region: Option<String>,
     current_version: String,
     target_version: Option<String>,
+    asset_match_fn: Option<AssetMatchFn>,
     bin_name: String,
     bin_install_path: PathBuf,
     bin_path_in_archive: String,
@@ -484,6 +489,10 @@ impl ReleaseUpdate for Update {
 
     fn target_version(&self) -> Option<String> {
         self.target_version.clone()
+    }
+
+    fn asset_match_fn(&self) -> Option<AssetMatchFn> {
+        self.asset_match_fn.clone()
     }
 
     fn bin_name(&self) -> String {
