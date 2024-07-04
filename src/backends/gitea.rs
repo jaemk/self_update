@@ -11,7 +11,7 @@ use crate::{
     errors::*,
     get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
-    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
+    DEFAULT_LOCALE, DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
 
 impl ReleaseAsset {
@@ -236,6 +236,7 @@ pub struct UpdateBuilder {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
+    locale: String,
     current_version: Option<String>,
     target_version: Option<String>,
     progress_template: String,
@@ -383,6 +384,12 @@ impl UpdateBuilder {
         self
     }
 
+    /// Locale to use to display informative messages. Defaults to `en`.
+    pub fn locale(&mut self, locale: &str) -> &mut Self {
+        self.locale = locale.to_string();
+        self
+    }
+
     /// Set the authorization token, used in requests to the gitea api url
     ///
     /// This is to support private repos where you need a gitea auth token.
@@ -461,6 +468,7 @@ impl UpdateBuilder {
             progress_chars: self.progress_chars.clone(),
             show_output: self.show_output,
             no_confirm: self.no_confirm,
+            locale: self.locale.clone(),
             auth_token: self.auth_token.clone(),
             #[cfg(feature = "signatures")]
             verifying_keys: self.verifying_keys.clone(),
@@ -483,6 +491,7 @@ pub struct Update {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
+    locale: String,
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
@@ -577,6 +586,10 @@ impl ReleaseUpdate for Update {
         self.no_confirm
     }
 
+    fn locale(&self) -> &str {
+        self.locale.as_str()
+    }
+
     fn progress_template(&self) -> String {
         self.progress_template.to_owned()
     }
@@ -612,6 +625,7 @@ impl Default for UpdateBuilder {
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
+            locale: DEFAULT_LOCALE.to_string(),
             current_version: None,
             target_version: None,
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),

@@ -6,7 +6,7 @@ use crate::{
     get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
     version::bump_is_greater,
-    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
+    DEFAULT_LOCALE, DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -148,6 +148,7 @@ pub struct UpdateBuilder {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
+    locale: String,
     current_version: Option<String>,
     target_version: Option<String>,
     progress_template: String,
@@ -171,6 +172,7 @@ impl Default for UpdateBuilder {
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
+            locale: DEFAULT_LOCALE.to_string(),
             current_version: None,
             target_version: None,
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
@@ -324,6 +326,12 @@ impl UpdateBuilder {
         self
     }
 
+    /// Locale to use to display informative messages. Defaults to `en`.
+    pub fn locale(&mut self, locale: &str) -> &mut Self {
+        self.locale = locale.to_string();
+        self
+    }
+
     pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
         self.auth_token = Some(auth_token.to_owned());
         self
@@ -389,6 +397,7 @@ impl UpdateBuilder {
             progress_chars: self.progress_chars.clone(),
             show_output: self.show_output,
             no_confirm: self.no_confirm,
+            locale: self.locale.clone(),
             auth_token: self.auth_token.clone(),
             #[cfg(feature = "signatures")]
             verifying_keys: self.verifying_keys.clone(),
@@ -412,6 +421,7 @@ pub struct Update {
     show_download_progress: bool,
     show_output: bool,
     no_confirm: bool,
+    locale: String,
     progress_template: String,
     progress_chars: String,
     auth_token: Option<String>,
@@ -508,6 +518,10 @@ impl ReleaseUpdate for Update {
 
     fn no_confirm(&self) -> bool {
         self.no_confirm
+    }
+
+    fn locale(&self) -> &str {
+        self.locale.as_str()
     }
 
     fn progress_template(&self) -> String {

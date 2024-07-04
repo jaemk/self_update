@@ -141,6 +141,8 @@ use std::path;
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate rust_i18n;
 
 #[macro_use]
 mod macros;
@@ -149,11 +151,14 @@ pub mod errors;
 pub mod update;
 pub mod version;
 
+pub const DEFAULT_LOCALE: &str = "en";
 pub const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
 pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 use errors::*;
+
+i18n!("locales", fallback = "en");
 
 /// Get the current target triple.
 ///
@@ -179,14 +184,29 @@ pub fn should_update(current: &str, latest: &str) -> Result<bool> {
 /// * Errors:
 ///     * Io flushing
 ///     * User entered anything other than enter/Y/y
-fn confirm(msg: &str) -> Result<()> {
-    print_flush!("{}", msg);
+fn confirm(msg: &str, locale: &str) -> Result<()> {
+    let prompt_yes = t!("prompt_yes", locale = locale).to_string();
+    let prompt_no = t!("prompt_no", locale = locale).to_string();
+    let prompt_options = t!(
+        "prompt_options",
+        locale = locale,
+        yes = prompt_yes,
+        no = prompt_no
+    )
+    .to_string();
+    let prompt_confirmation = t!(msg, locale = locale, prompt_options = prompt_options).to_string();
+    print_flush!("{}", prompt_confirmation);
 
+    let prompt_yes = prompt_yes.trim().to_lowercase();
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
     let s = s.trim().to_lowercase();
-    if !s.is_empty() && s != "y" {
-        bail!(Error::Update, "Update aborted");
+    if !s.is_empty() && !prompt_yes.starts_with(s.as_str()) {
+        bail!(
+            Error::Update,
+            "{}",
+            t!("update_aborted", locale = locale).to_string()
+        );
     }
     Ok(())
 }
