@@ -681,10 +681,11 @@ impl Download {
         }
 
         set_ssl_vars!();
-        let resp = reqwest::blocking::Client::new()
-            .get(&self.url)
-            .headers(headers)
-            .send()?;
+        let client = reqwest::blocking::ClientBuilder::new()
+            .use_rustls_tls()
+            .http2_adaptive_window(true)
+            .build()?;
+        let resp = client.get(&self.url).headers(headers).send()?;
         let size = resp
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)

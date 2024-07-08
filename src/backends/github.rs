@@ -174,7 +174,11 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let resp = reqwest::blocking::Client::new()
+        let client = reqwest::blocking::ClientBuilder::new()
+            .use_rustls_tls()
+            .http2_adaptive_window(true)
+            .build()?;
+        let resp = client
             .get(url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
@@ -518,7 +522,11 @@ impl ReleaseUpdate for Update {
             self.repo_owner,
             self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
+        let client = reqwest::blocking::ClientBuilder::new()
+            .use_rustls_tls()
+            .http2_adaptive_window(true)
+            .build()?;
+        let resp = client
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
@@ -545,7 +553,11 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let resp = reqwest::blocking::Client::new()
+        let client = reqwest::blocking::ClientBuilder::new()
+            .use_rustls_tls()
+            .http2_adaptive_window(true)
+            .build()?;
+        let resp = client
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)
             .send()?;
