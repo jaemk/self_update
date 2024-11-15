@@ -124,5 +124,12 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 }
 ```
 
+### Troubleshooting
+
+When using cross compilation tools such as cross if you want to use rustls and not openssl
+
+```toml
+self_update = { version = "0.27.0", features = ["rustls"], default-features = false }
+```
 
 License: MIT
