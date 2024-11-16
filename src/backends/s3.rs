@@ -456,6 +456,37 @@ impl ReleaseUpdate for Update {
         }
     }
 
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+        let releases = fetch_releases_from_s3(
+            self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+        )?;
+
+        let mut releases = releases
+            .iter()
+            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+            Ok(is_greater) => {
+                if is_greater {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            Err(_) => {
+                // Ignoring release due to an unexpected failure in parsing its version string
+                Ordering::Less
+            }
+        });
+
+        Ok(releases)
+    }
+
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         let releases = fetch_releases_from_s3(
             self.end_point,

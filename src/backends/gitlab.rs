@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use reqwest::{self, header};
 
 use crate::backends::find_rel_next_link;
+use crate::version::bump_is_greater;
 use crate::{
     errors::*,
     get_target,
@@ -512,6 +513,43 @@ impl ReleaseUpdate for Update {
         }
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release_gitlab(&json[0])
+    }
+
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+        set_ssl_vars!();
+        let api_url = format!(
+            "{}/api/v4/projects/{}%2F{}/releases",
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            self.repo_name
+        );
+        let resp = reqwest::blocking::Client::new()
+            .get(&api_url)
+            .headers(self.api_headers(&self.auth_token)?)
+            .send()?;
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                api_url
+            )
+        }
+
+        let json = resp.json::<serde_json::Value>()?;
+        json.as_array()
+            .ok_or_else(|| format_err!(Error::Release, "No releases found"))
+            .and_then(|releases| {
+                releases
+                    .iter()
+                    .map(Release::from_release_gitlab)
+                    .filter(|r| {
+                        r.as_ref().map_or(false, |r| {
+                            bump_is_greater(current_version, &r.version).unwrap_or(false)
+                        })
+                    })
+                    .collect::<Result<Vec<Release>>>()
+            })
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {

@@ -64,13 +64,13 @@ impl Release {
         self.assets
             .iter()
             .find(|asset| {
-                asset.name.contains(target)
-                    || (asset.name.contains(OS) && asset.name.contains(ARCH))
-                        && if let Some(i) = identifier {
-                            asset.name.contains(i)
-                        } else {
-                            true
-                        }
+                (asset.name.contains(target)
+                    || (asset.name.contains(OS) && asset.name.contains(ARCH)))
+                    && if let Some(i) = identifier {
+                        asset.name.contains(i)
+                    } else {
+                        true
+                    }
             })
             .cloned()
     }
@@ -80,6 +80,9 @@ impl Release {
 pub trait ReleaseUpdate {
     /// Fetch details of the latest release from the backend
     fn get_latest_release(&self) -> Result<Release>;
+
+    /// Fetch details of the latest release from the backend
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
 
     /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
@@ -172,14 +175,48 @@ pub trait ReleaseUpdate {
         let release = match self.target_version() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
-                let release = self.get_latest_release()?;
-                {
-                    println(show_output, &format!("v{}", release.version));
+                let releases = self.get_latest_releases(&current_version)?;
+                let release = {
+                    // Filter compatible version
+                    let compatible_releases = releases
+                        .iter()
+                        .filter(|r| {
+                            version::bump_is_compatible(&current_version, &r.version)
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>();
 
-                    if !version::bump_is_greater(&current_version, &release.version)? {
-                        return Ok(UpdateStatus::UpToDate);
+                    // Get the first version
+                    let release = compatible_releases.first().cloned();
+                    if let Some(release) = release {
+                        println(
+                            show_output,
+                            &format!(
+                                "v{} ({} versions compatible)",
+                                release.version,
+                                compatible_releases.len()
+                            ),
+                        );
+                        release.clone()
+                    } else {
+                        let release = releases.first();
+                        if let Some(release) = release {
+                            println(
+                                show_output,
+                                &format!(
+                                    "v{} ({} versions available)",
+                                    release.version,
+                                    releases.len()
+                                ),
+                            );
+                            release.clone()
+                        } else {
+                            return Ok(UpdateStatus::UpToDate);
+                        }
                     }
+                };
 
+                {
                     println(
                         show_output,
                         &format!(
@@ -198,6 +235,7 @@ pub trait ReleaseUpdate {
                         &format!("New release is {}compatible", qualifier),
                     );
                 }
+
                 release
             }
             Some(ref ver) => {
