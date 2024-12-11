@@ -2,6 +2,7 @@
 
 ## [unreleased]
 ### Added
+- add `UpdateBuilder::asset_match_fn` to enable custom logic for release asset matching
 ### Changed
 ### Removed
 
