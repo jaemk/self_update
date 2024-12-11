@@ -177,6 +177,7 @@ impl ReleaseList {
         let resp = reqwest::blocking::Client::new()
             .get(url)
             .headers(api_headers(&self.auth_token)?)
+            .query(&[("per_page", "100")])
             .send()?;
         if !resp.status().is_success() {
             bail!(
