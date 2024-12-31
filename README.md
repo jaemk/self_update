@@ -47,7 +47,7 @@ which runs something roughly equivalent to:
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -89,7 +89,7 @@ Separate utilities are also exposed (**NOTE**: the following example _requires_ 
 see the [features](#features) section above). The `self_replace` crate is re-exported for convenience:
 
 ```rust
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
@@ -100,7 +100,8 @@ fn update() -> Result<(), Box<::std::error::Error>> {
 
     // get the first available release
     let asset = releases[0]
-        .asset_for(&self_update::get_target()).unwrap();
+        .asset_for(&self_update::get_target(), None)
+        .unwrap();
 
     let tmp_dir = tempfile::Builder::new()
             .prefix("self_update")
@@ -131,5 +132,6 @@ When using cross compilation tools such as cross if you want to use rustls and n
 ```toml
 self_update = { version = "0.27.0", features = ["rustls"], default-features = false }
 ```
+
 
 License: MIT

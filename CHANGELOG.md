@@ -5,6 +5,16 @@
 ### Changed
 ### Removed
 
+## [0.42.0]
+### Added
+- Improved release search/lookup capability to support filtering assets by identifier
+- Improved version specifications to support prelease tags and parallel supported versions
+### Changed
+- Update reqwest features to allow http2 negotiation
+- Update quick-xml (0.37) and zipsign (0.1)
+- Specify per_page=100 when fetching github releases
+### Removed
+
 ## [0.41.0]
 ### Added
 ### Changed
