@@ -14,12 +14,17 @@ pub fn bump_is_greater(current: &str, other: &str) -> Result<bool> {
 pub fn bump_is_compatible(current: &str, other: &str) -> Result<bool> {
     let current = Version::parse(current)?;
     let other = Version::parse(other)?;
-    Ok(if other.major == 0 && current.major == 0 {
-        current.minor == other.minor && other.patch > current.patch
+    Ok(if !current.pre.is_empty() {
+        current.major == other.major
+            && ((other.minor >= current.minor)
+                || (current.minor == other.minor && other.patch >= current.patch))
+    } else if other.major == 0 && current.major == 0 {
+        current.minor == other.minor && other.patch > current.patch && other.pre.is_empty()
     } else if other.major > 0 {
         current.major == other.major
             && ((other.minor > current.minor)
                 || (current.minor == other.minor && other.patch > current.patch))
+            && other.pre.is_empty()
     } else {
         false
     })
@@ -66,9 +71,17 @@ mod test {
         assert!(!bump_is_compatible("0.2.0", "0.3.0").unwrap());
         assert!(!bump_is_compatible("0.3.0", "0.2.0").unwrap());
         assert!(!bump_is_compatible("1.2.3", "1.1.0").unwrap());
+        assert!(!bump_is_compatible("2.0.0", "2.0.0-alpha.1").unwrap());
+        assert!(!bump_is_compatible("1.2.3", "2.0.0-alpha.1").unwrap());
+        assert!(!bump_is_compatible("2.0.0-alpha.1", "3.0.0").unwrap());
+
         assert!(bump_is_compatible("1.2.0", "1.2.3").unwrap());
         assert!(bump_is_compatible("0.2.0", "0.2.3").unwrap());
         assert!(bump_is_compatible("1.2.0", "1.3.3").unwrap());
+        assert!(bump_is_compatible("2.0.0-alpha.0", "2.0.0-alpha.1").unwrap());
+        assert!(bump_is_compatible("2.0.0-alpha.0", "2.0.0").unwrap());
+        assert!(bump_is_compatible("2.0.0-alpha.0", "2.0.1").unwrap());
+        assert!(bump_is_compatible("2.0.0-alpha.0", "2.1.0").unwrap());
     }
 
     #[test]

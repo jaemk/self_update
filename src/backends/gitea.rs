@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use reqwest::{self, header};
 
 use crate::backends::find_rel_next_link;
+use crate::version::bump_is_greater;
 use crate::{
     errors::*,
     get_target,
@@ -234,6 +235,7 @@ pub struct UpdateBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
+    identifier: Option<String>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<String>,
@@ -295,6 +297,14 @@ impl UpdateBuilder {
     /// If unspecified, the build target of the crate will be used
     pub fn target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
+        self
+    }
+
+    /// Set the identifiable token for the asset in case of multiple compatible assets
+    ///
+    /// If unspecified, the first asset matching the target will be chosen
+    pub fn identifier(&mut self, identifier: &str) -> &mut Self {
+        self.identifier = Some(identifier.to_owned());
         self
     }
 
@@ -443,6 +453,7 @@ impl UpdateBuilder {
                 .as_ref()
                 .map(|t| t.to_owned())
                 .unwrap_or_else(|| get_target().to_owned()),
+            identifier: self.identifier.clone(),
             bin_name: if let Some(ref name) = self.bin_name {
                 name.to_owned()
             } else {
@@ -479,6 +490,7 @@ pub struct Update {
     repo_owner: String,
     repo_name: String,
     target: String,
+    identifier: Option<String>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -527,10 +539,45 @@ impl ReleaseUpdate for Update {
         Release::from_release_gitea(&json[0])
     }
 
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+        set_ssl_vars!();
+        let api_url = format!(
+            "{}/api/v1/repos/{}/{}/releases",
+            self.host, self.repo_owner, self.repo_name
+        );
+        let resp = reqwest::blocking::Client::new()
+            .get(&api_url)
+            .headers(self.api_headers(&self.auth_token)?)
+            .send()?;
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                api_url
+            )
+        }
+
+        let json = resp.json::<serde_json::Value>()?;
+        json.as_array()
+            .ok_or_else(|| format_err!(Error::Release, "No releases found"))
+            .and_then(|releases| {
+                releases
+                    .iter()
+                    .map(Release::from_release_gitea)
+                    .filter(|r| {
+                        r.as_ref().map_or(false, |r| {
+                            bump_is_greater(current_version, &r.version).unwrap_or(false)
+                        })
+                    })
+                    .collect::<Result<Vec<Release>>>()
+            })
+    }
+
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         set_ssl_vars!();
         let api_url = format!(
-            "{}/api/v1/repos/{}/{}/releases/{}",
+            "{}/api/v1/repos/{}/{}/releases/tags/{}",
             self.host, self.repo_owner, self.repo_name, ver
         );
         let client = reqwest::blocking::ClientBuilder::new()
@@ -563,6 +610,10 @@ impl ReleaseUpdate for Update {
 
     fn target_version(&self) -> Option<String> {
         self.target_version.clone()
+    }
+
+    fn identifier(&self) -> Option<String> {
+        self.identifier.clone()
     }
 
     fn bin_name(&self) -> String {
@@ -618,6 +669,7 @@ impl Default for UpdateBuilder {
             repo_owner: None,
             repo_name: None,
             target: None,
+            identifier: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
