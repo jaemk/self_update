@@ -582,7 +582,7 @@ fn fetch_releases_from_s3(
 
     let body = resp.text()?;
     let mut reader = Reader::from_str(&body);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
 
     // Let's now parse the response to extract the releases
     enum Tag {
@@ -607,8 +607,8 @@ fn fetch_releases_from_s3(
     let mut buf = Vec::new();
     let mut releases: Vec<Release> = vec![];
     loop {
-        match reader.read_event(&mut buf) {
-            Ok(Event::Start(ref e)) => match e.name() {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => match e.name().into_inner() {
                 b"Contents" => {
                     current_tag = Tag::Contents;
                     if let Some(release) = current_release {
@@ -622,7 +622,7 @@ fn fetch_releases_from_s3(
             },
             Ok(Event::Text(e)) => {
                 // if we cannot decode a tag text we just ignore it
-                if let Ok(txt) = e.unescape_and_decode(&reader) {
+                if let Ok(txt) = e.unescape().map(|r| r.into_owned()) {
                     match current_tag {
                         Tag::Key => {
                             let p = PathBuf::from(&txt);

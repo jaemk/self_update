@@ -23,12 +23,12 @@ either = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 hyper = "1"
 indicatif = "0.17"
-quick-xml = "0.23"
+quick-xml = "0.37"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-zipsign-api = { version = "0.1.0-a.3", default-features = false, optional = true }
+zipsign-api = { version = "0.1", default-features = false, optional = true }
 
 [features]
 default = ["reqwest/default-tls"]
