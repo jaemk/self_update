@@ -10,7 +10,7 @@ readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2018"
-rust = "1.64"
+rust-version = "1.85"
 
 [dependencies]
 serde_json = "1"
@@ -18,11 +18,11 @@ tempfile = "3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "2", default-features = false, features = ["time"], optional = true }
+zip = { version = "4", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"] }
 hyper = "1"
-indicatif = "0.17"
+indicatif = "0.18"
 quick-xml = "0.37"
 regex = "1"
 log = "0.4"
