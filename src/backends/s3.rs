@@ -657,7 +657,7 @@ fn fetch_releases_from_s3(
             },
             Ok(Event::Text(e)) => {
                 // if we cannot decode a tag text we just ignore it
-                if let Ok(txt) = e.unescape().map(|r| r.into_owned()) {
+                if let Ok(txt) = e.decode().map(|r| r.into_owned()) {
                     match current_tag {
                         Tag::Key => {
                             let p = PathBuf::from(&txt);

@@ -23,7 +23,7 @@ either = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"] }
 hyper = "1"
 indicatif = "0.18"
-quick-xml = "0.37"
+quick-xml = "0.38"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
