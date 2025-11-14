@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use reqwest::{self, header};
 
 use crate::backends::find_rel_next_link;
+use crate::client;
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
@@ -151,7 +152,6 @@ impl ReleaseList {
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(self) -> Result<Vec<Release>> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
@@ -170,10 +170,7 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(url)
             .headers(api_headers(&self.auth_token)?)
@@ -496,17 +493,13 @@ impl Update {
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
             self.repo_name
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(&api_url)
             .headers(self.api_headers(&self.auth_token)?)
@@ -524,14 +517,14 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
             self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
+        let client = client()?;
+        let resp = client
             .get(&api_url)
             .headers(self.api_headers(&self.auth_token)?)
             .send()?;
@@ -561,7 +554,6 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases/{}",
             self.host,
@@ -569,10 +561,7 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(&api_url)
             .headers(self.api_headers(&self.auth_token)?)

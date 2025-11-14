@@ -2,6 +2,7 @@
 Amazon S3 releases
 */
 use crate::{
+    client,
     errors::*,
     get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
@@ -601,10 +602,7 @@ fn fetch_releases_from_s3(
 
     debug!("using api url: {:?}", api_url);
 
-    let client = reqwest::blocking::ClientBuilder::new()
-        .use_rustls_tls()
-        .http2_adaptive_window(true)
-        .build()?;
+    let client = client()?;
     let resp = client.get(&api_url).send()?;
     if !resp.status().is_success() {
         bail!(

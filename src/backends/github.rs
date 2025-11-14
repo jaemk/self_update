@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use reqwest::{self, header};
 
 use crate::backends::find_rel_next_link;
+use crate::client;
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
@@ -154,7 +155,6 @@ impl ReleaseList {
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(self) -> Result<Vec<Release>> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.custom_url
@@ -175,10 +175,7 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(url)
             .headers(api_headers(&self.auth_token)?)
@@ -515,7 +512,6 @@ impl Update {
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases/latest",
             self.custom_url
@@ -524,10 +520,7 @@ impl ReleaseUpdate for Update {
             self.repo_owner,
             self.repo_name
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)
@@ -584,7 +577,6 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases/tags/{}",
             self.custom_url
@@ -594,10 +586,7 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client
             .get(&api_url)
             .headers(api_headers(&self.auth_token)?)

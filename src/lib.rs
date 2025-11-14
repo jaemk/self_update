@@ -200,6 +200,20 @@ fn confirm(msg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build a blocking `reqwest` client.
+/// The Rustls TLS backend is used if and only if the `rustls` feature is enabled.
+fn client() -> Result<reqwest::blocking::Client> {
+    set_ssl_vars!();
+    #[cfg(not(feature = "rustls"))]
+    let client = reqwest::blocking::ClientBuilder::new();
+    #[cfg(feature = "rustls")]
+    let client = reqwest::blocking::ClientBuilder::new().use_rustls_tls();
+    client
+        .http2_adaptive_window(true)
+        .build()
+        .map_err(Into::into)
+}
+
 /// Status returned after updating
 ///
 /// Wrapped `String`s are version tags
@@ -689,11 +703,7 @@ impl Download {
             );
         }
 
-        set_ssl_vars!();
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
+        let client = client()?;
         let resp = client.get(&self.url).headers(headers).send()?;
         let size = resp
             .headers()
