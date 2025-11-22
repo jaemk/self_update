@@ -136,6 +136,8 @@ self_update = { version = "0.27.0", features = ["rustls"], default-features = fa
 
 */
 
+#[macro_use]
+extern crate log;
 pub use self_replace;
 pub use tempfile::TempDir;
 
@@ -149,12 +151,10 @@ use std::io;
 use std::path;
 
 #[macro_use]
-extern crate log;
-
-#[macro_use]
 mod macros;
 pub mod backends;
 pub mod errors;
+pub mod restart;
 pub mod update;
 pub mod version;
 
@@ -375,8 +375,6 @@ impl<'a> Extract<'a> {
             None => detect_archive(self.source)?,
         };
 
-        // We cannot use a feature flag in a match arm. To bypass this the code block is
-        // isolated in a closure and called accordingly.
         let extract_into_plain_or_tar = |source: fs::File, compression: Option<Compression>| {
             let mut reader = Self::get_archive_reader(source, compression);
 
@@ -427,21 +425,37 @@ impl<'a> Extract<'a> {
                 let mut archive = zip::ZipArchive::new(source)?;
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
+                    let outpath = into_dir.join(file.name());
 
-                    let output_path = into_dir.join(file.name());
-                    if let Some(parent_dir) = output_path.parent() {
-                        if let Err(e) = fs::create_dir_all(parent_dir) {
-                            if e.kind() != io::ErrorKind::AlreadyExists {
-                                return Err(Error::Io(e));
+                    if file.is_dir() {
+                        // Create directories
+                        fs::create_dir_all(&outpath).map_err(Error::Io)?;
+                    } else {
+                        // Create parent directories if they don't exist
+                        if let Some(parent) = outpath.parent() {
+                            if !parent.exists() {
+                                fs::create_dir_all(parent).map_err(Error::Io)?;
                             }
                         }
+
+                        // Write the file to disk
+                        let mut outfile = fs::File::create(&outpath)?;
+                        io::copy(&mut file, &mut outfile)?;
                     }
 
-                    let mut output = fs::File::create(output_path)?;
-                    io::copy(&mut file, &mut output)?;
+                    // Set file permissions (only on Unix)
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Some(mode) = file.unix_mode() {
+                            fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))
+                                .map_err(Error::Io)?;
+                        }
+                    }
                 }
             }
         };
+
         Ok(())
     }
 

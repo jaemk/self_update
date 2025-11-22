@@ -125,6 +125,136 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+In case the application has been packaged as a bundle (using `cargo bundle` e.g. on macOS as `Application.app`), the following example can be used:
+Note that for zipped releases, the deflate feature is required:
+```toml
+features = ["archive-zip", "compression-zip-deflate"]
+```
+```rust
+const MACOS_APP_NAME: &str = "Application.app";
+
+/// method to copy the complete directory `src` to `dest` but skipping the binary `binary_name`
+/// since we have to  use `self-replace` for that.
+fn copy_dir(src: &Path, dest: &Path, binary_name: &str) -> io::Result<()> {
+    // Ensure the destination directory exists
+    if !dest.exists() {
+        fs::create_dir_all(dest)?;
+    }
+
+    // Iterate through entries in the source directory
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        if path.is_dir() {
+            // Recursively copy subdirectories
+            copy_dir(&path, &dest_path, binary_name)?;
+        } else if let Some(file_name) = path.file_name() {
+            if file_name != binary_name {
+                // Copy files except for the binary
+                fs::copy(&path, &dest_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// custom update function for use with bundles
+pub fn update(release: Release) -> Result<(), Box<dyn std::error::Error>> {
+    let releases = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .build()?
+        .fetch()?;
+    println!("found releases:");
+    println!("{:#?}\n", releases);
+
+    // get the first available release
+    let asset = releases[0]
+        .asset_for(&self_update::get_target(), None)
+        .unwrap();
+    
+    let tmp_archive_dir = tempfile::TempDir::new()?;
+    let tmp_archive_path = tmp_archive_dir.path().join(&asset.name);
+    let tmp_archive = fs::File::create(&tmp_archive_path)?;
+
+    self_update::Download::from_url(&asset.download_url)
+        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+        .download_to(&tmp_archive)?;
+
+    self_update::Extract::from_source(&tmp_archive_path).extract_into(tmp_archive_dir.path())?;
+    let new_exe = if cfg!(target_os = "windows") {
+        // only get the exe path on windows
+        let binary = env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        tmp_archive_dir.path().join(binary)
+    } else if cfg!(target_os = "macos") {
+        // get the binary path on macOS
+        let binary = env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        
+        // get the parent directory of the `Application.app` bundle
+        let app_dir = env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let app_name = app_dir
+            .clone()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let _ = copy_dir(&tmp_archive_dir.path().join(&app_name), &app_dir, &binary);
+
+        // MACOS_APP_NAME either needs to be hardcoded or extracted from the downloaded and
+        // extracted archive, but we cannot just assume that the parent directory of the
+        // currently running executable is equal to the app name - this is especially not
+        // the case if we run the code with `cargo run`.
+        tmp_archive_dir
+            .path()
+            .join(format!("{}/Contents/MacOS/{}", MACOS_APP_NAME, binary))
+    } else if cfg!(target_os = "linux") {
+        // only get the binary path from linux
+        let binary = env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        tmp_archive_dir.path().join(binary)
+    } else {
+        panic!("Running on an unsupported OS");
+    };
+    
+    // replace as usual
+    self_replace::self_replace(new_exe)?;
+    Ok(())
+}
+
+
+```
+
 ### Troubleshooting
 
 When using cross compilation tools such as cross if you want to use rustls and not openssl
