@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "cargo-clippy", deny(clippy::all))]
 /*!
 
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
@@ -142,7 +141,6 @@ pub use tempfile::TempDir;
 #[cfg(feature = "compression-flate2")]
 use either::Either;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header;
 use std::cmp::min;
 use std::fs;
 use std::io;
@@ -155,8 +153,11 @@ extern crate log;
 mod macros;
 pub mod backends;
 pub mod errors;
+mod http_client;
 pub mod update;
 pub mod version;
+
+use http_client::{header, HttpResponse};
 
 pub const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
@@ -618,7 +619,7 @@ impl<'a> Move<'a> {
 pub struct Download {
     show_progress: bool,
     url: String,
-    headers: reqwest::header::HeaderMap,
+    headers: http_client::header::HeaderMap,
     progress_template: String,
     progress_chars: String,
 }
@@ -628,7 +629,7 @@ impl Download {
         Self {
             show_progress: false,
             url: url.to_owned(),
-            headers: reqwest::header::HeaderMap::new(),
+            headers: http_client::header::HeaderMap::new(),
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
         }
@@ -652,7 +653,7 @@ impl Download {
     }
 
     /// Set the download request headers, replaces the existing `HeaderMap`
-    pub fn set_headers(&mut self, headers: reqwest::header::HeaderMap) -> &mut Self {
+    pub fn set_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
         self
     }
@@ -660,8 +661,8 @@ impl Download {
     /// Set a download request header, inserts into the existing `HeaderMap`
     pub fn set_header(
         &mut self,
-        name: reqwest::header::HeaderName,
-        value: reqwest::header::HeaderValue,
+        name: http_client::header::HeaderName,
+        value: http_client::header::HeaderValue,
     ) -> &mut Self {
         self.headers.insert(name, value);
         self
@@ -690,14 +691,11 @@ impl Download {
         }
 
         set_ssl_vars!();
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client.get(&self.url).headers(headers).send()?;
+
+        let resp = http_client::get(&self.url, headers)?;
         let size = resp
             .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
+            .get(http_client::header::CONTENT_LENGTH)
             .map(|val| {
                 val.to_str()
                     .map(|s| s.parse::<u64>().unwrap_or(0))
@@ -713,7 +711,7 @@ impl Download {
         }
         let show_progress = if size == 0 { false } else { self.show_progress };
 
-        let mut src = io::BufReader::new(resp);
+        let mut src = io::BufReader::new(resp.body());
         let mut downloaded = 0;
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
@@ -753,6 +751,9 @@ impl Download {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code, unused_mut, unused_variables)]
+    // #![warn(unused_mut)]
+
     use super::*;
     #[cfg(feature = "compression-flate2")]
     use flate2::{self, write::GzEncoder};

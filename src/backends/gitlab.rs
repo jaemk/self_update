@@ -4,7 +4,7 @@ Gitlab releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use crate::http_client::{self, header, HttpResponse};
 
 use crate::backends::find_rel_next_link;
 use crate::version::bump_is_greater;
@@ -170,14 +170,7 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -199,7 +192,7 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://gitlab.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
-        let links = headers.get_all(reqwest::header::LINK);
+        let links = headers.get_all(header::LINK);
 
         let next_link = links
             .iter()
@@ -503,14 +496,7 @@ impl ReleaseUpdate for Update {
             urlencoding::encode(&self.repo_owner),
             self.repo_name
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -531,10 +517,7 @@ impl ReleaseUpdate for Update {
             urlencoding::encode(&self.repo_owner),
             self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -569,14 +552,7 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
