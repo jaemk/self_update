@@ -1,6 +1,5 @@
 use regex::Regex;
 use std::borrow::Cow;
-use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::path::PathBuf;
 
@@ -64,8 +63,7 @@ impl Release {
         self.assets
             .iter()
             .find(|asset| {
-                (asset.name.contains(target)
-                    || (asset.name.contains(OS) && asset.name.contains(ARCH)))
+                asset.name.contains(target)
                     && if let Some(i) = identifier {
                         asset.name.contains(i)
                     } else {
