@@ -5,6 +5,7 @@
 - Docs: add documentation for [`self_update::errors::Error`]
 ### Changed
 ### Removed
+- Removed support for release assets without the full target platform in the filename
 
 ## [0.42.0]
 ### Added
