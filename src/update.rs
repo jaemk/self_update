@@ -63,14 +63,25 @@ impl Release {
     pub fn asset_for(&self, target: &str, identifier: Option<&str>) -> Option<ReleaseAsset> {
         self.assets
             .iter()
+            // first look specifically for a target with identifier
             .find(|asset| {
-                (asset.name.contains(target)
-                    || (asset.name.contains(OS) && asset.name.contains(ARCH)))
+                asset.name.contains(target)
                     && if let Some(i) = identifier {
                         asset.name.contains(i)
                     } else {
                         true
                     }
+            })
+            // otherwise look for a target for the current arch/os with identifier
+            .or_else(|| {
+                self.assets.iter().find(|asset| {
+                    (asset.name.contains(OS) && asset.name.contains(ARCH))
+                        && if let Some(i) = identifier {
+                            asset.name.contains(i)
+                        } else {
+                            true
+                        }
+                })
             })
             .cloned()
     }
