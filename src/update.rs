@@ -83,6 +83,10 @@ impl Release {
                         }
                 })
             })
+            // otherwise just with the identifier if set
+            .or_else(|| {
+                identifier.and_then(|i| self.assets.iter().find(|asset| asset.name.contains(i)))
+            })
             .cloned()
     }
 }

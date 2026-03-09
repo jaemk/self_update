@@ -42,6 +42,13 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         // you obtain it via another mechanism, such as environment variables
         // or prompting the user for input
         //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
+        //
+        // an optional `identifier` can be specified to narrow down
+        // an asset match for a target or OS-arch combination.
+        // additionally, if target/OS-arch search fails, then
+        // the identifier alone (if specified) will be used to
+        // find the asset
+        // .identifier("github-bin")
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;
