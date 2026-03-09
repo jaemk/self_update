@@ -5,6 +5,17 @@
 ### Changed
 ### Removed
 
+## [0.43.1]
+### Added
+### Changed
+- Improve `assert_for` logic to fallback to identifier-only search if
+  target/os-arch search fails
+- Fix update logic to respect `bin_install_path` when not equal to the
+  current exe. Logic was previously modified to use the `self_replace`
+  crate, but that change assumed the installation was always replacing
+  the current exe.
+### Removed
+
 ## [0.43.0]
 ### Added
 - Docs: add documentation for [`self_update::errors::Error`]
