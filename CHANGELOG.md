@@ -2,8 +2,15 @@
 
 ## [unreleased]
 ### Added
+### Changed
+### Removed
+
+## [0.43.0]
+### Added
 - Docs: add documentation for [`self_update::errors::Error`]
 ### Changed
+- Improve `assert_for` logic to prioritize searching by asset name and identifier
+  before looking for assets by OS/arch
 ### Removed
 
 ## [0.42.0]
