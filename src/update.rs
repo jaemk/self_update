@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::http_client::{self, header};
-use crate::{confirm, errors::*, version, Download, Extract, Status};
+use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
 
 /// Release asset information
 #[derive(Clone, Debug, Default)]
@@ -320,7 +320,12 @@ pub trait ReleaseUpdate {
         println(show_output, "Done");
 
         print_flush(show_output, "Replacing binary file... ")?;
-        self_replace::self_replace(new_exe)?;
+
+        if bin_install_path == std::env::current_exe()? {
+            self_replace::self_replace(new_exe)?;
+        } else {
+            Move::from_source(new_exe.as_ref()).to_dest(bin_install_path.as_ref())?;
+        }
         println(show_output, "Done");
 
         Ok(UpdateStatus::Updated(release))
