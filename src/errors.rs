@@ -47,6 +47,14 @@ pub enum Error {
     /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
     NonUTF8,
+    #[cfg(feature = "s3-auth")]
+    StdTimeError(std::time::SystemTimeError),
+    #[cfg(feature = "s3-auth")]
+    TimeError(time::error::ComponentRange),
+    #[cfg(feature = "s3-auth")]
+    Digest(hmac::digest::InvalidLength),
+    #[cfg(feature = "s3-auth")]
+    UrlParse(url::ParseError),
 }
 
 impl std::fmt::Display for Error {
@@ -75,6 +83,14 @@ impl std::fmt::Display for Error {
             Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
             NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
+            #[cfg(feature = "s3-auth")]
+            StdTimeError(ref e) => write!(f, "SystemTimeError: {}", e),
+            #[cfg(feature = "s3-auth")]
+            TimeError(ref e) => write!(f, "TimeError: {}", e),
+            #[cfg(feature = "s3-auth")]
+            Digest(ref e) => write!(f, "InvalidLength: {}", e),
+            #[cfg(feature = "s3-auth")]
+            UrlParse(ref e) => write!(f, "UrlParse: {e}"),
         }
     }
 }
@@ -143,5 +159,33 @@ impl From<ZipError> for Error {
 impl From<zipsign_api::ZipsignError> for Error {
     fn from(e: zipsign_api::ZipsignError) -> Error {
         Error::Signature(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<std::time::SystemTimeError> for Error {
+    fn from(e: std::time::SystemTimeError) -> Self {
+        Error::StdTimeError(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<hmac::digest::InvalidLength> for Error {
+    fn from(e: hmac::digest::InvalidLength) -> Self {
+        Error::Digest(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<url::ParseError> for Error {
+    fn from(e: url::ParseError) -> Self {
+        Error::UrlParse(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<time::error::ComponentRange> for Error {
+    fn from(e: time::error::ComponentRange) -> Self {
+        Error::TimeError(e)
     }
 }
