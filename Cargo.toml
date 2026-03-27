@@ -12,9 +12,18 @@ exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2018"
 rust-version = "1.85"
 
+# Can't enable all features, reqwest and ureq are mutually exclusives
 [package.metadata.docs.rs]
-# Whether to pass `--all-features` to Cargo (default: false)
-all-features = true
+features = [
+  "reqwest",
+  "default-tls",
+  "archive-zip",
+  "compression-zip-bzip2",
+  "compression-zip-deflate",
+  "archive-tar",
+  "compression-flate2",
+  "signatures",
+]
 
 [dependencies]
 serde = "1"
