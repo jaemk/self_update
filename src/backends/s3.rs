@@ -472,17 +472,21 @@ impl ReleaseUpdate for Update {
             .cloned()
             .collect::<Vec<_>>();
 
+        // The update code expects the return of get_latest_releases to be in
+        // descending order, that is, the latest release is first. (as it does a
+        // `compatible_releases.first().cloned()`)
+        // This why this is kinda reversed.
         releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
             Ok(is_greater) => {
                 if is_greater {
-                    Ordering::Greater
-                } else {
                     Ordering::Less
+                } else {
+                    Ordering::Greater
                 }
             }
             Err(_) => {
                 // Ignoring release due to an unexpected failure in parsing its version string
-                Ordering::Less
+                Ordering::Greater
             }
         });
 
