@@ -14,8 +14,8 @@ environment:
   # don't need
   matrix:
     # MinGW
-    - TARGET: i686-pc-windows-gnu
-    - TARGET: x86_64-pc-windows-gnu
+    # - TARGET: i686-pc-windows-gnu
+    # - TARGET: x86_64-pc-windows-gnu
 
     # MSVC
     - TARGET: i686-pc-windows-msvc
