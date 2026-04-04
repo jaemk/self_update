@@ -22,15 +22,41 @@ const MAX_KEYS: u8 = 100;
 
 /// The service end point.
 ///
-/// Currently S3, GCS, and DigitalOcean Spaces supported.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum EndPoint {
+    /// Short for `https://<bucket>.s3.<region>.amazonaws.com/`
     #[default]
     S3,
+    /// Short for `https://<bucket>.s3.dualstack.<region>.amazonaws.com/`
     S3DualStack,
+    /// Short for `https://storage.googleapis.com/<bucket>/`
     GCS,
+    /// Short for `https://<bucket>.<region>.digitaloceanspaces.com/`
     DigitalOceanSpaces,
+    /// Generic, for other s3 compatible providers
+    Generic {
+        /// The full URL of the end point. For example:
+        ///
+        /// - `https://bucket.s3.example.com/`
+        /// - `https://s3.example.com/bucket/`
+        end_point: String,
+    },
+}
+
+impl From<&str> for EndPoint {
+    fn from(value: &str) -> Self {
+        Self::Generic {
+            end_point: value.to_owned(),
+        }
+    }
+}
+
+impl From<String> for EndPoint {
+    fn from(value: String) -> Self {
+        Self::Generic { end_point: value }
+    }
 }
 
 /// `ReleaseList` Builder
@@ -63,8 +89,8 @@ impl ReleaseListBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
-        self.end_point = end_point;
+    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
+        self.end_point = end_point.into();
         self
     }
 
@@ -77,7 +103,7 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
-            end_point: self.end_point,
+            end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -117,7 +143,7 @@ impl ReleaseList {
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(&self) -> Result<Vec<Release>> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -192,8 +218,8 @@ impl UpdateBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
-        self.end_point = end_point;
+    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
+        self.end_point = end_point.into();
         self
     }
 
@@ -356,7 +382,7 @@ impl UpdateBuilder {
         };
 
         Ok(Box::new(Update {
-            end_point: self.end_point,
+            end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -431,7 +457,7 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -460,7 +486,7 @@ impl ReleaseUpdate for Update {
 
     fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -495,7 +521,7 @@ impl ReleaseUpdate for Update {
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -570,7 +596,7 @@ impl ReleaseUpdate for Update {
 ///
 /// This will strip the prefix from provided file names, allowing use with subdirectories
 fn fetch_releases_from_s3(
-    end_point: EndPoint,
+    end_point: &EndPoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
@@ -595,10 +621,14 @@ fn fetch_releases_from_s3(
             bucket_name, region?
         ),
         EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
+        EndPoint::Generic { ref end_point } => end_point.clone(),
     };
 
     let api_url = match end_point {
-        EndPoint::S3 | EndPoint::S3DualStack | EndPoint::DigitalOceanSpaces => format!(
+        EndPoint::S3
+        | EndPoint::S3DualStack
+        | EndPoint::DigitalOceanSpaces
+        | EndPoint::Generic { .. } => format!(
             "{}?list-type=2&max-keys={}{}",
             download_base_url, MAX_KEYS, prefix
         ),
