@@ -5,6 +5,14 @@
 ### Changed
 ### Removed
 
+## [0.44.0]
+### Added
+- *(s3)* support generic S3 endpoints ([#171](https://github.com/jaemk/self_update/pull/171))
+### Changed
+- *(s3)* fix reverse release ordering ([#173](https://github.com/jaemk/self_update/pull/173))
+- *(deps)* update reqwest to 0.13 ([#175](https://github.com/jaemk/self_update/pull/175))
+### Removed
+
 ## [0.43.1]
 ### Added
 ### Changed
