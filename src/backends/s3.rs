@@ -68,9 +68,7 @@ pub struct ReleaseListBuilder {
     target: Option<String>,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
-    access_key_id: Option<String>,
-    #[cfg(feature = "s3-auth")]
-    secret_access_key: Option<String>,
+    access_key: Option<auth::AccessKey>,
 }
 
 impl ReleaseListBuilder {
@@ -105,16 +103,9 @@ impl ReleaseListBuilder {
     }
 
     #[cfg(feature = "s3-auth")]
-    /// Set the access key id
-    pub fn access_key_id(&mut self, access_key_id: &str) -> &mut Self {
-        self.access_key_id = Some(access_key_id.to_owned());
-        self
-    }
-
-    #[cfg(feature = "s3-auth")]
-    /// Set the secret access key
-    pub fn secret_access_key(&mut self, secret_access_key: &str) -> &mut Self {
-        self.secret_access_key = Some(secret_access_key.to_owned());
+    /// Set the access key
+    pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
+        self.access_key = Some(access_key.into());
         self
     }
 
@@ -131,9 +122,7 @@ impl ReleaseListBuilder {
             asset_prefix: self.asset_prefix.clone(),
             target: self.target.clone(),
             #[cfg(feature = "s3-auth")]
-            access_key_id: self.access_key_id.clone(),
-            #[cfg(feature = "s3-auth")]
-            secret_access_key: self.secret_access_key.clone(),
+            access_key: self.access_key.clone(),
         })
     }
 }
@@ -148,9 +137,7 @@ pub struct ReleaseList {
     target: Option<String>,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
-    access_key_id: Option<String>,
-    #[cfg(feature = "s3-auth")]
-    secret_access_key: Option<String>,
+    access_key: Option<auth::AccessKey>,
 }
 
 impl ReleaseList {
@@ -163,9 +150,7 @@ impl ReleaseList {
             target: None,
             region: None,
             #[cfg(feature = "s3-auth")]
-            access_key_id: None,
-            #[cfg(feature = "s3-auth")]
-            secret_access_key: None,
+            access_key: None,
         }
     }
 
@@ -178,9 +163,7 @@ impl ReleaseList {
             &self.region,
             &self.asset_prefix,
             #[cfg(feature = "s3-auth")]
-            &self.access_key_id,
-            #[cfg(feature = "s3-auth")]
-            &self.secret_access_key,
+            &self.access_key,
         )?;
         let releases = match self.target {
             None => releases,
@@ -205,9 +188,7 @@ pub struct UpdateBuilder {
     target: Option<String>,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
-    access_key_id: Option<String>,
-    #[cfg(feature = "s3-auth")]
-    secret_access_key: Option<String>,
+    access_key: Option<auth::AccessKey>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<String>,
@@ -232,9 +213,7 @@ impl Default for UpdateBuilder {
             target: None,
             region: None,
             #[cfg(feature = "s3-auth")]
-            access_key_id: None,
-            #[cfg(feature = "s3-auth")]
-            secret_access_key: None,
+            access_key: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
@@ -285,15 +264,8 @@ impl UpdateBuilder {
 
     #[cfg(feature = "s3-auth")]
     /// Set the access key id
-    pub fn access_key_id(&mut self, access_key_id: &str) -> &mut Self {
-        self.access_key_id = Some(access_key_id.to_owned());
-        self
-    }
-
-    #[cfg(feature = "s3-auth")]
-    /// Set the secret access key
-    pub fn secret_access_key(&mut self, secret_access_key: &str) -> &mut Self {
-        self.secret_access_key = Some(secret_access_key.to_owned());
+    pub fn access_key_id(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
+        self.access_key = Some(access_key.into());
         self
     }
 
@@ -446,9 +418,7 @@ impl UpdateBuilder {
             },
             region: self.region.clone(),
             #[cfg(feature = "s3-auth")]
-            access_key_id: self.access_key_id.clone(),
-            #[cfg(feature = "s3-auth")]
-            secret_access_key: self.secret_access_key.clone(),
+            access_key: self.access_key.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self
                 .target
@@ -493,9 +463,7 @@ pub struct Update {
     target: String,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
-    access_key_id: Option<String>,
-    #[cfg(feature = "s3-auth")]
-    secret_access_key: Option<String>,
+    access_key: Option<auth::AccessKey>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -526,9 +494,7 @@ impl ReleaseUpdate for Update {
             &self.region,
             &self.asset_prefix,
             #[cfg(feature = "s3-auth")]
-            &self.access_key_id,
-            #[cfg(feature = "s3-auth")]
-            &self.secret_access_key,
+            &self.access_key,
         )?;
         let rel = releases
             .iter()
@@ -559,9 +525,7 @@ impl ReleaseUpdate for Update {
             &self.region,
             &self.asset_prefix,
             #[cfg(feature = "s3-auth")]
-            &self.access_key_id,
-            #[cfg(feature = "s3-auth")]
-            &self.secret_access_key,
+            &self.access_key,
         )?;
 
         let mut releases = releases
@@ -598,9 +562,7 @@ impl ReleaseUpdate for Update {
             &self.region,
             &self.asset_prefix,
             #[cfg(feature = "s3-auth")]
-            &self.access_key_id,
-            #[cfg(feature = "s3-auth")]
-            &self.secret_access_key,
+            &self.access_key,
         )?;
         let rel = releases.iter().find(|x| x.version == ver);
         match rel {
@@ -681,6 +643,30 @@ mod auth {
     use time::OffsetDateTime;
     use url::Url;
 
+    #[derive(Clone, Debug)]
+    pub struct AccessKey {
+        pub access_key_id: String,
+        pub secret_access_key: String,
+    }
+
+    impl From<(&str, &str)> for AccessKey {
+        fn from(value: (&str, &str)) -> Self {
+            Self {
+                access_key_id: value.0.to_owned(),
+                secret_access_key: value.1.to_owned(),
+            }
+        }
+    }
+
+    impl From<(String, String)> for AccessKey {
+        fn from(value: (String, String)) -> Self {
+            Self {
+                access_key_id: value.0,
+                secret_access_key: value.1,
+            }
+        }
+    }
+
     // NON_ALPHANUMERIC Encodes everything except A-Z, a-z, 0-9.
     // Remove the last 4 reserved characters that AWS doesn't encode: - . _ ~
     const URI_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
@@ -737,13 +723,12 @@ mod auth {
     pub fn s3_signature_v4(
         url_str: &str,
         region: &Option<String>,
-        access_key_id: &Option<String>,
-        secret_access_key: &Option<String>,
+        access_key: &Option<AccessKey>,
         ttl_secs: u64,
     ) -> Result<String> {
-        let (access_key_id, secret_access_key) = match (access_key_id, secret_access_key) {
-            (Some(access_key_id), Some(secret_access_key)) => (access_key_id, secret_access_key),
-            _ => return Ok(url_str.to_owned()),
+        let (access_key_id, secret_access_key) = match access_key {
+            Some(access_key) => (&access_key.access_key_id, &access_key.secret_access_key),
+            None => return Ok(url_str.to_owned()),
         };
         let url = Url::parse(url_str)?;
         let host = url
@@ -819,8 +804,7 @@ fn fetch_releases_from_s3(
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
-    #[cfg(feature = "s3-auth")] access_key_id: &Option<String>,
-    #[cfg(feature = "s3-auth")] secret_access_key: &Option<String>,
+    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<Vec<Release>> {
     let prefix = match asset_prefix {
         Some(prefix) => format!("&prefix={}", prefix),
@@ -860,7 +844,7 @@ fn fetch_releases_from_s3(
     };
 
     #[cfg(feature = "s3-auth")]
-    let api_url = auth::s3_signature_v4(&api_url, region, access_key_id, secret_access_key, 300)?;
+    let api_url = auth::s3_signature_v4(&api_url, region, access_key, 300)?;
 
     debug!("using api url: {:?}", api_url);
 
@@ -933,13 +917,8 @@ fn fetch_releases_from_s3(
                                 let download_url = format!("{}{}", download_base_url, txt);
 
                                 #[cfg(feature = "s3-auth")]
-                                let download_url = auth::s3_signature_v4(
-                                    &download_url,
-                                    region,
-                                    access_key_id,
-                                    secret_access_key,
-                                    300,
-                                )?;
+                                let download_url =
+                                    auth::s3_signature_v4(&download_url, region, access_key, 300)?;
 
                                 release.assets = vec![ReleaseAsset {
                                     name: exe_name.to_string(),
