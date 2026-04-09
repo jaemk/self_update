@@ -174,10 +174,13 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let resp = http_client::get(
-            &format!("{url}?per_page=100"),
-            api_headers(&self.auth_token)?,
-        )?;
+        let request_url = if url.contains('?') {
+            // Pagination URL from Link header — already has query params
+            url.to_string()
+        } else {
+            format!("{url}?per_page=100")
+        };
+        let resp = http_client::get(&request_url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
