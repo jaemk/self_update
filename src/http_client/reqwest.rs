@@ -6,12 +6,18 @@ use super::{HeaderMap, HttpResponse};
 use crate::{Error, Result};
 
 pub fn get(url: &str, headers: HeaderMap) -> Result<impl HttpResponse> {
+    use std::time::Duration;
+
     let client_builder = reqwest::blocking::ClientBuilder::new();
 
     #[cfg(feature = "rustls")]
     let client_builder = client_builder.use_rustls_tls();
 
-    let client = client_builder.http2_adaptive_window(true).build()?;
+    let client = client_builder
+        .http2_adaptive_window(true)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .build()?;
     let resp = client.get(url).headers(headers).send()?;
 
     if !resp.status().is_success() {
