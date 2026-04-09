@@ -78,6 +78,7 @@ fn update() -> Result<(), Box<::std::error::Error>> {
         .asset_prefix("something/self_update")
         .region("eu-west-2")
         .bin_name("self_update_example")
+        // .access_key((env!("AWS_ACCESS_KEY_ID"), env!("AWS_SECRET_ACCESS_KEY")))
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
         .build()?
