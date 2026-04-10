@@ -175,7 +175,7 @@ impl ReleaseList {
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
         let request_url = if url.contains('?') {
-            // Pagination URL from Link header — already has query params
+            // Pagination URL from Link header - already has query params
             url.to_string()
         } else {
             format!("{url}?per_page=100")
