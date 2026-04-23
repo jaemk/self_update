@@ -226,6 +226,7 @@ pub trait ReleaseUpdate {
                             );
                             release.clone()
                         } else {
+                            println(show_output, "up-to-date.");
                             return Ok(UpdateStatus::UpToDate);
                         }
                     }
