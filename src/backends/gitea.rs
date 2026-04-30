@@ -4,9 +4,8 @@ gitea releases
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
-
 use crate::backends::find_rel_next_link;
+use crate::http_client::{self, header, HttpResponse};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
@@ -173,14 +172,7 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -202,7 +194,7 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://gitea.com/api/v4/projects/13083/releases?id=13083&page=2&per_page=20>; rel="next"`
-        let links = headers.get_all(reqwest::header::LINK);
+        let links = headers.get_all(http_client::header::LINK);
 
         let next_link = links
             .iter()
@@ -408,7 +400,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticy
+    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity
     ///
     /// If the feature is activated AND at least one key was provided, a download is verifying.
     /// At least one key has to match.
@@ -519,14 +511,7 @@ impl ReleaseUpdate for Update {
             "{}/api/v1/repos/{}/{}/releases",
             self.host, self.repo_owner, self.repo_name
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -545,10 +530,7 @@ impl ReleaseUpdate for Update {
             "{}/api/v1/repos/{}/{}/releases",
             self.host, self.repo_owner, self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -580,14 +562,7 @@ impl ReleaseUpdate for Update {
             "{}/api/v1/repos/{}/{}/releases/tags/{}",
             self.host, self.repo_owner, self.repo_name, ver
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(self.api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, self.api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,

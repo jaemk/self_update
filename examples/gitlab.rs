@@ -2,9 +2,7 @@
 Example updating an executable to the latest version released via Gitlab
 */
 
-// For the `cargo_crate_version!` macro
-#[macro_use]
-extern crate self_update;
+use self_update::cargo_crate_version;
 
 fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     let releases = self_update::backends::gitlab::ReleaseList::configure()

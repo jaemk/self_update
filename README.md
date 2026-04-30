@@ -2,7 +2,6 @@
 
 
 [![Build status](https://ci.appveyor.com/api/projects/status/xlkq8rd73cla4ixw/branch/master?svg=true)](https://ci.appveyor.com/project/jaemk/self-update/branch/master)
-[![Build Status](https://travis-ci.org/jaemk/self_update.svg?branch=master)](https://travis-ci.org/jaemk/self_update)
 [![crates.io:clin](https://img.shields.io/crates/v/self_update.svg?label=self_update)](https://crates.io/crates/self_update)
 [![docs](https://docs.rs/self_update/badge.svg)](https://docs.rs/self_update)
 
@@ -61,7 +60,8 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Amazon S3, Google GCS, and DigitalOcean Spaces are also supported through the `S3` backend to check for new releases. Provided a `bucket_name`
+Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
+through the `S3` backend to check for new releases.  Provided a `bucket_name`
 and `asset_prefix` string, `self_update` will look up all matching files using the following format
 as a convention for the filenames: `[directory/]<asset name>-<semver>-<platform/target>.<extension>`.
 Leading directories will be stripped from the file name allowing the use of subdirectories in the S3 bucket,
@@ -72,10 +72,13 @@ use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
+        // .end_point(self_update::backends::s3::EndPoint::GCS)
+        // .end_point("https://s3.example.com")
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
         .region("eu-west-2")
         .bin_name("self_update_example")
+        // .access_key((env!("AWS_ACCESS_KEY_ID"), env!("AWS_SECRET_ACCESS_KEY")))
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
         .build()?

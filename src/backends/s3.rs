@@ -1,6 +1,7 @@
 /*!
 Amazon S3 releases
 */
+use crate::http_client::{self, HttpResponse};
 use crate::{
     errors::*,
     get_target,
@@ -8,6 +9,7 @@ use crate::{
     version::bump_is_greater,
     DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
+use log::debug;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
@@ -20,15 +22,41 @@ const MAX_KEYS: u8 = 100;
 
 /// The service end point.
 ///
-/// Currently S3, GCS, and DigitalOcean Spaces supported.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum EndPoint {
+    /// Short for `https://<bucket>.s3.<region>.amazonaws.com/`
     #[default]
     S3,
+    /// Short for `https://<bucket>.s3.dualstack.<region>.amazonaws.com/`
     S3DualStack,
+    /// Short for `https://storage.googleapis.com/<bucket>/`
     GCS,
+    /// Short for `https://<bucket>.<region>.digitaloceanspaces.com/`
     DigitalOceanSpaces,
+    /// Generic, for other s3 compatible providers
+    Generic {
+        /// The full URL of the end point. For example:
+        ///
+        /// - `https://bucket.s3.example.com/`
+        /// - `https://s3.example.com/bucket/`
+        end_point: String,
+    },
+}
+
+impl From<&str> for EndPoint {
+    fn from(value: &str) -> Self {
+        Self::Generic {
+            end_point: value.to_owned(),
+        }
+    }
+}
+
+impl From<String> for EndPoint {
+    fn from(value: String) -> Self {
+        Self::Generic { end_point: value }
+    }
 }
 
 /// `ReleaseList` Builder
@@ -39,6 +67,8 @@ pub struct ReleaseListBuilder {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    #[cfg(feature = "s3-auth")]
+    access_key: Option<auth::AccessKey>,
 }
 
 impl ReleaseListBuilder {
@@ -61,8 +91,8 @@ impl ReleaseListBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
-        self.end_point = end_point;
+    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
+        self.end_point = end_point.into();
         self
     }
 
@@ -72,10 +102,17 @@ impl ReleaseListBuilder {
         self
     }
 
+    #[cfg(feature = "s3-auth")]
+    /// Set the access key
+    pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
+        self.access_key = Some(access_key.into());
+        self
+    }
+
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         Ok(ReleaseList {
-            end_point: self.end_point,
+            end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -84,6 +121,8 @@ impl ReleaseListBuilder {
             region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self.target.clone(),
+            #[cfg(feature = "s3-auth")]
+            access_key: self.access_key.clone(),
         })
     }
 }
@@ -97,6 +136,8 @@ pub struct ReleaseList {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    #[cfg(feature = "s3-auth")]
+    access_key: Option<auth::AccessKey>,
 }
 
 impl ReleaseList {
@@ -108,6 +149,8 @@ impl ReleaseList {
             asset_prefix: None,
             target: None,
             region: None,
+            #[cfg(feature = "s3-auth")]
+            access_key: None,
         }
     }
 
@@ -115,10 +158,12 @@ impl ReleaseList {
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(&self) -> Result<Vec<Release>> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
         )?;
         let releases = match self.target {
             None => releases,
@@ -142,6 +187,8 @@ pub struct UpdateBuilder {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    #[cfg(feature = "s3-auth")]
+    access_key: Option<auth::AccessKey>,
     bin_name: Option<String>,
     bin_install_path: Option<PathBuf>,
     bin_path_in_archive: Option<String>,
@@ -165,6 +212,8 @@ impl Default for UpdateBuilder {
             asset_prefix: None,
             target: None,
             region: None,
+            #[cfg(feature = "s3-auth")]
+            access_key: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
@@ -190,8 +239,8 @@ impl UpdateBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: EndPoint) -> &mut Self {
-        self.end_point = end_point;
+    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
+        self.end_point = end_point.into();
         self
     }
 
@@ -210,6 +259,13 @@ impl UpdateBuilder {
     /// Set the S3 region used in the download url
     pub fn region(&mut self, region: &str) -> &mut Self {
         self.region = Some(region.to_owned());
+        self
+    }
+
+    #[cfg(feature = "s3-auth")]
+    /// Set the access key id
+    pub fn access_key_id(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
+        self.access_key = Some(access_key.into());
         self
     }
 
@@ -329,7 +385,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticy
+    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity
     ///
     /// If the feature is activated AND at least one key was provided, a download is verifying.
     /// At least one key has to match.
@@ -354,13 +410,15 @@ impl UpdateBuilder {
         };
 
         Ok(Box::new(Update {
-            end_point: self.end_point,
+            end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
                 bail!(Error::Config, "`bucket_name` required")
             },
             region: self.region.clone(),
+            #[cfg(feature = "s3-auth")]
+            access_key: self.access_key.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self
                 .target
@@ -404,6 +462,8 @@ pub struct Update {
     asset_prefix: Option<String>,
     target: String,
     region: Option<String>,
+    #[cfg(feature = "s3-auth")]
+    access_key: Option<auth::AccessKey>,
     current_version: String,
     target_version: Option<String>,
     bin_name: String,
@@ -429,10 +489,12 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
         )?;
         let rel = releases
             .iter()
@@ -458,10 +520,12 @@ impl ReleaseUpdate for Update {
 
     fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
         )?;
 
         let mut releases = releases
@@ -470,17 +534,21 @@ impl ReleaseUpdate for Update {
             .cloned()
             .collect::<Vec<_>>();
 
+        // The update code expects the return of get_latest_releases to be in
+        // descending order, that is, the latest release is first. (as it does a
+        // `compatible_releases.first().cloned()`)
+        // This why this is kinda reversed.
         releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
             Ok(is_greater) => {
                 if is_greater {
-                    Ordering::Greater
-                } else {
                     Ordering::Less
+                } else {
+                    Ordering::Greater
                 }
             }
             Err(_) => {
                 // Ignoring release due to an unexpected failure in parsing its version string
-                Ordering::Less
+                Ordering::Greater
             }
         });
 
@@ -489,10 +557,12 @@ impl ReleaseUpdate for Update {
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         let releases = fetch_releases_from_s3(
-            self.end_point,
+            &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
         )?;
         let rel = releases.iter().find(|x| x.version == ver);
         match rel {
@@ -559,53 +629,226 @@ impl ReleaseUpdate for Update {
     }
 }
 
+/// Generate S3 auth parameters
+#[cfg(feature = "s3-auth")]
+mod auth {
+    use crate::errors::*;
+    use hmac::{Hmac, Mac};
+    use percent_encoding::{utf8_percent_encode, AsciiSet, PercentEncode, NON_ALPHANUMERIC};
+    use sha2::{Digest, Sha256};
+    use std::{
+        borrow::Cow,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use time::OffsetDateTime;
+    use url::Url;
+
+    #[derive(Clone, Debug)]
+    pub struct AccessKey {
+        pub access_key_id: String,
+        pub secret_access_key: String,
+    }
+
+    impl From<(&str, &str)> for AccessKey {
+        fn from(value: (&str, &str)) -> Self {
+            Self {
+                access_key_id: value.0.to_owned(),
+                secret_access_key: value.1.to_owned(),
+            }
+        }
+    }
+
+    impl From<(String, String)> for AccessKey {
+        fn from(value: (String, String)) -> Self {
+            Self {
+                access_key_id: value.0,
+                secret_access_key: value.1,
+            }
+        }
+    }
+
+    // NON_ALPHANUMERIC Encodes everything except A-Z, a-z, 0-9.
+    // Remove the last 4 reserved characters that AWS doesn't encode: - . _ ~
+    const URI_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+
+    // AWS doesn't encode the slash character in the canonical URI, but it does
+    // encode it in query parameters
+    const URI_ENCODE_KEEP_SLASH: &AsciiSet = &URI_ENCODE.remove(b'/');
+
+    // Encode a string for use in AWS S3 signature v4, encoding reserved
+    // characters and optionally the slash character
+    fn uri_encode(input: &str, encode_slash: bool) -> PercentEncode<'_> {
+        let set = if encode_slash {
+            URI_ENCODE
+        } else {
+            URI_ENCODE_KEEP_SLASH
+        };
+        utf8_percent_encode(input, set)
+    }
+
+    fn hex_sha256(data: &[u8]) -> String {
+        let hash = Sha256::digest(data);
+        hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key)?;
+        mac.update(data);
+        Ok(mac.finalize().into_bytes().to_vec())
+    }
+
+    fn derive_signing_key(secret: &str, date_stamp: &str, region: &str) -> Result<Vec<u8>> {
+        let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date_stamp.as_bytes())?;
+        let k_region = hmac_sha256(&k_date, region.as_bytes())?;
+        let k_service = hmac_sha256(&k_region, b"s3")?;
+        hmac_sha256(&k_service, b"aws4_request")
+    }
+
+    fn format_timestamp(secs: u64) -> Result<(String, String)> {
+        let dt = OffsetDateTime::from_unix_timestamp(secs as i64)?;
+        let date_stamp = format!("{:04}{:02}{:02}", dt.year(), dt.month() as u8, dt.day());
+        let amz_date = format!(
+            "{date_stamp}T{:02}{:02}{:02}Z",
+            dt.hour(),
+            dt.minute(),
+            dt.second()
+        );
+        Ok((date_stamp, amz_date))
+    }
+
+    pub fn s3_signature_v4(
+        url_str: &str,
+        region: &Option<String>,
+        access_key: &Option<AccessKey>,
+        ttl_secs: u64,
+    ) -> Result<String> {
+        let (access_key_id, secret_access_key) = match access_key {
+            Some(access_key) => (&access_key.access_key_id, &access_key.secret_access_key),
+            None => return Ok(url_str.to_owned()),
+        };
+        let url = Url::parse(url_str)?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::Config("Cannot extract host from {:?url_str}".to_string()))?;
+        let canonical_uri = if url.path().is_empty() {
+            "/"
+        } else {
+            url.path()
+        };
+
+        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let (date_stamp, amz_date) = format_timestamp(now_secs)?;
+
+        let region = region.as_deref().unwrap_or("us-east-1");
+
+        let credential_scope = format!("{date_stamp}/{region}/s3/aws4_request");
+
+        // Existing query params (decoded by url crate) + SigV4 params, sans Signature.
+        let mut params: Vec<_> = url.query_pairs().collect();
+
+        params.extend([
+            (
+                Cow::Borrowed("X-Amz-Algorithm"),
+                Cow::Borrowed("AWS4-HMAC-SHA256"),
+            ),
+            (
+                Cow::Borrowed("X-Amz-Credential"),
+                Cow::Owned(format!("{access_key_id}/{credential_scope}")),
+            ),
+            (Cow::Borrowed("X-Amz-Date"), Cow::Borrowed(&amz_date)),
+            (
+                Cow::Borrowed("X-Amz-Expires"),
+                Cow::Owned(ttl_secs.to_string()),
+            ),
+            (Cow::Borrowed("X-Amz-SignedHeaders"), Cow::Borrowed("host")),
+        ]);
+        params.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let canonical_qs: String = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", uri_encode(k, true), uri_encode(v, true)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let canonical_request = format!(
+            "GET\n{}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD",
+            uri_encode(canonical_uri, false),
+        );
+
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+            hex_sha256(canonical_request.as_bytes())
+        );
+
+        let signing_key = derive_signing_key(secret_access_key, &date_stamp, region)?;
+        let signature: String = hmac_sha256(&signing_key, string_to_sign.as_bytes())?
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        let base = &url_str[..url_str.find('?').unwrap_or(url_str.len())];
+        Ok(format!("{base}?{canonical_qs}&X-Amz-Signature={signature}"))
+    }
+}
+
 /// Obtain list of releases from AWS S3 API, from bucket and region specified,
 /// filtering assets which don't match the prefix string if provided.
 ///
 /// This will strip the prefix from provided file names, allowing use with subdirectories
 fn fetch_releases_from_s3(
-    end_point: EndPoint,
+    end_point: &EndPoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
+    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<Vec<Release>> {
     let prefix = match asset_prefix {
         Some(prefix) => format!("&prefix={}", prefix),
         None => "".to_string(),
     };
 
-    let region = region
+    let region_result = region
         .as_ref()
         .ok_or_else(|| Error::Config("`region` required".to_string()));
 
     let download_base_url = match end_point {
-        EndPoint::S3 => format!("https://{}.s3.{}.amazonaws.com/", bucket_name, region?),
+        EndPoint::S3 => format!(
+            "https://{}.s3.{}.amazonaws.com/",
+            bucket_name, region_result?
+        ),
         EndPoint::S3DualStack => format!(
             "https://{}.s3.dualstack.{}.amazonaws.com/",
-            bucket_name, region?
+            bucket_name, region_result?
         ),
         EndPoint::DigitalOceanSpaces => format!(
             "https://{}.{}.digitaloceanspaces.com/",
-            bucket_name, region?
+            bucket_name, region_result?
         ),
         EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
+        EndPoint::Generic { ref end_point } => end_point.clone(),
     };
 
     let api_url = match end_point {
-        EndPoint::S3 | EndPoint::S3DualStack | EndPoint::DigitalOceanSpaces => format!(
+        EndPoint::S3
+        | EndPoint::S3DualStack
+        | EndPoint::DigitalOceanSpaces
+        | EndPoint::Generic { .. } => format!(
             "{}?list-type=2&max-keys={}{}",
             download_base_url, MAX_KEYS, prefix
         ),
         EndPoint::GCS => format!("{}?max-keys={}{}", download_base_url, MAX_KEYS, prefix),
     };
 
+    #[cfg(feature = "s3-auth")]
+    let api_url = auth::s3_signature_v4(&api_url, region, access_key, 300)?;
+
     debug!("using api url: {:?}", api_url);
 
-    let client = reqwest::blocking::ClientBuilder::new()
-        .use_rustls_tls()
-        .http2_adaptive_window(true)
-        .build()?;
-    let resp = client.get(&api_url).send()?;
+    let resp = http_client::get(&api_url, Default::default())?;
     if !resp.status().is_success() {
         bail!(
             Error::Network,
@@ -657,7 +900,7 @@ fn fetch_releases_from_s3(
             },
             Ok(Event::Text(e)) => {
                 // if we cannot decode a tag text we just ignore it
-                if let Ok(txt) = e.unescape().map(|r| r.into_owned()) {
+                if let Ok(txt) = e.decode().map(|r| r.into_owned()) {
                     match current_tag {
                         Tag::Key => {
                             let p = PathBuf::from(&txt);
@@ -671,9 +914,15 @@ fn fetch_releases_from_s3(
                                 release.name = captures["name"].to_string();
                                 release.version =
                                     captures["version"].trim_start_matches('v').to_string();
+                                let download_url = format!("{}{}", download_base_url, txt);
+
+                                #[cfg(feature = "s3-auth")]
+                                let download_url =
+                                    auth::s3_signature_v4(&download_url, region, access_key, 300)?;
+
                                 release.assets = vec![ReleaseAsset {
                                     name: exe_name.to_string(),
-                                    download_url: format!("{}{}", download_base_url, txt),
+                                    download_url,
                                 }];
                                 debug!("Matched release: {:?}", release);
                             } else {

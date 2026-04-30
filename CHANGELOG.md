@@ -5,10 +5,37 @@
 ### Changed
 ### Removed
 
+## [0.44.0]
+### Added
+- *(s3)* support generic S3 endpoints ([#171](https://github.com/jaemk/self_update/pull/171))
+### Changed
+- *(s3)* fix reverse release ordering ([#173](https://github.com/jaemk/self_update/pull/173))
+- *(deps)* update reqwest to 0.13 ([#175](https://github.com/jaemk/self_update/pull/175))
+### Removed
+
+## [0.43.1]
+### Added
+### Changed
+- Improve `assert_for` logic to fallback to identifier-only search if
+  target/os-arch search fails
+- Fix update logic to respect `bin_install_path` when not equal to the
+  current exe. Logic was previously modified to use the `self_replace`
+  crate, but that change assumed the installation was always replacing
+  the current exe.
+### Removed
+
+## [0.43.0]
+### Added
+- Docs: add documentation for [`self_update::errors::Error`]
+### Changed
+- Improve `assert_for` logic to prioritize searching by asset name and identifier
+  before looking for assets by OS/arch
+### Removed
+
 ## [0.42.0]
 ### Added
 - Improved release search/lookup capability to support filtering assets by identifier
-- Improved version specifications to support prelease tags and parallel supported versions
+- Improved version specifications to support prerelease tags and parallel supported versions
 ### Changed
 - Update reqwest features to allow http2 negotiation
 - Update quick-xml (0.37) and zipsign (0.1)
@@ -150,7 +177,7 @@
 ### Added
 - Add GCS support to S3 backend
 ### Changed
-- Fixed docs refering to github in s3 backend
+- Fixed docs referring to github in s3 backend
 ### Removed
 
 ## [0.20.0]

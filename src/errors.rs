@@ -9,23 +9,52 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
+    /// Used as a catch-most for when the program fails to update.
     Update(String),
+    /// Used when a web request to a repository archive fails.  
     Network(String),
+    /// If there is an issue with the most recent release (such as no
+    /// binary for the current platform), this error is returned.
     Release(String),
+    /// Used when a there is an error with setting up the configuration
+    /// for a repository archive. An example would be failing to provide the username a
+    /// repository archive is under.
     Config(String),
+    /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
+    /// A wrapper over a `zip::result::ZipError`.
     #[cfg(feature = "archive-zip")]
     Zip(ZipError),
+    /// A wrapper over a `serde_json::Error`.
     Json(serde_json::Error),
+    /// A wrapper over a `reqwest::Error`.
+    #[cfg(feature = "reqwest")]
     Reqwest(reqwest::Error),
+    /// A wrapper over a `ureq::Error`.
+    #[cfg(feature = "ureq")]
+    Ureq(ureq::Error),
+    /// A wrapper over a `semver::Error`.
     SemVer(semver::Error),
+    /// Used when the `archive-zip` feature is not enabled.
     ArchiveNotEnabled(String),
+    /// Used when the repository archive does not contain any signatures to verify with.
     #[cfg(feature = "signatures")]
     NoSignatures(crate::ArchiveKind),
+    /// A wrapper over a `zipsign_api::ZipsignError`.
     #[cfg(feature = "signatures")]
     Signature(zipsign_api::ZipsignError),
+    /// Used when the path generated to store the repository archive
+    /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
     NonUTF8,
+    #[cfg(feature = "s3-auth")]
+    StdTimeError(std::time::SystemTimeError),
+    #[cfg(feature = "s3-auth")]
+    TimeError(time::error::ComponentRange),
+    #[cfg(feature = "s3-auth")]
+    Digest(hmac::digest::InvalidLength),
+    #[cfg(feature = "s3-auth")]
+    UrlParse(url::ParseError),
 }
 
 impl std::fmt::Display for Error {
@@ -38,7 +67,10 @@ impl std::fmt::Display for Error {
             Config(ref s) => write!(f, "ConfigError: {}", s),
             Io(ref e) => write!(f, "IoError: {}", e),
             Json(ref e) => write!(f, "JsonError: {}", e),
+            #[cfg(feature = "reqwest")]
             Reqwest(ref e) => write!(f, "ReqwestError: {}", e),
+            #[cfg(feature = "ureq")]
+            Ureq(ref e) => write!(f, "UreqError: {}", e),
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
@@ -51,6 +83,14 @@ impl std::fmt::Display for Error {
             Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
             NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
+            #[cfg(feature = "s3-auth")]
+            StdTimeError(ref e) => write!(f, "SystemTimeError: {}", e),
+            #[cfg(feature = "s3-auth")]
+            TimeError(ref e) => write!(f, "TimeError: {}", e),
+            #[cfg(feature = "s3-auth")]
+            Digest(ref e) => write!(f, "InvalidLength: {}", e),
+            #[cfg(feature = "s3-auth")]
+            UrlParse(ref e) => write!(f, "UrlParse: {e}"),
         }
     }
 }
@@ -64,7 +104,10 @@ impl std::error::Error for Error {
         Some(match *self {
             Error::Io(ref e) => e,
             Error::Json(ref e) => e,
+            #[cfg(feature = "reqwest")]
             Error::Reqwest(ref e) => e,
+            #[cfg(feature = "ureq")]
+            Error::Ureq(ref e) => e,
             Error::SemVer(ref e) => e,
             #[cfg(feature = "signatures")]
             Error::Signature(ref e) => e,
@@ -85,9 +128,17 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+#[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Error {
         Error::Reqwest(e)
+    }
+}
+
+#[cfg(feature = "ureq")]
+impl From<ureq::Error> for Error {
+    fn from(e: ureq::Error) -> Error {
+        Error::Ureq(e)
     }
 }
 
@@ -108,5 +159,33 @@ impl From<ZipError> for Error {
 impl From<zipsign_api::ZipsignError> for Error {
     fn from(e: zipsign_api::ZipsignError) -> Error {
         Error::Signature(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<std::time::SystemTimeError> for Error {
+    fn from(e: std::time::SystemTimeError) -> Self {
+        Error::StdTimeError(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<hmac::digest::InvalidLength> for Error {
+    fn from(e: hmac::digest::InvalidLength) -> Self {
+        Error::Digest(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<url::ParseError> for Error {
+    fn from(e: url::ParseError) -> Self {
+        Error::UrlParse(e)
+    }
+}
+
+#[cfg(feature = "s3-auth")]
+impl From<time::error::ComponentRange> for Error {
+    fn from(e: time::error::ComponentRange) -> Self {
+        Error::TimeError(e)
     }
 }

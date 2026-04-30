@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "0.42.0"
+version = "0.44.0"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -10,36 +10,64 @@ readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2018"
-rust = "1.64"
+rust-version = "1.85"
+
+# Can't enable all features, reqwest and ureq are mutually exclusives
+[package.metadata.docs.rs]
+features = [
+  "reqwest",
+  "default-tls",
+  "archive-zip",
+  "compression-zip-bzip2",
+  "compression-zip-deflate",
+  "archive-tar",
+  "compression-flate2",
+  "signatures",
+]
 
 [dependencies]
+serde = "1"
 serde_json = "1"
 tempfile = "3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "2", default-features = false, features = ["time"], optional = true }
+zip = { version = "6", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"] }
-hyper = "1"
-indicatif = "0.17"
-quick-xml = "0.37"
+indicatif = "0.18"
+quick-xml = "0.38"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
 zipsign-api = { version = "0.1", default-features = false, optional = true }
 
+http = "1"
+
+reqwest = { version = "0.13", default-features = false, optional = true, features = ["blocking", "json", "http2"] }
+
+ureq = { version = "3.0.6", optional = true, default-features = false, features = ["gzip", "json", "socks-proxy", "charset"]}
+
+hmac = { version = "0.12.1", optional = true }
+percent-encoding = { version = "2.3.2", optional = true }
+sha2 = { version = "0.10.0", optional = true }
+time = { version = "0.3.45", optional = true }
+url = { version = "2.5.8", optional = true }
+
 [features]
-default = ["reqwest/default-tls"]
+default = ["reqwest", "default-tls"]
+
 archive-zip = ["zip", "zipsign-api?/verify-zip"]
 compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
 compression-zip-deflate = ["archive-zip", "zip/deflate"]
 archive-tar = ["tar", "zipsign-api?/verify-tar"]
 compression-flate2 = ["archive-tar", "flate2", "either"]
-rustls = ["reqwest/rustls-tls"]
 signatures = ["dep:zipsign-api"]
 
-[package.metadata.docs.rs]
-# Whether to pass `--all-features` to Cargo (default: false)
-all-features = true
+
+default-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
+rustls = ["reqwest?/rustls", "ureq?/rustls"]
+
+reqwest = ["dep:reqwest"]
+ureq = ["dep:ureq"]
+s3-auth = ["dep:hmac", "dep:percent-encoding", "dep:sha2", "dep:url", "dep:time"]

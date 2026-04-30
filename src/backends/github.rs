@@ -1,11 +1,10 @@
 /*!
 GitHub releases
 */
-use hyper::HeaderMap;
 use std::env::{self, consts::EXE_SUFFIX};
 use std::path::{Path, PathBuf};
 
-use reqwest::{self, header};
+use crate::http_client::{self, header, HeaderMap, HttpResponse};
 
 use crate::backends::find_rel_next_link;
 use crate::version::bump_is_greater;
@@ -175,15 +174,13 @@ impl ReleaseList {
     }
 
     fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(url)
-            .headers(api_headers(&self.auth_token)?)
-            .query(&[("per_page", "100")])
-            .send()?;
+        let request_url = if url.contains('?') {
+            // Pagination URL from Link header - already has query params
+            url.to_string()
+        } else {
+            format!("{url}?per_page=100")
+        };
+        let resp = http_client::get(&request_url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -205,7 +202,7 @@ impl ReleaseList {
 
         // handle paged responses containing `Link` header:
         // `Link: <https://api.github.com/resource?page=2>; rel="next"`
-        let links = headers.get_all(reqwest::header::LINK);
+        let links = headers.get_all(header::LINK);
 
         let next_link = links
             .iter()
@@ -413,7 +410,7 @@ impl UpdateBuilder {
         self
     }
 
-    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticy
+    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity
     ///
     /// If the feature is activated AND at least one key was provided, a download is verifying.
     /// At least one key has to match.
@@ -524,14 +521,7 @@ impl ReleaseUpdate for Update {
             self.repo_owner,
             self.repo_name
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -554,10 +544,7 @@ impl ReleaseUpdate for Update {
             self.repo_owner,
             self.repo_name
         );
-        let resp = reqwest::blocking::Client::new()
-            .get(&api_url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -594,14 +581,7 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             ver
         );
-        let client = reqwest::blocking::ClientBuilder::new()
-            .use_rustls_tls()
-            .http2_adaptive_window(true)
-            .build()?;
-        let resp = client
-            .get(&api_url)
-            .headers(api_headers(&self.auth_token)?)
-            .send()?;
+        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -705,7 +685,7 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust-reqwest/self-update"
+        "rust/self-update"
             .parse()
             .expect("github invalid user-agent"),
     );
