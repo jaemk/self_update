@@ -1,18 +1,14 @@
 /*!
 GitHub releases
 */
-use std::env::{self, consts::EXE_SUFFIX};
-use std::path::{Path, PathBuf};
+use crate::http_client::{header, HeaderMap, HttpResponse};
 
-use crate::http_client::{self, header, HeaderMap, HttpResponse};
-
-use crate::backends::find_rel_next_link;
+use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
+use crate::backends::{collect_paginated, first_page_url, next_link, send};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
-    get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
-    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
 
 impl ReleaseAsset {
@@ -63,12 +59,14 @@ impl Release {
 
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ReleaseListBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
     custom_url: Option<String>,
+    request: RequestConfig,
 }
 impl ReleaseListBuilder {
     /// Set the repo owner, used to build a github api url
@@ -84,7 +82,7 @@ impl ReleaseListBuilder {
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn with_target(&mut self, target: &str) -> &mut Self {
+    pub fn target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -92,7 +90,7 @@ impl ReleaseListBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    pub fn with_url(&mut self, url: &str) -> &mut Self {
+    pub fn url(&mut self, url: &str) -> &mut Self {
         self.custom_url = Some(url.to_owned());
         self
     }
@@ -107,6 +105,8 @@ impl ReleaseListBuilder {
         self.auth_token = Some(auth_token.to_owned());
         self
     }
+
+    request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
@@ -124,6 +124,7 @@ impl ReleaseListBuilder {
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
             custom_url: self.custom_url.clone(),
+            request: self.request.clone(),
         })
     }
 }
@@ -137,6 +138,7 @@ pub struct ReleaseList {
     target: Option<String>,
     auth_token: Option<String>,
     custom_url: Option<String>,
+    request: RequestConfig,
 }
 impl ReleaseList {
     /// Initialize a ReleaseListBuilder
@@ -147,13 +149,13 @@ impl ReleaseList {
             target: None,
             auth_token: None,
             custom_url: None,
+            request: RequestConfig::default(),
         }
     }
 
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
-    pub fn fetch(self) -> Result<Vec<Release>> {
-        set_ssl_vars!();
+    pub fn fetch(&self) -> Result<Vec<Release>> {
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.custom_url
@@ -162,7 +164,7 @@ impl ReleaseList {
             self.repo_owner,
             self.repo_name
         );
-        let releases = self.fetch_releases(&api_url)?;
+        let releases = fetch_all_releases(&api_url, self.auth_token.as_deref(), &self.request)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -172,83 +174,19 @@ impl ReleaseList {
         };
         Ok(releases)
     }
-
-    fn fetch_releases(&self, url: &str) -> Result<Vec<Release>> {
-        let request_url = if url.contains('?') {
-            // Pagination URL from Link header - already has query params
-            url.to_string()
-        } else {
-            format!("{url}?per_page=100")
-        };
-        let resp = http_client::get(&request_url, api_headers(&self.auth_token)?)?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                url
-            )
-        }
-        let headers = resp.headers().clone();
-
-        let releases = resp.json::<serde_json::Value>()?;
-        let releases = releases
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
-        let mut releases = releases
-            .iter()
-            .map(Release::from_release)
-            .collect::<Result<Vec<Release>>>()?;
-
-        // handle paged responses containing `Link` header:
-        // `Link: <https://api.github.com/resource?page=2>; rel="next"`
-        let links = headers.get_all(header::LINK);
-
-        let next_link = links
-            .iter()
-            .filter_map(|link| {
-                if let Ok(link) = link.to_str() {
-                    find_rel_next_link(link)
-                } else {
-                    None
-                }
-            })
-            .next();
-
-        Ok(match next_link {
-            None => releases,
-            Some(link) => {
-                releases.extend(self.fetch_releases(link)?);
-                releases
-            }
-        })
-    }
 }
 
 /// `github::Update` builder
 ///
 /// Configure download and installation from
 /// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
-#[derive(Debug)]
+#[derive(Debug, Default)]
+#[must_use]
 pub struct UpdateBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
-    target: Option<String>,
-    identifier: Option<String>,
-    bin_name: Option<String>,
-    bin_install_path: Option<PathBuf>,
-    bin_path_in_archive: Option<String>,
-    show_download_progress: bool,
-    show_output: bool,
-    no_confirm: bool,
-    current_version: Option<String>,
-    target_version: Option<String>,
-    progress_template: String,
-    progress_chars: String,
-    auth_token: Option<String>,
     custom_url: Option<String>,
-    #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+    common: CommonBuilderConfig,
 }
 
 impl UpdateBuilder {
@@ -272,169 +210,15 @@ impl UpdateBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    pub fn with_url(&mut self, url: &str) -> &mut Self {
+    pub fn url(&mut self, url: &str) -> &mut Self {
         self.custom_url = Some(url.to_owned());
         self
     }
 
-    /// Set the current app version, used to compare against the latest available version.
-    /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
-    pub fn current_version(&mut self, ver: &str) -> &mut Self {
-        self.current_version = Some(ver.to_owned());
-        self
-    }
+    impl_common_builder_setters!();
 
-    /// Set the target version tag to update to. This will be used to search for a release
-    /// by tag name:
-    /// `/repos/:owner/:repo/releases/tags/:tag`
-    ///
-    /// If not specified, the latest available release is used.
-    pub fn target_version_tag(&mut self, ver: &str) -> &mut Self {
-        self.target_version = Some(ver.to_owned());
-        self
-    }
-
-    /// Set the target triple that will be downloaded, e.g. `x86_64-unknown-linux-gnu`.
-    ///
-    /// If unspecified, the build target of the crate will be used
-    pub fn target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
-        self
-    }
-
-    /// Set the identifiable token for the asset in case of multiple compatible assets
-    ///
-    /// If unspecified, the first asset matching the target will be chosen
-    pub fn identifier(&mut self, identifier: &str) -> &mut Self {
-        self.identifier = Some(identifier.to_owned());
-        self
-    }
-
-    /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
-    ///
-    /// This method will append the platform specific executable file suffix
-    /// (see `std::env::consts::EXE_SUFFIX`) to the name if it's missing.
-    pub fn bin_name(&mut self, name: &str) -> &mut Self {
-        let raw_bin_name = format!("{}{}", name.trim_end_matches(EXE_SUFFIX), EXE_SUFFIX);
-        if self.bin_path_in_archive.is_none() {
-            self.bin_path_in_archive = Some(raw_bin_name.clone());
-        }
-        self.bin_name = Some(raw_bin_name);
-        self
-    }
-
-    /// Set the installation path for the new exe, defaults to the current
-    /// executable's path
-    pub fn bin_install_path<A: AsRef<Path>>(&mut self, bin_install_path: A) -> &mut Self {
-        self.bin_install_path = Some(PathBuf::from(bin_install_path.as_ref()));
-        self
-    }
-
-    /// Set the path of the exe inside the release tarball. This is the location
-    /// of the executable relative to the base of the tar'd directory and is the
-    /// path that will be copied to the `bin_install_path`. If not specified, this
-    /// will default to the value of `bin_name`. This only needs to be specified if
-    /// the path to the binary (from the root of the tarball) is not equal to just
-    /// the `bin_name`.
-    ///
-    /// This also supports variable paths:
-    /// - `{{ bin }}` is replaced with the value of `bin_name`
-    /// - `{{ target }}` is replaced with the value of `target`
-    /// - `{{ version }}` is replaced with the value of `target_version` if set,
-    /// otherwise the value of the latest available release version is used.
-    ///
-    /// # Example
-    ///
-    /// For a `myapp` binary with `windows` target and latest release version `1.2.3`,
-    /// the tarball `myapp.tar.gz` has the contents:
-    ///
-    /// ```shell
-    /// myapp.tar/
-    ///  |------- windows-1.2.3-bin/
-    ///  |         |--- myapp  # <-- executable
-    /// ```
-    ///
-    /// The path provided should be:
-    ///
-    /// ```
-    /// # use self_update::backends::github::Update;
-    /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// Update::configure()
-    ///     .bin_path_in_archive("{{ target }}-{{ version }}-bin/{{ bin }}")
-    /// #   .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn bin_path_in_archive(&mut self, bin_path: &str) -> &mut Self {
-        self.bin_path_in_archive = Some(bin_path.to_owned());
-        self
-    }
-
-    /// Toggle download progress bar, defaults to `off`.
-    pub fn show_download_progress(&mut self, show: bool) -> &mut Self {
-        self.show_download_progress = show;
-        self
-    }
-
-    /// Set download progress style.
-    pub fn set_progress_style(
-        &mut self,
-        progress_template: String,
-        progress_chars: String,
-    ) -> &mut Self {
-        self.progress_template = progress_template;
-        self.progress_chars = progress_chars;
-        self
-    }
-
-    /// Toggle update output information, defaults to `true`.
-    pub fn show_output(&mut self, show: bool) -> &mut Self {
-        self.show_output = show;
-        self
-    }
-
-    /// Toggle download confirmation. Defaults to `false`.
-    pub fn no_confirm(&mut self, no_confirm: bool) -> &mut Self {
-        self.no_confirm = no_confirm;
-        self
-    }
-
-    /// Set the authorization token, used in requests to the github api url
-    ///
-    /// This is to support private repos where you need a GitHub auth token.
-    /// **Make sure not to bake the token into your app**; it is recommended
-    /// you obtain it via another mechanism, such as environment variables
-    /// or prompting the user for input
-    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-        self.auth_token = Some(auth_token.to_owned());
-        self
-    }
-
-    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity
-    ///
-    /// If the feature is activated AND at least one key was provided, a download is verifying.
-    /// At least one key has to match.
-    #[cfg(feature = "signatures")]
-    pub fn verifying_keys(
-        &mut self,
-        keys: impl Into<Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>>,
-    ) -> &mut Self {
-        self.verifying_keys = keys.into();
-        self
-    }
-
-    /// Confirm config and create a ready-to-use `Update`
-    ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        let bin_install_path = if let Some(v) = &self.bin_install_path {
-            v.clone()
-        } else {
-            env::current_exe()?
-        };
-
-        Ok(Box::new(Update {
+    fn build_update(&self) -> Result<Update> {
+        Ok(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
@@ -445,40 +229,32 @@ impl UpdateBuilder {
             } else {
                 bail!(Error::Config, "`repo_name` required")
             },
-            target: self
-                .target
-                .as_ref()
-                .map(|t| t.to_owned())
-                .unwrap_or_else(|| get_target().to_owned()),
-            identifier: self.identifier.clone(),
-            bin_name: if let Some(ref name) = self.bin_name {
-                name.to_owned()
-            } else {
-                bail!(Error::Config, "`bin_name` required")
-            },
-            bin_install_path,
-            bin_path_in_archive: if let Some(ref bin_path) = self.bin_path_in_archive {
-                bin_path.to_owned()
-            } else {
-                bail!(Error::Config, "`bin_path_in_archive` required")
-            },
-            current_version: if let Some(ref ver) = self.current_version {
-                ver.to_owned()
-            } else {
-                bail!(Error::Config, "`current_version` required")
-            },
-            target_version: self.target_version.as_ref().map(|v| v.to_owned()),
-            show_download_progress: self.show_download_progress,
-            progress_template: self.progress_template.clone(),
-            progress_chars: self.progress_chars.clone(),
-            show_output: self.show_output,
-            no_confirm: self.no_confirm,
-            auth_token: self.auth_token.clone(),
             custom_url: self.custom_url.clone(),
-            #[cfg(feature = "signatures")]
-            verifying_keys: self.verifying_keys.clone(),
-        }))
+            common: self.common.build()?,
+        })
     }
+
+    /// Confirm config and create a ready-to-use `Update`
+    ///
+    /// * Errors:
+    ///     * Config - Invalid `Update` configuration
+    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
+        Ok(Box::new(self.build_update()?))
+    }
+
+    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    ///
+    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
+    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    #[cfg(feature = "async")]
+    pub fn build_async(&self) -> Result<Update> {
+        self.build_update()
+    }
+}
+
+#[cfg(feature = "async")]
+impl Update {
+    impl_async_update_methods!();
 }
 
 /// Updates to a specified or latest release distributed via GitHub
@@ -486,42 +262,39 @@ impl UpdateBuilder {
 pub struct Update {
     repo_owner: String,
     repo_name: String,
-    target: String,
-    identifier: Option<String>,
-    current_version: String,
-    target_version: Option<String>,
-    bin_name: String,
-    bin_install_path: PathBuf,
-    bin_path_in_archive: String,
-    show_download_progress: bool,
-    show_output: bool,
-    no_confirm: bool,
-    progress_template: String,
-    progress_chars: String,
-    auth_token: Option<String>,
     custom_url: Option<String>,
-    #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+    common: CommonConfig,
 }
 impl Update {
     /// Initialize a new `Update` builder
     pub fn configure() -> UpdateBuilder {
         UpdateBuilder::new()
     }
+
+    /// API base URL (the custom URL for enterprise installs, or the public github API). Shared by
+    /// the sync and async fetch paths so they can't drift.
+    fn api_base(&self) -> &str {
+        self.custom_url
+            .as_deref()
+            .unwrap_or("https://api.github.com")
+    }
 }
+
+impl crate::update::sealed::Sealed for Update {}
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases/latest",
-            self.custom_url
-                .as_ref()
-                .unwrap_or(&"https://api.github.com".to_string()),
+            self.api_base(),
             self.repo_owner,
             self.repo_name
         );
-        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
+        let resp = send(
+            &api_url,
+            api_headers(self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -535,53 +308,36 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases",
-            self.custom_url
-                .as_ref()
-                .unwrap_or(&"https://api.github.com".to_string()),
+            self.api_base(),
             self.repo_owner,
             self.repo_name
         );
-        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                api_url
-            )
-        }
-
-        let json = resp.json::<serde_json::Value>()?;
-        json.as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No releases found"))
-            .and_then(|releases| {
-                releases
-                    .iter()
-                    .map(Release::from_release)
-                    .filter(|r| {
-                        r.as_ref().map_or(false, |r| {
-                            bump_is_greater(current_version, &r.version).unwrap_or(false)
-                        })
-                    })
-                    .collect::<Result<Vec<Release>>>()
-            })
+        let releases = fetch_all_releases(
+            &api_url,
+            self.common.auth_token.as_deref(),
+            &self.common.request,
+        )?;
+        Ok(releases
+            .into_iter()
+            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
+            .collect())
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        set_ssl_vars!();
         let api_url = format!(
             "{}/repos/{}/{}/releases/tags/{}",
-            self.custom_url
-                .as_ref()
-                .unwrap_or(&"https://api.github.com".to_string()),
+            self.api_base(),
             self.repo_owner,
             self.repo_name,
             ver
         );
-        let resp = http_client::get(&api_url, api_headers(&self.auth_token)?)?;
+        let resp = send(
+            &api_url,
+            api_headers(self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )?;
         if !resp.status().is_success() {
             bail!(
                 Error::Network,
@@ -594,94 +350,131 @@ impl ReleaseUpdate for Update {
         Release::from_release(&json)
     }
 
-    fn current_version(&self) -> String {
-        self.current_version.to_owned()
-    }
+    impl_release_update_accessors!();
 
-    fn target(&self) -> String {
-        self.target.clone()
-    }
-
-    fn target_version(&self) -> Option<String> {
-        self.target_version.clone()
-    }
-
-    fn identifier(&self) -> Option<String> {
-        self.identifier.clone()
-    }
-
-    fn bin_name(&self) -> String {
-        self.bin_name.clone()
-    }
-
-    fn bin_install_path(&self) -> PathBuf {
-        self.bin_install_path.clone()
-    }
-
-    fn bin_path_in_archive(&self) -> String {
-        self.bin_path_in_archive.clone()
-    }
-
-    fn show_download_progress(&self) -> bool {
-        self.show_download_progress
-    }
-
-    fn show_output(&self) -> bool {
-        self.show_output
-    }
-
-    fn no_confirm(&self) -> bool {
-        self.no_confirm
-    }
-
-    fn progress_template(&self) -> String {
-        self.progress_template.to_owned()
-    }
-
-    fn progress_chars(&self) -> String {
-        self.progress_chars.to_owned()
-    }
-
-    fn auth_token(&self) -> Option<String> {
-        self.auth_token.clone()
-    }
-
-    fn api_headers(&self, auth_token: &Option<String>) -> Result<HeaderMap> {
+    fn api_headers(&self, auth_token: Option<&str>) -> Result<HeaderMap> {
         api_headers(auth_token)
     }
-
-    #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
-        &self.verifying_keys
-    }
 }
 
-impl Default for UpdateBuilder {
-    fn default() -> Self {
-        Self {
-            repo_owner: None,
-            repo_name: None,
-            target: None,
-            identifier: None,
-            bin_name: None,
-            bin_install_path: None,
-            bin_path_in_archive: None,
-            show_download_progress: false,
-            show_output: true,
-            no_confirm: false,
-            current_version: None,
-            target_version: None,
-            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
-            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
-            auth_token: None,
-            custom_url: None,
-            #[cfg(feature = "signatures")]
-            verifying_keys: vec![],
+/// Fetch every release from `base_url`, following GitHub's `Link: rel="next"` pagination.
+fn fetch_all_releases(
+    base_url: &str,
+    auth_token: Option<&str>,
+    req: &RequestConfig,
+) -> Result<Vec<Release>> {
+    collect_paginated(&first_page_url(base_url), |url| {
+        let resp = send(url, api_headers(auth_token)?, req)?;
+        if !resp.status().is_success() {
+            bail!(
+                Error::Network,
+                "api request failed with status: {:?} - for: {:?}",
+                resp.status(),
+                url
+            )
         }
+        let headers = resp.headers().clone();
+        let releases = resp
+            .json::<serde_json::Value>()?
+            .as_array()
+            .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
+            .iter()
+            .map(Release::from_release)
+            .collect::<Result<Vec<Release>>>()?;
+        Ok((releases, next_link(&headers)))
+    })
+}
+
+/// Async sibling of [`fetch_all_releases`], following `Link: rel="next"` pagination with the async
+/// transport. Reuses the same [`Release::from_release`] parser.
+#[cfg(feature = "async")]
+async fn fetch_all_releases_async(
+    base_url: &str,
+    auth_token: Option<&str>,
+    req: &RequestConfig,
+) -> Result<Vec<Release>> {
+    use crate::backends::{collect_paginated_async, send_async};
+    let auth = auth_token.map(str::to_owned);
+    collect_paginated_async(&first_page_url(base_url), |url| {
+        let auth = auth.clone();
+        let req = req.clone();
+        async move {
+            let resp = send_async(&url, api_headers(auth.as_deref())?, &req).await?;
+            let headers = resp.headers().clone();
+            let releases = resp
+                .json::<serde_json::Value>()
+                .await?
+                .as_array()
+                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
+                .iter()
+                .map(Release::from_release)
+                .collect::<Result<Vec<Release>>>()?;
+            Ok((releases, next_link(&headers)))
+        }
+    })
+    .await
+}
+
+#[cfg(feature = "async")]
+impl crate::update::AsyncReleaseSource for Update {
+    async fn get_latest_release_async(&self) -> Result<Release> {
+        use crate::backends::send_async;
+        let api_url = format!(
+            "{}/repos/{}/{}/releases/latest",
+            self.api_base(),
+            self.repo_owner,
+            self.repo_name
+        );
+        let resp = send_async(
+            &api_url,
+            api_headers(self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )
+        .await?;
+        let json = resp.json::<serde_json::Value>().await?;
+        Release::from_release(&json)
+    }
+
+    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
+        let api_url = format!(
+            "{}/repos/{}/{}/releases",
+            self.api_base(),
+            self.repo_owner,
+            self.repo_name
+        );
+        let releases = fetch_all_releases_async(
+            &api_url,
+            self.common.auth_token.as_deref(),
+            &self.common.request,
+        )
+        .await?;
+        Ok(releases
+            .into_iter()
+            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
+            .collect())
+    }
+
+    async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
+        use crate::backends::send_async;
+        let api_url = format!(
+            "{}/repos/{}/{}/releases/tags/{}",
+            self.api_base(),
+            self.repo_owner,
+            self.repo_name,
+            ver
+        );
+        let resp = send_async(
+            &api_url,
+            api_headers(self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )
+        .await?;
+        let json = resp.json::<serde_json::Value>().await?;
+        Release::from_release(&json)
     }
 }
 
-fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
+fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -700,4 +493,645 @@ fn api_headers(auth_token: &Option<String>) -> Result<header::HeaderMap> {
     };
 
     Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    struct Resp {
+        status: &'static str,
+        link: Option<String>,
+        body: String,
+    }
+
+    /// Bind a loopback listener and serve `make(base_url)`'s responses in order, one per
+    /// incoming connection, on a background thread. Returns the server's base URL
+    /// (`http://127.0.0.1:<port>`). No external network is used.
+    fn stub(make: impl FnOnce(&str) -> Vec<Resp>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf); // drain the request line/headers
+                let mut out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n",
+                    r.status
+                );
+                if let Some(link) = r.link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.body.len(),
+                    r.body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    fn release_json(tag: &str) -> String {
+        format!(
+            r#"[{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[]}}]"#
+        )
+    }
+
+    #[cfg(feature = "async")]
+    fn release_obj_json(tag: &str) -> String {
+        format!(
+            r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[]}}"#
+        )
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_all_releases_async_follows_pagination() {
+        let base = stub(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/releases?page=2")),
+                    body: release_json("v1.0.0"),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v0.9.0"),
+                },
+            ]
+        });
+        let releases = super::fetch_all_releases_async(
+            &format!("{base}/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            releases.len(),
+            2,
+            "both pages accumulated over async transport"
+        );
+        assert_eq!(releases[0].version, "1.0.0");
+        assert_eq!(releases[1].version, "0.9.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_parses_release() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v3.1.0"),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .url(&base)
+            .build_async()
+            .unwrap();
+        let rel = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(rel.version, "3.1.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn update_async_reports_up_to_date() {
+        // The only release (v1.0.0) is older than the current version, so the async update flow
+        // fetches + filters and reports up-to-date without downloading anything.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("2.0.0")
+            .url(&base)
+            .no_confirm(true)
+            .show_output(false)
+            .build_async()
+            .unwrap();
+        let status = upd.update_extended_async().await.unwrap();
+        assert!(status.uptodate(), "an older release means up-to-date");
+    }
+
+    #[test]
+    fn fetch_all_releases_follows_link_pagination() {
+        // Page 1 advertises a `rel="next"` to page 2; page 2 has no next link.
+        let base = stub(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/releases?page=2")),
+                    body: release_json("v1.0.0"),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v0.9.0"),
+                },
+            ]
+        });
+        let releases = super::fetch_all_releases(
+            &format!("{base}/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            releases.len(),
+            2,
+            "releases from both pages are accumulated"
+        );
+        assert_eq!(releases[0].version, "1.0.0");
+        assert_eq!(releases[1].version, "0.9.0");
+    }
+
+    #[test]
+    fn fetch_all_releases_errors_on_http_error_status() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "404 Not Found",
+                link: None,
+                body: "nope".to_string(),
+            }]
+        });
+        let res = super::fetch_all_releases(
+            &format!("{base}/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        );
+        // A non-2xx status is always an error, though the variant differs by client:
+        // `reqwest` returns the response (mapped to `Network` by our status check) while
+        // `ureq` fails the request itself (mapped to `Http`).
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::Network(_)) | Err(crate::errors::Error::Http(_))
+        ));
+    }
+
+    #[test]
+    fn fetch_all_releases_errors_when_body_is_not_an_array() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "{}".to_string(),
+            }]
+        });
+        let res = super::fetch_all_releases(
+            &format!("{base}/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        );
+        assert!(matches!(res, Err(crate::errors::Error::Release(_))));
+    }
+
+    /// Like [`stub`], but also captures each incoming raw request so tests can assert on what
+    /// the client actually sent.
+    fn stub_capturing(
+        make: impl FnOnce(&str) -> Vec<Resp>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let mut out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n",
+                    r.status
+                );
+                if let Some(link) = r.link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.body.len(),
+                    r.body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    #[test]
+    fn builder_stores_timeout_and_request_header() {
+        use std::time::Duration;
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .timeout(Duration::from_secs(7))
+            .request_header("x-foo".parse().unwrap(), "bar".parse().unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(upd.request_timeout(), Some(Duration::from_secs(7)));
+        assert_eq!(
+            upd.request_headers()
+                .get("x-foo")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn builder_stores_progress_callback() {
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .set_progress_callback(|_downloaded, _total| {})
+            .build()
+            .unwrap();
+        // The callback is forwarded to the download step (accessor is internal/doc-hidden).
+        assert!(upd.progress_callback().is_some());
+    }
+
+    #[test]
+    fn builder_stores_verify_hook() {
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .verify_with(|_new_exe| true)
+            .build()
+            .unwrap();
+        assert!(upd.verify_callback().is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "checksums")]
+    fn builder_stores_checksum() {
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .verifying_checksum(crate::Checksum::Sha256("ab".repeat(32)))
+            .build()
+            .unwrap();
+        assert!(upd.checksum().is_some());
+    }
+
+    #[test]
+    fn builder_stores_asset_matcher() {
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .asset_matcher(|assets| assets.first().cloned())
+            .build()
+            .unwrap();
+        assert!(upd.asset_matcher().is_some());
+    }
+
+    #[test]
+    fn asset_matcher_overrides_default_selection() {
+        use crate::update::{Release, ReleaseAsset};
+
+        // Asset names the built-in target/OS/ARCH substring heuristic can't pick.
+        let release = Release {
+            assets: vec![
+                ReleaseAsset {
+                    name: "app-stable.bin".into(),
+                    download_url: "https://example/stable".into(),
+                },
+                ReleaseAsset {
+                    name: "app-nightly.bin".into(),
+                    download_url: "https://example/nightly".into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Default selection finds nothing (no asset contains the target triple / OS+ARCH).
+        assert!(release.asset_for("some-unmatchable-target", None).is_none());
+
+        // A custom matcher can pick by an arbitrary rule.
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .asset_matcher(|assets| assets.iter().find(|a| a.name.contains("nightly")).cloned())
+            .build()
+            .unwrap();
+        let matcher = upd.asset_matcher().expect("matcher stored");
+        let chosen = matcher(&release.assets).expect("matcher selects an asset");
+        assert_eq!(chosen.name, "app-nightly.bin");
+        assert_eq!(chosen.download_url, "https://example/nightly");
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn builder_stores_reqwest_client() {
+        let client = reqwest::blocking::Client::builder().build().unwrap();
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .reqwest_client(client)
+            .build()
+            .unwrap();
+        assert!(upd.request_client().blocking.is_some());
+    }
+
+    /// A `HeaderMap` with a single marker header, used as an injected client's `default_headers`
+    /// so the wire tests can prove the *injected* client (not a fresh per-call one) was used.
+    #[cfg(feature = "reqwest")]
+    fn marker_default_headers() -> crate::http_client::header::HeaderMap {
+        use crate::http_client::header::{HeaderMap, HeaderName, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-injected-client"),
+            HeaderValue::from_static("marker"),
+        );
+        headers
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn injected_reqwest_client_is_used_on_the_wire() {
+        use crate::backends::common::RequestConfig;
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.2.3"),
+            }]
+        });
+        // The injected client carries a marker default header the per-call client would never add.
+        let client = reqwest::blocking::Client::builder()
+            .default_headers(marker_default_headers())
+            .build()
+            .unwrap();
+        let mut cfg = RequestConfig::default();
+        cfg.client.blocking = Some(client);
+        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "1.2.3");
+        let request = captured.lock().unwrap()[0].to_lowercase();
+        assert!(
+            request.contains("x-injected-client: marker"),
+            "the injected client's default header proves it was used (not a fresh client)"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn builder_stores_reqwest_async_client() {
+        let client = reqwest::Client::builder().build().unwrap();
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .reqwest_async_client(client)
+            .build()
+            .unwrap();
+        assert!(upd.request_client().r#async.is_some());
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn injected_async_client_is_used_on_the_wire() {
+        use crate::backends::common::RequestConfig;
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.0.0"),
+            }]
+        });
+        let client = reqwest::Client::builder()
+            .default_headers(marker_default_headers())
+            .build()
+            .unwrap();
+        let mut cfg = RequestConfig::default();
+        cfg.client.r#async = Some(client);
+        let releases = super::fetch_all_releases_async(&format!("{base}/releases"), None, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "2.0.0");
+        let request = captured.lock().unwrap()[0].to_lowercase();
+        assert!(
+            request.contains("x-injected-client: marker"),
+            "the injected async client's default header proves it was used"
+        );
+    }
+
+    #[cfg(feature = "ureq")]
+    #[test]
+    fn injected_ureq_agent_is_used_on_the_wire() {
+        use crate::backends::common::RequestConfig;
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v3.0.0"),
+            }]
+        });
+        let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .ureq_agent(agent)
+            .build()
+            .unwrap();
+        assert!(upd.request_client().agent.is_some());
+
+        // And the injected agent actually performs the request.
+        let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
+        let mut cfg = RequestConfig::default();
+        cfg.client.agent = Some(agent);
+        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "3.0.0");
+    }
+
+    #[test]
+    fn request_header_is_sent_on_the_wire() {
+        use crate::backends::common::RequestConfig;
+        use crate::http_client::header::{HeaderMap, HeaderName, HeaderValue};
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("hello"),
+        );
+        let cfg = RequestConfig {
+            timeout: None,
+            headers,
+            ..Default::default()
+        };
+        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        assert_eq!(releases.len(), 1);
+        let request = captured.lock().unwrap()[0].to_lowercase();
+        assert!(
+            request.contains("x-custom: hello"),
+            "custom header missing from request:\n{}",
+            captured.lock().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn timeout_aborts_an_unresponsive_request() {
+        use crate::backends::common::RequestConfig;
+        use std::time::{Duration, Instant};
+        // Accept the connection but never send a response.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let cfg = RequestConfig {
+            timeout: Some(Duration::from_millis(200)),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let res = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg);
+        assert!(res.is_err(), "expected a timeout error");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "request should have timed out quickly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn retries_recover_from_transient_failures() {
+        use crate::backends::common::RequestConfig;
+        // First two attempts fail (503), the third succeeds.
+        let base = stub(|_| {
+            vec![
+                Resp {
+                    status: "503 Service Unavailable",
+                    link: None,
+                    body: "busy".to_string(),
+                },
+                Resp {
+                    status: "503 Service Unavailable",
+                    link: None,
+                    body: "busy".to_string(),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v1.0.0"),
+                },
+            ]
+        });
+        let cfg = RequestConfig {
+            retries: 2,
+            ..Default::default()
+        };
+        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn retries_are_exhausted_and_then_error() {
+        use crate::backends::common::RequestConfig;
+        // One retry allowed -> two attempts, both 503 -> error.
+        let base = stub(|_| {
+            vec![
+                Resp {
+                    status: "503 Service Unavailable",
+                    link: None,
+                    body: "busy".to_string(),
+                },
+                Resp {
+                    status: "503 Service Unavailable",
+                    link: None,
+                    body: "busy".to_string(),
+                },
+            ]
+        });
+        let cfg = RequestConfig {
+            retries: 1,
+            ..Default::default()
+        };
+        let res = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn release_list_applies_its_request_config() {
+        // Confirms `ReleaseList`'s transport setters (here `retries`) flow through `fetch`.
+        let base = stub(|_| {
+            vec![
+                Resp {
+                    status: "503 Service Unavailable",
+                    link: None,
+                    body: "busy".to_string(),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v2.0.0"),
+                },
+            ]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .retries(1)
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "2.0.0");
+    }
 }

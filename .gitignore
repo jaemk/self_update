@@ -3,3 +3,8 @@
 Cargo.lock
 .idea/
 .DS_Store
+/local/*
+!/local/.gitkeep
+.claude/settings.local.json
+# transient file produced by `make check/readme`
+_tmp_readme.md

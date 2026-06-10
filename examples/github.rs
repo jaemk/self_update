@@ -37,11 +37,14 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         //.show_output(false)
         //.no_confirm(true)
         //
+        // For a GitHub Enterprise install, point at your API endpoint:
+        //.url("https://github.mycorp.com/api/v3")
+        //
         // For private repos, you will need to provide a GitHub auth token
         // **Make sure not to bake the token into your app**; it is recommended
         // you obtain it via another mechanism, such as environment variables
         // or prompting the user for input
-        //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
+        //.auth_token(&std::env::var("DOWNLOAD_AUTH_TOKEN")?)
         //
         // an optional `identifier` can be specified to narrow down
         // an asset match for a target or OS-arch combination.

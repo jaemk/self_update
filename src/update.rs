@@ -9,12 +9,29 @@ use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
 
 /// Release asset information
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ReleaseAsset {
     pub download_url: String,
     pub name: String,
 }
 
+impl ReleaseAsset {
+    /// Construct a `ReleaseAsset` from its name and download URL.
+    ///
+    /// Useful when implementing a custom [`ReleaseSource`] (the built-in backends build assets from
+    /// their own API responses) or when building a `ReleaseAsset` in your own tests — the type is
+    /// `#[non_exhaustive]`, so it can't be built with a struct literal from outside the crate.
+    pub fn new(name: impl Into<String>, download_url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            download_url: download_url.into(),
+        }
+    }
+}
+
 /// Update status with extended information
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum UpdateStatus {
     /// Crate is up to date
     UpToDate,
@@ -44,6 +61,7 @@ impl UpdateStatus {
 
 /// Release information
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Release {
     pub name: String,
     pub version: String,
@@ -89,10 +107,152 @@ impl Release {
             })
             .cloned()
     }
+
+    /// Start building a [`Release`].
+    ///
+    /// `Release` is `#[non_exhaustive]`, so it can't be built with a struct literal from outside the
+    /// crate. Use this builder when implementing a custom [`ReleaseSource`] or constructing a
+    /// `Release` in your own tests.
+    pub fn builder() -> ReleaseBuilder {
+        ReleaseBuilder::default()
+    }
 }
 
-/// Updates to a specified or latest release
-pub trait ReleaseUpdate {
+/// Builder for a [`Release`]. Obtain one via [`Release::builder`].
+///
+/// Only `version` is required (it drives the version comparison); `name` defaults to the version,
+/// `date` defaults to empty, `body` to `None`, and `assets` to whatever was added.
+#[derive(Clone, Debug, Default)]
+#[must_use]
+pub struct ReleaseBuilder {
+    name: Option<String>,
+    version: Option<String>,
+    date: Option<String>,
+    body: Option<String>,
+    assets: Vec<ReleaseAsset>,
+}
+
+impl ReleaseBuilder {
+    /// Set the release version (required), e.g. `"1.2.3"`. This is what the updater compares against
+    /// the current version, so it should be a bare semver string (no leading `v`).
+    pub fn version(&mut self, version: impl Into<String>) -> &mut Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Set the release name/title. Defaults to the version if unset.
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the release date string. Defaults to empty if unset.
+    pub fn date(&mut self, date: impl Into<String>) -> &mut Self {
+        self.date = Some(date.into());
+        self
+    }
+
+    /// Set the release body / notes.
+    pub fn body(&mut self, body: impl Into<String>) -> &mut Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Add a single downloadable asset.
+    pub fn asset(&mut self, asset: ReleaseAsset) -> &mut Self {
+        self.assets.push(asset);
+        self
+    }
+
+    /// Add several downloadable assets.
+    pub fn assets(&mut self, assets: impl IntoIterator<Item = ReleaseAsset>) -> &mut Self {
+        self.assets.extend(assets);
+        self
+    }
+
+    /// Validate and build the [`Release`]. Errors if `version` was not set.
+    pub fn build(&self) -> Result<Release> {
+        let version = self
+            .version
+            .clone()
+            .ok_or_else(|| Error::Config("`version` required".to_string()))?;
+        Ok(Release {
+            name: self.name.clone().unwrap_or_else(|| version.clone()),
+            version,
+            date: self.date.clone().unwrap_or_default(),
+            body: self.body.clone(),
+            assets: self.assets.clone(),
+        })
+    }
+}
+
+/// A source of releases for a custom update backend.
+///
+/// Implement this to update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`)
+/// don't cover — a different forge, a private artifact registry, a plain HTTP directory, etc. — and
+/// then drive a full update through [`backends::custom`](crate::backends::custom), which reuses the
+/// crate's compare → select-asset → download → verify → extract → install orchestration. The trait
+/// is **not** sealed, unlike [`ReleaseUpdate`].
+///
+/// You own *where releases come from*: each method makes whatever HTTP request (with whatever auth,
+/// pagination, and parsing) your host needs and returns [`Release`]s built via [`Release::builder`].
+/// The crate owns *how the update happens* — asset selection, transport for the download, checksum
+/// /signature verification, extraction, and the install — so you do not touch the low-level
+/// primitives.
+///
+/// Implementations must be `Send + Sync`, and the builder stores the source as
+/// `impl ReleaseSource + 'static`, so a source that needs to reference outer state should own it
+/// (e.g. hold an `Arc<Config>`) rather than borrow it.
+///
+/// On failure, return one of the public [`Error`](crate::errors::Error) variants — they are plain
+/// constructible tuple variants, e.g. `Error::Network("…".into())` for a failed request,
+/// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
+/// for a misconfiguration.
+pub trait ReleaseSource: Send + Sync {
+    /// Fetch the single newest release.
+    fn get_latest_release(&self) -> Result<Release>;
+
+    /// Fetch the candidate releases, **newest first**. Return all the releases you want considered;
+    /// the updater discards any that are not strictly newer than the current version, prefers the
+    /// newest semver-compatible one, and otherwise offers the newest available (flagged
+    /// "not compatible"). You therefore do **not** need to filter out the current or older versions
+    /// (they are ignored) — but returning them is harmless, and returning the list newest-first
+    /// ensures the right release is chosen. `current_version` is passed only so you may bound the
+    /// query if it helps (e.g. stop paginating once you pass it).
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+
+    /// Fetch the release for an explicit tag/version.
+    fn get_release_version(&self, ver: &str) -> Result<Release>;
+}
+
+/// Internal async counterpart of the three backend fetch methods, implemented by every backend's
+/// `Update` when the `async` feature is on. It is only ever used through generics (the async
+/// orchestrator is generic over `ReleaseUpdate + AsyncReleaseSource`), never as a trait object, so
+/// `async fn` in the trait needs no boxing.
+#[cfg(feature = "async")]
+#[allow(async_fn_in_trait)]
+pub(crate) trait AsyncReleaseSource {
+    async fn get_latest_release_async(&self) -> Result<Release>;
+    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>>;
+    async fn get_release_version_async(&self, ver: &str) -> Result<Release>;
+}
+
+/// Implementation detail used to seal [`ReleaseUpdate`].
+///
+/// Downstream code can *use* `ReleaseUpdate` (every backend's `build()` returns a
+/// `Box<dyn ReleaseUpdate>`) but cannot implement it for foreign types, which leaves the
+/// crate free to evolve the trait without a breaking change.
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+/// Updates to a specified or latest release.
+///
+/// This trait is **sealed**: it is implemented only by this crate's backend `Update` types
+/// and cannot be implemented for types outside the crate. You consume it as the return type
+/// of each backend's `build()` (`Box<dyn ReleaseUpdate>`) — call `update()` /
+/// `update_extended()` on it — but you do not implement it yourself.
+pub trait ReleaseUpdate: sealed::Sealed {
     /// Fetch details of the latest release from the backend
     fn get_latest_release(&self) -> Result<Release>;
 
@@ -103,27 +263,28 @@ pub trait ReleaseUpdate {
     fn get_release_version(&self, ver: &str) -> Result<Release>;
 
     /// Current version of binary being updated
-    fn current_version(&self) -> String;
+    fn current_version(&self) -> &str;
 
     /// Target platform the update is being performed for
-    fn target(&self) -> String;
+    fn target(&self) -> &str;
 
-    /// Target version optionally specified for the update
-    fn target_version(&self) -> Option<String>;
+    /// Target version tag optionally specified for the update (set via `target_version_tag`)
+    #[doc(alias = "target_version")]
+    fn target_version_tag(&self) -> Option<&str>;
 
     /// Optional identifier of determining the asset among multiple matches
-    fn identifier(&self) -> Option<String> {
+    fn identifier(&self) -> Option<&str> {
         None
     }
 
     /// Name of the binary being updated
-    fn bin_name(&self) -> String;
+    fn bin_name(&self) -> &str;
 
     /// Installation path for the binary being updated
     fn bin_install_path(&self) -> PathBuf;
 
     /// Path of the binary to be extracted from release package
-    fn bin_path_in_archive(&self) -> String;
+    fn bin_path_in_archive(&self) -> &str;
 
     /// Flag indicating if progress information shall be output when downloading a release
     fn show_download_progress(&self) -> bool;
@@ -134,14 +295,45 @@ pub trait ReleaseUpdate {
     /// Flag indicating if the user shouldn't be prompted to confirm an update
     fn no_confirm(&self) -> bool;
 
-    // message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
-    fn progress_template(&self) -> String;
+    /// Message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    fn progress_template(&self) -> &str;
 
-    // progress_chars to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
-    fn progress_chars(&self) -> String;
+    /// Progress characters to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    fn progress_chars(&self) -> &str;
 
     /// Authorisation token for communicating with backend
-    fn auth_token(&self) -> Option<String>;
+    fn auth_token(&self) -> Option<&str>;
+
+    /// Per-request timeout to apply to backend HTTP requests, if any.
+    #[doc(hidden)]
+    fn request_timeout(&self) -> Option<std::time::Duration>;
+
+    /// Extra HTTP headers to merge into every backend request.
+    #[doc(hidden)]
+    fn request_headers(&self) -> &http_client::HeaderMap;
+
+    /// Optional user-supplied HTTP client to apply to the download, mirroring the listing requests.
+    #[doc(hidden)]
+    fn request_client(&self) -> &http_client::ClientOverride;
+
+    /// Optional download-progress callback to forward to the download step.
+    #[doc(hidden)]
+    fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>>;
+
+    /// Optional post-update verification hook, run on the extracted binary before install.
+    #[doc(hidden)]
+    fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
+
+    /// Optional custom asset matcher, overriding the built-in target/identifier selection.
+    #[doc(hidden)]
+    fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
+        None
+    }
+
+    /// Optional checksum to verify the downloaded artifact against before installing it.
+    #[doc(hidden)]
+    #[cfg(feature = "checksums")]
+    fn checksum(&self) -> Option<&crate::Checksum>;
 
     /// ed25519ph verifying keys to validate a download's authenticity
     #[cfg(feature = "signatures")]
@@ -150,109 +342,49 @@ pub trait ReleaseUpdate {
     }
 
     /// Construct a header with an authorisation entry if an auth token is provided
-    fn api_headers(&self, auth_token: &Option<String>) -> Result<http_client::HeaderMap> {
+    fn api_headers(&self, auth_token: Option<&str>) -> Result<http_client::HeaderMap> {
         let mut headers = header::HeaderMap::new();
 
-        if auth_token.is_some() {
-            headers.insert(
-                header::AUTHORIZATION,
-                (String::from("token ") + &auth_token.clone().unwrap())
-                    .parse()
-                    .unwrap(),
-            );
+        if let Some(token) = auth_token {
+            let value = format!("token {}", token).parse().map_err(|_| {
+                Error::Config(
+                    "the auth token contains characters that are not valid in an HTTP \
+                     header value"
+                        .to_string(),
+                )
+            })?;
+            headers.insert(header::AUTHORIZATION, value);
         };
 
         Ok(headers)
     }
 
     /// Display release information and update the current binary to the latest release, pending
-    /// confirmation from the user
+    /// confirmation from the user.
+    ///
+    /// Returns a [`Status`] carrying only the version tag. Use [`update_extended`](Self::update_extended)
+    /// instead if you need the full [`Release`] details (name, date, body, assets) of the installed
+    /// release.
     fn update(&self) -> Result<Status> {
-        let current_version = self.current_version();
+        let current_version = self.current_version().to_string();
         self.update_extended()
             .map(|s| s.into_status(current_version))
     }
 
     /// Same as `update`, but returns `UpdateStatus`.
     fn update_extended(&self) -> Result<UpdateStatus> {
-        let bin_install_path = self.bin_install_path();
-        let bin_name = self.bin_name();
-
         let current_version = self.current_version();
-        let target = self.target();
         let show_output = self.show_output();
-        println(show_output, &format!("Checking target-arch... {}", target));
-        println(
-            show_output,
-            &format!("Checking current version... v{}", current_version),
-        );
+        print_check_header(self.target(), current_version, show_output);
 
-        let release = match self.target_version() {
+        let release = match self.target_version_tag() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
-                let releases = self.get_latest_releases(&current_version)?;
-                let release = {
-                    // Filter compatible version
-                    let compatible_releases = releases
-                        .iter()
-                        .filter(|r| {
-                            version::bump_is_compatible(&current_version, &r.version)
-                                .unwrap_or(false)
-                        })
-                        .collect::<Vec<_>>();
-
-                    // Get the first version
-                    let release = compatible_releases.first().cloned();
-                    if let Some(release) = release {
-                        println(
-                            show_output,
-                            &format!(
-                                "v{} ({} versions compatible)",
-                                release.version,
-                                compatible_releases.len()
-                            ),
-                        );
-                        release.clone()
-                    } else {
-                        let release = releases.first();
-                        if let Some(release) = release {
-                            println(
-                                show_output,
-                                &format!(
-                                    "v{} ({} versions available)",
-                                    release.version,
-                                    releases.len()
-                                ),
-                            );
-                            release.clone()
-                        } else {
-                            println(show_output, "up-to-date.");
-                            return Ok(UpdateStatus::UpToDate);
-                        }
-                    }
-                };
-
-                {
-                    println(
-                        show_output,
-                        &format!(
-                            "New release found! v{} --> v{}",
-                            current_version, release.version
-                        ),
-                    );
-                    let qualifier =
-                        if version::bump_is_compatible(&current_version, &release.version)? {
-                            ""
-                        } else {
-                            "*NOT* "
-                        };
-                    println(
-                        show_output,
-                        &format!("New release is {}compatible", qualifier),
-                    );
+                let releases = self.get_latest_releases(current_version)?;
+                match choose_latest_release(releases, current_version, show_output)? {
+                    Some(release) => release,
+                    None => return Ok(UpdateStatus::UpToDate),
                 }
-
-                release
             }
             Some(ref ver) => {
                 println(show_output, &format!("Looking for tag: {}", ver));
@@ -260,77 +392,269 @@ pub trait ReleaseUpdate {
             }
         };
 
-        let target_asset = release
-            .asset_for(&target, self.identifier().as_deref())
-            .ok_or_else(|| {
-                format_err!(Error::Release, "No asset found for target: `{}`", target)
-            })?;
-
-        let prompt_confirmation = !self.no_confirm();
-        if self.show_output() || prompt_confirmation {
-            println!("\n{} release status:", bin_name);
-            println!("  * Current exe: {:?}", bin_install_path);
-            println!("  * New exe release: {:?}", target_asset.name);
-            println!("  * New exe download url: {:?}", target_asset.download_url);
-            println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
-        }
-        if prompt_confirmation {
-            confirm("Do you want to continue? [Y/n] ")?;
-        }
+        let target_asset = resolve_and_confirm(self, &release)?;
 
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
         println(show_output, "Downloading...");
-        let mut download = Download::from_url(&target_asset.download_url);
-        let mut headers = self.api_headers(&self.auth_token())?;
-        headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
-        download.set_headers(headers);
-        download.show_progress(self.show_download_progress());
+        build_download(self, &target_asset)?.download_to(&mut tmp_archive)?;
 
-        download.progress_template = self.progress_template();
-        download.progress_chars = self.progress_chars();
-
-        download.download_to(&mut tmp_archive)?;
-
-        #[cfg(feature = "signatures")]
-        verify_signature(&tmp_archive_path, self.verifying_keys())?;
-
-        print_flush(show_output, "Extracting archive... ")?;
-
-        let bin_path_str = Cow::Owned(self.bin_path_in_archive());
-
-        /// Substitute the `var` variable in a string with the given `val` value.
-        ///
-        /// Variable format: `{{ var }}`
-        fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
-            let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
-            Regex::new(&format).unwrap().replace_all(str, val)
-        }
-
-        let bin_path_str = substitute(&bin_path_str, "version", &release.version);
-        let bin_path_str = substitute(&bin_path_str, "target", &target);
-        let bin_path_str = substitute(&bin_path_str, "bin", &bin_name);
-        let bin_path_str = bin_path_str.as_ref();
-
-        Extract::from_source(&tmp_archive_path)
-            .extract_file(tmp_archive_dir.path(), bin_path_str)?;
-        let new_exe = tmp_archive_dir.path().join(bin_path_str);
-
-        println(show_output, "Done");
-
-        print_flush(show_output, "Replacing binary file... ")?;
-
-        if bin_install_path == std::env::current_exe()? {
-            self_replace::self_replace(new_exe)?;
-        } else {
-            Move::from_source(new_exe.as_ref()).to_dest(bin_install_path.as_ref())?;
-        }
-        println(show_output, "Done");
-
-        Ok(UpdateStatus::Updated(release))
+        finish_update(self, release, &tmp_archive_dir, &tmp_archive_path)
     }
+}
+
+/// Print the "Checking target-arch / current version" header lines.
+fn print_check_header(target: &str, current_version: &str, show_output: bool) {
+    println(show_output, &format!("Checking target-arch... {}", target));
+    println(
+        show_output,
+        &format!("Checking current version... v{}", current_version),
+    );
+}
+
+/// Given the releases fetched for the "latest" path, choose the one to update to, printing the
+/// usual progress messages. `Ok(None)` means there is nothing newer than the current version
+/// (already up to date). Shared by the sync and async orchestrators.
+fn choose_latest_release(
+    releases: Vec<Release>,
+    current_version: &str,
+    show_output: bool,
+) -> Result<Option<Release>> {
+    // Only consider releases strictly newer than the current version. The built-in backends already
+    // pre-filter this way, so this is a no-op for them; it matters for `backends::custom`, whose
+    // `ReleaseSource` may return the current (or older) releases — without this guard the fallback
+    // below would treat the current version as an available "update" and re-install it.
+    let releases = releases
+        .into_iter()
+        .filter(|r| version::bump_is_greater(current_version, &r.version).unwrap_or(false))
+        .collect::<Vec<_>>();
+
+    // Filter to versions compatible with the current one.
+    let compatible_releases = releases
+        .iter()
+        .filter(|r| version::bump_is_compatible(current_version, &r.version).unwrap_or(false))
+        .collect::<Vec<_>>();
+
+    let release = if let Some(release) = compatible_releases.first().cloned() {
+        println(
+            show_output,
+            &format!(
+                "v{} ({} versions compatible)",
+                release.version,
+                compatible_releases.len()
+            ),
+        );
+        release.clone()
+    } else if let Some(release) = releases.first() {
+        println(
+            show_output,
+            &format!(
+                "v{} ({} versions available)",
+                release.version,
+                releases.len()
+            ),
+        );
+        release.clone()
+    } else {
+        println(show_output, "up-to-date.");
+        return Ok(None);
+    };
+
+    println(
+        show_output,
+        &format!(
+            "New release found! v{} --> v{}",
+            current_version, release.version
+        ),
+    );
+    let qualifier = if version::bump_is_compatible(current_version, &release.version)? {
+        ""
+    } else {
+        "*NOT* "
+    };
+    println(
+        show_output,
+        &format!("New release is {}compatible", qualifier),
+    );
+
+    Ok(Some(release))
+}
+
+/// Select the asset to download (custom matcher or the built-in target/identifier match), print the
+/// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
+fn resolve_and_confirm<U: ReleaseUpdate + ?Sized>(
+    u: &U,
+    release: &Release,
+) -> Result<ReleaseAsset> {
+    let target = u.target();
+    let target_asset = match u.asset_matcher() {
+        Some(matcher) => matcher(&release.assets),
+        None => release.asset_for(target, u.identifier()),
+    }
+    .ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", target))?;
+
+    let prompt_confirmation = !u.no_confirm();
+    if u.show_output() || prompt_confirmation {
+        println!("\n{} release status:", u.bin_name());
+        println!("  * Current exe: {:?}", u.bin_install_path());
+        println!("  * New exe release: {:?}", target_asset.name);
+        println!("  * New exe download url: {:?}", target_asset.download_url);
+        println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+    }
+    if prompt_confirmation {
+        confirm("Do you want to continue? [Y/n] ")?;
+    }
+    Ok(target_asset)
+}
+
+/// Build the [`Download`] for an asset, applying the auth/accept/extra headers, timeout, progress
+/// callback, and progress style from the updater. Shared by both orchestrators; the caller drives
+/// it with `download_to` (sync) or `download_to_async` (async).
+fn build_download<U: ReleaseUpdate + ?Sized>(
+    u: &U,
+    target_asset: &ReleaseAsset,
+) -> Result<Download> {
+    let mut download = Download::from_url(&target_asset.download_url);
+    let mut headers = u.api_headers(u.auth_token())?;
+    headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
+    // Apply the user's extra request headers to the download too.
+    for (name, value) in u.request_headers() {
+        headers.insert(name.clone(), value.clone());
+    }
+    download.replace_headers(headers);
+    // Forward any injected HTTP client so the download reuses it too.
+    download.set_client_override(u.request_client().clone());
+    if let Some(timeout) = u.request_timeout() {
+        download.set_timeout(timeout);
+    }
+    if let Some(callback) = u.progress_callback() {
+        download.set_progress_callback_arc(callback);
+    }
+    download.show_download_progress(u.show_download_progress());
+    download.set_progress_style(u.progress_template(), u.progress_chars());
+    Ok(download)
+}
+
+/// Verify the downloaded archive (checksum/signature), extract the binary, and install it. This is
+/// the sync tail shared verbatim by the sync and async update flows. Consumes `release` and returns
+/// the resulting status.
+fn finish_update<U: ReleaseUpdate + ?Sized>(
+    u: &U,
+    release: Release,
+    tmp_archive_dir: &tempfile::TempDir,
+    tmp_archive_path: &std::path::Path,
+) -> Result<UpdateStatus> {
+    let show_output = u.show_output();
+
+    #[cfg(feature = "checksums")]
+    if let Some(checksum) = u.checksum() {
+        checksum.verify(tmp_archive_path)?;
+    }
+
+    #[cfg(feature = "signatures")]
+    verify_signature(tmp_archive_path, u.verifying_keys())?;
+
+    print_flush(show_output, "Extracting archive... ")?;
+
+    let bin_path_str = Cow::Borrowed(u.bin_path_in_archive());
+
+    // Substitute the `var` variable in a string with the given `val` value.
+    // Variable format: `{{ var }}`
+    fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
+        let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
+        Regex::new(&format).unwrap().replace_all(str, val)
+    }
+
+    let bin_path_str = substitute(&bin_path_str, "version", &release.version);
+    let bin_path_str = substitute(&bin_path_str, "target", u.target());
+    let bin_path_str = substitute(&bin_path_str, "bin", u.bin_name());
+    let bin_path_str = bin_path_str.as_ref();
+
+    Extract::from_source(tmp_archive_path).extract_file(tmp_archive_dir.path(), bin_path_str)?;
+    let new_exe = tmp_archive_dir.path().join(bin_path_str);
+
+    println(show_output, "Done");
+
+    print_flush(show_output, "Replacing binary file... ")?;
+
+    install_binary(
+        &new_exe,
+        &u.bin_install_path(),
+        u.verify_callback().as_deref(),
+    )?;
+    println(show_output, "Done");
+
+    Ok(UpdateStatus::Updated(release))
+}
+
+/// Async sibling of [`ReleaseUpdate::update_extended`]: identical flow with the release listing and
+/// the download done asynchronously, reusing the shared sync helpers for selection, confirmation,
+/// verification, extraction, and install.
+#[cfg(feature = "async")]
+pub(crate) async fn update_extended_async<U>(u: &U) -> Result<UpdateStatus>
+where
+    // `AsyncReleaseSource` is never used through a trait object (the async API hands out a concrete
+    // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above.
+    U: ReleaseUpdate + AsyncReleaseSource,
+{
+    let current_version = u.current_version();
+    let show_output = u.show_output();
+    print_check_header(u.target(), current_version, show_output);
+
+    let release = match u.target_version_tag() {
+        None => {
+            print_flush(show_output, "Checking latest released version... ")?;
+            let releases = u.get_latest_releases_async(current_version).await?;
+            match choose_latest_release(releases, current_version, show_output)? {
+                Some(release) => release,
+                None => return Ok(UpdateStatus::UpToDate),
+            }
+        }
+        Some(ref ver) => {
+            println(show_output, &format!("Looking for tag: {}", ver));
+            u.get_release_version_async(ver).await?
+        }
+    };
+
+    let target_asset = resolve_and_confirm(u, &release)?;
+
+    let tmp_archive_dir = tempfile::TempDir::new()?;
+    let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
+    let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
+
+    println(show_output, "Downloading...");
+    build_download(u, &target_asset)?
+        .download_to_async(&mut tmp_archive)
+        .await?;
+
+    finish_update(u, release, &tmp_archive_dir, &tmp_archive_path)
+}
+
+/// Run the post-update verification hook (if any) on the freshly-extracted binary, then install
+/// it — replacing the current executable in place, or moving it to `bin_install_path`. If the
+/// hook returns `false` the install is aborted before anything is replaced.
+fn install_binary(
+    new_exe: &std::path::Path,
+    bin_install_path: &std::path::Path,
+    verify: Option<&crate::DynVerifyFn>,
+) -> Result<()> {
+    if let Some(verify) = verify {
+        if !verify(new_exe) {
+            bail!(
+                Error::Update,
+                "post-update verification rejected the new binary"
+            )
+        }
+    }
+    let current_exe = std::env::current_exe()?;
+    if bin_install_path == current_exe.as_path() {
+        self_replace::self_replace(new_exe)?;
+    } else {
+        Move::from_source(new_exe).to_dest(bin_install_path)?;
+    }
+    Ok(())
 }
 
 // Print out message based on provided flag and flush the output buffer
@@ -391,4 +715,88 @@ fn verify_signature(
         }
     }
     Err(Error::NoSignatures(archive_kind))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_latest_release, install_binary};
+    use crate::update::Release;
+    use crate::DynVerifyFn;
+
+    fn rel(version: &str) -> Release {
+        Release::builder().version(version).build().unwrap()
+    }
+
+    #[test]
+    fn choose_latest_release_up_to_date_when_nothing_newer() {
+        // No releases at all.
+        assert!(choose_latest_release(vec![], "1.0.0", false)
+            .unwrap()
+            .is_none());
+
+        // A source (e.g. a custom backend) that returns the current and older versions must be
+        // treated as up-to-date — not re-install the current version. (Regression test.)
+        let chosen =
+            choose_latest_release(vec![rel("1.0.0"), rel("0.9.0")], "1.0.0", false).unwrap();
+        assert!(
+            chosen.is_none(),
+            "current/older releases must not be offered as an update"
+        );
+    }
+
+    #[test]
+    fn choose_latest_release_prefers_newest_compatible() {
+        let chosen = choose_latest_release(
+            vec![rel("1.2.0"), rel("1.1.0"), rel("1.0.0")],
+            "1.0.0",
+            false,
+        )
+        .unwrap()
+        .expect("a compatible newer release is chosen");
+        assert_eq!(chosen.version, "1.2.0");
+    }
+
+    #[test]
+    fn choose_latest_release_falls_back_to_incompatible_newer() {
+        // Only a major bump is available: newer than current but not semver-compatible. It is still
+        // offered (flagged "*NOT* compatible" in the messages), exercising the fallback branch.
+        let chosen = choose_latest_release(vec![rel("2.0.0")], "1.0.0", false)
+            .unwrap()
+            .expect("an incompatible-but-newer release is still offered");
+        assert_eq!(chosen.version, "2.0.0");
+    }
+
+    #[test]
+    fn install_binary_aborts_when_verify_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+        // A dest that isn't the current exe takes the move path (not self_replace).
+        let dest = dir.path().join("installed");
+
+        let reject: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| false);
+        let res = install_binary(&new_exe, &dest, Some(&*reject));
+        assert!(res.is_err(), "verify=false must abort the install");
+        assert!(
+            !dest.exists(),
+            "nothing is installed when verification fails"
+        );
+        assert!(new_exe.exists(), "the extracted binary is left untouched");
+    }
+
+    #[test]
+    fn install_binary_installs_when_verify_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+        let dest = dir.path().join("installed");
+
+        let accept: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| true);
+        install_binary(&new_exe, &dest, Some(&*accept)).unwrap();
+        assert!(
+            dest.exists(),
+            "binary is installed when verification passes"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new binary");
+    }
 }

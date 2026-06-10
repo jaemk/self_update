@@ -8,6 +8,16 @@
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
+Supported backends: **GitHub**, **GitLab**, **Gitea**, and **S3** (Amazon S3, Google GCS,
+DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Update`
+(configure → build → update) and `ReleaseList` builder API.
+
+> **Upgrading from 0.x?** 1.0 makes a focused set of breaking changes to clean up the public
+> API. See the [1.0 migration guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0-human.md)
+> for a step-by-step walkthrough, or the
+> [agent-oriented guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0.md)
+> for automated migration tooling.
+
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
@@ -17,18 +27,26 @@ producing release-builds via CI (travis/appveyor).
 
 ### Features
 
-The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section) are
-available (but _disabled_ by default):
+Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
+exclusive — enabling both, or neither, is a compile error):
+
+* `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
+* `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
+* `default-tls` (default): native TLS for the selected client;
+* `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
+
+The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
+are _disabled_ by default; activate the one(s) your release files need:
 
 * `archive-tar`: Support for _tar_ archive format;
 * `archive-zip`: Support for _zip_ archive format;
 * `compression-flate2`: Support for _gzip_ compression;
 * `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
-* `rustls`: Use [pure rust TLS implementation](https://github.com/ctz/rustls) for network requests. This feature does _not_ support 32bit macOS;
-* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign.
-
-Please activate the feature(s) needed by your release files.
+* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
+* `checksums`: Verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
+* `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
+* `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
 ### Example
 
@@ -36,7 +54,7 @@ Run the following example to see `self_update` in action:
 
 `cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
 
-There's also an equivalent example for gitlab:
+There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
 `cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
 
@@ -69,7 +87,7 @@ and any file not matching the format, or not matching the provided prefix string
 ```rust
 use self_update::cargo_crate_version;
 
-fn update() -> Result<(), Box<::std::error::Error>> {
+fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
         // .end_point(self_update::backends::s3::EndPoint::GCS)
         // .end_point("https://s3.example.com")
@@ -110,10 +128,10 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
             .prefix("self_update")
             .tempdir_in(::std::env::current_dir()?)?;
     let tmp_tarball_path = tmp_dir.path().join(&asset.name);
-    let tmp_tarball = ::std::fs::File::open(&tmp_tarball_path)?;
+    let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+        .set_header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -128,18 +146,246 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Multi-file / non-executable install
+
+The high-level `update()` flow replaces a single executable. To update a tool that ships **more
+than one file** (a binary plus sidecar libraries/resources), or to install files that aren't the
+running executable, download and extract the whole archive yourself and then install the files
+with [`MoveAll`], which applies a set of `(source -> dest)` moves **transactionally**: either every
+move succeeds, or — on the first failure — all already-applied moves are rolled back, so a failed
+update can't leave a half-installed tool. Because it uses `rename` (which can't cross
+filesystems), the source files, every destination, and the temp dir must all be on the same
+filesystem.
+
+```rust
+# #[cfg(feature = "archive-tar")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempfile::TempDir::new()?;
+    let tarball_path = tmp_dir.path().join("release.tar.gz");
+    // ... download the archive to `tarball_path` (see the example above) ...
+
+    // The extracted files are renamed into place, so the staging dir (the move sources) and the
+    // stash dir must be on the same filesystem as the destinations — create both next to them
+    // rather than in $TMPDIR.
+    let staging = tempfile::TempDir::new_in("/usr/local")?;
+    self_update::Extract::from_source(&tarball_path)
+        .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
+        .extract_into(staging.path())?;
+
+    // Install several files atomically (all-or-nothing).
+    let stash = tempfile::TempDir::new_in("/usr/local")?;
+    self_update::MoveAll::from_temp(stash.path())
+        .add(staging.path().join("app"), "/usr/local/bin/app")
+        .add(staging.path().join("libapp.so"), "/usr/local/lib/libapp.so")
+        .commit()?;
+    Ok(())
+}
+```
+
+### Checksum verification
+
+With the `checksums` feature, pass a known digest (e.g. one published in a `SHA256SUMS` file
+alongside the release) and the crate verifies the downloaded artifact against it **before**
+installing — a mismatch aborts the update. The algorithm is chosen by the
+[`Checksum`](crate::Checksum) variant (`Sha256` / `Sha512`); it complements the `signatures`
+feature (zipsign), which verifies authenticity rather than a published digest.
+
+```rust
+# #[cfg(feature = "checksums")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
+        .verifying_checksum(self_update::Checksum::Sha256("abc123…".into()))
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+### Custom backends
+
+To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`) don't cover —
+another forge, a private artifact registry, a plain HTTP directory — implement the
+[`ReleaseSource`] trait (three fetch methods that say *where releases come from*) and drive a full
+update through the [`backends::custom`] backend, which reuses the crate's compare → select-asset →
+download → verify → extract → install flow. You build [`Release`]s with [`Release::builder`] and
+[`ReleaseAsset::new`]; the `ReleaseUpdate` trait stays sealed.
+
+```rust
+use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
+
+struct MyHost;
+impl ReleaseSource for MyHost {
+    fn get_latest_release(&self) -> self_update::Result<Release> {
+        Ok(Release::builder()
+            .version("1.2.3")
+            .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
+            .build()?)
+    }
+    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+        Ok(vec![self.get_latest_release()?])
+    }
+    fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
+        self.get_latest_release()
+    }
+}
+
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let status = self_update::backends::custom::Update::configure()
+    .source(MyHost)
+    .bin_name("app")
+    .current_version(cargo_crate_version!())
+    .build()?
+    .update()?;
+# Ok(())
+# }
+```
+
+### Async
+
+With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
+returns a concrete `Update` with async (`*_async`) verbs — `update_async()`,
+`update_extended_async()`, and `get_latest_release_async()` — so a `tokio` application can update
+without wrapping the blocking calls in `spawn_blocking`. The blocking API is unchanged; the async
+path is purely additive. It is **tokio-only and reqwest-only** (ureq has no async story, so `async`
+is incompatible with `ureq`). Network IO becomes async; the extract/replace step stays synchronous.
+
+```rust
+# #[cfg(feature = "async")]
+async fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .build_async()?
+        .update_async()
+        .await?;
+    println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+```
+
+### Custom HTTP client
+
+The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
+for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
+simply reusing your application's existing client — you can hand the crate a **pre-built client**.
+It is used for both the release listing and the download. The setters are client-specific (the
+client types differ and are mutually exclusive): `reqwest_client` (a blocking
+[`reqwest::Client`](::reqwest::blocking::Client), used by the blocking API), `reqwest_async_client`
+(an async [`reqwest::Client`](::reqwest::Client), used by the `*_async` verbs), and `ureq_agent` (a
+[`ureq::Agent`](::ureq::Agent)). The selected client crate is re-exported (`self_update::reqwest` /
+`self_update::ureq`) so you don't need a separate dependency to name the type.
+
+When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
+release-listing requests (the download is never retried), and for `reqwest` the per-request
+`.timeout()` is layered on too; but `HTTP(S)_PROXY` env and the crate's TLS feature are left entirely
+to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does not apply to an
+injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and
+`reqwest_async_client` the async ones — injecting only one and calling the other half just uses the
+crate's per-call client for that half.
+
+```rust
+# #[cfg(feature = "reqwest")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let client = self_update::reqwest::blocking::Client::builder()
+        // .add_root_certificate(...) / .proxy(...) / .danger_accept_invalid_certs(...) etc.
+        .build()?;
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .reqwest_client(client)
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
 ### Troubleshooting
 
 When using cross compilation tools such as cross if you want to use rustls and not openssl
 
 ```toml
-self_update = { version = "0.27.0", features = ["rustls"], default-features = false }
+self_update = { version = "1", features = ["rustls"], default-features = false }
 ```
+
+**TLS certificate errors on Linux (`default-tls` / OpenSSL).** With the native-TLS backend,
+OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
+it can't (some containers, `musl` static builds, or a non-standard cert layout) a request may fail
+with a certificate-verification error. Point OpenSSL at the bundle by exporting `SSL_CERT_FILE`
+(and, if needed, `SSL_CERT_DIR`) before running your program — the paths vary by distribution, e.g.
+on a Debian/Ubuntu base:
+
+```bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_DIR=/etc/ssl/certs
+```
+
+Alternatively build with the `rustls` feature, which uses a bundled root store and does not depend
+on the system OpenSSL cert layout.
 
 */
 
+// Exactly one HTTP client must be selected. Surface a human-readable diagnostic instead of
+// the raw symbol collision (both) or undefined-item error (neither) that would otherwise occur.
+#[cfg(all(feature = "reqwest", feature = "ureq"))]
+compile_error!(
+    "features `reqwest` and `ureq` are mutually exclusive — enable exactly one HTTP client \
+     (for `ureq`, set `default-features = false`)"
+);
+#[cfg(not(any(feature = "reqwest", feature = "ureq")))]
+compile_error!(
+    "no HTTP client selected — enable exactly one of the `reqwest` (default) or `ureq` features"
+);
+
+// The TLS backend is also a single choice; enabling both forwards conflicting TLS features to
+// the selected client.
+#[cfg(all(feature = "default-tls", feature = "rustls"))]
+compile_error!(
+    "features `default-tls` and `rustls` are mutually exclusive — to use `rustls`, set \
+     `default-features = false`"
+);
+
+// The async API is reqwest-only — ureq has no async story.
+#[cfg(all(feature = "async", feature = "ureq"))]
+compile_error!(
+    "feature `async` requires the `reqwest` client and is incompatible with `ureq` — \
+     `ureq` has no async API"
+);
+
+pub use http;
 pub use self_replace;
 pub use tempfile::TempDir;
+// Re-export the selected HTTP client so callers can name the types accepted by the client-injection
+// setters (`reqwest_client` / `reqwest_async_client` / `ureq_agent`) without a separate dependency.
+#[cfg(feature = "reqwest")]
+pub use reqwest;
+pub use update::{
+    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, UpdateStatus,
+};
+#[cfg(feature = "ureq")]
+pub use ureq;
+
+/// Re-export of the [`zipsign_api`] crate, whose [`PUBLIC_KEY_LENGTH`] constant defines the
+/// size of the ed25519 verifying keys accepted by the `verifying_keys` builder methods.
+///
+/// [`PUBLIC_KEY_LENGTH`]: zipsign_api::PUBLIC_KEY_LENGTH
+#[cfg(feature = "signatures")]
+pub use zipsign_api;
+
+/// An ed25519ph verifying key used to validate a signed download (see the `signatures` feature).
+///
+/// This is a convenience alias for the fixed-size key array accepted by the `verifying_keys`
+/// builder methods, so consumers don't need to depend on `zipsign-api` directly.
+#[cfg(feature = "signatures")]
+pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 
 #[cfg(feature = "compression-flate2")]
 use either::Either;
@@ -153,10 +399,20 @@ use std::path;
 #[macro_use]
 mod macros;
 pub mod backends;
+#[cfg(feature = "checksums")]
+mod checksum;
 pub mod errors;
 mod http_client;
 pub mod update;
 pub mod version;
+
+/// Re-export the crate's [`Error`](errors::Error) and [`Result`](errors::Result) at the crate root,
+/// so consumers (and `ReleaseSource` implementors) can write `self_update::Result<T>` /
+/// `self_update::Error` without naming the `errors` module.
+pub use errors::{Error, Result};
+
+#[cfg(feature = "checksums")]
+pub use checksum::Checksum;
 
 use http_client::{header, HttpResponse};
 
@@ -164,24 +420,11 @@ pub const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
 pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
-use errors::*;
-
 /// Get the current target triple.
 ///
 /// Returns a target triple (e.g. `x86_64-unknown-linux-gnu` or `i686-pc-windows-msvc`)
 pub fn get_target() -> &'static str {
     env!("TARGET")
-}
-
-/// Check if a version tag is greater than the current
-#[deprecated(
-    since = "0.4.2",
-    note = "`should_update` functionality has been moved to `version::bump_is_greater`.\
-            `version::bump_is_compatible` should be used instead."
-)]
-pub fn should_update(current: &str, latest: &str) -> Result<bool> {
-    use semver::Version;
-    Ok(Version::parse(latest)? > Version::parse(current)?)
 }
 
 /// Flush a message to stdout and check if they respond `yes`.
@@ -206,6 +449,7 @@ fn confirm(msg: &str) -> Result<()> {
 ///
 /// Wrapped `String`s are version tags
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Status {
     UpToDate(String),
     Updated(String),
@@ -243,6 +487,7 @@ impl std::fmt::Display for Status {
 
 /// Supported archive formats
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ArchiveKind {
     #[cfg(feature = "archive-tar")]
     Tar(Option<Compression>),
@@ -252,6 +497,7 @@ pub enum ArchiveKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Compression {
     Gz,
 }
@@ -333,9 +579,9 @@ pub struct Extract<'a> {
     archive: Option<ArchiveKind>,
 }
 #[cfg(feature = "compression-flate2")]
-pub type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
+type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
 #[cfg(not(feature = "compression-flate2"))]
-pub type GetArchiveReaderResult = fs::File;
+type GetArchiveReaderResult = fs::File;
 
 impl<'a> Extract<'a> {
     /// Create an `Extract`or from a source path
@@ -532,7 +778,13 @@ impl<'a> Extract<'a> {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
-                let mut file = archive.by_name(file_to_extract.to_str().unwrap())?;
+                let file_name = file_to_extract.to_str().ok_or_else(|| {
+                    Error::Update(format!(
+                        "cannot extract file with a non-UTF-8 path: {:?}",
+                        file_to_extract
+                    ))
+                })?;
+                let mut file = archive.by_name(file_name)?;
 
                 let output_path = into_dir.join(file.name());
                 if let Some(parent_dir) = output_path.parent() {
@@ -590,26 +842,220 @@ impl<'a> Move<'a> {
     /// Move source file to specified destination
     pub fn to_dest(&self, dest: &path::Path) -> Result<()> {
         match self.temp {
-            None => {
-                fs::rename(self.source, dest)?;
-            }
-            Some(temp) => {
-                if dest.exists() {
-                    // Move the existing dest to a temp location so we can move it
-                    // back it there's an error. If the existing `dest` file is a
-                    // long running program, this may prevent the temp dir from
-                    // being cleaned up.
-                    fs::rename(dest, temp)?;
-                    if let Err(e) = fs::rename(self.source, dest) {
-                        fs::rename(temp, dest)?;
-                        return Err(Error::from(e));
-                    }
-                } else {
-                    fs::rename(self.source, dest)?;
+            // Move the existing dest to a temp location so we can move it back if
+            // there's an error. If the existing `dest` file is a long running program,
+            // this may prevent the temp dir from being cleaned up.
+            Some(temp) if dest.exists() => {
+                fs::rename(dest, temp)?;
+                if let Err(e) = fs::rename(self.source, dest) {
+                    fs::rename(temp, dest)?;
+                    return Err(Error::from(e));
                 }
+            }
+            // No temp set, or nothing to preserve at `dest`: just move source into place.
+            _ => {
+                fs::rename(self.source, dest)?;
             }
         };
         Ok(())
+    }
+}
+
+/// Transactionally install a *set* of files: either every `(source -> dest)` move is applied, or
+/// — on the first failure — all already-applied moves are rolled back, restoring every
+/// destination to its prior contents. Use it to update a tool that ships more than one file (a
+/// binary plus sidecar libraries/resources) without risking a half-applied update.
+///
+/// This is the multi-file analogue of [`Move`]. It relies on `rename`, so **every source, every
+/// destination, and the `temp` directory must live on the same filesystem** (the same constraint
+/// [`Move::replace_using_temp`] has) — in particular the staging dir holding the files you `add`
+/// must be co-located with the destinations, not in `$TMPDIR`. The `temp` directory is used to
+/// stash each displaced destination so it can be restored on rollback; a [`tempfile::TempDir`] is a
+/// convenient choice.
+///
+/// [`commit`](Self::commit) drains the queued moves as it applies them, so a `MoveAll` is
+/// single-use: a second `commit` has nothing left to do and is a no-op returning `Ok(())`. Rollback
+/// is best-effort — if a rollback step itself fails it is logged via `log::error!` rather than
+/// surfaced, and the error returned to the caller is always the original one that triggered the
+/// rollback.
+///
+/// ```no_run
+/// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// // The stash dir must be on the same filesystem as the destinations (rename can't cross
+/// // filesystems), so create it next to them rather than in $TMPDIR.
+/// let tmp = tempfile::TempDir::new_in("/usr/local")?;
+/// // `new_bin` / `new_lib` are files you already extracted into a temp dir.
+/// let new_bin = std::path::Path::new("/tmp/extracted/app");
+/// let new_lib = std::path::Path::new("/tmp/extracted/libapp.so");
+/// self_update::MoveAll::from_temp(tmp.path())
+///     .add(new_bin, "/usr/local/bin/app")
+///     .add(new_lib, "/usr/local/lib/libapp.so")
+///     .commit()?; // all-or-nothing
+/// # Ok(())
+/// # }
+/// ```
+///
+/// * Errors:
+///     * Io - renaming a source into place or stashing an existing destination
+#[derive(Debug)]
+#[must_use = "queued moves are only applied when `.commit()` is called"]
+pub struct MoveAll<'a> {
+    temp: &'a path::Path,
+    moves: Vec<(path::PathBuf, path::PathBuf)>,
+}
+
+impl<'a> MoveAll<'a> {
+    /// Start a transactional install, stashing displaced destinations under `temp` so they can be
+    /// restored if a later move fails. `temp` must be on the same filesystem as every destination.
+    pub fn from_temp(temp: &'a path::Path) -> Self {
+        Self {
+            temp,
+            moves: Vec::new(),
+        }
+    }
+
+    /// Queue a `source -> dest` move. Moves are applied by [`commit`](Self::commit) in the order
+    /// added.
+    pub fn add(
+        &mut self,
+        source: impl AsRef<path::Path>,
+        dest: impl AsRef<path::Path>,
+    ) -> &mut Self {
+        self.moves
+            .push((source.as_ref().to_path_buf(), dest.as_ref().to_path_buf()));
+        self
+    }
+
+    /// Apply every queued move. On success all destinations have been replaced. On the first
+    /// failure, every already-applied move (and the failing one's partial state) is rolled back so
+    /// each destination is left with its original contents, and the underlying error is returned.
+    ///
+    /// The queued moves are drained as they are applied, so calling `commit` again is a no-op that
+    /// returns `Ok(())`.
+    pub fn commit(&mut self) -> Result<()> {
+        // Drain the queue so a second `commit` is a no-op rather than re-running already-applied
+        // moves against now-missing sources.
+        let moves = std::mem::take(&mut self.moves);
+
+        // For each applied move we remember the destination and where its previous contents (if
+        // any) were stashed, so a later failure can restore them in reverse order.
+        let mut applied: Vec<Applied> = Vec::with_capacity(moves.len());
+
+        for (i, (source, dest)) in moves.iter().enumerate() {
+            // Stash an existing destination so we can move it back on rollback.
+            let stash = if dest.exists() {
+                let stash = self.temp.join(format!("self_update-stash-{i}"));
+                if let Err(e) = fs::rename(dest, &stash) {
+                    rollback(&applied);
+                    return Err(Error::from(e));
+                }
+                Some(stash)
+            } else {
+                None
+            };
+
+            // Move the new file into place.
+            if let Err(e) = fs::rename(source, dest) {
+                // Undo this step's stash before rolling back the earlier ones.
+                if let Some(stash) = &stash {
+                    if let Err(restore_err) = fs::rename(stash, dest) {
+                        log::error!(
+                            "failed to restore {:?} from stash {:?} during rollback: {}",
+                            dest,
+                            stash,
+                            restore_err
+                        );
+                    }
+                }
+                rollback(&applied);
+                return Err(Error::from(e));
+            }
+
+            applied.push(Applied {
+                dest: dest.clone(),
+                stash,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// A move that [`MoveAll::commit`] has applied, retained so it can be undone on a later failure.
+#[derive(Debug)]
+struct Applied {
+    dest: path::PathBuf,
+    stash: Option<path::PathBuf>,
+}
+
+/// Best-effort rollback of already-applied moves, in reverse order. For a destination that
+/// previously existed, the stashed original is `rename`d back over the newly installed file — a
+/// single atomic replace (the same technique [`Move::replace_using_temp`] uses), so the original
+/// is never deleted before its restore can fail. For a destination that didn't previously exist
+/// (a fresh install), the newly installed file is simply removed. Rollback failures are logged
+/// rather than propagated — the original error that triggered the rollback is what callers see.
+fn rollback(applied: &[Applied]) {
+    for entry in applied.iter().rev() {
+        match &entry.stash {
+            // Previously existed: atomically restore the original over the new file.
+            Some(stash) => {
+                if let Err(e) = fs::rename(stash, &entry.dest) {
+                    log::error!(
+                        "failed to restore {:?} from stash {:?} during rollback: {}",
+                        entry.dest,
+                        stash,
+                        e
+                    );
+                }
+            }
+            // Fresh install (nothing to restore): remove the file we added.
+            None => {
+                if let Err(e) = fs::remove_file(&entry.dest) {
+                    log::error!("failed to remove {:?} during rollback: {}", entry.dest, e);
+                }
+            }
+        }
+    }
+}
+
+/// A download-progress callback: `(bytes_downloaded_so_far, total_bytes_if_known)`.
+pub(crate) type DynProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;
+
+/// Wrapper around a [`DynProgressFn`] so structs holding one can still derive `Clone`/`Debug`.
+#[derive(Clone)]
+pub(crate) struct ProgressCallback(pub(crate) std::sync::Arc<DynProgressFn>);
+
+impl std::fmt::Debug for ProgressCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressCallback(..)")
+    }
+}
+
+/// A post-update verification callback: given the path to the freshly-extracted binary (before
+/// it is installed), returns `true` to accept it or `false` to reject it (aborting the update).
+pub(crate) type DynVerifyFn = dyn Fn(&std::path::Path) -> bool + Send + Sync;
+
+/// Wrapper around a [`DynVerifyFn`] so structs holding one can still derive `Clone`/`Debug`.
+#[derive(Clone)]
+pub(crate) struct VerifyCallback(pub(crate) std::sync::Arc<DynVerifyFn>);
+
+impl std::fmt::Debug for VerifyCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifyCallback(..)")
+    }
+}
+
+/// A custom asset-selection callback: given the release's assets, returns the asset to download
+/// (or `None` to fail the update). Overrides the built-in target/identifier substring matching.
+pub(crate) type DynAssetMatcher = dyn Fn(&[ReleaseAsset]) -> Option<ReleaseAsset> + Send + Sync;
+
+/// Wrapper around a [`DynAssetMatcher`] so structs holding one can still derive `Clone`/`Debug`.
+#[derive(Clone)]
+pub(crate) struct AssetMatcher(pub(crate) std::sync::Arc<DynAssetMatcher>);
+
+impl std::fmt::Debug for AssetMatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AssetMatcher(..)")
     }
 }
 
@@ -623,6 +1069,9 @@ pub struct Download {
     headers: http_client::header::HeaderMap,
     progress_template: String,
     progress_chars: String,
+    timeout: Option<std::time::Duration>,
+    on_progress: Option<ProgressCallback>,
+    client: http_client::ClientOverride,
 }
 impl Download {
     /// Specify download url
@@ -633,29 +1082,98 @@ impl Download {
             headers: http_client::header::HeaderMap::new(),
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
+            timeout: None,
+            on_progress: None,
+            client: http_client::ClientOverride::default(),
         }
     }
 
-    /// Toggle download progress bar
-    pub fn show_progress(&mut self, b: bool) -> &mut Self {
+    /// Toggle the download progress bar. Named to match the `Update` builder's setter of the same
+    /// name.
+    #[doc(alias = "show_progress")]
+    pub fn show_download_progress(&mut self, b: bool) -> &mut Self {
         self.show_progress = b;
+        self
+    }
+
+    /// Set a timeout for the download request. Defaults to no timeout.
+    pub fn set_timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Register a callback invoked as the download streams, with
+    /// `(bytes_downloaded_so_far, total_bytes)` — `total_bytes` is `None` when the server does
+    /// not send a `Content-Length`. Independent of the terminal progress bar
+    /// ([`show_download_progress`](Self::show_download_progress)); use it to drive a GUI, structured logging, or
+    /// any non-terminal progress display. The callback is `Fn`, so track state via interior
+    /// mutability (e.g. an `AtomicU64` or a channel).
+    pub fn set_progress_callback(
+        &mut self,
+        callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_progress = Some(ProgressCallback(std::sync::Arc::new(callback)));
+        self
+    }
+
+    /// Internal: set the progress callback from an already-wrapped `Arc` (used by the update
+    /// flow to forward an `Update`'s callback to its download).
+    pub(crate) fn set_progress_callback_arc(
+        &mut self,
+        callback: std::sync::Arc<DynProgressFn>,
+    ) -> &mut Self {
+        self.on_progress = Some(ProgressCallback(callback));
         self
     }
 
     /// Set the progress style
     pub fn set_progress_style(
         &mut self,
-        progress_template: String,
-        progress_chars: String,
+        progress_template: impl Into<String>,
+        progress_chars: impl Into<String>,
     ) -> &mut Self {
-        self.progress_template = progress_template;
-        self.progress_chars = progress_chars;
+        self.progress_template = progress_template.into();
+        self.progress_chars = progress_chars.into();
         self
     }
 
-    /// Set the download request headers, replaces the existing `HeaderMap`
-    pub fn set_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
+    /// Replace the entire download request `HeaderMap`. To add a single header without discarding
+    /// the others, use [`set_header`](Self::set_header) instead.
+    #[doc(alias = "set_headers")]
+    pub fn replace_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
+        self
+    }
+
+    /// Use a pre-built blocking [`reqwest::Client`](::reqwest::blocking::Client) for the download
+    /// instead of the per-call client. See the `Update` builder's `reqwest_client` for the
+    /// rationale and precedence rules.
+    #[cfg(feature = "reqwest")]
+    pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
+        self.client.blocking = Some(client);
+        self
+    }
+
+    /// Async sibling of [`reqwest_client`](Self::reqwest_client), used by
+    /// [`download_to_async`](Self::download_to_async).
+    #[cfg(feature = "async")]
+    pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
+        self.client.r#async = Some(client);
+        self
+    }
+
+    /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for the download instead of the per-call
+    /// agent. The agent owns its own timeout / TLS / proxy config.
+    #[cfg(feature = "ureq")]
+    pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
+        self.client.agent = Some(agent);
+        self
+    }
+
+    /// Internal: set the client override from an already-built one (used by the update flow to
+    /// forward an `Update`'s injected client to its download).
+    pub(crate) fn set_client_override(&mut self, client: http_client::ClientOverride) -> &mut Self {
+        self.client = client;
         self
     }
 
@@ -674,7 +1192,7 @@ impl Download {
     /// If the resource doesn't specify a content-length, the progress bar will not be shown
     ///
     /// * Errors:
-    ///     * `reqwest` network errors
+    ///     * HTTP client network errors
     ///     * Unsuccessful response status
     ///     * Progress-bar errors
     ///     * Reading from response to `BufReader`-buffer
@@ -691,9 +1209,7 @@ impl Download {
             );
         }
 
-        set_ssl_vars!();
-
-        let resp = http_client::get(&self.url, headers)?;
+        let resp = http_client::get(&self.url, headers, self.timeout, &self.client)?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -703,17 +1219,12 @@ impl Download {
                     .unwrap_or(0)
             })
             .unwrap_or(0);
-        if !resp.status().is_success() {
-            bail!(
-                Error::Update,
-                "Download request failed with status: {:?}",
-                resp.status()
-            )
-        }
+        // `http_client::get` already errored on a non-success status (see `download_to_async`).
+        let total = if size == 0 { None } else { Some(size) };
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp.body());
-        let mut downloaded = 0;
+        let mut downloaded: u64 = 0;
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
             pb.set_style(
@@ -737,10 +1248,77 @@ impl Download {
                 break;
             }
             src.consume(n);
-            downloaded = min(downloaded + n as u64, size);
+            downloaded += n as u64;
 
             if let Some(ref mut bar) = bar {
-                bar.set_position(downloaded);
+                bar.set_position(min(downloaded, size));
+            }
+            if let Some(ref cb) = self.on_progress {
+                (cb.0)(downloaded, total);
+            }
+        }
+        if let Some(ref mut bar) = bar {
+            bar.finish_with_message("Done");
+        }
+        Ok(())
+    }
+
+    /// Async sibling of [`download_to`](Self::download_to): stream the download into `dest` using
+    /// the async (reqwest) transport, driving the same progress bar / callback. `dest` is a
+    /// synchronous writer (chunks are written as they arrive); file IO is not offloaded.
+    #[cfg(feature = "async")]
+    pub async fn download_to_async<T: io::Write>(&self, mut dest: T) -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut headers = self.headers.clone();
+        if !headers.contains_key(header::USER_AGENT) {
+            headers.insert(
+                header::USER_AGENT,
+                "rust-reqwest/self-update"
+                    .parse()
+                    .expect("invalid user-agent"),
+            );
+        }
+
+        let resp = http_client::get_async(&self.url, headers, self.timeout, &self.client).await?;
+        let size = resp
+            .headers()
+            .get(http_client::header::CONTENT_LENGTH)
+            .map(|val| {
+                val.to_str()
+                    .map(|s| s.parse::<u64>().unwrap_or(0))
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        // `get_async` already errored on a non-success status.
+        let total = if size == 0 { None } else { Some(size) };
+        let show_progress = if size == 0 { false } else { self.show_progress };
+
+        let mut downloaded: u64 = 0;
+        let mut bar = if show_progress {
+            let pb = ProgressBar::new(size);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(&self.progress_template)
+                    .expect("set ProgressStyle template failed")
+                    .progress_chars(&self.progress_chars),
+            );
+            Some(pb)
+        } else {
+            None
+        };
+
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            dest.write_all(&chunk)?;
+            downloaded += chunk.len() as u64;
+
+            if let Some(ref mut bar) = bar {
+                bar.set_position(min(downloaded, size));
+            }
+            if let Some(ref cb) = self.on_progress {
+                (cb.0)(downloaded, total);
             }
         }
         if let Some(ref mut bar) = bar {
@@ -771,6 +1349,162 @@ mod tests {
             ArchiveKind::Plain(None),
             detect_archive(&PathBuf::from("Something.exe")).unwrap()
         );
+    }
+
+    #[test]
+    fn move_all_commits_every_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        // Two new files to install over two existing destinations.
+        let src_a = dir.path().join("src_a");
+        let src_b = dir.path().join("src_b");
+        fs::write(&src_a, b"new-a").unwrap();
+        fs::write(&src_b, b"new-b").unwrap();
+        let dst_a = dir.path().join("dst_a");
+        let dst_b = dir.path().join("dst_b");
+        fs::write(&dst_a, b"old-a").unwrap();
+        fs::write(&dst_b, b"old-b").unwrap();
+
+        MoveAll::from_temp(temp.path())
+            .add(&src_a, &dst_a)
+            .add(&src_b, &dst_b)
+            .commit()
+            .unwrap();
+
+        assert_eq!(fs::read(&dst_a).unwrap(), b"new-a");
+        assert_eq!(fs::read(&dst_b).unwrap(), b"new-b");
+    }
+
+    #[test]
+    fn move_all_rolls_back_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        // Three moves: the first two are valid and overwrite existing destinations (so both are
+        // stashed and applied), the third points at a non-existent source so its move fails. This
+        // drives the already-applied first two back through `rollback()` (the stash-restore path).
+        let src_a = dir.path().join("src_a");
+        let src_b = dir.path().join("src_b");
+        fs::write(&src_a, b"new-a").unwrap();
+        fs::write(&src_b, b"new-b").unwrap();
+        let missing_src = dir.path().join("does_not_exist");
+
+        let dst_a = dir.path().join("dst_a");
+        let dst_b = dir.path().join("dst_b");
+        let dst_c = dir.path().join("dst_c");
+        fs::write(&dst_a, b"old-a").unwrap();
+        fs::write(&dst_b, b"old-b").unwrap();
+        fs::write(&dst_c, b"old-c").unwrap();
+
+        let res = MoveAll::from_temp(temp.path())
+            .add(&src_a, &dst_a)
+            .add(&src_b, &dst_b)
+            .add(&missing_src, &dst_c)
+            .commit();
+        assert!(res.is_err(), "a failing move must abort the transaction");
+
+        // Every destination is restored to its original contents — both the applied moves
+        // (rolled back via the stash) and the one whose move failed mid-step.
+        assert_eq!(
+            fs::read(&dst_a).unwrap(),
+            b"old-a",
+            "the first applied move must be rolled back"
+        );
+        assert_eq!(
+            fs::read(&dst_b).unwrap(),
+            b"old-b",
+            "the second applied move must be rolled back"
+        );
+        assert_eq!(
+            fs::read(&dst_c).unwrap(),
+            b"old-c",
+            "the failed move's stashed destination must be restored"
+        );
+    }
+
+    #[test]
+    fn move_all_installs_fresh_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        // Destination does not pre-exist (fresh install, no stash needed).
+        let src = dir.path().join("src");
+        fs::write(&src, b"fresh").unwrap();
+        let dst = dir.path().join("new_dst");
+
+        MoveAll::from_temp(temp.path())
+            .add(&src, &dst)
+            .commit()
+            .unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"fresh");
+    }
+
+    #[test]
+    fn move_all_second_commit_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        let src = dir.path().join("src");
+        fs::write(&src, b"new").unwrap();
+        let dst = dir.path().join("dst");
+        fs::write(&dst, b"old").unwrap();
+
+        let mut mover = MoveAll::from_temp(temp.path());
+        mover.add(&src, &dst);
+        mover.commit().unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new");
+
+        // The queue was drained, so a second commit does nothing and succeeds (rather than trying
+        // to re-apply the move against the now-missing source and erroring out).
+        mover.commit().unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new");
+    }
+
+    #[test]
+    fn download_invokes_progress_callback() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        // Serve a known-length body from a loopback server (no external network).
+        let body = "x".repeat(20_000);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = body.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                served.len(),
+                served
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        let progress = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+        let sink_progress = progress.clone();
+        let mut out = Vec::new();
+        Download::from_url(&format!("http://{addr}/file"))
+            .set_progress_callback(move |downloaded, total| {
+                sink_progress.lock().unwrap().push((downloaded, total));
+            })
+            .download_to(&mut out)
+            .unwrap();
+
+        assert_eq!(out.len(), 20_000);
+        let calls = progress.lock().unwrap();
+        assert!(!calls.is_empty(), "callback should have been invoked");
+        // `total` reflects the Content-Length on every call.
+        assert!(calls.iter().all(|(_, total)| *total == Some(20_000)));
+        // `downloaded` is monotonically non-decreasing and reaches the full size.
+        let mut last = 0u64;
+        for (downloaded, _) in calls.iter() {
+            assert!(*downloaded >= last);
+            last = *downloaded;
+        }
+        assert_eq!(calls.last().unwrap().0, 20_000);
     }
 
     #[test]

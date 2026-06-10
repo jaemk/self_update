@@ -3,22 +3,41 @@
 use ureq::tls::TlsProvider;
 use ureq::{http::Response, Agent, Body};
 
-use super::{HeaderMap, HttpResponse};
+use super::{ClientOverride, HeaderMap, HttpResponse};
 use crate::{Error, Result};
 
-pub fn get(url: &str, headers: HeaderMap) -> Result<impl HttpResponse> {
-    #[allow(unused_mut)]
-    let mut provider = TlsProvider::NativeTls;
+pub fn get(
+    url: &str,
+    headers: HeaderMap,
+    timeout: Option<std::time::Duration>,
+    client: &ClientOverride,
+) -> Result<impl HttpResponse> {
+    // Use the injected agent if present (by reference — `Agent::get` takes `&self`), otherwise
+    // build one per call. An injected agent owns its own timeout/TLS/proxy config, so the
+    // per-request `timeout` is only applied to the per-call agent (see the `### Custom HTTP client`
+    // docs).
+    let built_agent;
+    let agent: &Agent = match &client.agent {
+        Some(agent) => agent,
+        None => {
+            #[allow(unused_mut)]
+            let mut provider = TlsProvider::NativeTls;
 
-    #[cfg(feature = "rustls")]
-    {
-        provider = TlsProvider::Rustls;
-    }
+            #[cfg(feature = "rustls")]
+            {
+                provider = TlsProvider::Rustls;
+            }
 
-    let config = Agent::config_builder()
-        .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
-        .build();
-    let agent = Agent::new_with_config(config);
+            let config = Agent::config_builder()
+                .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
+                .timeout_global(timeout)
+                // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
+                .proxy(ureq::Proxy::try_from_env())
+                .build();
+            built_agent = Agent::new_with_config(config);
+            &built_agent
+        }
+    };
     let mut req = agent.get(url);
 
     for (key, value) in headers.into_iter() {
@@ -38,18 +57,16 @@ pub fn get(url: &str, headers: HeaderMap) -> Result<impl HttpResponse> {
         )
     }
 
-    res.headers();
-
     Ok(res)
 }
 
 impl HttpResponse for Response<Body> {
     fn headers(&self) -> &HeaderMap<http::HeaderValue> {
-        Response::headers(&self)
+        Response::headers(self)
     }
 
     fn status(&self) -> http::StatusCode {
-        Response::status(&self)
+        Response::status(self)
     }
 
     fn body(self) -> impl std::io::Read {

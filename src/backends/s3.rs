@@ -1,21 +1,20 @@
 /*!
 Amazon S3 releases
 */
-use crate::http_client::{self, HttpResponse};
+use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
+use crate::backends::send;
+use crate::http_client::HttpResponse;
 use crate::{
     errors::*,
-    get_target,
     update::{Release, ReleaseAsset, ReleaseUpdate},
     version::bump_is_greater,
-    DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE,
 };
 use log::debug;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
 use std::cmp::Ordering;
-use std::env::{self, consts::EXE_SUFFIX};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
@@ -61,6 +60,7 @@ impl From<String> for EndPoint {
 
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ReleaseListBuilder {
     end_point: EndPoint,
     bucket_name: Option<String>,
@@ -69,6 +69,7 @@ pub struct ReleaseListBuilder {
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
+    request: RequestConfig,
 }
 
 impl ReleaseListBuilder {
@@ -97,7 +98,7 @@ impl ReleaseListBuilder {
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn with_target(&mut self, target: &str) -> &mut Self {
+    pub fn target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -108,6 +109,8 @@ impl ReleaseListBuilder {
         self.access_key = Some(access_key.into());
         self
     }
+
+    request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
@@ -123,6 +126,7 @@ impl ReleaseListBuilder {
             target: self.target.clone(),
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
+            request: self.request.clone(),
         })
     }
 }
@@ -138,6 +142,7 @@ pub struct ReleaseList {
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
+    request: RequestConfig,
 }
 
 impl ReleaseList {
@@ -151,6 +156,7 @@ impl ReleaseList {
             region: None,
             #[cfg(feature = "s3-auth")]
             access_key: None,
+            request: RequestConfig::default(),
         }
     }
 
@@ -164,6 +170,7 @@ impl ReleaseList {
             &self.asset_prefix,
             #[cfg(feature = "s3-auth")]
             &self.access_key,
+            &self.request,
         )?;
         let releases = match self.target {
             None => releases,
@@ -180,55 +187,16 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
-#[derive(Debug)]
+#[derive(Debug, Default)]
+#[must_use]
 pub struct UpdateBuilder {
     end_point: EndPoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
-    target: Option<String>,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
-    bin_name: Option<String>,
-    bin_install_path: Option<PathBuf>,
-    bin_path_in_archive: Option<String>,
-    show_download_progress: bool,
-    show_output: bool,
-    no_confirm: bool,
-    current_version: Option<String>,
-    target_version: Option<String>,
-    progress_template: String,
-    progress_chars: String,
-    auth_token: Option<String>,
-    #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
-}
-
-impl Default for UpdateBuilder {
-    fn default() -> Self {
-        Self {
-            end_point: EndPoint::default(),
-            bucket_name: None,
-            asset_prefix: None,
-            target: None,
-            region: None,
-            #[cfg(feature = "s3-auth")]
-            access_key: None,
-            bin_name: None,
-            bin_install_path: None,
-            bin_path_in_archive: None,
-            show_download_progress: false,
-            show_output: true,
-            no_confirm: false,
-            current_version: None,
-            target_version: None,
-            progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
-            progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
-            auth_token: None,
-            #[cfg(feature = "signatures")]
-            verifying_keys: vec![],
-        }
-    }
+    common: CommonBuilderConfig,
 }
 
 /// Configure download and installation from bucket
@@ -263,153 +231,29 @@ impl UpdateBuilder {
     }
 
     #[cfg(feature = "s3-auth")]
-    /// Set the access key id
-    pub fn access_key_id(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
+    /// Set the access key (an `(access_key_id, secret_access_key)` pair)
+    pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
         self
     }
 
-    /// Set the current app version, used to compare against the latest available version.
-    /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
-    pub fn current_version(&mut self, ver: &str) -> &mut Self {
-        self.current_version = Some(ver.to_owned());
+    impl_common_builder_setters!(no_auth_token);
+
+    /// **Deprecated and a no-op on the S3 backend.** S3 authenticates by signing requests with
+    /// an `access_key` (AWS SigV4), not a bearer token, so this setter has never had any effect
+    /// here. Use [`access_key`](Self::access_key) instead. Retained for one release to avoid a
+    /// hard break; it will be removed in the next major version.
+    #[deprecated(
+        since = "1.0.0",
+        note = "S3 uses `access_key` (AWS SigV4 signing), not an auth token; `auth_token` is a \
+                no-op on the S3 backend. Use `.access_key((id, secret))` instead."
+    )]
+    pub fn auth_token(&mut self, _auth_token: &str) -> &mut Self {
         self
     }
 
-    /// Set the target version tag to update to. This will be used to search for a release
-    /// by tag name:
-    /// `/repos/:owner/:repo/releases/tags/:tag`
-    ///
-    /// If not specified, the latest available release is used.
-    pub fn target_version_tag(&mut self, ver: &str) -> &mut Self {
-        self.target_version = Some(ver.to_owned());
-        self
-    }
-
-    /// Set the target triple that will be downloaded, e.g. `x86_64-unknown-linux-gnu`.
-    ///
-    /// If unspecified, the build target of the crate will be used
-    pub fn target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
-        self
-    }
-
-    /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
-    pub fn bin_name(&mut self, name: &str) -> &mut Self {
-        let raw_bin_name = format!("{}{}", name.trim_end_matches(EXE_SUFFIX), EXE_SUFFIX);
-        if self.bin_path_in_archive.is_none() {
-            self.bin_path_in_archive = Some(raw_bin_name.to_owned());
-        }
-        self.bin_name = Some(raw_bin_name);
-        self
-    }
-
-    /// Set the installation path for the new exe, defaults to the current
-    /// executable's path
-    pub fn bin_install_path<A: AsRef<Path>>(&mut self, bin_install_path: A) -> &mut Self {
-        self.bin_install_path = Some(PathBuf::from(bin_install_path.as_ref()));
-        self
-    }
-
-    /// Set the path of the exe inside the release tarball. This is the location
-    /// of the executable relative to the base of the tar'd directory and is the
-    /// path that will be copied to the `bin_install_path`. If not specified, this
-    /// will default to the value of `bin_name`. This only needs to be specified if
-    /// the path to the binary (from the root of the tarball) is not equal to just
-    /// the `bin_name`.
-    ///
-    /// This also supports variable paths:
-    /// - `{{ bin }}` is replaced with the value of `bin_name`
-    /// - `{{ target }}` is replaced with the value of `target`
-    /// - `{{ version }}` is replaced with the value of `target_version` if set,
-    /// otherwise the value of the latest available release version is used.
-    ///
-    /// # Example
-    ///
-    /// For a `myapp` binary with `windows` target and latest release version `1.2.3`,
-    /// the tarball `myapp.tar.gz` has the contents:
-    ///
-    /// ```shell
-    /// myapp.tar/
-    ///  |------- windows-1.2.3-bin/
-    ///  |         |--- myapp  # <-- executable
-    /// ```
-    ///
-    /// The path provided should be:
-    ///
-    /// ```
-    /// # use self_update::backends::s3::Update;
-    /// # fn run() -> Result<(), Box<::std::error::Error>> {
-    /// Update::configure()
-    ///     .bin_path_in_archive("{{ target }}-{{ version }}-bin/{{ bin }}")
-    /// #   .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn bin_path_in_archive(&mut self, bin_path: &str) -> &mut Self {
-        self.bin_path_in_archive = Some(bin_path.to_owned());
-        self
-    }
-
-    /// Toggle download progress bar, defaults to `off`.
-    pub fn show_download_progress(&mut self, show: bool) -> &mut Self {
-        self.show_download_progress = show;
-        self
-    }
-
-    /// Set download progress style.
-    pub fn set_progress_style(
-        &mut self,
-        progress_template: String,
-        progress_chars: String,
-    ) -> &mut Self {
-        self.progress_template = progress_template;
-        self.progress_chars = progress_chars;
-        self
-    }
-
-    /// Toggle update output information, defaults to `true`.
-    pub fn show_output(&mut self, show: bool) -> &mut Self {
-        self.show_output = show;
-        self
-    }
-
-    /// Toggle download confirmation. Defaults to `false`.
-    pub fn no_confirm(&mut self, no_confirm: bool) -> &mut Self {
-        self.no_confirm = no_confirm;
-        self
-    }
-
-    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-        self.auth_token = Some(auth_token.to_owned());
-        self
-    }
-
-    /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity
-    ///
-    /// If the feature is activated AND at least one key was provided, a download is verifying.
-    /// At least one key has to match.
-    #[cfg(feature = "signatures")]
-    pub fn verifying_keys(
-        &mut self,
-        keys: impl Into<Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>>,
-    ) -> &mut Self {
-        self.verifying_keys = keys.into();
-        self
-    }
-
-    /// Confirm config and create a ready-to-use `Update`
-    ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        let bin_install_path = if let Some(v) = &self.bin_install_path {
-            v.clone()
-        } else {
-            env::current_exe()?
-        };
-
-        Ok(Box::new(Update {
+    fn build_update(&self) -> Result<Update> {
+        Ok(Update {
             end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
@@ -420,38 +264,31 @@ impl UpdateBuilder {
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
             asset_prefix: self.asset_prefix.clone(),
-            target: self
-                .target
-                .as_ref()
-                .map(|t| t.to_owned())
-                .unwrap_or_else(|| get_target().to_owned()),
-            bin_name: if let Some(ref name) = self.bin_name {
-                name.to_owned()
-            } else {
-                bail!(Error::Config, "`bin_name` required")
-            },
-            bin_install_path,
-            bin_path_in_archive: if let Some(ref bin_path) = self.bin_path_in_archive {
-                bin_path.to_owned()
-            } else {
-                bail!(Error::Config, "`bin_path_in_archive` required")
-            },
-            current_version: if let Some(ref ver) = self.current_version {
-                ver.to_owned()
-            } else {
-                bail!(Error::Config, "`current_version` required")
-            },
-            target_version: self.target_version.as_ref().map(|v| v.to_owned()),
-            show_download_progress: self.show_download_progress,
-            progress_template: self.progress_template.clone(),
-            progress_chars: self.progress_chars.clone(),
-            show_output: self.show_output,
-            no_confirm: self.no_confirm,
-            auth_token: self.auth_token.clone(),
-            #[cfg(feature = "signatures")]
-            verifying_keys: self.verifying_keys.clone(),
-        }))
+            common: self.common.build()?,
+        })
     }
+
+    /// Confirm config and create a ready-to-use `Update`
+    ///
+    /// * Errors:
+    ///     * Config - Invalid `Update` configuration
+    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
+        Ok(Box::new(self.build_update()?))
+    }
+
+    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    ///
+    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
+    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    #[cfg(feature = "async")]
+    pub fn build_async(&self) -> Result<Update> {
+        self.build_update()
+    }
+}
+
+#[cfg(feature = "async")]
+impl Update {
+    impl_async_update_methods!();
 }
 
 /// Updates to a specified or latest release distributed via S3
@@ -460,23 +297,10 @@ pub struct Update {
     end_point: EndPoint,
     bucket_name: String,
     asset_prefix: Option<String>,
-    target: String,
     region: Option<String>,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
-    current_version: String,
-    target_version: Option<String>,
-    bin_name: String,
-    bin_install_path: PathBuf,
-    bin_path_in_archive: String,
-    show_download_progress: bool,
-    show_output: bool,
-    no_confirm: bool,
-    progress_template: String,
-    progress_chars: String,
-    auth_token: Option<String>,
-    #[cfg(feature = "signatures")]
-    verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+    common: CommonConfig,
 }
 
 impl Update {
@@ -484,148 +308,125 @@ impl Update {
     pub fn configure() -> UpdateBuilder {
         UpdateBuilder::new()
     }
+
+    /// Fetch the bucket's releases (sync). Wraps the per-backend argument plumbing so the
+    /// `ReleaseUpdate` methods stay terse.
+    fn fetch_releases(&self) -> Result<Vec<Release>> {
+        fetch_releases_from_s3(
+            &self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
+            &self.common.request,
+        )
+    }
+
+    /// Async sibling of [`fetch_releases`](Self::fetch_releases).
+    #[cfg(feature = "async")]
+    async fn fetch_releases_async(&self) -> Result<Vec<Release>> {
+        fetch_releases_from_s3_async(
+            &self.end_point,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
+            &self.common.request,
+        )
+        .await
+    }
 }
+
+/// Pick the single highest-version release. Shared by the sync and async paths.
+fn pick_latest(releases: &[Release]) -> Result<Release> {
+    let rel = releases
+        .iter()
+        .max_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+            Ok(is_greater) => {
+                if is_greater {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            // Ignoring release due to an unexpected failure in parsing its version string
+            Err(_) => Ordering::Less,
+        });
+    match rel {
+        Some(r) => Ok(r.clone()),
+        None => bail!(Error::Release, "No release was found"),
+    }
+}
+
+/// Filter releases newer than `current_version`, sorted newest-first (the orchestrator takes the
+/// first compatible one). Shared by the sync and async paths.
+fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
+    let mut releases = releases
+        .into_iter()
+        .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
+        .collect::<Vec<_>>();
+    // Descending order (latest first), since the update code takes `.first()`.
+    releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+        Ok(is_greater) => {
+            if is_greater {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        // Ignoring release due to an unexpected failure in parsing its version string
+        Err(_) => Ordering::Greater,
+    });
+    releases
+}
+
+/// Find the release matching an explicit version. Shared by the sync and async paths.
+fn find_version(releases: &[Release], ver: &str) -> Result<Release> {
+    match releases.iter().find(|x| x.version == ver) {
+        Some(r) => Ok(r.clone()),
+        None => bail!(
+            Error::Release,
+            "No release with version '{}' was found",
+            ver
+        ),
+    }
+}
+
+impl crate::update::sealed::Sealed for Update {}
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Release> {
-        let releases = fetch_releases_from_s3(
-            &self.end_point,
-            &self.bucket_name,
-            &self.region,
-            &self.asset_prefix,
-            #[cfg(feature = "s3-auth")]
-            &self.access_key,
-        )?;
-        let rel = releases
-            .iter()
-            .max_by(|x, y| match bump_is_greater(&y.version, &x.version) {
-                Ok(is_greater) => {
-                    if is_greater {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
-                }
-                Err(_) => {
-                    // Ignoring release due to an unexpected failure in parsing its version string
-                    Ordering::Less
-                }
-            });
-
-        match rel {
-            Some(r) => Ok(r.clone()),
-            None => bail!(Error::Release, "No release was found"),
-        }
+        pick_latest(&self.fetch_releases()?)
     }
 
     fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        let releases = fetch_releases_from_s3(
-            &self.end_point,
-            &self.bucket_name,
-            &self.region,
-            &self.asset_prefix,
-            #[cfg(feature = "s3-auth")]
-            &self.access_key,
-        )?;
-
-        let mut releases = releases
-            .iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        // The update code expects the return of get_latest_releases to be in
-        // descending order, that is, the latest release is first. (as it does a
-        // `compatible_releases.first().cloned()`)
-        // This why this is kinda reversed.
-        releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
-            Ok(is_greater) => {
-                if is_greater {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                }
-            }
-            Err(_) => {
-                // Ignoring release due to an unexpected failure in parsing its version string
-                Ordering::Greater
-            }
-        });
-
-        Ok(releases)
+        Ok(sort_newer(self.fetch_releases()?, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let releases = fetch_releases_from_s3(
-            &self.end_point,
-            &self.bucket_name,
-            &self.region,
-            &self.asset_prefix,
-            #[cfg(feature = "s3-auth")]
-            &self.access_key,
-        )?;
-        let rel = releases.iter().find(|x| x.version == ver);
-        match rel {
-            Some(r) => Ok(r.clone()),
-            None => bail!(
-                Error::Release,
-                "No release with version '{}' was found",
-                ver
-            ),
-        }
+        find_version(&self.fetch_releases()?, ver)
     }
 
-    fn current_version(&self) -> String {
-        self.current_version.to_owned()
+    impl_release_update_accessors!();
+}
+
+#[cfg(feature = "async")]
+impl crate::update::AsyncReleaseSource for Update {
+    async fn get_latest_release_async(&self) -> Result<Release> {
+        pick_latest(&self.fetch_releases_async().await?)
     }
 
-    fn target(&self) -> String {
-        self.target.clone()
+    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
+        Ok(sort_newer(
+            self.fetch_releases_async().await?,
+            current_version,
+        ))
     }
 
-    fn target_version(&self) -> Option<String> {
-        self.target_version.clone()
-    }
-
-    fn bin_name(&self) -> String {
-        self.bin_name.clone()
-    }
-
-    fn bin_install_path(&self) -> PathBuf {
-        self.bin_install_path.clone()
-    }
-
-    fn bin_path_in_archive(&self) -> String {
-        self.bin_path_in_archive.clone()
-    }
-
-    fn show_download_progress(&self) -> bool {
-        self.show_download_progress
-    }
-
-    fn show_output(&self) -> bool {
-        self.show_output
-    }
-
-    fn no_confirm(&self) -> bool {
-        self.no_confirm
-    }
-
-    fn progress_template(&self) -> String {
-        self.progress_template.to_owned()
-    }
-
-    fn progress_chars(&self) -> String {
-        self.progress_chars.to_owned()
-    }
-
-    fn auth_token(&self) -> Option<String> {
-        self.auth_token.clone()
-    }
-
-    #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
-        &self.verifying_keys
+    async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
+        find_version(&self.fetch_releases_async().await?, ver)
     }
 }
 
@@ -733,7 +534,7 @@ mod auth {
         let url = Url::parse(url_str)?;
         let host = url
             .host_str()
-            .ok_or_else(|| Error::Config("Cannot extract host from {:?url_str}".to_string()))?;
+            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url_str)))?;
         let canonical_uri = if url.path().is_empty() {
             "/"
         } else {
@@ -795,17 +596,15 @@ mod auth {
     }
 }
 
-/// Obtain list of releases from AWS S3 API, from bucket and region specified,
-/// filtering assets which don't match the prefix string if provided.
-///
-/// This will strip the prefix from provided file names, allowing use with subdirectories
-fn fetch_releases_from_s3(
+/// Build the S3 listing `api_url` and the `download_base_url` that asset URLs are formed against,
+/// signing the listing URL when `s3-auth` is enabled. Shared by the sync and async fetch paths.
+fn build_s3_api_url(
     end_point: &EndPoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
-) -> Result<Vec<Release>> {
+) -> Result<(String, String)> {
     let prefix = match asset_prefix {
         Some(prefix) => format!("&prefix={}", prefix),
         None => "".to_string(),
@@ -846,20 +645,89 @@ fn fetch_releases_from_s3(
     #[cfg(feature = "s3-auth")]
     let api_url = auth::s3_signature_v4(&api_url, region, access_key, 300)?;
 
+    Ok((download_base_url, api_url))
+}
+
+/// Obtain list of releases from AWS S3 API, from bucket and region specified,
+/// filtering assets which don't match the prefix string if provided.
+///
+/// This will strip the prefix from provided file names, allowing use with subdirectories
+fn fetch_releases_from_s3(
+    end_point: &EndPoint,
+    bucket_name: &str,
+    region: &Option<String>,
+    asset_prefix: &Option<String>,
+    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
+    req: &RequestConfig,
+) -> Result<Vec<Release>> {
+    let (download_base_url, api_url) = build_s3_api_url(
+        end_point,
+        bucket_name,
+        region,
+        asset_prefix,
+        #[cfg(feature = "s3-auth")]
+        access_key,
+    )?;
+
     debug!("using api url: {:?}", api_url);
 
-    let resp = http_client::get(&api_url, Default::default())?;
-    if !resp.status().is_success() {
-        bail!(
-            Error::Network,
-            "S3 API request failed with status: {:?} - for: {:?}",
-            resp.status(),
-            api_url
-        )
-    }
-
+    // `send` already errored on a non-success status (see `fetch_releases_from_s3_async`).
+    let resp = send(&api_url, Default::default(), req)?;
     let body = resp.text()?;
-    let mut reader = Reader::from_str(&body);
+    parse_s3_response(
+        &body,
+        &download_base_url,
+        #[cfg(feature = "s3-auth")]
+        region,
+        #[cfg(feature = "s3-auth")]
+        access_key,
+    )
+}
+
+/// Async sibling of [`fetch_releases_from_s3`], reusing [`build_s3_api_url`] and
+/// [`parse_s3_response`] with the async transport.
+#[cfg(feature = "async")]
+async fn fetch_releases_from_s3_async(
+    end_point: &EndPoint,
+    bucket_name: &str,
+    region: &Option<String>,
+    asset_prefix: &Option<String>,
+    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
+    req: &RequestConfig,
+) -> Result<Vec<Release>> {
+    use crate::backends::send_async;
+    let (download_base_url, api_url) = build_s3_api_url(
+        end_point,
+        bucket_name,
+        region,
+        asset_prefix,
+        #[cfg(feature = "s3-auth")]
+        access_key,
+    )?;
+
+    debug!("using api url: {:?}", api_url);
+
+    let resp = send_async(&api_url, Default::default(), req).await?;
+    let body = resp.text().await?;
+    parse_s3_response(
+        &body,
+        &download_base_url,
+        #[cfg(feature = "s3-auth")]
+        region,
+        #[cfg(feature = "s3-auth")]
+        access_key,
+    )
+}
+
+/// Parse an S3 `ListBucketResult` XML body into releases, forming (and, under `s3-auth`, signing)
+/// each asset's download URL against `download_base_url`. Pure/sync — shared by both fetch paths.
+fn parse_s3_response(
+    body: &str,
+    download_base_url: &str,
+    #[cfg(feature = "s3-auth")] region: &Option<String>,
+    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
+) -> Result<Vec<Release>> {
+    let mut reader = Reader::from_str(body);
     reader.config_mut().trim_text(true);
 
     // Let's now parse the response to extract the releases
@@ -973,5 +841,94 @@ fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
             }
             None => releases.push(rel),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Update;
+    use crate::update::{Release, ReleaseUpdate};
+
+    fn rel(version: &str) -> Release {
+        Release::builder().version(version).build().unwrap()
+    }
+
+    #[test]
+    fn pick_latest_returns_highest_version() {
+        let releases = [rel("1.0.0"), rel("2.3.1"), rel("2.0.0"), rel("1.9.9")];
+        assert_eq!(super::pick_latest(&releases).unwrap().version, "2.3.1");
+    }
+
+    #[test]
+    fn pick_latest_errors_on_empty() {
+        assert!(super::pick_latest(&[]).is_err());
+    }
+
+    #[test]
+    fn sort_newer_keeps_only_newer_descending() {
+        let releases = vec![rel("0.9.0"), rel("1.5.0"), rel("1.0.0"), rel("2.0.0")];
+        let newer = super::sort_newer(releases, "1.0.0");
+        // 0.9.0 and 1.0.0 are not strictly newer than 1.0.0; the rest are, newest-first.
+        let versions: Vec<_> = newer.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
+    }
+
+    #[test]
+    fn find_version_matches_exact() {
+        let releases = [rel("1.0.0"), rel("1.2.3"), rel("2.0.0")];
+        assert_eq!(
+            super::find_version(&releases, "1.2.3").unwrap().version,
+            "1.2.3"
+        );
+        assert!(super::find_version(&releases, "9.9.9").is_err());
+    }
+
+    fn configured() -> Box<dyn ReleaseUpdate> {
+        Update::configure()
+            .bucket_name("bucket")
+            .asset_prefix("prefix")
+            .region("us-east-1")
+            .bin_name("my_bin")
+            .target("x86_64-unknown-linux-gnu")
+            .identifier("musl")
+            .current_version("0.1.0")
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn identifier_and_str_accessors_are_wired() {
+        let upd = configured();
+        // `identifier` is newly supported on the s3 builder.
+        assert_eq!(upd.identifier(), Some("musl"));
+        assert_eq!(upd.target(), "x86_64-unknown-linux-gnu");
+        assert_eq!(upd.current_version(), "0.1.0");
+    }
+
+    #[test]
+    fn s3_auth_token_is_a_deprecated_noop() {
+        // The s3 backend overrides the shared `auth_token` setter with a `#[deprecated]` no-op
+        // (s3 authenticates via `access_key`/SigV4). Calling it stores nothing.
+        #[allow(deprecated)]
+        let upd = Update::configure()
+            .bucket_name("bucket")
+            .region("us-east-1")
+            .bin_name("my_bin")
+            .current_version("0.1.0")
+            .auth_token("ignored")
+            .build()
+            .unwrap();
+        assert_eq!(upd.auth_token(), None);
+    }
+
+    #[test]
+    fn default_api_headers_rejects_invalid_token_without_panicking() {
+        let upd = configured();
+        // A token containing a newline is not a valid HTTP header value. The default
+        // `api_headers` impl must surface an error rather than panic (it previously
+        // `unwrap()`ed the parse).
+        assert!(upd.api_headers(Some("bad\ntoken")).is_err());
+        // A well-formed token still succeeds.
+        assert!(upd.api_headers(Some("good-token")).is_ok());
     }
 }

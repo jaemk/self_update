@@ -16,17 +16,20 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::gitlab::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
-        .bin_name("github")
+        .bin_name("gitlab")
         .show_download_progress(true)
         //.target_version_tag("v9.9.10")
         //.show_output(false)
         //.no_confirm(true)
         //
+        // Defaults to https://gitlab.com; for a self-hosted instance, set the base URL:
+        //.url("https://gitlab.mycorp.com")
+        //
         // For private repos, you will need to provide an auth token
         // **Make sure not to bake the token into your app**; it is recommended
         // you obtain it via another mechanism, such as environment variables
         // or prompting the user for input
-        //.auth_token(env!("DOWNLOAD_AUTH_TOKEN"))
+        //.auth_token(&std::env::var("DOWNLOAD_AUTH_TOKEN")?)
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;

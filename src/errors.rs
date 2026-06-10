@@ -8,10 +8,11 @@ use zip::result::ZipError;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Used as a catch-most for when the program fails to update.
     Update(String),
-    /// Used when a web request to a repository archive fails.  
+    /// Used when a web request to a repository archive fails.
     Network(String),
     /// If there is an issue with the most recent release (such as no
     /// binary for the current platform), this error is returned.
@@ -27,12 +28,12 @@ pub enum Error {
     Zip(ZipError),
     /// A wrapper over a `serde_json::Error`.
     Json(serde_json::Error),
-    /// A wrapper over a `reqwest::Error`.
-    #[cfg(feature = "reqwest")]
-    Reqwest(reqwest::Error),
-    /// A wrapper over a `ureq::Error`.
-    #[cfg(feature = "ureq")]
-    Ureq(ureq::Error),
+    /// A wrapper over the active HTTP client's error type (`reqwest` or `ureq`).
+    ///
+    /// The concrete error is boxed so that the public API does not change when the
+    /// `reqwest` / `ureq` feature selection changes. Use [`std::error::Error::source`]
+    /// to inspect the underlying error.
+    Http(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over a `semver::Error`.
     SemVer(semver::Error),
     /// Used when the `archive-zip` feature is not enabled.
@@ -47,14 +48,13 @@ pub enum Error {
     /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
     NonUTF8,
+    /// A wrapper over the errors that can occur while signing S3 requests (`s3-auth`).
+    ///
+    /// The concrete error is boxed so that the public API surface does not depend on the
+    /// signing implementation's internal error types. Use [`std::error::Error::source`]
+    /// to inspect the underlying error.
     #[cfg(feature = "s3-auth")]
-    StdTimeError(std::time::SystemTimeError),
-    #[cfg(feature = "s3-auth")]
-    TimeError(time::error::ComponentRange),
-    #[cfg(feature = "s3-auth")]
-    Digest(hmac::digest::InvalidLength),
-    #[cfg(feature = "s3-auth")]
-    UrlParse(url::ParseError),
+    S3Auth(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for Error {
@@ -67,10 +67,7 @@ impl std::fmt::Display for Error {
             Config(ref s) => write!(f, "ConfigError: {}", s),
             Io(ref e) => write!(f, "IoError: {}", e),
             Json(ref e) => write!(f, "JsonError: {}", e),
-            #[cfg(feature = "reqwest")]
-            Reqwest(ref e) => write!(f, "ReqwestError: {}", e),
-            #[cfg(feature = "ureq")]
-            Ureq(ref e) => write!(f, "UreqError: {}", e),
+            Http(ref e) => write!(f, "HttpError: {}", e),
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
@@ -84,33 +81,22 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "signatures")]
             NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
             #[cfg(feature = "s3-auth")]
-            StdTimeError(ref e) => write!(f, "SystemTimeError: {}", e),
-            #[cfg(feature = "s3-auth")]
-            TimeError(ref e) => write!(f, "TimeError: {}", e),
-            #[cfg(feature = "s3-auth")]
-            Digest(ref e) => write!(f, "InvalidLength: {}", e),
-            #[cfg(feature = "s3-auth")]
-            UrlParse(ref e) => write!(f, "UrlParse: {e}"),
+            S3Auth(ref e) => write!(f, "S3AuthError: {}", e),
         }
     }
 }
 
 impl std::error::Error for Error {
-    fn description(&self) -> &str {
-        "Self Update Error"
-    }
-
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match *self {
             Error::Io(ref e) => e,
             Error::Json(ref e) => e,
-            #[cfg(feature = "reqwest")]
-            Error::Reqwest(ref e) => e,
-            #[cfg(feature = "ureq")]
-            Error::Ureq(ref e) => e,
+            Error::Http(ref e) => &**e,
             Error::SemVer(ref e) => e,
             #[cfg(feature = "signatures")]
             Error::Signature(ref e) => e,
+            #[cfg(feature = "s3-auth")]
+            Error::S3Auth(ref e) => &**e,
             _ => return None,
         })
     }
@@ -131,14 +117,14 @@ impl From<serde_json::Error> for Error {
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Error {
-        Error::Reqwest(e)
+        Error::Http(Box::new(e))
     }
 }
 
 #[cfg(feature = "ureq")]
 impl From<ureq::Error> for Error {
     fn from(e: ureq::Error) -> Error {
-        Error::Ureq(e)
+        Error::Http(Box::new(e))
     }
 }
 
@@ -165,27 +151,27 @@ impl From<zipsign_api::ZipsignError> for Error {
 #[cfg(feature = "s3-auth")]
 impl From<std::time::SystemTimeError> for Error {
     fn from(e: std::time::SystemTimeError) -> Self {
-        Error::StdTimeError(e)
+        Error::S3Auth(Box::new(e))
     }
 }
 
 #[cfg(feature = "s3-auth")]
 impl From<hmac::digest::InvalidLength> for Error {
     fn from(e: hmac::digest::InvalidLength) -> Self {
-        Error::Digest(e)
+        Error::S3Auth(Box::new(e))
     }
 }
 
 #[cfg(feature = "s3-auth")]
 impl From<url::ParseError> for Error {
     fn from(e: url::ParseError) -> Self {
-        Error::UrlParse(e)
+        Error::S3Auth(Box::new(e))
     }
 }
 
 #[cfg(feature = "s3-auth")]
 impl From<time::error::ComponentRange> for Error {
     fn from(e: time::error::ComponentRange) -> Self {
-        Error::TimeError(e)
+        Error::S3Auth(Box::new(e))
     }
 }
