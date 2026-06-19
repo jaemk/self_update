@@ -9,9 +9,9 @@ an identical set of common update options (target, bin name, version, progress s
 configured; [`CommonBuilderConfig::build`] validates them and produces a resolved
 [`CommonConfig`] that each backend's `Update` embeds. The shared builder *setters* are
 emitted into each backend builder by the `impl_common_builder_setters!` macro, and the
-shared `ReleaseUpdate` *accessors* are emitted into each backend's `impl` by the
-`impl_release_update_accessors!` macro (both in `src/macros.rs`), so the common surface
-lives in exactly one place.
+shared [`UpdateConfig`](crate::UpdateConfig) *accessors* are emitted as a full `impl` block for
+each backend's `Update` by the `impl_update_config_accessors!` macro (both in `src/macros.rs`), so
+the common surface lives in exactly one place.
 */
 
 use std::path::PathBuf;
@@ -33,6 +33,51 @@ pub(crate) struct RequestConfig {
     pub(crate) retries: u32,
     /// Optional user-supplied HTTP client to use instead of the per-call one the crate builds.
     pub(crate) client: crate::http_client::ClientOverride,
+    /// First error produced converting a `request_header(name, value)` argument that wasn't a
+    /// valid HTTP header. Stored here so the builder setter can stay infallible (`-> &mut Self`)
+    /// and the failure is surfaced from `build()` as an `Error::Config` instead of panicking.
+    pub(crate) header_error: Option<String>,
+}
+
+impl RequestConfig {
+    /// Insert an extra request header from `TryInto<HeaderName>` / `TryInto<HeaderValue>` args. A
+    /// conversion failure is recorded in [`header_error`](Self::header_error) (first one wins) and
+    /// surfaced later by [`check`](Self::check); the header is simply not inserted.
+    pub(crate) fn insert_header<N, V>(&mut self, name: N, value: V)
+    where
+        N: ::core::convert::TryInto<crate::http_client::header::HeaderName>,
+        V: ::core::convert::TryInto<crate::http_client::header::HeaderValue>,
+    {
+        let name = match name.try_into() {
+            Ok(n) => n,
+            Err(_) => {
+                if self.header_error.is_none() {
+                    self.header_error =
+                        Some("invalid HTTP header name passed to `request_header`".to_string());
+                }
+                return;
+            }
+        };
+        let value = match value.try_into() {
+            Ok(v) => v,
+            Err(_) => {
+                if self.header_error.is_none() {
+                    self.header_error =
+                        Some("invalid HTTP header value passed to `request_header`".to_string());
+                }
+                return;
+            }
+        };
+        self.headers.insert(name, value);
+    }
+
+    /// Return the stored `request_header` conversion error, if any, as an `Error::Config`.
+    pub(crate) fn check(&self) -> Result<()> {
+        match &self.header_error {
+            Some(msg) => Err(Error::Config(msg.clone())),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The common, backend-independent options of an `Update` builder, before validation.
@@ -40,7 +85,7 @@ pub(crate) struct RequestConfig {
 pub(crate) struct CommonBuilderConfig {
     pub request: RequestConfig,
     pub target: Option<String>,
-    pub identifier: Option<String>,
+    pub asset_identifier: Option<String>,
     pub bin_name: Option<String>,
     pub bin_install_path: Option<PathBuf>,
     pub bin_path_in_archive: Option<String>,
@@ -48,7 +93,7 @@ pub(crate) struct CommonBuilderConfig {
     pub show_output: bool,
     pub no_confirm: bool,
     pub current_version: Option<String>,
-    pub target_version: Option<String>,
+    pub release_tag: Option<String>,
     pub progress_template: String,
     pub progress_chars: String,
     pub auth_token: Option<String>,
@@ -66,7 +111,7 @@ impl Default for CommonBuilderConfig {
         Self {
             request: RequestConfig::default(),
             target: None,
-            identifier: None,
+            asset_identifier: None,
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
@@ -74,7 +119,7 @@ impl Default for CommonBuilderConfig {
             show_output: true,
             no_confirm: false,
             current_version: None,
-            target_version: None,
+            release_tag: None,
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
@@ -96,18 +141,20 @@ impl CommonBuilderConfig {
     /// current executable. `current_version`, `bin_name`, and `bin_path_in_archive` are
     /// required (the last is set automatically by the `bin_name` setter).
     pub(crate) fn build(&self) -> Result<CommonConfig> {
+        // Surface any deferred `request_header` conversion error as a config error.
+        self.request.check()?;
         Ok(CommonConfig {
             request: self.request.clone(),
             target: self
                 .target
                 .clone()
                 .unwrap_or_else(|| get_target().to_owned()),
-            identifier: self.identifier.clone(),
+            asset_identifier: self.asset_identifier.clone(),
             current_version: self
                 .current_version
                 .clone()
                 .ok_or_else(|| Error::Config("`current_version` required".to_string()))?,
-            target_version: self.target_version.clone(),
+            release_tag: self.release_tag.clone(),
             bin_name: self
                 .bin_name
                 .clone()
@@ -142,9 +189,9 @@ impl CommonBuilderConfig {
 pub(crate) struct CommonConfig {
     pub request: RequestConfig,
     pub target: String,
-    pub identifier: Option<String>,
+    pub asset_identifier: Option<String>,
     pub current_version: String,
-    pub target_version: Option<String>,
+    pub release_tag: Option<String>,
     pub bin_name: String,
     pub bin_install_path: PathBuf,
     pub bin_path_in_archive: String,
@@ -165,7 +212,83 @@ pub(crate) struct CommonConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::CommonBuilderConfig;
+    use super::{CommonBuilderConfig, RequestConfig};
+
+    #[test]
+    fn insert_header_records_invalid_value_error() {
+        // The setter is infallible; an invalid *value* (control char) is deferred to `check()`
+        // as an `Error::Config` and the header is not inserted. (Only the invalid-*name* path was
+        // tested at the backend level before; this covers the value branch directly.)
+        let mut req = RequestConfig::default();
+        req.insert_header("x-ok", "bad\nvalue");
+        assert!(
+            req.headers.get("x-ok").is_none(),
+            "an invalid value must not be inserted"
+        );
+        let err = req
+            .check()
+            .expect_err("invalid value must surface from check()");
+        match err {
+            crate::errors::Error::Config(msg) => {
+                assert!(
+                    msg.contains("value"),
+                    "value-conversion error should mention the value, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Error::Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn insert_header_records_invalid_name_error() {
+        let mut req = RequestConfig::default();
+        req.insert_header("inva lid", "ok");
+        assert!(req.headers.get("inva lid").is_none());
+        match req
+            .check()
+            .expect_err("invalid name must surface from check()")
+        {
+            crate::errors::Error::Config(msg) => assert!(msg.contains("name")),
+            other => panic!("expected Error::Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn insert_header_first_error_wins() {
+        // First a bad *name*, then a bad *value*. The recorded error must be the first one (name),
+        // proving the `header_error.is_none()` guard keeps the earliest failure.
+        let mut req = RequestConfig::default();
+        req.insert_header("bad name", "ok"); // invalid name -> records "name" error
+        req.insert_header("x-ok", "bad\nvalue"); // invalid value -> must NOT overwrite
+        match req.check().expect_err("an error is recorded") {
+            crate::errors::Error::Config(msg) => assert!(
+                msg.contains("name"),
+                "the first (name) error must win, got: {}",
+                msg
+            ),
+            other => panic!("expected Error::Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn insert_header_valid_then_invalid_still_keeps_valid_header() {
+        // A valid header is inserted; a later invalid one is recorded as an error but does not
+        // remove the already-inserted valid header.
+        let mut req = RequestConfig::default();
+        req.insert_header("x-good", "value");
+        req.insert_header("x-bad", "bad\nvalue");
+        assert_eq!(req.headers.get("x-good").unwrap(), "value");
+        assert!(req.check().is_err());
+    }
+
+    #[test]
+    fn check_is_ok_when_no_error_recorded() {
+        let mut req = RequestConfig::default();
+        req.insert_header("x-fine", "ok");
+        assert!(req.check().is_ok());
+        assert_eq!(req.headers.get("x-fine").unwrap(), "ok");
+    }
 
     #[test]
     fn build_requires_current_version_bin_name_and_archive_path() {

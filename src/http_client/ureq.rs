@@ -20,13 +20,10 @@ pub fn get(
     let agent: &Agent = match &client.agent {
         Some(agent) => agent,
         None => {
-            #[allow(unused_mut)]
-            let mut provider = TlsProvider::NativeTls;
-
             #[cfg(feature = "rustls")]
-            {
-                provider = TlsProvider::Rustls;
-            }
+            let provider = TlsProvider::Rustls;
+            #[cfg(not(feature = "rustls"))]
+            let provider = TlsProvider::NativeTls;
 
             let config = Agent::config_builder()
                 .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())

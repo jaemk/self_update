@@ -68,29 +68,31 @@ pub struct ReleaseListBuilder {
     request: RequestConfig,
 }
 impl ReleaseListBuilder {
-    /// Set the base URL of the Gitea instance, e.g. `https://gitea.example.com`.
+    /// Required. Set the base URL of the Gitea instance, e.g. `https://gitea.example.com`.
     ///
-    /// **Required** -- unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no
-    /// canonical public host, so `build()` errors if this is not set.
-    pub fn url(&mut self, host: &str) -> &mut Self {
+    /// Unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no canonical public
+    /// host, so `build()` errors if this is not set.
+    #[doc(alias = "url")]
+    pub fn instance_url(&mut self, host: &str) -> &mut Self {
         self.host = Some(host.to_owned());
         self
     }
 
-    /// Set the repo owner, used to build a gitea api url
+    /// Required. Set the repo owner, used to build a gitea api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a gitea api url
+    /// Required. Set the repo name, used to build a gitea api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn target(&mut self, target: &str) -> &mut Self {
+    #[doc(alias = "target")]
+    pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -110,13 +112,14 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
+        self.request.check()?;
         Ok(ReleaseList {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
                 bail!(
                     Error::Config,
-                    "`url` required (gitea has no default host; call `.url(...)`)"
+                    "`instance_url` required (gitea has no default host; call `.instance_url(...)`)"
                 )
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -184,7 +187,7 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://<gitea-host>/api/v1/repos/<repo_owner>/<repo_name>/releases`
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[must_use]
 pub struct UpdateBuilder {
     host: Option<String>,
@@ -199,22 +202,23 @@ impl UpdateBuilder {
         Default::default()
     }
 
-    /// Set the base URL of the Gitea instance, e.g. `https://gitea.example.com`.
+    /// Required. Set the base URL of the Gitea instance, e.g. `https://gitea.example.com`.
     ///
-    /// **Required** -- unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no
-    /// canonical public host, so `build()` errors if this is not set.
-    pub fn url(&mut self, host: &str) -> &mut Self {
+    /// Unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no canonical public
+    /// host, so `build()` errors if this is not set.
+    #[doc(alias = "url")]
+    pub fn instance_url(&mut self, host: &str) -> &mut Self {
         self.host = Some(host.to_owned());
         self
     }
 
-    /// Set the repo owner, used to build a gitea api url
+    /// Required. Set the repo owner, used to build a gitea api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a gitea api url
+    /// Required. Set the repo name, used to build a gitea api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
@@ -233,7 +237,7 @@ impl UpdateBuilder {
             } else {
                 bail!(
                     Error::Config,
-                    "`url` required (gitea has no default host; call `.url(...)`)"
+                    "`instance_url` required (gitea has no default host; call `.instance_url(...)`)"
                 )
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -355,13 +359,13 @@ impl ReleaseUpdate for Update {
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release_gitea(&json)
     }
+}
 
-    impl_release_update_accessors!();
-
+impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
         api_headers(auth_token)
     }
-}
+});
 
 /// Fetch every release from `base_url`, following Gitea's `Link: rel="next"` pagination.
 fn fetch_all_releases(
@@ -422,7 +426,7 @@ async fn fetch_all_releases_async(
 }
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncReleaseSource for Update {
+impl crate::update::AsyncFetch for Update {
     async fn get_latest_release_async(&self) -> Result<Release> {
         use crate::backends::send_async;
         let api_url = self.releases_url();
@@ -496,6 +500,92 @@ mod tests {
     use super::Update;
 
     #[test]
+    fn instance_url_and_filter_target_setters_exist_on_release_list_builder() {
+        // The renamed `instance_url` / `filter_target` setters must exist on the gitea
+        // `ReleaseListBuilder` and the builder must still build (gitea requires `instance_url`).
+        let _list = super::ReleaseList::configure()
+            .instance_url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .filter_target("x86_64-unknown-linux-gnu")
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn release_list_build_requires_instance_url() {
+        // gitea has no default host, so the `ReleaseList` builder must error without `instance_url`.
+        let res = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .build();
+        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+    }
+
+    #[test]
+    fn api_headers_override_uses_gitea_user_agent_and_token_scheme() {
+        // The `{api_headers}` override arm must wire gitea's custom `api_headers` (User-Agent +
+        // `token` auth scheme), not the trait default (which sets no User-Agent).
+        let upd = Update::configure()
+            .instance_url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let headers = upd.api_headers(Some("secret")).unwrap();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust-reqwest/self-update"
+        );
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "token secret",
+            "gitea authenticates with the token scheme"
+        );
+    }
+
+    #[test]
+    fn release_list_build_surfaces_invalid_header() {
+        // A bad header on the gitea `ReleaseListBuilder` must fail at `build()` via
+        // `request.check()` with `Error::Config`, not panic. (The header check runs before the
+        // host check, so a valid host is supplied to isolate the header failure.)
+        let res = super::ReleaseList::configure()
+            .instance_url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .request_header("inva lid", "ok")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "invalid header must surface as Error::Config from gitea ReleaseList build()"
+        );
+    }
+
+    #[test]
+    fn update_build_surfaces_invalid_header() {
+        // Same deferred-header check via `CommonBuilderConfig::build` on the gitea UpdateBuilder.
+        let res = Update::configure()
+            .instance_url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header("inva lid", "ok")
+            .build();
+        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+    }
+
+    #[test]
     fn build_requires_url() {
         // Gitea has no default host, so `build()` must fail when `url` is not set.
         let res = Update::configure()
@@ -510,14 +600,14 @@ mod tests {
     #[test]
     fn build_requires_repo_owner_and_name() {
         let missing_owner = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_name("repo")
             .current_version("0.1.0")
             .build();
         assert!(missing_owner.is_err(), "build must fail without repo_owner");
 
         let missing_name = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_owner("owner")
             .current_version("0.1.0")
             .build();
@@ -529,7 +619,7 @@ mod tests {
         // `build_update` yields the concrete `Update` so we can check the shared base URL that both
         // the sync and async fetch paths build on.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
@@ -545,15 +635,15 @@ mod tests {
     #[test]
     fn identifier_is_wired() {
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
             .current_version("0.1.0")
-            .identifier("musl")
+            .asset_identifier("musl")
             .build()
             .unwrap();
-        assert_eq!(upd.identifier(), Some("musl"));
+        assert_eq!(upd.asset_identifier(), Some("musl"));
     }
 
     #[test]
@@ -561,7 +651,7 @@ mod tests {
         // `bin_name` auto-populates `bin_path_in_archive` (with the platform exe suffix).
         let expected = format!("app{}", std::env::consts::EXE_SUFFIX);
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -572,7 +662,7 @@ mod tests {
 
         // An explicit `bin_path_in_archive` set before `bin_name` is NOT overwritten.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .instance_url("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_path_in_archive("custom/path")

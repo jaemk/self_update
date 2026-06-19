@@ -48,6 +48,8 @@ are _disabled_ by default; activate the one(s) your release files need:
 * `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
 * `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
+The S3 backend needs **no feature** — it is always compiled. (A no-op `s3` alias feature exists only so `features = ["s3"]` resolves for symmetry with the other backends; only private-bucket request signing needs an actual feature, `s3-auth`.)
+
 ### Example
 
 Run the following example to see `self_update` in action:
@@ -106,7 +108,10 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature,
-see the [features](#features) section above). The `self_replace` crate is re-exported for convenience:
+see the [features](#features) section above). It downloads, extracts, and replaces the running binary
+by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
+and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
+(they are no longer re-exported from `self_update`):
 
 ```rust
 # #[cfg(feature = "archive-tar")]
@@ -131,7 +136,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .set_header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
+        .header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -199,7 +204,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
-        .verifying_checksum(self_update::Checksum::Sha256("abc123…".into()))
+        .checksum(self_update::Checksum::Sha256("abc123…".into()))
         .build()?
         .update()?;
     Ok(())
@@ -214,6 +219,12 @@ another forge, a private artifact registry, a plain HTTP directory — implement
 update through the [`backends::custom`] backend, which reuses the crate's compare → select-asset →
 download → verify → extract → install flow. You build [`Release`]s with [`Release::builder`] and
 [`ReleaseAsset::new`]; the `ReleaseUpdate` trait stays sealed.
+
+[`ReleaseSource`] is **synchronous**. For a natively-async source, implement [`AsyncReleaseSource`]
+(the same three fetches as `async fn`) and drive it through
+[`backends::custom::AsyncUpdate`](backends::custom::AsyncUpdate) + `build_async()`; to reuse a
+`Clone` sync source from the async API, wrap it in
+[`backends::custom::Blocking`](backends::custom::Blocking).
 
 ```rust
 use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
@@ -361,14 +372,14 @@ compile_error!(
 );
 
 pub use http;
-pub use self_replace;
-pub use tempfile::TempDir;
 // Re-export the selected HTTP client so callers can name the types accepted by the client-injection
 // setters (`reqwest_client` / `reqwest_async_client` / `ureq_agent`) without a separate dependency.
 #[cfg(feature = "reqwest")]
 pub use reqwest;
+#[cfg(feature = "async")]
+pub use update::AsyncReleaseSource;
 pub use update::{
-    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, UpdateStatus,
+    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, UpdateConfig, UpdateStatus,
 };
 #[cfg(feature = "ureq")]
 pub use ureq;
@@ -1097,7 +1108,8 @@ impl Download {
     }
 
     /// Set a timeout for the download request. Defaults to no timeout.
-    pub fn set_timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
+    #[doc(alias = "set_timeout")]
+    pub fn timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
         self.timeout = Some(timeout);
         self
     }
@@ -1108,7 +1120,8 @@ impl Download {
     /// ([`show_download_progress`](Self::show_download_progress)); use it to drive a GUI, structured logging, or
     /// any non-terminal progress display. The callback is `Fn`, so track state via interior
     /// mutability (e.g. an `AtomicU64` or a channel).
-    pub fn set_progress_callback(
+    #[doc(alias = "set_progress_callback")]
+    pub fn progress_callback(
         &mut self,
         callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
     ) -> &mut Self {
@@ -1127,7 +1140,8 @@ impl Download {
     }
 
     /// Set the progress style
-    pub fn set_progress_style(
+    #[doc(alias = "set_progress_style")]
+    pub fn progress_style(
         &mut self,
         progress_template: impl Into<String>,
         progress_chars: impl Into<String>,
@@ -1138,7 +1152,7 @@ impl Download {
     }
 
     /// Replace the entire download request `HeaderMap`. To add a single header without discarding
-    /// the others, use [`set_header`](Self::set_header) instead.
+    /// the others, use [`header`](Self::header) instead.
     #[doc(alias = "set_headers")]
     pub fn replace_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
@@ -1178,7 +1192,8 @@ impl Download {
     }
 
     /// Set a download request header, inserts into the existing `HeaderMap`
-    pub fn set_header(
+    #[doc(alias = "set_header")]
+    pub fn header(
         &mut self,
         name: http_client::header::HeaderName,
         value: http_client::header::HeaderValue,
@@ -1487,7 +1502,7 @@ mod tests {
         let sink_progress = progress.clone();
         let mut out = Vec::new();
         Download::from_url(&format!("http://{addr}/file"))
-            .set_progress_callback(move |downloaded, total| {
+            .progress_callback(move |downloaded, total| {
                 sink_progress.lock().unwrap().push((downloaded, total));
             })
             .download_to(&mut out)

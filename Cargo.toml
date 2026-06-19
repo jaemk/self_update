@@ -85,3 +85,8 @@ rustls = ["reqwest?/rustls", "ureq?/rustls"]
 reqwest = ["dep:reqwest"]
 ureq = ["dep:ureq"]
 s3-auth = ["dep:hmac", "dep:percent-encoding", "dep:sha2", "dep:url", "dep:time"]
+
+# The s3 backend itself needs no feature (it is always compiled). This is a no-op alias so that
+# `features = ["s3"]` resolves instead of erroring, for symmetry with the other backends; only
+# private-bucket request signing needs an actual feature (`s3-auth`).
+s3 = []

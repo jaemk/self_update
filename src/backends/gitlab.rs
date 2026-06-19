@@ -69,26 +69,29 @@ pub struct ReleaseListBuilder {
     request: RequestConfig,
 }
 impl ReleaseListBuilder {
-    /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`
-    pub fn url(&mut self, url: &str) -> &mut Self {
+    /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
+    /// `https://gitlab.com`.
+    #[doc(alias = "url")]
+    pub fn instance_url(&mut self, url: &str) -> &mut Self {
         self.host = url.to_owned();
         self
     }
 
-    /// Set the repo owner, used to build a gitlab api url
+    /// Required. Set the repo owner, used to build a gitlab api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a gitlab api url
+    /// Required. Set the repo name, used to build a gitlab api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn target(&mut self, target: &str) -> &mut Self {
+    #[doc(alias = "target")]
+    pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -108,6 +111,7 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
+        self.request.check()?;
         Ok(ReleaseList {
             host: self.host.clone(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -176,7 +180,7 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://gitlab.com/api/v4/projects/<repo_owner>%2F<repo_name>/releases`
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[must_use]
 pub struct UpdateBuilder {
     host: String,
@@ -191,19 +195,21 @@ impl UpdateBuilder {
         Default::default()
     }
 
-    /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`
-    pub fn url(&mut self, url: &str) -> &mut Self {
+    /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
+    /// `https://gitlab.com`.
+    #[doc(alias = "url")]
+    pub fn instance_url(&mut self, url: &str) -> &mut Self {
         self.host = url.to_owned();
         self
     }
 
-    /// Set the repo owner, used to build a gitlab api url
+    /// Required. Set the repo owner, used to build a gitlab api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a gitlab api url
+    /// Required. Set the repo name, used to build a gitlab api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
@@ -335,13 +341,13 @@ impl ReleaseUpdate for Update {
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release_gitlab(&json)
     }
+}
 
-    impl_release_update_accessors!();
-
+impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
         api_headers(auth_token)
     }
-}
+});
 
 impl Default for UpdateBuilder {
     fn default() -> Self {
@@ -413,7 +419,7 @@ async fn fetch_all_releases_async(
 }
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncReleaseSource for Update {
+impl crate::update::AsyncFetch for Update {
     async fn get_latest_release_async(&self) -> Result<Release> {
         use crate::backends::send_async;
         let api_url = self.releases_url();
@@ -487,6 +493,92 @@ mod tests {
     use super::Update;
 
     #[test]
+    fn instance_url_and_filter_target_setters_exist_on_release_list_builder() {
+        // The renamed `instance_url` / `filter_target` setters must exist on the gitlab
+        // `ReleaseListBuilder` and the builder must still build.
+        let _list = super::ReleaseList::configure()
+            .instance_url("https://gitlab.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .filter_target("x86_64-unknown-linux-gnu")
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn instance_url_setter_exists_on_update_builder() {
+        // The renamed `instance_url` setter must exist on the gitlab `UpdateBuilder`.
+        let _upd = Update::configure()
+            .instance_url("https://gitlab.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn api_headers_override_uses_gitlab_user_agent_and_bearer_scheme() {
+        // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire gitlab's
+        // custom `api_headers` (User-Agent + `Bearer` auth scheme), not the trait default (which
+        // sets no User-Agent and a `token` scheme).
+        let upd = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let headers = upd.api_headers(Some("secret")).unwrap();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust-reqwest/self-update"
+        );
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer secret",
+            "gitlab authenticates with the Bearer scheme"
+        );
+    }
+
+    #[test]
+    fn release_list_build_surfaces_invalid_header() {
+        // A bad header on the gitlab `ReleaseListBuilder` must fail at `build()` via
+        // `request.check()` with `Error::Config`, not panic.
+        let res = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .request_header("inva lid", "ok")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "invalid header must surface as Error::Config from gitlab ReleaseList build()"
+        );
+    }
+
+    #[test]
+    fn update_build_surfaces_invalid_header() {
+        // Same deferred-header check via `CommonBuilderConfig::build` on the gitlab UpdateBuilder.
+        let res = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header("inva lid", "ok")
+            .build();
+        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+    }
+
+    #[test]
     fn identifier_is_wired() {
         // `identifier` was previously missing from the gitlab builder.
         let upd = Update::configure()
@@ -494,10 +586,10 @@ mod tests {
             .repo_name("repo")
             .bin_name("my_bin")
             .current_version("0.1.0")
-            .identifier("musl")
+            .asset_identifier("musl")
             .build()
             .unwrap();
-        assert_eq!(upd.identifier(), Some("musl"));
+        assert_eq!(upd.asset_identifier(), Some("musl"));
     }
 
     #[test]

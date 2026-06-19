@@ -69,20 +69,21 @@ pub struct ReleaseListBuilder {
     request: RequestConfig,
 }
 impl ReleaseListBuilder {
-    /// Set the repo owner, used to build a github api url
+    /// Required. Set the repo owner, used to build a github api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Required. Set the repo name, used to build a github api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn target(&mut self, target: &str) -> &mut Self {
+    #[doc(alias = "target")]
+    pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -110,6 +111,7 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
+        self.request.check()?;
         Ok(ReleaseList {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -180,7 +182,7 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://api.github.com/repos/<repo_owner>/<repo_name>/releases/latest`
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[must_use]
 pub struct UpdateBuilder {
     repo_owner: Option<String>,
@@ -195,13 +197,13 @@ impl UpdateBuilder {
         Default::default()
     }
 
-    /// Set the repo owner, used to build a github api url
+    /// Required. Set the repo owner, used to build a github api url
     pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
         self.repo_owner = Some(owner.to_owned());
         self
     }
 
-    /// Set the repo name, used to build a github api url
+    /// Required. Set the repo name, used to build a github api url
     pub fn repo_name(&mut self, name: &str) -> &mut Self {
         self.repo_name = Some(name.to_owned());
         self
@@ -349,13 +351,13 @@ impl ReleaseUpdate for Update {
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release(&json)
     }
+}
 
-    impl_release_update_accessors!();
-
+impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<HeaderMap> {
         api_headers(auth_token)
     }
-}
+});
 
 /// Fetch every release from `base_url`, following GitHub's `Link: rel="next"` pagination.
 fn fetch_all_releases(
@@ -416,7 +418,7 @@ async fn fetch_all_releases_async(
 }
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncReleaseSource for Update {
+impl crate::update::AsyncFetch for Update {
     async fn get_latest_release_async(&self) -> Result<Release> {
         use crate::backends::send_async;
         let api_url = format!(
@@ -755,7 +757,9 @@ mod tests {
             .bin_name("app")
             .current_version("0.1.0")
             .timeout(Duration::from_secs(7))
-            .request_header("x-foo".parse().unwrap(), "bar".parse().unwrap())
+            // `request_header` accepts `TryInto<HeaderName>`/`TryInto<HeaderValue>`, so plain
+            // string args work (no `.parse().unwrap()` needed).
+            .request_header("x-foo", "bar")
             .build()
             .unwrap();
         assert_eq!(upd.request_timeout(), Some(Duration::from_secs(7)));
@@ -770,13 +774,81 @@ mod tests {
     }
 
     #[test]
+    fn request_header_accepts_typed_args() {
+        use crate::http_client::header::{HeaderName, HeaderValue};
+        // Already-typed header name/value still work (identity `TryInto`), keeping old call sites
+        // valid.
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header(
+                HeaderName::from_static("x-typed"),
+                HeaderValue::from_static("v"),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(upd.request_headers().get("x-typed").unwrap(), "v");
+    }
+
+    #[test]
+    fn api_headers_override_uses_github_user_agent_and_token_scheme() {
+        // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire github's
+        // custom `api_headers` (its `rust/self-update` User-Agent + `token` auth scheme), not the
+        // trait default (which sets no User-Agent).
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let headers = upd.api_headers(Some("secret")).unwrap();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust/self-update"
+        );
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "token secret",
+            "github authenticates with the token scheme"
+        );
+    }
+
+    #[test]
+    fn request_header_surfaces_invalid_header_at_build() {
+        // A header name that is not a valid HTTP token must fail at `build()` with `Error::Config`,
+        // not panic in the setter.
+        let res = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header("inva lid name", "ok")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "invalid header name should surface as Error::Config from build()"
+        );
+    }
+
+    #[test]
     fn builder_stores_progress_callback() {
         let upd = super::Update::configure()
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .set_progress_callback(|_downloaded, _total| {})
+            .progress_callback(|_downloaded, _total| {})
             .build()
             .unwrap();
         // The callback is forwarded to the download step (accessor is internal/doc-hidden).
@@ -804,7 +876,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .verifying_checksum(crate::Checksum::Sha256("ab".repeat(32)))
+            .checksum(crate::Checksum::Sha256("ab".repeat(32)))
             .build()
             .unwrap();
         assert!(upd.checksum().is_some());

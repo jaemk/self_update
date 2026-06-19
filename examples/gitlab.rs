@@ -18,12 +18,12 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         .repo_name("self_update")
         .bin_name("gitlab")
         .show_download_progress(true)
-        //.target_version_tag("v9.9.10")
+        //.release_tag("v9.9.10")
         //.show_output(false)
         //.no_confirm(true)
         //
         // Defaults to https://gitlab.com; for a self-hosted instance, set the base URL:
-        //.url("https://gitlab.mycorp.com")
+        //.instance_url("https://gitlab.mycorp.com")
         //
         // For private repos, you will need to provide an auth token
         // **Make sure not to bake the token into your app**; it is recommended

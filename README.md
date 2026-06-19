@@ -49,6 +49,8 @@ are _disabled_ by default; activate the one(s) your release files need:
 * `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
 * `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
+The S3 backend needs **no feature** — it is always compiled. (A no-op `s3` alias feature exists only so `features = ["s3"]` resolves for symmetry with the other backends; only private-bucket request signing needs an actual feature, `s3-auth`.)
+
 ### Example
 
 Run the following example to see `self_update` in action:
@@ -107,7 +109,10 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature,
-see the [features](#features) section above). The `self_replace` crate is re-exported for convenience:
+see the [features](#features) section above). It downloads, extracts, and replaces the running binary
+by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
+and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
+(they are no longer re-exported from `self_update`):
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,7 +136,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .set_header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
+        .header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -197,7 +202,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
-        .verifying_checksum(self_update::Checksum::Sha256("abc123…".into()))
+        .checksum(self_update::Checksum::Sha256("abc123…".into()))
         .build()?
         .update()?;
     Ok(())
@@ -212,6 +217,12 @@ another forge, a private artifact registry, a plain HTTP directory — implement
 update through the [`backends::custom`] backend, which reuses the crate's compare → select-asset →
 download → verify → extract → install flow. You build [`Release`]s with [`Release::builder`] and
 [`ReleaseAsset::new`]; the `ReleaseUpdate` trait stays sealed.
+
+[`ReleaseSource`] is **synchronous**. For a natively-async source, implement [`AsyncReleaseSource`]
+(the same three fetches as `async fn`) and drive it through
+[`backends::custom::AsyncUpdate`](backends::custom::AsyncUpdate) + `build_async()`; to reuse a
+`Clone` sync source from the async API, wrap it in
+[`backends::custom::Blocking`](backends::custom::Blocking).
 
 ```rust
 use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};

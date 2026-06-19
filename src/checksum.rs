@@ -18,7 +18,7 @@ use crate::errors::*;
 ///
 /// The variant selects the algorithm; the contained `String` is the expected digest, hex
 /// encoded (case-insensitive, surrounding whitespace ignored). Pass one to
-/// `Update::configure().verifying_checksum(..)`; the download is rejected before installation
+/// `Update::configure().checksum(..)`; the download is rejected before installation
 /// if it does not match.
 ///
 /// ```

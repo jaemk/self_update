@@ -29,6 +29,9 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 - `compile_error!` guards that turn invalid feature combinations into a clear message:
   enabling both or neither of `reqwest`/`ureq`, or both `default-tls`/`rustls`.
 - `#[must_use]` on every builder type.
+- A no-op `s3` alias cargo feature, so `features = ["s3"]` resolves for symmetry with the other
+  backends. The S3 backend itself needs no feature (it is always compiled); only private-bucket
+  request signing needs a feature (`s3-auth`).
 - Transport control on the `Update` and `ReleaseList` builders: `.timeout(Duration)` bounds
   every HTTP request the builder makes (release listing and, for `Update`, the download);
   `.request_header(name, value)` adds an extra header to every request (e.g. for a
@@ -80,27 +83,63 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   `ReleaseUpdate` trait stays sealed. To support this, `ReleaseAsset::new` and a `Release::builder()`
   (`ReleaseBuilder`) make those `#[non_exhaustive]` types constructible by downstream code (also
   handy for building `Release` values in your own tests).
+- Async custom backend (under the `async` feature): a public `AsyncReleaseSource` trait (the three
+  fetches as `async fn`, mirroring `ReleaseSource`) and a generic `backends::custom::AsyncUpdate<S>`
+  builder with `build_async()` / `update_async()` let you update from a natively-async source. A
+  `backends::custom::Blocking` adapter wraps a `Clone` sync `ReleaseSource` so it can drive the async
+  updater via `tokio::task::spawn_blocking`. No `async-trait` dependency: the updater is generic over
+  the source, so the `async fn`s need no boxing.
 
 ### Changed
-- **Builder vocabulary unified** (the `with_` prefix is dropped):
-  - the custom-endpoint setter is now `url(...)` on every git backend (was `with_url` on
-    `github` and `with_host` on `gitlab`/`gitea`);
-  - `ReleaseListBuilder::with_target` is now `target`;
+- **Builder vocabulary unified** (the `with_` prefix is dropped, and setter/accessor names line
+  up):
+  - the custom-endpoint setter is `url(...)` on `github` (its API endpoint, was `with_url`) and
+    `instance_url(...)` on `gitlab`/`gitea` (the instance base URL, was `with_host`);
+  - the `ReleaseList` release filter is now `filter_target(...)` (was `with_target`/`target`),
+    distinct from the build-target `target(...)` on the `Update` builder;
   - the s3 `UpdateBuilder::access_key_id` is now `access_key` (matching the
-    `ReleaseListBuilder`; the setter takes the full `(id, secret)` pair).
+    `ReleaseListBuilder`; the setter takes the full `(id, secret)` pair);
+  - the version-tag setter is `release_tag(...)` (was `target_version_tag`) and the
+    asset-disambiguation setter is `asset_identifier(...)` (was `identifier`), on every `Update`
+    builder — each now matching its `ReleaseUpdate` accessor of the same name;
+  - the checksum setter is `checksum(...)` (was `verifying_checksum`), matching the `checksum()`
+    accessor;
+  - the `Update`/`Download` progress setters are `progress_callback(...)` and `progress_style(...)`
+    (were `set_progress_callback`/`set_progress_style`).
+- **`Download` setters renamed to match the `Update`/`ReleaseList` builders**: `set_timeout` →
+  `timeout`, `set_header` → `header`, `set_headers` → `replace_headers` (it replaces the whole
+  `HeaderMap`), `show_progress` → `show_download_progress`, `set_progress_callback` →
+  `progress_callback`, `set_progress_style` → `progress_style`. The old names remain as
+  `#[doc(alias)]`s.
+- **`request_header(name, value)` now accepts `TryInto<HeaderName>`/`TryInto<HeaderValue>`** on the
+  `Update` and `ReleaseList` builders, so `.request_header("X-Foo", "bar")` works (no
+  `.parse().unwrap()`); an invalid header is surfaced as `Error::Config` from `build()` instead of
+  panicking. Typed-argument call sites still compile.
 - **`ReleaseUpdate` is now a sealed trait** — downstream code can call it (every backend's
   `build()` returns a `Box<dyn ReleaseUpdate>`) but can no longer implement it for foreign
   types.
 - **`ReleaseUpdate` accessors return borrows**: `current_version`/`target`/`bin_name`/
   `bin_path_in_archive`/`progress_template`/`progress_chars` return `&str`, and
-  `target_version_tag`/`identifier`/`auth_token` return `Option<&str>` (were owned `String`/
+  `release_tag`/`asset_identifier`/`auth_token` return `Option<&str>` (were owned `String`/
   `Option<String>`); `api_headers` takes `Option<&str>`.
-- **`ReleaseUpdate::target_version` accessor renamed to `target_version_tag`** so it matches the
-  `target_version_tag` builder setter (the one remaining setter/accessor name mismatch).
-- **`Download` header/progress setters renamed for clarity and cross-type consistency**:
-  `set_headers` is now `replace_headers` (it discards and replaces the whole `HeaderMap`, unlike
-  the additive `set_header`), and `show_progress` is now `show_download_progress` (matching the
-  `Update` builder setter of the same name).
+- **`ReleaseUpdate` accessors renamed to match their setters**: the `target_version` accessor is
+  now `release_tag` and `identifier` is now `asset_identifier`.
+- **`ReleaseSource` is sync-only; a separate `AsyncReleaseSource` trait drives the async custom
+  updater.** `ReleaseSource` is the three sync fetch methods plus `Send + Sync` (no `Clone` bound).
+  For a natively-async source, implement the new public `AsyncReleaseSource` trait (the same three
+  fetches as `async fn`, clean names without an `_async` suffix) and drive it through
+  `backends::custom::AsyncUpdate` + `build_async()`; to reuse a `Clone` sync `ReleaseSource` from the
+  async API, wrap it in `backends::custom::Blocking` (which runs the sync fetches on
+  `tokio::task::spawn_blocking`). `AsyncReleaseSource` is consumed through generics (`AsyncUpdate<S>`,
+  never a `dyn` object), so its `async fn`s need no `async-trait`/boxing. See *Added* below.
+- **`ReleaseUpdate` accessors moved to a sealed `UpdateConfig` supertrait** (`ReleaseUpdate:
+  UpdateConfig`). All the getters (`current_version`, `target`, `bin_name`, `release_tag`,
+  `asset_identifier`, `auth_token`, `api_headers`, the progress/transport/verify getters, …) now
+  live on `self_update::UpdateConfig`; `ReleaseUpdate` keeps the three fetches plus
+  `update`/`update_extended`. Calling an accessor on a `Box<dyn ReleaseUpdate>` is unchanged; a
+  generic helper bounded `R: ReleaseUpdate` that calls an accessor needs `use self_update::UpdateConfig;`.
+- **`#[derive(Clone)]` added to every `UpdateBuilder`** (github/gitlab/gitea/s3/custom), matching
+  the already-`Clone` `ReleaseListBuilder`s, so a configured builder can be cloned before `build()`.
 - **`ReleaseList::fetch` now takes `&self`** (was `self`) on the `github`/`gitlab`/`gitea`
   backends (the `s3` backend already borrowed).
 - **`Error` is now `#[non_exhaustive]`**, and the feature-specific variants are collapsed:
@@ -109,10 +148,16 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   `S3Auth` variant. The underlying error is still reachable via `Error::source()`.
 - `Status`, `ArchiveKind`, `Compression`, `UpdateStatus`, `Release`, and `ReleaseAsset` are
   now `#[non_exhaustive]`.
-- `Download::set_progress_style` and each backend's `UpdateBuilder::set_progress_style` now
+- `Download::progress_style` and each backend's `UpdateBuilder::progress_style` now
   accept `impl Into<String>`.
-- The `Download::set_header` doc example now uses `self_update::http::header::ACCEPT`, so it
+- The `Download::header` doc example now uses `self_update::http::header::ACCEPT`, so it
   is client-agnostic and self-contained.
+- The `verifying_keys(...)` setter and accessor now use the `self_update::VerifyingKey` alias in
+  their signatures (instead of the raw `[u8; zipsign_api::PUBLIC_KEY_LENGTH]` array).
+- The s3 `AccessKey` credential type is now public and re-exported as
+  `self_update::backends::s3::AccessKey` (under `s3-auth`), and is `#[non_exhaustive]` so a future
+  credential field (e.g. an STS session token) can be added without a break. Build it via its
+  `(id, secret)` `From` impls.
 - Respect pagination URLs when fetching GitHub releases
   ([#179](https://github.com/jaemk/self_update/pull/179)).
 - Print a short "up to date" message instead of nothing when no update is available
@@ -126,6 +171,10 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 - The `Error::Reqwest`, `Error::Ureq`, `Error::StdTimeError`, `Error::TimeError`,
   `Error::Digest`, and `Error::UrlParse` variants (replaced by `Error::Http` /
   `Error::S3Auth`).
+- The `self_replace` and `tempfile::TempDir` re-exports (`self_update::self_replace` /
+  `self_update::TempDir`). They pinned consumers to the crate's exact dependency versions; depend
+  on `self-replace` / `tempfile` directly instead. The `http`, `reqwest`/`ureq`, and `zipsign_api`
+  re-exports are unchanged.
 - `GetArchiveReaderResult` is no longer `pub` (it leaked `either::Either` /
   `flate2::read::GzDecoder` for a private function and had no consumer use).
 - The deprecated `std::error::Error::description` implementation on `Error`.
@@ -156,10 +205,18 @@ The full walkthrough is in [`docs/migrations/0.x-to-1.0-human.md`](docs/migratio
 find/replace for the common cases:
 
 - Custom endpoint setter:
-  - `.with_url(` → `.url(`   (github)
-  - `.with_host(` → `.url(`  (gitlab, gitea)
-- Release-list target filter: `.with_target(` → `.target(`
+  - `.with_url(` → `.url(`           (github API endpoint, kept)
+  - `.with_host(` → `.instance_url(` (gitlab, gitea)
+- Release-list target filter: `.with_target(` → `.filter_target(`
 - S3 credentials: `.access_key_id(` → `.access_key(`
+- Version tag / asset id setters: `.target_version_tag(` → `.release_tag(`, `.identifier(` →
+  `.asset_identifier(`; checksum setter `.verifying_checksum(` → `.checksum(`
+- `Download`/`Update` progress + transport setters: `.set_progress_callback(` →
+  `.progress_callback(`, `.set_progress_style(` → `.progress_style(`, and on `Download`
+  `.set_timeout(` → `.timeout(`, `.set_header(` → `.header(`, `.set_headers(` →
+  `.replace_headers(`, `.show_progress(` → `.show_download_progress(`
+- Dropped re-exports: replace `self_update::self_replace::` / `self_update::TempDir` with a direct
+  `self-replace` / `tempfile` dependency.
 - Error matching (the enum is now `#[non_exhaustive]`, so add a `_ =>` arm):
   - `Error::Reqwest(e)` / `Error::Ureq(e)` → `Error::Http(e)`
   - `Error::StdTimeError(e)` / `Error::TimeError(e)` / `Error::Digest(e)` / `Error::UrlParse(e)` → `Error::S3Auth(e)`

@@ -33,7 +33,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         .repo_name("self_update")
         .bin_name("github")
         .show_download_progress(true)
-        //.target_version_tag("v9.9.10")
+        //.release_tag("v9.9.10")
         //.show_output(false)
         //.no_confirm(true)
         //
@@ -51,7 +51,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         // additionally, if target/OS-arch search fails, then
         // the identifier alone (if specified) will be used to
         // find the asset
-        // .identifier("github-bin")
+        // .asset_identifier("github-bin")
         .current_version(cargo_crate_version!())
         .build()?
         .update()?;

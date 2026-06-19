@@ -204,6 +204,12 @@ impl ReleaseBuilder {
 /// `impl ReleaseSource + 'static`, so a source that needs to reference outer state should own it
 /// (e.g. hold an `Arc<Config>`) rather than borrow it.
 ///
+/// This trait is **synchronous**. For a natively-async source, implement
+/// [`AsyncReleaseSource`] and drive it through
+/// [`backends::custom::AsyncUpdate`](crate::backends::custom::AsyncUpdate); to reuse a `Clone`
+/// sync `ReleaseSource` from the async API, wrap it in
+/// [`backends::custom::Blocking`](crate::backends::custom::Blocking).
+///
 /// On failure, return one of the public [`Error`](crate::errors::Error) variants — they are plain
 /// constructible tuple variants, e.g. `Error::Network("…".into())` for a failed request,
 /// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
@@ -225,13 +231,53 @@ pub trait ReleaseSource: Send + Sync {
     fn get_release_version(&self, ver: &str) -> Result<Release>;
 }
 
-/// Internal async counterpart of the three backend fetch methods, implemented by every backend's
-/// `Update` when the `async` feature is on. It is only ever used through generics (the async
-/// orchestrator is generic over `ReleaseUpdate + AsyncReleaseSource`), never as a trait object, so
-/// `async fn` in the trait needs no boxing.
+/// An async source of releases for a custom update backend.
+///
+/// This is the async analog of [`ReleaseSource`]: implement it to update from a host the built-in
+/// backends (`github`, `gitlab`, `gitea`, `s3`) don't cover when your listing transport is itself
+/// async, and drive a full update through
+/// [`backends::custom::AsyncUpdate`](crate::backends::custom::AsyncUpdate), which reuses the
+/// crate's compare → select-asset → download → verify → extract → install orchestration.
+///
+/// You own *where releases come from*: each method makes whatever async HTTP request (with whatever
+/// auth, pagination, and parsing) your host needs and returns [`Release`]s built via
+/// [`Release::builder`]. The crate owns *how the update happens* — asset selection, the download,
+/// checksum/signature verification, extraction, and the install.
+///
+/// This trait is consumed through generics (the async updater is generic over its source, never a
+/// `dyn AsyncReleaseSource`), so the plain `async fn` methods need no boxing — there is no
+/// `async-trait` dependency. Implementations must be `Send + Sync`, and the returned futures must
+/// be `Send` (they are awaited inside the updater).
+///
+/// To reuse an existing `Clone` sync [`ReleaseSource`] from the async API, wrap it in
+/// [`backends::custom::Blocking`](crate::backends::custom::Blocking), which runs the sync fetches
+/// on [`tokio::task::spawn_blocking`].
+///
+/// On failure, return one of the public [`Error`](crate::errors::Error) variants — they are plain
+/// constructible tuple variants, e.g. `Error::Network("…".into())` for a failed request,
+/// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
+/// for a misconfiguration.
 #[cfg(feature = "async")]
 #[allow(async_fn_in_trait)]
-pub(crate) trait AsyncReleaseSource {
+pub trait AsyncReleaseSource: Send + Sync {
+    /// Fetch the single newest release.
+    async fn get_latest_release(&self) -> Result<Release>;
+
+    /// Fetch the candidate releases, **newest first**. See
+    /// [`ReleaseSource::get_latest_releases`] for how the updater treats the returned list.
+    async fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+
+    /// Fetch the release for an explicit tag/version.
+    async fn get_release_version(&self, ver: &str) -> Result<Release>;
+}
+
+/// Internal async counterpart of the three backend fetch methods, implemented by every backend's
+/// `Update` (and the custom `AsyncUpdate`) when the `async` feature is on. It is only ever used
+/// through generics (the async orchestrator is generic over `UpdateConfig + AsyncFetch`), never as
+/// a trait object, so `async fn` in the trait needs no boxing.
+#[cfg(feature = "async")]
+#[allow(async_fn_in_trait)]
+pub(crate) trait AsyncFetch {
     async fn get_latest_release_async(&self) -> Result<Release>;
     async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>>;
     async fn get_release_version_async(&self, ver: &str) -> Result<Release>;
@@ -246,34 +292,35 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-/// Updates to a specified or latest release.
+/// The shared configuration surface of an updater: the accessors every backend's `Update` exposes
+/// (current version, target, bin name/path, progress style, auth, transport, verification hooks,
+/// …).
 ///
-/// This trait is **sealed**: it is implemented only by this crate's backend `Update` types
-/// and cannot be implemented for types outside the crate. You consume it as the return type
-/// of each backend's `build()` (`Box<dyn ReleaseUpdate>`) — call `update()` /
-/// `update_extended()` on it — but you do not implement it yourself.
-pub trait ReleaseUpdate: sealed::Sealed {
-    /// Fetch details of the latest release from the backend
-    fn get_latest_release(&self) -> Result<Release>;
-
-    /// Fetch details of the latest release from the backend
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
-
-    /// Fetch details of the release matching the specified version
-    fn get_release_version(&self, ver: &str) -> Result<Release>;
-
+/// This trait is **sealed**: it is implemented only by this crate's backend `Update` types and the
+/// custom updaters, and cannot be implemented for types outside the crate. It is the supertrait of
+/// both [`ReleaseUpdate`] (sync) and the orchestrator's async path, so an async-only updater need
+/// not implement the sync fetch methods.
+///
+/// You rarely name this trait directly: accessor calls (e.g. `bin_name()`, `current_version()`,
+/// `target()`) resolve on a `dyn ReleaseUpdate` value without importing it. It is only needed in
+/// scope (`use self_update::UpdateConfig;`) to call an accessor from generic code bounded
+/// `R: ReleaseUpdate`.
+pub trait UpdateConfig: sealed::Sealed {
     /// Current version of binary being updated
     fn current_version(&self) -> &str;
 
     /// Target platform the update is being performed for
     fn target(&self) -> &str;
 
-    /// Target version tag optionally specified for the update (set via `target_version_tag`)
+    /// Release tag optionally specified for the update (set via `release_tag`)
     #[doc(alias = "target_version")]
-    fn target_version_tag(&self) -> Option<&str>;
+    #[doc(alias = "target_version_tag")]
+    fn release_tag(&self) -> Option<&str>;
 
-    /// Optional identifier of determining the asset among multiple matches
-    fn identifier(&self) -> Option<&str> {
+    /// Optional identifier for determining the asset among multiple matches (set via
+    /// `asset_identifier`)
+    #[doc(alias = "identifier")]
+    fn asset_identifier(&self) -> Option<&str> {
         None
     }
 
@@ -337,7 +384,7 @@ pub trait ReleaseUpdate: sealed::Sealed {
 
     /// ed25519ph verifying keys to validate a download's authenticity
     #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
+    fn verifying_keys(&self) -> &[crate::VerifyingKey] {
         &[]
     }
 
@@ -358,6 +405,27 @@ pub trait ReleaseUpdate: sealed::Sealed {
 
         Ok(headers)
     }
+}
+
+/// Updates to a specified or latest release.
+///
+/// This trait is **sealed** (via its [`UpdateConfig`] supertrait): it is implemented only by this
+/// crate's backend `Update` types and cannot be implemented for types outside the crate. You
+/// consume it as the return type of each backend's `build()` (`Box<dyn ReleaseUpdate>`) — call
+/// `update()` / `update_extended()` on it — but you do not implement it yourself.
+///
+/// The shared accessor methods live on the [`UpdateConfig`] supertrait. They resolve on a
+/// `dyn ReleaseUpdate` without importing it; bring it into scope (`use self_update::UpdateConfig;`)
+/// only to call them from generic code bounded `R: ReleaseUpdate`.
+pub trait ReleaseUpdate: UpdateConfig {
+    /// Fetch details of the latest release from the backend
+    fn get_latest_release(&self) -> Result<Release>;
+
+    /// Fetch details of the latest release from the backend
+    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+
+    /// Fetch details of the release matching the specified version
+    fn get_release_version(&self, ver: &str) -> Result<Release>;
 
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user.
@@ -377,7 +445,7 @@ pub trait ReleaseUpdate: sealed::Sealed {
         let show_output = self.show_output();
         print_check_header(self.target(), current_version, show_output);
 
-        let release = match self.target_version_tag() {
+        let release = match self.release_tag() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
                 let releases = self.get_latest_releases(current_version)?;
@@ -426,10 +494,28 @@ fn choose_latest_release(
     // pre-filter this way, so this is a no-op for them; it matters for `backends::custom`, whose
     // `ReleaseSource` may return the current (or older) releases — without this guard the fallback
     // below would treat the current version as an available "update" and re-install it.
-    let releases = releases
+    let mut releases = releases
         .into_iter()
         .filter(|r| version::bump_is_greater(current_version, &r.version).unwrap_or(false))
         .collect::<Vec<_>>();
+
+    // Sort the candidates semver-descending (newest first) so the selection below does not depend
+    // on the order the source/backend returned them. The built-in backends already sort or filter,
+    // but `backends::custom`'s `ReleaseSource` may hand back releases in any order. Mirrors the
+    // descending comparator in `backends::s3::sort_newer`.
+    releases.sort_by(
+        |x, y| match version::bump_is_greater(&y.version, &x.version) {
+            Ok(is_greater) => {
+                if is_greater {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            }
+            // Ignoring release due to an unexpected failure in parsing its version string
+            Err(_) => std::cmp::Ordering::Greater,
+        },
+    );
 
     // Filter to versions compatible with the current one.
     let compatible_releases = releases
@@ -484,14 +570,11 @@ fn choose_latest_release(
 
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
 /// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
-fn resolve_and_confirm<U: ReleaseUpdate + ?Sized>(
-    u: &U,
-    release: &Release,
-) -> Result<ReleaseAsset> {
+fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Result<ReleaseAsset> {
     let target = u.target();
     let target_asset = match u.asset_matcher() {
         Some(matcher) => matcher(&release.assets),
-        None => release.asset_for(target, u.identifier()),
+        None => release.asset_for(target, u.asset_identifier()),
     }
     .ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", target))?;
 
@@ -512,7 +595,7 @@ fn resolve_and_confirm<U: ReleaseUpdate + ?Sized>(
 /// Build the [`Download`] for an asset, applying the auth/accept/extra headers, timeout, progress
 /// callback, and progress style from the updater. Shared by both orchestrators; the caller drives
 /// it with `download_to` (sync) or `download_to_async` (async).
-fn build_download<U: ReleaseUpdate + ?Sized>(
+fn build_download<U: UpdateConfig + ?Sized>(
     u: &U,
     target_asset: &ReleaseAsset,
 ) -> Result<Download> {
@@ -527,20 +610,20 @@ fn build_download<U: ReleaseUpdate + ?Sized>(
     // Forward any injected HTTP client so the download reuses it too.
     download.set_client_override(u.request_client().clone());
     if let Some(timeout) = u.request_timeout() {
-        download.set_timeout(timeout);
+        download.timeout(timeout);
     }
     if let Some(callback) = u.progress_callback() {
         download.set_progress_callback_arc(callback);
     }
     download.show_download_progress(u.show_download_progress());
-    download.set_progress_style(u.progress_template(), u.progress_chars());
+    download.progress_style(u.progress_template(), u.progress_chars());
     Ok(download)
 }
 
 /// Verify the downloaded archive (checksum/signature), extract the binary, and install it. This is
 /// the sync tail shared verbatim by the sync and async update flows. Consumes `release` and returns
 /// the resulting status.
-fn finish_update<U: ReleaseUpdate + ?Sized>(
+fn finish_update<U: UpdateConfig + ?Sized>(
     u: &U,
     release: Release,
     tmp_archive_dir: &tempfile::TempDir,
@@ -595,15 +678,17 @@ fn finish_update<U: ReleaseUpdate + ?Sized>(
 #[cfg(feature = "async")]
 pub(crate) async fn update_extended_async<U>(u: &U) -> Result<UpdateStatus>
 where
-    // `AsyncReleaseSource` is never used through a trait object (the async API hands out a concrete
-    // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above.
-    U: ReleaseUpdate + AsyncReleaseSource,
+    // `AsyncFetch` is never used through a trait object (the async API hands out a concrete
+    // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above. Only the
+    // accessors (`UpdateConfig`) and the async fetches are used, never the sync fetches, so the
+    // bound is narrower than `ReleaseUpdate`.
+    U: UpdateConfig + AsyncFetch,
 {
     let current_version = u.current_version();
     let show_output = u.show_output();
     print_check_header(u.target(), current_version, show_output);
 
-    let release = match u.target_version_tag() {
+    let release = match u.release_tag() {
         None => {
             print_flush(show_output, "Checking latest released version... ")?;
             let releases = u.get_latest_releases_async(current_version).await?;
@@ -720,6 +805,7 @@ fn verify_signature(
 #[cfg(test)]
 mod tests {
     use super::{choose_latest_release, install_binary};
+    use crate::errors::Result;
     use crate::update::Release;
     use crate::DynVerifyFn;
 
@@ -757,6 +843,57 @@ mod tests {
     }
 
     #[test]
+    fn choose_latest_release_sorts_out_of_order_candidates() {
+        // A source (e.g. a custom backend) that returns candidates in an arbitrary order must still
+        // yield the newest compatible release — "newest" must not depend on caller ordering.
+        let chosen = choose_latest_release(
+            vec![rel("1.1.0"), rel("1.4.2"), rel("1.0.5"), rel("1.3.0")],
+            "1.0.0",
+            false,
+        )
+        .unwrap()
+        .expect("the newest compatible release is chosen regardless of input order");
+        assert_eq!(chosen.version, "1.4.2");
+
+        // Same set, reversed — the choice must be identical.
+        let chosen = choose_latest_release(
+            vec![rel("1.3.0"), rel("1.0.5"), rel("1.4.2"), rel("1.1.0")],
+            "1.0.0",
+            false,
+        )
+        .unwrap()
+        .expect("the newest compatible release is chosen regardless of input order");
+        assert_eq!(chosen.version, "1.4.2");
+    }
+
+    #[test]
+    fn choose_latest_release_ignores_unparseable_versions() {
+        // An unparseable version is dropped by the leading `bump_is_greater(...).unwrap_or(false)`
+        // filter (it never reaches the sort comparator), so a custom source returning junk versions
+        // must not crash or be chosen — the newest parseable compatible release wins.
+        let chosen = choose_latest_release(
+            vec![
+                rel("not-a-version"),
+                rel("1.2.0"),
+                rel("also-bad"),
+                rel("1.1.0"),
+            ],
+            "1.0.0",
+            false,
+        )
+        .unwrap()
+        .expect("the newest parseable compatible release is chosen");
+        assert_eq!(chosen.version, "1.2.0");
+
+        // Only junk versions -> nothing selectable -> up-to-date.
+        assert!(
+            choose_latest_release(vec![rel("junk"), rel("garbage")], "1.0.0", false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn choose_latest_release_falls_back_to_incompatible_newer() {
         // Only a major bump is available: newer than current but not semver-compatible. It is still
         // offered (flagged "*NOT* compatible" in the messages), exercising the fallback branch.
@@ -764,6 +901,64 @@ mod tests {
             .unwrap()
             .expect("an incompatible-but-newer release is still offered");
         assert_eq!(chosen.version, "2.0.0");
+    }
+
+    // --- Bound-narrowing compile locks (gap #3) -----------------------------------------------
+    //
+    // The refactor split the accessors onto the `UpdateConfig` supertrait. These items don't run
+    // assertions; they exist to *fail to compile* if the trait relationships regress.
+
+    use crate::update::{ReleaseUpdate, UpdateConfig};
+
+    // A generic helper bounded only on `ReleaseUpdate` must still be able to call the accessors
+    // that now live on the `UpdateConfig` supertrait — because `ReleaseUpdate: UpdateConfig`. If
+    // the supertrait bound were dropped, `bin_name()`/`target()` would not resolve here.
+    fn accessor_via_release_update_bound<R: ReleaseUpdate + ?Sized>(r: &R) -> (String, String) {
+        (r.bin_name().to_string(), r.target().to_string())
+    }
+
+    // Accessors must also resolve on a `&dyn ReleaseUpdate` (trait-object form returned by every
+    // backend's `build()`), again only because of the supertrait relationship.
+    fn accessor_via_dyn_release_update(r: &dyn ReleaseUpdate) -> String {
+        r.current_version().to_string()
+    }
+
+    // A helper bounded directly on `UpdateConfig` is the narrower form the async orchestrator
+    // uses; it must compile for any `UpdateConfig`, with no `ReleaseUpdate`/fetch requirement.
+    fn accessor_via_update_config_bound<U: UpdateConfig + ?Sized>(u: &U) -> String {
+        u.bin_name().to_string()
+    }
+
+    #[test]
+    fn bound_narrowing_helpers_are_exercised() {
+        // Drive the compile-locked helpers against a real backend `Update` so they aren't dead
+        // code (and so the trait-object path is actually walked at runtime).
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build()
+            .unwrap();
+
+        let (bin, target) = accessor_via_release_update_bound(&*upd);
+        assert_eq!(bin, "app");
+        assert_eq!(target, "x86_64-unknown-linux-gnu");
+        assert_eq!(accessor_via_dyn_release_update(&*upd), "1.0.0");
+        assert_eq!(accessor_via_update_config_bound(&*upd), "app");
+    }
+
+    struct BoundSource;
+    impl crate::update::ReleaseSource for BoundSource {
+        fn get_latest_release(&self) -> Result<Release> {
+            Release::builder().version("1.0.0").build()
+        }
+        fn get_latest_releases(&self, _c: &str) -> Result<Vec<Release>> {
+            Ok(vec![Release::builder().version("1.0.0").build()?])
+        }
+        fn get_release_version(&self, v: &str) -> Result<Release> {
+            Release::builder().version(v).build()
+        }
     }
 
     #[test]

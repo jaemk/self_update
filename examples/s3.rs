@@ -34,7 +34,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         .region("us-east-1")
         .bin_name("myapp")
         .show_download_progress(true)
-        //.target_version_tag("v9.9.10")
+        //.release_tag("v9.9.10")
         //.no_confirm(true)
         .current_version(cargo_crate_version!());
 

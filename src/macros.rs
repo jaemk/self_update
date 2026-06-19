@@ -22,12 +22,18 @@ macro_rules! request_config_setters {
 
         /// Add an extra HTTP header sent on every request, e.g. for a proxy or gateway. May be
         /// called multiple times; a repeated header name overwrites the previous value.
-        pub fn request_header(
-            &mut self,
-            name: crate::http_client::header::HeaderName,
-            value: crate::http_client::header::HeaderValue,
-        ) -> &mut Self {
-            self.$($path).+.headers.insert(name, value);
+        ///
+        /// Accepts anything that converts into a header name/value, so both typed values and plain
+        /// strings work: `.request_header("X-Foo", "bar")` or
+        /// `.request_header(self_update::http::header::ACCEPT, "application/json")`. A name or value
+        /// that is not a valid HTTP header is reported as an `Error::Config` from
+        /// [`build()`](Self::build) rather than panicking here.
+        pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
+        where
+            N: ::core::convert::TryInto<crate::http_client::header::HeaderName>,
+            V: ::core::convert::TryInto<crate::http_client::header::HeaderValue>,
+        {
+            self.$($path).+.insert_header(name, value);
             self
         }
 
@@ -74,27 +80,53 @@ macro_rules! request_config_setters {
     };
 }
 
-/// Emit the standard [`ReleaseUpdate`](crate::update::ReleaseUpdate) field accessors that
-/// every backend shares.
+/// Emit a full `impl `[`UpdateConfig`](crate::update::UpdateConfig) block holding the standard
+/// field accessors that every backend shares.
 ///
 /// Each backend's `Update` stores the same set of common fields, so the accessor bodies are
-/// identical. This macro is invoked inside each `impl ReleaseUpdate for Update` block so the
-/// shared accessors live in exactly one place; only the backend-specific methods
-/// (`get_latest_release`, `get_latest_releases`, `get_release_version`, `api_headers`) are
-/// written per backend.
-macro_rules! impl_release_update_accessors {
-    () => {
+/// identical. This macro emits the whole `impl UpdateConfig for $t` block so the shared accessors
+/// live in exactly one place; the backend-specific fetch methods go in a separate
+/// `impl ReleaseUpdate for $t` block.
+///
+/// A backend that needs to override [`UpdateConfig::api_headers`] (github/gitlab/gitea) passes the
+/// override as a trailing `{ … }` block, which is spliced into the same `impl` (a trait can only be
+/// implemented once per type):
+///
+/// ```ignore
+/// impl_update_config_accessors!(Update);                 // default api_headers
+/// impl_update_config_accessors!(Update, {               // custom api_headers
+///     fn api_headers(&self, auth_token: Option<&str>) -> Result<HeaderMap> { api_headers(auth_token) }
+/// });
+/// ```
+macro_rules! impl_update_config_accessors {
+    ($t:ty) => {
+        impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), {});
+    };
+    ($t:ty, { $($extra:tt)* }) => {
+        impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), { $($extra)* });
+    };
+    // Generic form for the custom `AsyncUpdate<S>`: a `where (...)` clause carries the bound.
+    ($t:ty, where ( $($bound:tt)* )) => {
+        impl_update_config_accessors!(
+            @emit (impl<S> crate::update::UpdateConfig for $t where $($bound)*),
+            {}
+        );
+    };
+    (@emit ($($header:tt)*), { $($extra:tt)* }) => {
+        $($header)* {
+            $($extra)*
+
         fn current_version(&self) -> &str {
             &self.common.current_version
         }
         fn target(&self) -> &str {
             &self.common.target
         }
-        fn target_version_tag(&self) -> Option<&str> {
-            self.common.target_version.as_deref()
+        fn release_tag(&self) -> Option<&str> {
+            self.common.release_tag.as_deref()
         }
-        fn identifier(&self) -> Option<&str> {
-            self.common.identifier.as_deref()
+        fn asset_identifier(&self) -> Option<&str> {
+            self.common.asset_identifier.as_deref()
         }
         fn bin_name(&self) -> &str {
             &self.common.bin_name
@@ -153,8 +185,9 @@ macro_rules! impl_release_update_accessors {
             self.common.checksum.as_ref()
         }
         #[cfg(feature = "signatures")]
-        fn verifying_keys(&self) -> &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]] {
+        fn verifying_keys(&self) -> &[crate::VerifyingKey] {
             &self.common.verifying_keys
+        }
         }
     };
 }
@@ -189,22 +222,23 @@ macro_rules! impl_common_builder_setters {
         impl_common_builder_setters!(@shared);
     };
     (@shared) => {
-        /// Set the current app version, used to compare against the latest available version.
-        /// The `cargo_crate_version!` macro can be used to pull the version from your `Cargo.toml`
+        /// Required. Set the current app version, used to compare against the latest available
+        /// version. The `cargo_crate_version!` macro can be used to pull the version from your
+        /// `Cargo.toml`
         pub fn current_version(&mut self, ver: &str) -> &mut Self {
             self.common.current_version = Some(ver.to_owned());
             self
         }
 
-        /// Set the target version tag to update to.
+        /// Set the release tag to update to.
         ///
         /// Pass the tag exactly as it appears in the remote (including any leading `v`, e.g.
         /// `"v1.2.3"`) — it is used verbatim to look the release up by tag. If not specified, the
         /// latest available release is used. (Note that the `{{ version }}` substitution in
         /// [`bin_path_in_archive`](Self::bin_path_in_archive) is still the bare semver with any
         /// leading `v` stripped, regardless of what is passed here.)
-        pub fn target_version_tag(&mut self, ver: &str) -> &mut Self {
-            self.common.target_version = Some(ver.to_owned());
+        pub fn release_tag(&mut self, ver: &str) -> &mut Self {
+            self.common.release_tag = Some(ver.to_owned());
             self
         }
 
@@ -219,12 +253,13 @@ macro_rules! impl_common_builder_setters {
         /// Set the identifiable token for the asset in case of multiple compatible assets.
         ///
         /// If unspecified, the first asset matching the target will be chosen.
-        pub fn identifier(&mut self, identifier: &str) -> &mut Self {
-            self.common.identifier = Some(identifier.to_owned());
+        pub fn asset_identifier(&mut self, identifier: &str) -> &mut Self {
+            self.common.asset_identifier = Some(identifier.to_owned());
             self
         }
 
-        /// Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been set.
+        /// Required. Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been
+        /// set.
         ///
         /// This method will append the platform specific executable file suffix
         /// (see `std::env::consts::EXE_SUFFIX`) to the name if it's missing.
@@ -266,7 +301,7 @@ macro_rules! impl_common_builder_setters {
         /// This also supports variable paths:
         /// - `{{ bin }}` is replaced with the value of `bin_name`
         /// - `{{ target }}` is replaced with the value of `target`
-        /// - `{{ version }}` is replaced with the configured `target_version_tag` if set,
+        /// - `{{ version }}` is replaced with the configured `release_tag` if set,
         ///   otherwise the value of the latest available release version is used. This is the bare
         ///   semver (e.g. `1.2.3`); the built-in backends strip a leading `v` from the release tag,
         ///   so a tag like `v1.2.3` substitutes as `1.2.3`.
@@ -285,7 +320,7 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Set download progress style.
-        pub fn set_progress_style(
+        pub fn progress_style(
             &mut self,
             progress_template: impl Into<String>,
             progress_chars: impl Into<String>,
@@ -314,7 +349,7 @@ macro_rules! impl_common_builder_setters {
         /// sends no `Content-Length`). Independent of `show_download_progress`; use it to drive
         /// a GUI or structured logging. The callback is `Fn`, so track state via interior
         /// mutability (e.g. an `AtomicU64` or a channel).
-        pub fn set_progress_callback(
+        pub fn progress_callback(
             &mut self,
             callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
         ) -> &mut Self {
@@ -355,7 +390,7 @@ macro_rules! impl_common_builder_setters {
         /// (e.g. one published in a `SHA256SUMS` file) before installing it. The algorithm is
         /// chosen by the `Checksum` variant.
         #[cfg(feature = "checksums")]
-        pub fn verifying_checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
+        pub fn checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
             self
         }
@@ -367,7 +402,7 @@ macro_rules! impl_common_builder_setters {
         #[cfg(feature = "signatures")]
         pub fn verifying_keys(
             &mut self,
-            keys: impl Into<Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>>,
+            keys: impl Into<Vec<crate::VerifyingKey>>,
         ) -> &mut Self {
             self.common.verifying_keys = keys.into();
             self
@@ -377,7 +412,7 @@ macro_rules! impl_common_builder_setters {
 
 /// Emit the inherent async update methods shared by every backend's `Update` (under the `async`
 /// feature). Invoked inside a `#[cfg(feature = "async")] impl Update { … }` block. The `Update`
-/// type must implement both `ReleaseUpdate` and the internal `AsyncReleaseSource`.
+/// type must implement both `UpdateConfig` and the internal `AsyncFetch`.
 #[cfg(feature = "async")]
 macro_rules! impl_async_update_methods {
     () => {
@@ -388,7 +423,7 @@ macro_rules! impl_async_update_methods {
         /// download are async; the extract/replace step is synchronous and runs inline, briefly
         /// blocking the executor — keep that in mind on a small single-threaded runtime.
         pub async fn update_async(&self) -> crate::errors::Result<crate::Status> {
-            let current_version = crate::update::ReleaseUpdate::current_version(self).to_string();
+            let current_version = crate::update::UpdateConfig::current_version(self).to_string();
             self.update_extended_async()
                 .await
                 .map(|s| s.into_status(current_version))
@@ -406,7 +441,7 @@ macro_rules! impl_async_update_methods {
         pub async fn get_latest_release_async(
             &self,
         ) -> crate::errors::Result<crate::update::Release> {
-            crate::update::AsyncReleaseSource::get_latest_release_async(self).await
+            crate::update::AsyncFetch::get_latest_release_async(self).await
         }
     };
 }

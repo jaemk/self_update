@@ -19,6 +19,12 @@ use std::path::PathBuf;
 /// Maximum number of items to retrieve from S3 API
 const MAX_KEYS: u8 = 100;
 
+/// Re-export the S3 [`AccessKey`] credential type at the backend module level so consumers can
+/// name it as `self_update::backends::s3::AccessKey` (e.g. to build one explicitly). Available
+/// under the `s3-auth` feature.
+#[cfg(feature = "s3-auth")]
+pub use auth::AccessKey;
+
 /// The service end point.
 ///
 #[allow(clippy::upper_case_acronyms)]
@@ -98,7 +104,8 @@ impl ReleaseListBuilder {
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    pub fn target(&mut self, target: &str) -> &mut Self {
+    #[doc(alias = "target")]
+    pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
     }
@@ -114,6 +121,7 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
+        self.request.check()?;
         Ok(ReleaseList {
             end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
@@ -187,7 +195,7 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[must_use]
 pub struct UpdateBuilder {
     end_point: EndPoint,
@@ -408,12 +416,12 @@ impl ReleaseUpdate for Update {
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         find_version(&self.fetch_releases()?, ver)
     }
-
-    impl_release_update_accessors!();
 }
 
+impl_update_config_accessors!(Update);
+
 #[cfg(feature = "async")]
-impl crate::update::AsyncReleaseSource for Update {
+impl crate::update::AsyncFetch for Update {
     async fn get_latest_release_async(&self) -> Result<Release> {
         pick_latest(&self.fetch_releases_async().await?)
     }
@@ -444,7 +452,15 @@ mod auth {
     use time::OffsetDateTime;
     use url::Url;
 
+    /// S3 access credentials used to sign requests (AWS SigV4) for private buckets.
+    ///
+    /// Construct one from an `(access_key_id, secret_access_key)` pair via [`From`] (e.g.
+    /// `("AKIA…", "secret").into()`), which is what [`access_key`](super::UpdateBuilder::access_key)
+    /// accepts. It is `#[non_exhaustive]` so future credential fields (e.g. an STS session token)
+    /// can be added without a breaking change; build it through the `From` impls rather than a
+    /// struct literal.
     #[derive(Clone, Debug)]
+    #[non_exhaustive]
     pub struct AccessKey {
         pub access_key_id: String,
         pub secret_access_key: String,
@@ -865,6 +881,94 @@ mod tests {
     }
 
     #[test]
+    fn pick_latest_ignores_unparseable_versions() {
+        // `pick_latest` does NOT pre-filter, so its comparator's `Err(_)` branch (unparseable
+        // version string) is reachable here. A release with a non-semver version must be ignored
+        // and the highest parseable version still chosen. (`choose_latest_release`/`sort_newer`
+        // pre-filter unparseable versions, so their comparator `Err(_)` arm is unreachable.)
+        let releases = [rel("1.0.0"), rel("not-a-version"), rel("2.1.0")];
+        assert_eq!(super::pick_latest(&releases).unwrap().version, "2.1.0");
+
+        // Even when the unparseable one is first/last, it never wins.
+        let releases = [rel("bogus"), rel("1.5.0")];
+        assert_eq!(super::pick_latest(&releases).unwrap().version, "1.5.0");
+    }
+
+    #[test]
+    fn sort_newer_ignores_unparseable_versions() {
+        // The pre-filter drops the unparseable version before the sort; only parseable, strictly
+        // newer versions survive, newest-first.
+        let releases = vec![rel("garbage"), rel("2.0.0"), rel("1.5.0"), rel("1.0.0")];
+        let newer = super::sort_newer(releases, "1.0.0");
+        let versions: Vec<_> = newer.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn access_key_is_reexported_and_built_from_tuples() {
+        // `AccessKey` is re-exported at the backend module level and is built via the tuple `From`
+        // impls (it is `#[non_exhaustive]`, so no struct literal from outside this module).
+        let from_strs: super::AccessKey = ("AKIA-id", "secret").into();
+        assert_eq!(from_strs.access_key_id, "AKIA-id");
+        assert_eq!(from_strs.secret_access_key, "secret");
+
+        let from_owned: super::AccessKey = (String::from("id2"), String::from("secret2")).into();
+        assert_eq!(from_owned.access_key_id, "id2");
+        assert_eq!(from_owned.secret_access_key, "secret2");
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn access_key_setter_accepts_tuple_and_reexported_type() {
+        // The `access_key` setter takes `impl Into<AccessKey>`, so both a bare tuple and an
+        // already-built `AccessKey` (named via the re-export) compile and build.
+        let _ = Update::configure()
+            .bucket_name("bucket")
+            .region("us-east-1")
+            .bin_name("my_bin")
+            .current_version("0.1.0")
+            .access_key(("id", "secret"))
+            .build()
+            .unwrap();
+
+        let key: super::AccessKey = ("id", "secret").into();
+        let _ = Update::configure()
+            .bucket_name("bucket")
+            .region("us-east-1")
+            .bin_name("my_bin")
+            .current_version("0.1.0")
+            .access_key(key)
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn filter_target_setter_exists_on_release_list_builder() {
+        // The renamed `filter_target` setter must exist on the s3 `ReleaseListBuilder` and the
+        // builder must build with the required fields present.
+        let _list = super::ReleaseList::configure()
+            .bucket_name("bucket")
+            .filter_target("x86_64-unknown-linux-gnu")
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn release_list_build_surfaces_invalid_header() {
+        // A bad header on the `ReleaseListBuilder` must fail at `build()` via `request.check()`
+        // with `Error::Config`, not panic.
+        let res = super::ReleaseList::configure()
+            .bucket_name("bucket")
+            .request_header("inva lid", "ok")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "invalid header must surface as Error::Config from ReleaseList build()"
+        );
+    }
+
+    #[test]
     fn sort_newer_keeps_only_newer_descending() {
         let releases = vec![rel("0.9.0"), rel("1.5.0"), rel("1.0.0"), rel("2.0.0")];
         let newer = super::sort_newer(releases, "1.0.0");
@@ -890,7 +994,7 @@ mod tests {
             .region("us-east-1")
             .bin_name("my_bin")
             .target("x86_64-unknown-linux-gnu")
-            .identifier("musl")
+            .asset_identifier("musl")
             .current_version("0.1.0")
             .build()
             .unwrap()
@@ -900,7 +1004,7 @@ mod tests {
     fn identifier_and_str_accessors_are_wired() {
         let upd = configured();
         // `identifier` is newly supported on the s3 builder.
-        assert_eq!(upd.identifier(), Some("musl"));
+        assert_eq!(upd.asset_identifier(), Some("musl"));
         assert_eq!(upd.target(), "x86_64-unknown-linux-gnu");
         assert_eq!(upd.current_version(), "0.1.0");
     }
@@ -930,5 +1034,28 @@ mod tests {
         assert!(upd.api_headers(Some("bad\ntoken")).is_err());
         // A well-formed token still succeeds.
         assert!(upd.api_headers(Some("good-token")).is_ok());
+    }
+
+    #[test]
+    fn api_headers_uses_the_trait_default_no_override() {
+        // s3 passes NO `{api_headers}` override to `impl_update_config_accessors!`, so it must get
+        // the `UpdateConfig` trait default: a single `token` Authorization header and, crucially,
+        // *no* User-Agent (unlike github/gitlab/gitea which override with one).
+        let upd = configured();
+        let headers = upd.api_headers(Some("secret")).unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .is_none(),
+            "the default api_headers (no override) must not set a User-Agent"
+        );
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "token secret"
+        );
     }
 }
