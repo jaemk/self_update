@@ -471,6 +471,403 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
 mod tests {
     use super::Update;
 
+    // -----------------------------------------------------------------------
+    // Async-test infrastructure (loopback stub + JSON helpers)
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "async")]
+    use crate::update::AsyncFetch;
+    #[cfg(feature = "async")]
+    use std::io::{Read, Write};
+    #[cfg(feature = "async")]
+    use std::net::TcpListener;
+
+    #[cfg(feature = "async")]
+    struct Resp {
+        status: &'static str,
+        link: Option<String>,
+        body: String,
+    }
+
+    /// Bind a loopback listener and serve `make(base_url)`'s responses in order, one per
+    /// incoming connection, on a background thread. Returns the server's base URL
+    /// (`http://127.0.0.1:<port>`). No external network is used.
+    #[cfg(feature = "async")]
+    fn stub(make: impl FnOnce(&str) -> Vec<Resp>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let mut out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n",
+                    r.status
+                );
+                if let Some(link) = r.link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.body.len(),
+                    r.body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    /// Like [`stub`], but also captures each incoming raw request so tests can assert on what
+    /// the client actually sent (e.g. to verify URL encoding in the request line).
+    #[cfg(feature = "async")]
+    fn stub_capturing(
+        make: impl FnOnce(&str) -> Vec<Resp>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let mut out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n",
+                    r.status
+                );
+                if let Some(link) = r.link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.body.len(),
+                    r.body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    /// A GitLab-format releases JSON array containing one release with the given tag.
+    /// GitLab assets live under `assets.links` (not a bare `assets` array), and the
+    /// body field is `description` (not `body`).
+    #[cfg(feature = "async")]
+    fn release_json(tag: &str) -> String {
+        format!(
+            r#"[{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}]"#
+        )
+    }
+
+    /// A GitLab-format releases JSON array containing one release per entry in `tags`.
+    #[cfg(feature = "async")]
+    fn releases_json(tags: &[&str]) -> String {
+        let objs = tags
+            .iter()
+            .map(|tag| {
+                format!(
+                    r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{objs}]")
+    }
+
+    /// A bare GitLab-format release object (not wrapped in an array). GitLab's
+    /// `get_release_version[_async]` hits `.../releases/{ver}`, which returns a single object.
+    #[cfg(feature = "async")]
+    fn release_obj_json(tag: &str) -> String {
+        format!(
+            r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}"#
+        )
+    }
+
+    /// Convenience: build a `gitlab::Update` pointed at the loopback stub.
+    #[cfg(feature = "async")]
+    fn gitlab_update(base: &str, current_version: &str) -> Update {
+        Update::configure()
+            .instance_url(base)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version(current_version)
+            .build_async()
+            .unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // Async tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_parses_release() {
+        // Drive `get_latest_release_async` against a loopback mock that returns a GitLab-format
+        // releases array and assert the parsed version string.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+
+        let rel = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(rel.version, "2.5.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_all_releases_async_follows_link_pagination() {
+        // Page 1 advertises a `rel="next"` link to page 2; page 2 has no next link.
+        // Both pages are accumulated and returned in order.
+        let base = stub(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: release_json("v1.0.0"),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v0.9.0"),
+                },
+            ]
+        });
+        let releases = super::fetch_all_releases_async(
+            &format!("{base}/api/v4/projects/o%2Fr/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            releases.len(),
+            2,
+            "both pages accumulated over async transport"
+        );
+        assert_eq!(releases[0].version, "1.0.0");
+        assert_eq!(releases[1].version, "0.9.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_release_version_async_parses_single_tag_object() {
+        // `.../releases/{ver}` returns a single release *object* (not an array). The async
+        // path must parse the bare object via `from_release_gitlab` and strip the leading `v`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v4.2.1"),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let rel = upd.get_release_version_async("v4.2.1").await.unwrap();
+        assert_eq!(rel.version, "4.2.1");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_releases_async_filters_to_newer_only() {
+        // The payload mixes releases newer than, equal to, and older than the current version.
+        // `get_latest_releases_async` must keep only strictly-newer ones, preserving order.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0"],
+            "only releases strictly newer than the current version are kept, in order"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_releases_async_empty_when_all_older_or_equal() {
+        // When no release is newer than the current version, the result is empty.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v1.0.0", "v0.9.0"]),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        assert!(
+            releases.is_empty(),
+            "no release newer than current => empty list, got {:?}",
+            releases
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_releases_async_accumulates_across_pages_then_filters() {
+        // Filtering must happen *after* pagination: a newer release on page 2 (reached via
+        // a `Link: rel="next"` header) must still be retained.
+        let base = stub(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v0.5.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v3.0.0"]),
+                },
+            ]
+        });
+
+        let upd = gitlab_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["3.0.0"],
+            "the newer release on page 2 survives pagination + filtering"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_errors_on_empty_array() {
+        // An empty releases array must error with `Error::Release`, not index out of bounds.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "empty releases array must surface as Error::Release, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_errors_on_non_array_payload() {
+        // A non-array top-level payload must hit the `as_array` guard and error.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "{}".to_string(),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "non-array payload must surface as Error::Release, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_release_version_async_errors_on_missing_tag_name() {
+        // A malformed object (no `tag_name`) must surface as `Error::Release`, not panic.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"{"created_at":"2020-01-01T00:00:00Z","assets":{"links":[]}}"#.to_string(),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_release_version_async("v1.0.0").await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "missing tag_name must surface as Error::Release, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn releases_url_encodes_repo_owner_with_slash() {
+        // `releases_url()` calls `urlencoding::encode` on `repo_owner`. A `repo_owner` that
+        // contains a `/` (e.g. a subgroup path like "group/subgroup") must appear as `%2F` in
+        // the request line seen by the server, not as a literal `/` that would create an extra
+        // path segment.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+
+        let upd = Update::configure()
+            .instance_url(&base)
+            .repo_owner("group/subgroup")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build_async()
+            .unwrap();
+        let _ = upd.get_latest_release_async().await.unwrap();
+        let request = captured.lock().unwrap()[0].clone();
+        // The request line (first line of the raw HTTP/1.1 request) must contain the
+        // percent-encoded form of the slash.
+        let first_line = request.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("%2F"),
+            "repo_owner slash must be percent-encoded as %2F in the request path; got: {:?}",
+            first_line
+        );
+        assert!(
+            !first_line.contains("group/subgroup"),
+            "literal slash in repo_owner must not appear in request path; got: {:?}",
+            first_line
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing sync / builder tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn instance_url_and_filter_target_setters_exist_on_release_list_builder() {
         // The renamed `instance_url` / `filter_target` setters must exist on the gitlab
