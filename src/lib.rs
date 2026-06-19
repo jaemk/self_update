@@ -160,7 +160,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 The high-level `update()` flow replaces a single executable. To update a tool that ships **more
 than one file** (a binary plus sidecar libraries/resources), or to install files that aren't the
 running executable, download and extract the whole archive yourself and then install the files
-with [`MoveAll`], which applies a set of `(source -> dest)` moves **transactionally**: either every
+with `MoveAll`, which applies a set of `(source -> dest)` moves **transactionally**: either every
 move succeeds, or — on the first failure — all already-applied moves are rolled back, so a failed
 update can't leave a half-installed tool. Because it uses `rename` (which can't cross
 filesystems), the source files, every destination, and the temp dir must all be on the same
@@ -199,7 +199,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 With the `checksums` feature, pass a known digest (e.g. one published in a `SHA256SUMS` file
 alongside the release) and the crate verifies the downloaded artifact against it **before**
 installing — a mismatch aborts the update. The algorithm is chosen by the
-[`Checksum`](crate::Checksum) variant (`Sha256` / `Sha512`); it complements the `signatures`
+`Checksum` variant (`Sha256` / `Sha512`); it complements the `signatures`
 feature (zipsign), which verifies authenticity rather than a published digest.
 
 ```rust
@@ -222,16 +222,16 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`) don't cover —
 another forge, a private artifact registry, a plain HTTP directory — implement the
-[`ReleaseSource`] trait (three fetch methods that say *where releases come from*) and drive a full
-update through the [`backends::custom`] backend, which reuses the crate's compare → select-asset →
-download → verify → extract → install flow. You build [`Release`]s with [`Release::builder`] and
-[`ReleaseAsset::new`]; the `ReleaseUpdate` trait stays sealed.
+`ReleaseSource` trait (three fetch methods that say *where releases come from*) and drive a full
+update through the `backends::custom` backend, which reuses the crate's compare → select-asset →
+download → verify → extract → install flow. You build `Release`s with `Release::builder` and
+`ReleaseAsset::new`; the `ReleaseUpdate` trait stays sealed.
 
-[`ReleaseSource`] is **synchronous**. For a natively-async source, implement [`AsyncReleaseSource`]
+`ReleaseSource` is **synchronous**. For a natively-async source, implement `AsyncReleaseSource`
 (the same three fetches as `async fn`) and drive it through
-[`backends::custom::AsyncUpdate`](backends::custom::AsyncUpdate) + `build_async()`; to reuse a
+`backends::custom::AsyncUpdate` + `build_async()`; to reuse a
 `Clone` sync source from the async API, wrap it in
-[`backends::custom::Blocking`](backends::custom::Blocking).
+`backends::custom::Blocking`.
 
 ```rust
 use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
@@ -296,9 +296,9 @@ for full control — custom TLS roots / mTLS, connection pooling, redirect polic
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
 It is used for both the release listing and the download. The setters are client-specific (the
 client types differ and are mutually exclusive): `reqwest_client` (a blocking
-[`reqwest::blocking::Client`](::reqwest::blocking::Client), used by the blocking API), `reqwest_async_client`
-(an async [`reqwest::Client`](::reqwest::Client), used by the `*_async` verbs), and `ureq_agent` (a
-[`ureq::Agent`](::ureq::Agent)). The selected client crate is re-exported (`self_update::reqwest` /
+`reqwest::blocking::Client`, used by the blocking API), `reqwest_async_client`
+(an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent` (a
+`ureq::Agent`). The selected client crate is re-exported (`self_update::reqwest` /
 `self_update::ureq`) so you don't need a separate dependency to name the type.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
