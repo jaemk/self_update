@@ -472,17 +472,14 @@ mod tests {
     use super::Update;
 
     // -----------------------------------------------------------------------
-    // Async-test infrastructure (loopback stub + JSON helpers)
+    // Shared loopback stub infrastructure (sync and async tests both use this)
     // -----------------------------------------------------------------------
 
     #[cfg(feature = "async")]
     use crate::update::AsyncFetch;
-    #[cfg(feature = "async")]
     use std::io::{Read, Write};
-    #[cfg(feature = "async")]
     use std::net::TcpListener;
 
-    #[cfg(feature = "async")]
     struct Resp {
         status: &'static str,
         link: Option<String>,
@@ -492,7 +489,6 @@ mod tests {
     /// Bind a loopback listener and serve `make(base_url)`'s responses in order, one per
     /// incoming connection, on a background thread. Returns the server's base URL
     /// (`http://127.0.0.1:<port>`). No external network is used.
-    #[cfg(feature = "async")]
     fn stub(make: impl FnOnce(&str) -> Vec<Resp>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -526,7 +522,7 @@ mod tests {
 
     /// Like [`stub`], but also captures each incoming raw request so tests can assert on what
     /// the client actually sent (e.g. to verify URL encoding in the request line).
-    #[cfg(feature = "async")]
+    #[cfg_attr(not(feature = "async"), allow(dead_code))]
     fn stub_capturing(
         make: impl FnOnce(&str) -> Vec<Resp>,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -568,7 +564,6 @@ mod tests {
     /// A GitLab-format releases JSON array containing one release with the given tag.
     /// GitLab assets live under `assets.links` (not a bare `assets` array), and the
     /// body field is `description` (not `body`).
-    #[cfg(feature = "async")]
     fn release_json(tag: &str) -> String {
         format!(
             r#"[{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}]"#
@@ -576,7 +571,6 @@ mod tests {
     }
 
     /// A GitLab-format releases JSON array containing one release per entry in `tags`.
-    #[cfg(feature = "async")]
     fn releases_json(tags: &[&str]) -> String {
         let objs = tags
             .iter()
@@ -592,14 +586,14 @@ mod tests {
 
     /// A bare GitLab-format release object (not wrapped in an array). GitLab's
     /// `get_release_version[_async]` hits `.../releases/{ver}`, which returns a single object.
-    #[cfg(feature = "async")]
     fn release_obj_json(tag: &str) -> String {
         format!(
             r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}"#
         )
     }
 
-    /// Convenience: build a `gitlab::Update` pointed at the loopback stub.
+    /// Convenience: build a `gitlab::Update` (concrete type) pointed at the loopback stub.
+    /// Only available when the `async` feature is enabled (uses `build_async()`).
     #[cfg(feature = "async")]
     fn gitlab_update(base: &str, current_version: &str) -> Update {
         Update::configure()
@@ -609,6 +603,19 @@ mod tests {
             .bin_name("app")
             .current_version(current_version)
             .build_async()
+            .unwrap()
+    }
+
+    /// Convenience: build a `Box<dyn ReleaseUpdate>` pointed at the loopback stub.
+    /// Available under both sync transports (reqwest blocking and ureq).
+    fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
+        Update::configure()
+            .instance_url(base)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version(current_version)
+            .build()
             .unwrap()
     }
 
@@ -1139,5 +1146,101 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(upd.bin_path_in_archive(), "custom/path");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync loopback tests (plain #[test], no tokio, works under reqwest and ureq)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_latest_release_sync_parses_release() {
+        // Drive `get_latest_release` (sync) against a loopback stub that returns a
+        // GitLab-format releases array and assert the parsed version string.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let rel = upd.get_latest_release().unwrap();
+        assert_eq!(rel.version, "2.5.0");
+    }
+
+    #[test]
+    fn get_latest_releases_sync_filters_to_newer_only() {
+        // The payload mixes releases newer than, equal to, and older than the current version.
+        // `get_latest_releases` (sync) must keep only strictly-newer ones, preserving order.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+            }]
+        });
+        let upd = gl_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases("1.0.0").unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0"],
+            "only releases strictly newer than the current version are kept, in order"
+        );
+    }
+
+    #[test]
+    fn get_release_version_sync_parses_single_tag_object() {
+        // `.../releases/{ver}` returns a single release *object* (not an array). The sync
+        // path must parse the bare object via `from_release_gitlab` and strip the leading `v`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v4.2.1"),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let rel = upd.get_release_version("v4.2.1").unwrap();
+        assert_eq!(rel.version, "4.2.1");
+    }
+
+    #[test]
+    fn get_release_version_sync_errors_on_non_2xx_status() {
+        // A 404 (the realistic "unknown tag" response from GitLab) must surface as an error,
+        // not a parse attempt on the error body, under the sync transport.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "404 Not Found",
+                link: None,
+                body: r#"{"message":"404 Not Found"}"#.to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let res = upd.get_release_version("v9.9.9");
+        assert!(
+            res.is_err(),
+            "non-2xx status on get_release_version must return an error, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn get_latest_release_sync_errors_on_empty_array() {
+        // An empty releases array must error, not index out of bounds, under the sync transport.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let res = upd.get_latest_release();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "empty releases array must surface as Error::Release, got {:?}",
+            res
+        );
     }
 }
