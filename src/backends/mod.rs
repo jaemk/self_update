@@ -2,7 +2,7 @@
 Collection of modules supporting various release distribution backends
 */
 
-use crate::errors::Result;
+use crate::errors::{Error, Result};
 use crate::http_client;
 
 pub(crate) mod common;
@@ -104,6 +104,69 @@ pub(crate) fn collect_paginated<T>(
     Ok(out)
 }
 
+/// Exponential backoff in milliseconds before retry `attempt` (0-based): 100, 200, 400, … capped
+/// at ~3.2s (attempt 5 and beyond).
+pub(crate) fn retry_backoff_ms(attempt: u32) -> u64 {
+    100u64 << attempt.min(5)
+}
+
+/// Run `attempt` until it succeeds or the retry budget is spent, invoking `on_retry(err, backoff)`
+/// (which logs the failure and sleeps) between tries. With `retries == 0` the attempt runs exactly
+/// once. The transport and the sleep are injected so the retry/backoff control flow can be
+/// unit-tested without real requests or real delays.
+pub(crate) fn retry<R>(
+    retries: u32,
+    mut attempt: impl FnMut() -> Result<R>,
+    mut on_retry: impl FnMut(&Error, u64),
+) -> Result<R> {
+    let mut attempts = 0u32;
+    loop {
+        match attempt() {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                if attempts >= retries {
+                    return Err(e);
+                }
+                on_retry(&e, retry_backoff_ms(attempts));
+                attempts += 1;
+            }
+        }
+    }
+}
+
+/// Async sibling of [`retry`]: the same retry/backoff loop with an injected async transport and
+/// async `sleep`. `log_retry` runs synchronously between tries (so the error is never held across
+/// the await); `sleep` performs the backoff delay.
+#[cfg(feature = "async")]
+pub(crate) async fn retry_async<R, A, Fut, S, SFut>(
+    retries: u32,
+    mut attempt: A,
+    mut log_retry: impl FnMut(&Error, u64),
+    mut sleep: S,
+) -> Result<R>
+where
+    A: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<R>>,
+    S: FnMut(u64) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let mut attempts = 0u32;
+    loop {
+        match attempt().await {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                if attempts >= retries {
+                    return Err(e);
+                }
+                let backoff = retry_backoff_ms(attempts);
+                log_retry(&e, backoff);
+                sleep(backoff).await;
+                attempts += 1;
+            }
+        }
+    }
+}
+
 /// Issue a GET request, merging the per-request transport `config` (extra headers + timeout)
 /// on top of the supplied `base` headers, retrying a failed request up to `config.retries`
 /// times with exponential backoff.
@@ -115,22 +178,14 @@ pub(crate) fn send(
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
-    let mut attempt = 0u32;
-    loop {
-        match http_client::get(url, base.clone(), config.timeout, &config.client) {
-            Ok(resp) => return Ok(resp),
-            Err(e) => {
-                if attempt >= config.retries {
-                    return Err(e);
-                }
-                // Exponential backoff: 100ms, 200ms, 400ms, … capped at ~3.2s.
-                let backoff = 100u64 << attempt.min(5);
-                log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
-                std::thread::sleep(std::time::Duration::from_millis(backoff));
-                attempt += 1;
-            }
-        }
-    }
+    retry(
+        config.retries,
+        || http_client::get(url, base.clone(), config.timeout, &config.client),
+        |e, backoff| {
+            log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
+            std::thread::sleep(std::time::Duration::from_millis(backoff));
+        },
+    )
 }
 
 /// Async sibling of [`send`]: issue a GET, merging the per-request transport `config` on top of
@@ -144,22 +199,15 @@ pub(crate) async fn send_async(
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
-    let mut attempt = 0u32;
-    loop {
-        match http_client::get_async(url, base.clone(), config.timeout, &config.client).await {
-            Ok(resp) => return Ok(resp),
-            Err(e) => {
-                if attempt >= config.retries {
-                    return Err(e);
-                }
-                // Exponential backoff: 100ms, 200ms, 400ms, … capped at ~3.2s.
-                let backoff = 100u64 << attempt.min(5);
-                log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                attempt += 1;
-            }
-        }
-    }
+    retry_async(
+        config.retries,
+        || http_client::get_async(url, base.clone(), config.timeout, &config.client),
+        |e, backoff| {
+            log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
+        },
+        |backoff| tokio::time::sleep(std::time::Duration::from_millis(backoff)),
+    )
+    .await
 }
 
 /// Async sibling of [`collect_paginated`]: accumulate items across `Link: rel="next"` pages.
@@ -285,6 +333,157 @@ mod test {
         let res: crate::errors::Result<Vec<i32>> =
             collect_paginated("u", |_url| Err(Error::Network("boom".to_string())));
         assert!(matches!(res, Err(Error::Network(_))));
+    }
+
+    #[test]
+    fn retry_runs_once_on_immediate_success() {
+        use crate::backends::retry;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            3,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(7)
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert_eq!(res.unwrap(), 7);
+        assert_eq!(calls.get(), 1);
+        assert!(backoffs.borrow().is_empty());
+    }
+
+    #[test]
+    fn retry_with_zero_budget_attempts_once_then_errors() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            0,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Network("boom".into()))
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(matches!(res, Err(Error::Network(_))));
+        assert_eq!(calls.get(), 1);
+        assert!(backoffs.borrow().is_empty());
+    }
+
+    #[test]
+    fn retry_exhausts_budget_then_returns_last_error() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            2,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Network("boom".into()))
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(matches!(res, Err(Error::Network(_))));
+        // initial attempt + 2 retries
+        assert_eq!(calls.get(), 3);
+        assert_eq!(*backoffs.borrow(), vec![100, 200]);
+    }
+
+    #[test]
+    fn retry_returns_ok_when_a_later_attempt_succeeds() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            5,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err(Error::Network("transient".into()))
+                } else {
+                    Ok(42)
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert_eq!(res.unwrap(), 42);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(*backoffs.borrow(), vec![100, 200]);
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_and_capped() {
+        use crate::backends::retry_backoff_ms;
+        assert_eq!(retry_backoff_ms(0), 100);
+        assert_eq!(retry_backoff_ms(1), 200);
+        assert_eq!(retry_backoff_ms(2), 400);
+        assert_eq!(retry_backoff_ms(3), 800);
+        assert_eq!(retry_backoff_ms(4), 1600);
+        assert_eq!(retry_backoff_ms(5), 3200);
+        // capped from attempt 5 onward
+        assert_eq!(retry_backoff_ms(6), 3200);
+        assert_eq!(retry_backoff_ms(100), 3200);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn retry_async_exhausts_budget_then_returns_last_error() {
+        use crate::backends::retry_async;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry_async(
+            2,
+            || {
+                calls.set(calls.get() + 1);
+                async { Err(Error::Network("boom".into())) }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+            |_b| async {},
+        )
+        .await;
+        assert!(matches!(res, Err(Error::Network(_))));
+        assert_eq!(calls.get(), 3);
+        assert_eq!(*backoffs.borrow(), vec![100, 200]);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn retry_async_returns_ok_when_a_later_attempt_succeeds() {
+        use crate::backends::retry_async;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry_async(
+            5,
+            || {
+                calls.set(calls.get() + 1);
+                let done = calls.get() >= 3;
+                async move {
+                    if done {
+                        Ok(42)
+                    } else {
+                        Err(Error::Network("transient".into()))
+                    }
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+            |_b| async {},
+        )
+        .await;
+        assert_eq!(res.unwrap(), 42);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(*backoffs.borrow(), vec![100, 200]);
     }
 
     #[test]
