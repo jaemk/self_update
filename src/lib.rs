@@ -178,7 +178,8 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
     // The extracted files are renamed into place, so the staging dir (the move sources) and the
     // stash dir must be on the same filesystem as the destinations — create both next to them
-    // rather than in $TMPDIR.
+    // rather than in $TMPDIR. The `/usr/local` paths below are illustrative; use destinations
+    // and temp dirs you have write access to (these may require elevated privileges).
     let staging = tempfile::TempDir::new_in("/usr/local")?;
     self_update::Extract::from_source(&tarball_path)
         .archive(self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz)))
@@ -211,7 +212,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
-        .checksum(self_update::Checksum::Sha256("abc123…".into()))
+        .checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
         .build()?
         .update()?;
     Ok(())

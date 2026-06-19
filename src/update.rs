@@ -602,7 +602,8 @@ fn build_download<U: UpdateConfig + ?Sized>(
     let mut download = Download::from_url(&target_asset.download_url);
     let mut headers = u.api_headers(u.auth_token())?;
     headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
-    // Apply the user's extra request headers to the download too.
+    // Apply the user's extra request headers to the download too. This runs after the ACCEPT and
+    // auth headers set above, so a user-supplied header of the same name overrides them here.
     for (name, value) in u.request_headers() {
         headers.insert(name.clone(), value.clone());
     }

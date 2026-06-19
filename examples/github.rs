@@ -46,10 +46,10 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         // or prompting the user for input
         //.auth_token(&std::env::var("DOWNLOAD_AUTH_TOKEN")?)
         //
-        // an optional `identifier` can be specified to narrow down
+        // an optional `asset_identifier` can be specified to narrow down
         // an asset match for a target or OS-arch combination.
         // additionally, if target/OS-arch search fails, then
-        // the identifier alone (if specified) will be used to
+        // the `asset_identifier` alone (if specified) will be used to
         // find the asset
         // .asset_identifier("github-bin")
         .current_version(cargo_crate_version!())

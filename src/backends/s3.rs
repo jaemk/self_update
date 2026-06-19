@@ -251,8 +251,8 @@ impl UpdateBuilder {
     impl_common_builder_setters!(no_auth_token);
 
     /// **Deprecated and a no-op on the S3 backend.** S3 authenticates by signing requests with
-    /// an `access_key` (AWS SigV4), not a bearer token, so this setter has never had any effect
-    /// here. Use [`access_key`](Self::access_key) instead. Retained for one release to avoid a
+    /// an `access_key` (AWS SigV4), not a bearer token, so the stored token has never been read by
+    /// the S3 fetch path. Use [`access_key`](Self::access_key) instead. Retained for one release to avoid a
     /// hard break; it will be removed in the next major version.
     #[deprecated(
         since = "1.0.0",
@@ -739,7 +739,9 @@ async fn fetch_releases_from_s3_async(
 }
 
 /// Parse an S3 `ListBucketResult` XML body into releases, forming (and, under `s3-auth`, signing)
-/// each asset's download URL against `download_base_url`. Pure/sync — shared by both fetch paths.
+/// each asset's download URL against `download_base_url`. Pure when `s3-auth` is off; under
+/// `s3-auth` it signs each URL with a timestamped SigV4 signature and is therefore time-dependent.
+/// Shared by both fetch paths.
 fn parse_s3_response(
     body: &str,
     download_base_url: &str,
