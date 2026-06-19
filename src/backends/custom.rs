@@ -486,6 +486,133 @@ mod tests {
         assert_eq!(asset.download_url, "https://example/app-2.0.0.tar.gz");
     }
 
+    // --- Sync end-to-end path tests (analogue of the async OrchestratedSource tests) -----------
+    //
+    // These mirror `update_extended_async_resolves_explicit_tag_then_selects_that_release` and
+    // `update_extended_async_selects_newest_compatible_then_fails_at_missing_asset` from the async
+    // submodule below. The async tests proved those paths work through `AsyncUpdate`; the tests here
+    // prove the same paths work through the sync `Update` and its `update_extended()` orchestrator.
+
+    /// A sync source whose `get_latest_releases` returns several candidates (out of order, some
+    /// older than current) so `choose_latest_release` runs over real source data. Each release
+    /// carries a single asset whose name embeds its version (`app-<ver>.bin`), letting an
+    /// asset-matcher report which release the orchestrator actually selected.
+    struct SyncOrchestratedSource;
+
+    fn versioned_release_sync(v: &str) -> Release {
+        Release::builder()
+            .version(v)
+            .asset(ReleaseAsset::new(
+                format!("app-{}.bin", v),
+                format!("https://example/app-{}.bin", v),
+            ))
+            .build()
+            .unwrap()
+    }
+
+    impl ReleaseSource for SyncOrchestratedSource {
+        fn get_latest_release(&self) -> crate::errors::Result<Release> {
+            self.get_release_version("9.9.9")
+        }
+        fn get_latest_releases(&self, _current: &str) -> crate::errors::Result<Vec<Release>> {
+            // Newest-but-incompatible, current, older, and the compatible winner — out of order.
+            // The orchestrator must drop current/older and pick the newest compatible (1.4.0),
+            // not 2.0.0 and not 1.0.0.
+            Ok(vec![
+                versioned_release_sync("1.0.0"),
+                versioned_release_sync("2.0.0"),
+                versioned_release_sync("0.9.0"),
+                versioned_release_sync("1.4.0"),
+                versioned_release_sync("1.2.0"),
+            ])
+        }
+        fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+            Ok(versioned_release_sync(ver))
+        }
+    }
+
+    #[test]
+    fn update_extended_resolves_explicit_tag_then_selects_that_release() {
+        // With an explicit release_tag the sync orchestrator takes the get_release_version path
+        // (not choose_latest_release) and runs asset selection over *that* tagged release.
+        // The asset-matcher records the asset names it sees (proving which release was fetched),
+        // then returns None so the update fails at resolve_and_confirm rather than attempting a
+        // real download.
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen_cb = seen.clone();
+        let upd = Update::configure()
+            .source(SyncOrchestratedSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .release_tag("7.7.7")
+            .no_confirm(true)
+            .show_output(false)
+            .asset_matcher(move |assets| {
+                let mut s = seen_cb.lock().unwrap();
+                for a in assets {
+                    s.push(a.name.clone());
+                }
+                None
+            })
+            .build()
+            .unwrap();
+        let err = upd
+            .update_extended()
+            .expect_err("matcher returning None must fail the update");
+        assert!(
+            matches!(err, crate::errors::Error::Release(_)),
+            "explicit-tag path still runs asset selection, got {:?}",
+            err
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["app-7.7.7.bin".to_string()],
+            "the explicit-tag path must resolve and select the tagged release (7.7.7)"
+        );
+    }
+
+    #[test]
+    fn update_extended_selects_newest_compatible_then_fails_at_missing_asset() {
+        // Reaches past choose_latest_release into asset selection. A recording asset-matcher
+        // captures the asset names of the *chosen* release, proving the sync orchestrator selected
+        // the newest **compatible** release (1.4.0) over the source's out-of-order list — not the
+        // newer-but-incompatible 2.0.0, nor the current 1.0.0. The matcher then returns None, so
+        // the update fails at resolve_and_confirm with an Error::Release (rather than attempting a
+        // real download).
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen_cb = seen.clone();
+        let upd = Update::configure()
+            .source(SyncOrchestratedSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .no_confirm(true)
+            .show_output(false)
+            .asset_matcher(move |assets| {
+                let mut s = seen_cb.lock().unwrap();
+                for a in assets {
+                    s.push(a.name.clone());
+                }
+                None
+            })
+            .build()
+            .unwrap();
+        let err = upd
+            .update_extended()
+            .expect_err("matcher returning None must fail the update");
+        assert!(
+            matches!(err, crate::errors::Error::Release(_)),
+            "no asset selected -> Error::Release, got {:?}",
+            err
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["app-1.4.0.bin".to_string()],
+            "the sync orchestrator must select the newest compatible release (1.4.0)"
+        );
+    }
+
     #[cfg(feature = "async")]
     mod async_tests {
         use super::super::{AsyncUpdate, Blocking};
