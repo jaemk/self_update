@@ -994,4 +994,73 @@ mod tests {
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"new binary");
     }
+
+    // Build a custom-backend `Update` carrying `checksum`, to drive `finish_update` directly.
+    #[cfg(feature = "checksums")]
+    fn update_with_checksum(checksum: crate::Checksum) -> Box<dyn ReleaseUpdate> {
+        crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .checksum(checksum)
+            .build()
+            .unwrap()
+    }
+
+    // A configured checksum is actually consulted by `finish_update`: a mismatch aborts the
+    // update at the checksum gate, before any extraction or install. If the checksum block were
+    // dropped, the bogus archive would instead fail later with a non-checksum error and this
+    // test would catch it.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn finish_update_rejects_a_mismatched_checksum_before_extracting() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        // A valid-length but wrong SHA-256 digest (the file's real digest is 2cf24dba…).
+        let upd = update_with_checksum(crate::Checksum::Sha256("00".repeat(32)));
+        let release = Release::builder().version("1.2.3").build().unwrap();
+
+        let err = super::finish_update(&*upd, release, &dir, &archive_path)
+            .expect_err("a mismatched checksum must abort the update");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checksum mismatch"),
+            "expected a checksum-mismatch abort, got: {}",
+            msg
+        );
+    }
+
+    // The complement: a *matching* checksum passes the gate, so the flow proceeds past it. Here
+    // the bogus `.tar.gz` then fails at extraction — a different error — proving the checksum was
+    // accepted rather than the update being aborted at the gate. Gated additionally on the
+    // archive features so the post-gate extraction failure is deterministic.
+    #[cfg(all(
+        feature = "checksums",
+        feature = "archive-tar",
+        feature = "compression-flate2"
+    ))]
+    #[test]
+    fn finish_update_passes_a_matching_checksum_then_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        // The real SHA-256 of b"hello".
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let upd = update_with_checksum(crate::Checksum::Sha256(digest.to_string()));
+        let release = Release::builder().version("1.2.3").build().unwrap();
+
+        let err = super::finish_update(&*upd, release, &dir, &archive_path)
+            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("checksum mismatch"),
+            "a matching checksum must pass the gate; the failure should come from extraction, \
+             got: {}",
+            msg
+        );
+    }
 }
