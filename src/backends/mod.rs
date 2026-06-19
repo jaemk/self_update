@@ -433,6 +433,50 @@ mod test {
         assert_eq!(retry_backoff_ms(100), 3200);
     }
 
+    #[test]
+    fn retry_with_a_single_retry_attempts_twice() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            1,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Network("boom".into()))
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(matches!(res, Err(Error::Network(_))));
+        // initial attempt + 1 retry; the `>` vs `>=` budget boundary
+        assert_eq!(calls.get(), 2);
+        assert_eq!(*backoffs.borrow(), vec![100]);
+    }
+
+    #[test]
+    fn retry_backoff_sequence_through_the_loop_climbs_and_caps() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        // Six retries drive the in-loop attempt index from 0 through 5, so the recorded backoff
+        // sequence must climb 100 -> 3200 and hit the cap at the final step — proving the loop
+        // feeds the rising attempt index into `retry_backoff_ms`, not just index 0/1.
+        let res: crate::errors::Result<i32> = retry(
+            6,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Network("boom".into()))
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(matches!(res, Err(Error::Network(_))));
+        assert_eq!(calls.get(), 7);
+        assert_eq!(*backoffs.borrow(), vec![100, 200, 400, 800, 1600, 3200]);
+    }
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn retry_async_exhausts_budget_then_returns_last_error() {
