@@ -17,14 +17,14 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 - S3 auth support (request signing for private buckets) behind the `s3-auth` feature
   ([#172](https://github.com/jaemk/self_update/pull/172)).
 - Re-export the `http` crate as `self_update::http`, so consumers can name the header
-  types accepted by `Download::set_header`/`replace_headers` (e.g.
+  types accepted by `Download::header`/`replace_headers` (e.g.
   `self_update::http::header::ACCEPT`) without a separate `http` dependency.
 - Re-export `ReleaseUpdate`, `UpdateStatus`, `Release`, and `ReleaseAsset` at the crate root
   (e.g. `self_update::ReleaseUpdate`) — the types returned by `update_extended()` / `fetch()`.
 - Re-export `zipsign_api` and add a `self_update::VerifyingKey` type alias (under the
   `signatures` feature) so `verifying_keys(...)` callers need neither a direct
   `zipsign-api` dependency nor a hard-coded key length.
-- `identifier(...)` builder setter on the `gitlab` and `s3` `UpdateBuilder`s (it already
+- `asset_identifier(...)` builder setter on the `gitlab` and `s3` `UpdateBuilder`s (it already
   existed on `github`/`gitea`), so every backend can disambiguate multiple matching assets.
 - `compile_error!` guards that turn invalid feature combinations into a clear message:
   enabling both or neither of `reqwest`/`ureq`, or both `default-tls`/`rustls`.
@@ -35,12 +35,12 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 - Transport control on the `Update` and `ReleaseList` builders: `.timeout(Duration)` bounds
   every HTTP request the builder makes (release listing and, for `Update`, the download);
   `.request_header(name, value)` adds an extra header to every request (e.g. for a
-  proxy/gateway); and `.retries(n)` retries a failed release-listing request with exponential
-  backoff. `Download::set_timeout(..)` provides a timeout for the standalone downloader (which
-  already had `set_header`). Both the `reqwest` and `ureq` clients honor the
+  proxy/gateway); and `.retries(n)` retries a failed API request with exponential
+  backoff. `Download::timeout(..)` provides a timeout for the standalone downloader (which
+  already had `header`). Both the `reqwest` and `ureq` clients honor the
   `HTTP(S)_PROXY` / `NO_PROXY` environment variables.
-- Download progress callback: `Download::set_progress_callback(|downloaded, total| ..)` and the
-  same `.set_progress_callback(..)` on every `Update` builder, invoked as the download streams
+- Download progress callback: `Download::progress_callback(|downloaded, total| ..)` and the
+  same `.progress_callback(..)` on every `Update` builder, invoked as the download streams
   (`total` is `None` when the server sends no `Content-Length`). It is independent of the
   terminal progress bar, so GUI / headless / logging consumers can observe download progress.
 - Checksum verification behind the `checksums` feature: `Update::configure()

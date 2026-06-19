@@ -46,7 +46,9 @@ download itself needs an auth header, set it scheme-agnostically with
 `.request_header(self_update::http::header::AUTHORIZATION, "Bearer …".parse()?)` (there is no
 `auth_token` on this backend — its `token <…>` scheme is github-specific). `.retries()` has **no
 effect** here: it only ever retried the built-in release-listing requests, and on this backend the
-listing is entirely the source's responsibility.
+listing is entirely the source's responsibility. An injected client (`reqwest_client`,
+`reqwest_async_client`, or `ureq_agent`) is also honored for the download — `build_download`
+forwards the override, so the same client you supplied controls the actual file transfer.
 
 # Async
 
@@ -133,7 +135,9 @@ use crate::update::{Release, ReleaseSource, ReleaseUpdate};
 /// its own HTTP client, auth, and pagination. In particular `.retries()` has **no effect at all**
 /// here (it only ever retried the built-in listing requests), and `.timeout()` /
 /// `.request_header()` apply to the download but not to your source's requests. Configure listing
-/// transport inside your `ReleaseSource` implementation instead.
+/// transport inside your `ReleaseSource` implementation instead. An injected client
+/// (`reqwest_client`, `reqwest_async_client`, or `ureq_agent`) is also honored for the download
+/// — `build_download` forwards the override to the crate-controlled file transfer.
 #[must_use]
 #[derive(Clone, Default)]
 pub struct UpdateBuilder {

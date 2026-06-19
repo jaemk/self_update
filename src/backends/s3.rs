@@ -1421,6 +1421,291 @@ mod tests {
         assert!(upd.api_headers(Some("good-token")).is_ok());
     }
 
+    // ---------------------------------------------------------------------------
+    // build_s3_api_url: endpoint/region/prefix URL construction (pure, no network)
+    // ---------------------------------------------------------------------------
+
+    /// Call `build_s3_api_url`, threading the `s3-auth`-only `access_key` argument behind the
+    /// feature gate so the same call site compiles with and without `s3-auth`. With no access key
+    /// the returned `api_url` is unsigned, so the tests below can assert on the raw URL shape.
+    fn api_url(
+        end_point: super::EndPoint,
+        bucket: &str,
+        region: Option<&str>,
+        prefix: Option<&str>,
+    ) -> crate::errors::Result<(String, String)> {
+        super::build_s3_api_url(
+            &end_point,
+            bucket,
+            &region.map(str::to_owned),
+            &prefix.map(str::to_owned),
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+    }
+
+    #[test]
+    fn build_s3_api_url_s3_endpoint_shape() {
+        // EndPoint::S3 forms `https://<bucket>.s3.<region>.amazonaws.com/` as the download base,
+        // and the listing url appends the v2 `list-type=2&max-keys=...` query.
+        let (base, url) =
+            api_url(super::EndPoint::S3, "my-bucket", Some("eu-west-1"), None).unwrap();
+        assert_eq!(base, "https://my-bucket.s3.eu-west-1.amazonaws.com/");
+        assert_eq!(
+            url,
+            "https://my-bucket.s3.eu-west-1.amazonaws.com/?list-type=2&max-keys=100"
+        );
+    }
+
+    #[test]
+    fn build_s3_api_url_dualstack_endpoint_shape() {
+        // EndPoint::S3DualStack injects the `dualstack` infix into the host.
+        let (base, url) =
+            api_url(super::EndPoint::S3DualStack, "b", Some("us-east-2"), None).unwrap();
+        assert_eq!(base, "https://b.s3.dualstack.us-east-2.amazonaws.com/");
+        assert!(url.starts_with("https://b.s3.dualstack.us-east-2.amazonaws.com/?list-type=2"));
+    }
+
+    #[test]
+    fn build_s3_api_url_digitalocean_endpoint_shape() {
+        // EndPoint::DigitalOceanSpaces uses `<bucket>.<region>.digitaloceanspaces.com`.
+        let (base, url) = api_url(
+            super::EndPoint::DigitalOceanSpaces,
+            "space",
+            Some("nyc3"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(base, "https://space.nyc3.digitaloceanspaces.com/");
+        assert!(url.starts_with("https://space.nyc3.digitaloceanspaces.com/?list-type=2"));
+    }
+
+    #[test]
+    fn build_s3_api_url_gcs_ignores_region_and_uses_maxkeys_only() {
+        // EndPoint::GCS targets `storage.googleapis.com/<bucket>/`, does NOT embed a region, and
+        // its listing query is `max-keys` only (no `list-type=2`, which is S3-specific).
+        let (base, url) = api_url(super::EndPoint::GCS, "gbucket", None, None).unwrap();
+        assert_eq!(base, "https://storage.googleapis.com/gbucket/");
+        assert_eq!(url, "https://storage.googleapis.com/gbucket/?max-keys=100");
+        assert!(
+            !url.contains("list-type=2"),
+            "GCS listing must not use the S3-only list-type=2 param"
+        );
+    }
+
+    #[test]
+    fn build_s3_api_url_generic_passes_endpoint_through() {
+        // EndPoint::Generic uses the supplied URL verbatim as the download base (region is not
+        // consumed) and appends the v2 `list-type=2` listing query.
+        let (base, url) = api_url(
+            super::EndPoint::Generic {
+                end_point: "https://s3.example.com/bucket/".to_owned(),
+            },
+            "ignored-bucket",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(base, "https://s3.example.com/bucket/");
+        assert_eq!(
+            url,
+            "https://s3.example.com/bucket/?list-type=2&max-keys=100"
+        );
+    }
+
+    #[test]
+    fn build_s3_api_url_appends_asset_prefix() {
+        // A configured asset_prefix is appended as `&prefix=<value>` to the listing query; with
+        // no prefix the segment is absent.
+        let (_base, with_prefix) = api_url(
+            super::EndPoint::S3,
+            "b",
+            Some("us-east-1"),
+            Some("releases/"),
+        )
+        .unwrap();
+        assert!(
+            with_prefix.ends_with("&prefix=releases/"),
+            "prefix must be appended: {}",
+            with_prefix
+        );
+        let (_base, no_prefix) =
+            api_url(super::EndPoint::S3, "b", Some("us-east-1"), None).unwrap();
+        assert!(
+            !no_prefix.contains("prefix="),
+            "no prefix segment when asset_prefix is None"
+        );
+    }
+
+    #[test]
+    fn build_s3_api_url_missing_region_errors_for_region_endpoints() {
+        // S3, S3DualStack and DigitalOceanSpaces all interpolate the region into the host, so a
+        // missing region must surface as `Error::Config` (not a panic or a malformed URL).
+        for ep in [
+            super::EndPoint::S3,
+            super::EndPoint::S3DualStack,
+            super::EndPoint::DigitalOceanSpaces,
+        ] {
+            let res = api_url(ep, "b", None, None);
+            assert!(
+                matches!(res, Err(crate::errors::Error::Config(_))),
+                "region-requiring endpoint without region must error with Error::Config"
+            );
+        }
+    }
+
+    #[test]
+    fn build_s3_api_url_generic_and_gcs_succeed_without_region() {
+        // Generic and GCS never read the region, so both must build successfully when region is
+        // absent (the region-requiring endpoints are covered by the error test above).
+        assert!(api_url(super::EndPoint::GCS, "b", None, None).is_ok());
+        assert!(api_url(
+            super::EndPoint::Generic {
+                end_point: "https://s3.example.com/".to_owned()
+            },
+            "b",
+            None,
+            None
+        )
+        .is_ok());
+    }
+
+    // ---------------------------------------------------------------------------
+    // s3-auth: SigV4 query-signing structural invariants (deterministic, no real
+    // signature assertions since the timestamp/HMAC are time-dependent)
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn s3_signature_v4_no_access_key_returns_url_unchanged() {
+        // With no access key the signer is a no-op: the URL is returned verbatim, so an
+        // unauthenticated (public-bucket) request carries no SigV4 query params.
+        let url = "https://b.s3.us-east-1.amazonaws.com/key?list-type=2";
+        let out = super::auth::s3_signature_v4(url, &Some("us-east-1".into()), &None, 300).unwrap();
+        assert_eq!(out, url, "missing access key must return the URL unchanged");
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn s3_signature_v4_signed_url_has_required_query_params() {
+        // With an access key the signer appends the AWS SigV4 presigned-query params. We cannot
+        // assert the exact signature (it depends on the current wall-clock timestamp and HMAC),
+        // but the structural invariants are deterministic.
+        let url = "https://b.s3.us-east-1.amazonaws.com/path/to/key";
+        let key: super::AccessKey = ("AKIAEXAMPLE", "secretkey").into();
+        let out =
+            super::auth::s3_signature_v4(url, &Some("us-east-1".into()), &Some(key), 300).unwrap();
+        assert!(out.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(out.contains("X-Amz-Credential="));
+        assert!(out.contains("X-Amz-Date="));
+        assert!(out.contains("X-Amz-Expires=300"));
+        assert!(out.contains("X-Amz-SignedHeaders=host"));
+        assert!(out.contains("X-Amz-Signature="));
+        // The signature is the final param and is a lowercase hex SHA-256 HMAC (64 hex chars).
+        let sig = out
+            .rsplit("X-Amz-Signature=")
+            .next()
+            .expect("signature param present");
+        assert_eq!(sig.len(), 64, "SigV4 signature is 32 bytes hex-encoded");
+        assert!(
+            sig.bytes().all(|b| b.is_ascii_hexdigit()),
+            "signature must be lowercase hex"
+        );
+        // The credential scope embeds the region and the s3/aws4_request terminator. The whole
+        // X-Amz-Credential value is URI-encoded in the query string, so the scope separators are
+        // percent-encoded slashes (`%2F`).
+        assert!(
+            out.contains("%2Fus-east-1%2Fs3%2Faws4_request"),
+            "credential scope must embed region and service scope: {}",
+            out
+        );
+        // The base path is preserved ahead of the query string.
+        assert!(out.starts_with("https://b.s3.us-east-1.amazonaws.com/path/to/key?"));
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn s3_signature_v4_defaults_region_to_us_east_1() {
+        // When region is None the signer falls back to `us-east-1` in the credential scope.
+        let key: super::AccessKey = ("AKIA", "secret").into();
+        let out =
+            super::auth::s3_signature_v4("https://b.s3.amazonaws.com/k", &None, &Some(key), 300)
+                .unwrap();
+        assert!(
+            out.contains("%2Fus-east-1%2Fs3%2Faws4_request"),
+            "absent region must default to us-east-1: {}",
+            out
+        );
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn build_s3_api_url_signs_listing_url_when_access_key_present() {
+        // The listing url returned by `build_s3_api_url` is signed when an access key is supplied,
+        // and left unsigned otherwise. This exercises the s3-auth branch at the call site (not
+        // just the bare signer), preserving the existing `list-type=2` query under signing.
+        let key: super::AccessKey = ("AKIA", "secret").into();
+        let region = Some("us-east-1".to_owned());
+        let (_base, signed) =
+            super::build_s3_api_url(&super::EndPoint::S3, "b", &region, &None, &Some(key)).unwrap();
+        assert!(signed.contains("X-Amz-Signature="));
+        assert!(signed.contains("X-Amz-Credential="));
+        assert!(
+            signed.contains("list-type=2"),
+            "the original listing query must survive signing"
+        );
+
+        let (_base, unsigned) =
+            super::build_s3_api_url(&super::EndPoint::S3, "b", &region, &None, &None).unwrap();
+        assert!(
+            !unsigned.contains("X-Amz-Signature="),
+            "no access key => unsigned listing url"
+        );
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn parse_s3_response_signs_download_urls_when_access_key_present() {
+        // Under s3-auth, `parse_s3_response` signs each asset's download URL. The unsigned vs
+        // signed distinction is the load-bearing behavior: with an access key the asset URL gains
+        // the SigV4 presign params; with none it stays a plain URL.
+        let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
+        let region = Some("us-east-1".to_owned());
+
+        let key: super::AccessKey = ("AKIA", "secret").into();
+        let signed = super::parse_s3_response(
+            &xml,
+            "https://b.s3.us-east-1.amazonaws.com/",
+            &region,
+            &Some(key),
+        )
+        .unwrap();
+        let signed_url = &signed[0].assets[0].download_url;
+        assert!(
+            signed_url.contains("X-Amz-Signature=") && signed_url.contains("X-Amz-Credential="),
+            "signed asset download url must carry SigV4 params: {}",
+            signed_url
+        );
+
+        let unsigned = super::parse_s3_response(
+            &xml,
+            "https://b.s3.us-east-1.amazonaws.com/",
+            &region,
+            &None,
+        )
+        .unwrap();
+        let unsigned_url = &unsigned[0].assets[0].download_url;
+        assert!(
+            !unsigned_url.contains("X-Amz-Signature="),
+            "no access key => unsigned asset download url: {}",
+            unsigned_url
+        );
+        assert_eq!(
+            unsigned_url, "https://b.s3.us-east-1.amazonaws.com/myapp-1.2.3-x86_64-linux",
+            "unsigned download url is the plain base+key"
+        );
+    }
+
     #[test]
     fn api_headers_uses_the_trait_default_no_override() {
         // s3 passes NO `{api_headers}` override to `impl_update_config_accessors!`, so it must get

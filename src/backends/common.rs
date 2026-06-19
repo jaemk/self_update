@@ -29,7 +29,7 @@ use crate::{get_target, DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 pub(crate) struct RequestConfig {
     pub(crate) timeout: Option<Duration>,
     pub(crate) headers: HeaderMap,
-    /// Number of times to retry a failed listing request (with exponential backoff).
+    /// Number of times to retry a failed API request (with exponential backoff).
     pub(crate) retries: u32,
     /// Optional user-supplied HTTP client to use instead of the per-call one the crate builds.
     pub(crate) client: crate::http_client::ClientOverride,

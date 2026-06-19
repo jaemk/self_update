@@ -53,8 +53,8 @@ macro_rules! request_config_setters {
         /// custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth — or to
         /// reuse your application's existing client. `.timeout()` and `.request_header()` still
         /// apply per request, but `HTTP(S)_PROXY` env and the crate's TLS feature are left to your
-        /// client. Used by the blocking API; for `update_async` see
-        /// [`reqwest_async_client`](Self::reqwest_async_client).
+        /// client. Used by the blocking API; for the async path use `reqwest_async_client` (under
+        /// the `async` feature).
         #[cfg(feature = "reqwest")]
         pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
             self.$($path).+.client.blocking = Some(client);

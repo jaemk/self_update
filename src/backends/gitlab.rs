@@ -864,6 +864,154 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_errors_on_non_2xx_status() {
+        // The http client bails on any non-2xx status before the body is parsed. Under the async
+        // transport (reqwest-only) this surfaces as `Error::Network`. Drive the single-page
+        // `get_latest_release_async` against a 500 so the status guard, not the JSON parser, is
+        // what fails.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "500 Internal Server Error",
+                link: None,
+                body: "boom".to_string(),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Network(_))),
+            "non-2xx status on get_latest_release_async must surface as Error::Network, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_release_version_async_errors_on_non_2xx_status() {
+        // Same non-2xx guard for the single-tag fetch path (`.../releases/{ver}`). A 404 (the
+        // realistic "unknown tag" response from GitLab) must surface as an error, not a parse
+        // attempt on the error body.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "404 Not Found",
+                link: None,
+                body: r#"{"message":"404 Not Found"}"#.to_string(),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_release_version_async("v9.9.9").await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Network(_))),
+            "non-2xx status on get_release_version_async must surface as Error::Network, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_all_releases_async_errors_on_non_2xx_status() {
+        // The paginated async fetch path also enforces the non-2xx status guard on each page. A
+        // 503 on the first page must abort the whole accumulation with `Error::Network`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "503 Service Unavailable",
+                link: None,
+                body: "busy".to_string(),
+            }]
+        });
+        let res = super::fetch_all_releases_async(
+            &format!("{base}/api/v4/projects/o%2Fr/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Network(_))),
+            "non-2xx status on fetch_all_releases_async must surface as Error::Network, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_all_releases_async_errors_when_body_is_not_an_array() {
+        // Called directly with a 200 whose top-level JSON is an object, `fetch_all_releases_async`
+        // must hit its own `as_array` guard ("No releases found") and surface `Error::Release`.
+        // This is the paginated path's array check, distinct from `get_latest_release_async`'s.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "{}".to_string(),
+            }]
+        });
+        let res = super::fetch_all_releases_async(
+            &format!("{base}/api/v4/projects/o%2Fr/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "non-array body on fetch_all_releases_async must surface as Error::Release, got {:?}",
+            res
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_all_releases_async_empty_array_is_ok_empty() {
+        // Boundary: an empty top-level array is a *valid* (empty) page for the paginated fetch,
+        // unlike `get_latest_release_async` where empty is an error. It must return an empty Vec,
+        // not error.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let releases = super::fetch_all_releases_async(
+            &format!("{base}/api/v4/projects/o%2Fr/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            releases.is_empty(),
+            "empty releases array is a valid empty page, got {:?}",
+            releases
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_errors_on_missing_assets_links() {
+        // GitLab-specific parser path: `from_release_gitlab` requires `assets.links` to be an
+        // array ("No assets found"). A release object lacking `assets.links` (but otherwise well
+        // formed, with a valid `tag_name`/`created_at`) must surface as `Error::Release`, exercising
+        // a different `from_release_gitlab` guard than the missing-`tag_name` case.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body:
+                    r#"[{"tag_name":"v1.0.0","created_at":"2020-01-01T00:00:00Z","name":"v1.0.0"}]"#
+                        .to_string(),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "missing assets.links must surface as Error::Release, got {:?}",
+            res
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Existing sync / builder tests
     // -----------------------------------------------------------------------

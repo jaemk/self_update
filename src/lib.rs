@@ -170,7 +170,7 @@ filesystem.
 `compression-flate2` features.
 
 ```rust
-# #[cfg(feature = "archive-tar")]
+# #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
 fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = tempfile::TempDir::new()?;
     let tarball_path = tmp_dir.path().join("release.tar.gz");
