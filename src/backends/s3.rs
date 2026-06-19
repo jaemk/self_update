@@ -690,7 +690,7 @@ fn fetch_releases_from_s3(
 
     debug!("using api url: {:?}", api_url);
 
-    // `send` already errored on a non-success status (see `fetch_releases_from_s3_async`).
+    // `http_client::get` bails on any non-2xx status before returning the response.
     let resp = send(&api_url, Default::default(), req)?;
     let body = resp.text()?;
     parse_s3_response(
@@ -867,6 +867,388 @@ fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
 mod tests {
     use super::Update;
     use crate::update::{Release, ReleaseUpdate};
+
+    // ---------------------------------------------------------------------------
+    // Helpers shared between sync XML-parse tests and async stub tests
+    // ---------------------------------------------------------------------------
+
+    /// Build a minimal `ListBucketResult` XML body with the given `<Key>` entries.
+    fn list_bucket_xml(keys: &[&str]) -> String {
+        let contents: String = keys
+            .iter()
+            .map(|k| {
+                format!(
+                    "<Contents><Key>{k}</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents>"
+                )
+            })
+            .collect();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Name>my-bucket</Name>{contents}</ListBucketResult>"
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_s3_response / add_to_releases_list unit tests (no network)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_s3_response_single_release_single_asset() {
+        // One <Contents> entry that matches the version regex: name="myapp", version="1.2.3",
+        // suffix "-x86_64-linux". The trailing Eof flush emits that release.
+        let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket.s3.us-east-1.amazonaws.com/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1, "one release parsed");
+        let rel = &releases[0];
+        assert_eq!(rel.name, "myapp");
+        assert_eq!(rel.version, "1.2.3");
+        assert_eq!(rel.assets.len(), 1);
+        assert_eq!(rel.assets[0].name, "myapp-1.2.3-x86_64-linux");
+        assert!(
+            rel.assets[0]
+                .download_url
+                .starts_with("https://bucket.s3.us-east-1.amazonaws.com/"),
+            "download URL uses the supplied base"
+        );
+        assert_eq!(rel.date, "2024-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn parse_s3_response_v_prefix_stripped() {
+        // A `v`-prefixed version tag (e.g. "myapp-v2.0.0-arm-linux") must have the `v` stripped
+        // in the parsed release's `version` field, matching the regex's `[v]{0,1}` handling.
+        let xml = list_bucket_xml(&["myapp-v2.0.0-arm-linux"]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "2.0.0", "v-prefix must be stripped");
+    }
+
+    #[test]
+    fn parse_s3_response_multi_asset_merge() {
+        // Two <Contents> entries for the same name+version represent two assets of one release.
+        // `add_to_releases_list` must merge them into a single release with two assets.
+        // The Eof flush handles the last entry, and the interim flush (on the second <Contents>
+        // start) handles the first.
+        let xml = list_bucket_xml(&["myapp-3.0.0-x86_64-linux", "myapp-3.0.0-aarch64-linux"]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1, "same name+version must be merged");
+        assert_eq!(
+            releases[0].assets.len(),
+            2,
+            "both assets present after merge"
+        );
+        let asset_names: Vec<&str> = releases[0].assets.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            asset_names.contains(&"myapp-3.0.0-x86_64-linux"),
+            "x86_64 asset present"
+        );
+        assert!(
+            asset_names.contains(&"myapp-3.0.0-aarch64-linux"),
+            "aarch64 asset present"
+        );
+    }
+
+    #[test]
+    fn parse_s3_response_multiple_releases() {
+        // Multiple distinct name/version combinations produce separate release entries.
+        // Also exercises the interim <Contents> flush path (not just the Eof flush).
+        let xml = list_bucket_xml(&[
+            "myapp-1.0.0-x86_64-linux",
+            "myapp-2.0.0-x86_64-linux",
+            "otherapp-1.5.0-x86_64-linux",
+        ]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 3, "three distinct releases");
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert!(versions.contains(&"1.0.0"));
+        assert!(versions.contains(&"2.0.0"));
+        assert!(versions.contains(&"1.5.0"));
+    }
+
+    #[test]
+    fn parse_s3_response_skips_non_matching_keys() {
+        // Keys that don't match the version regex (no semver-like version component) must be
+        // silently ignored; only the matching entry produces a release.
+        let xml = list_bucket_xml(&[
+            "README.txt",
+            "myapp-1.0.0-x86_64-linux",
+            "some/random/path/no-version",
+        ]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1, "only matching key produces a release");
+        assert_eq!(releases[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn parse_s3_response_prefix_path_stripped_to_filename() {
+        // When the <Key> contains a directory prefix (e.g. "releases/myapp-1.0.0-linux"),
+        // the asset `name` must be just the filename component, not the full path.
+        let xml = list_bucket_xml(&["releases/myapp-1.0.0-x86_64-linux"]);
+        let releases = super::parse_s3_response(
+            &xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].assets[0].name, "myapp-1.0.0-x86_64-linux",
+            "asset name is the filename, not the full key path"
+        );
+    }
+
+    #[test]
+    fn parse_s3_response_malformed_xml_errors() {
+        // A body that is not valid XML must surface as an `Err`, not panic.
+        let bad_xml = "this is not xml at all <<<";
+        let result = super::parse_s3_response(
+            bad_xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        );
+        assert!(result.is_err(), "malformed XML must return Err");
+    }
+
+    #[test]
+    fn parse_s3_response_empty_body_returns_empty_vec() {
+        // An empty/minimal XML document with no <Contents> produces an empty releases list (not
+        // an error), since there is simply nothing to parse.
+        let xml = "<?xml version=\"1.0\"?><ListBucketResult></ListBucketResult>";
+        let releases = super::parse_s3_response(
+            xml,
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert!(releases.is_empty(), "empty bucket produces empty list");
+    }
+
+    #[test]
+    fn add_to_releases_list_skips_entries_with_empty_name_or_version() {
+        // `add_to_releases_list` must silently drop a release whose name or version is empty,
+        // matching the `if !rel.version.is_empty() && !rel.name.is_empty()` guard.
+        let mut releases = Vec::new();
+        let empty_name = Release::builder()
+            .name("")
+            .version("1.0.0")
+            .build()
+            .unwrap();
+        let empty_ver = Release::builder()
+            .name("myapp")
+            .version("")
+            .build()
+            .unwrap();
+        super::add_to_releases_list(&mut releases, empty_name);
+        super::add_to_releases_list(&mut releases, empty_ver);
+        assert!(
+            releases.is_empty(),
+            "entries with empty name or version must be dropped"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Async-fetch tests via a loopback TCP stub
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "async")]
+    use std::io::{Read as _, Write as _};
+    #[cfg(feature = "async")]
+    use std::net::TcpListener;
+
+    /// Serve a single XML response over a loopback TCP listener, one connection per `Resp`.
+    /// Returns the base URL (`http://127.0.0.1:<port>/`).
+    #[cfg(feature = "async")]
+    struct Resp {
+        status: &'static str,
+        body: String,
+    }
+
+    #[cfg(feature = "async")]
+    fn stub(responses: Vec<Resp>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.status,
+                    r.body.len(),
+                    r.body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    /// Build a `fetch_releases_from_s3_async`-ready `Update` whose `EndPoint::Generic` points at
+    /// the stub base URL. The Generic endpoint does not require a region.
+    #[cfg(feature = "async")]
+    fn s3_update(base_url: &str, current_version: &str) -> Update {
+        Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base_url.to_owned(),
+            })
+            .bucket_name("test-bucket")
+            .bin_name("myapp")
+            .current_version(current_version)
+            .build_async()
+            .unwrap()
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_releases_from_s3_async_parses_xml_response() {
+        // Drive `fetch_releases_from_s3_async` against a loopback stub that returns a valid S3
+        // `ListBucketResult` XML body, and assert the parsed releases.
+        let xml = list_bucket_xml(&["myapp-2.1.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "0.1.0");
+        let rel = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(rel.version, "2.1.0");
+        assert_eq!(rel.name, "myapp");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_releases_async_filters_to_newer_only() {
+        // A ListBucketResult with releases at versions 0.9.0, 1.0.0, 1.5.0, and 2.0.0.
+        // With current_version=1.0.0, only 1.5.0 and 2.0.0 should survive (newest-first).
+        let xml = list_bucket_xml(&[
+            "myapp-0.9.0-x86_64-linux",
+            "myapp-1.0.0-x86_64-linux",
+            "myapp-1.5.0-x86_64-linux",
+            "myapp-2.0.0-x86_64-linux",
+        ]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "1.0.0");
+        use crate::update::AsyncFetch;
+        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0"],
+            "only releases strictly newer than current, newest-first"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_release_version_async_finds_exact_version() {
+        // A ListBucketResult with two releases; `get_release_version_async` must return only the
+        // one matching the requested version.
+        let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "0.1.0");
+        use crate::update::AsyncFetch;
+        let rel = upd.get_release_version_async("1.0.0").await.unwrap();
+        assert_eq!(rel.version, "1.0.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_release_version_async_errors_on_missing_version() {
+        // When the requested version does not exist in the bucket listing, the call must error
+        // with `Error::Release`.
+        let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "0.1.0");
+        use crate::update::AsyncFetch;
+        let res = upd.get_release_version_async("9.9.9").await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "missing version must surface as Error::Release"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_latest_release_async_multi_asset_merge() {
+        // Two <Contents> entries for the same name+version are merged into a single release with
+        // two assets. `get_latest_release_async` must return that merged release.
+        let xml = list_bucket_xml(&["myapp-3.0.0-x86_64-linux", "myapp-3.0.0-aarch64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "0.1.0");
+        let rel = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(rel.version, "3.0.0");
+        assert_eq!(
+            rel.assets.len(),
+            2,
+            "both assets present after async multi-asset merge"
+        );
+    }
 
     fn rel(version: &str) -> Release {
         Release::builder().version(version).build().unwrap()
