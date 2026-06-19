@@ -50,3 +50,6 @@ jobs:
     - run: cargo fmt --check
     # todo: fix clippy lints and run `clippy -- -Dwarnings` instead of cargo check
     - run: cargo check
+    # Run the test suite across the default, reqwest, ureq, and async feature sets
+    # (mirrors the Makefile's `tests` target so the feature lists stay in one place).
+    - run: make tests
