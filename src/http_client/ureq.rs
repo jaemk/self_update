@@ -62,10 +62,6 @@ impl HttpResponse for Response<Body> {
         Response::headers(self)
     }
 
-    fn status(&self) -> http::StatusCode {
-        Response::status(self)
-    }
-
     fn body(self) -> impl std::io::Read {
         self.into_body().into_reader()
     }

@@ -105,6 +105,7 @@ impl ReleaseListBuilder {
 
     /// Set the optional arch `target` name, used to filter available releases
     #[doc(alias = "target")]
+    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
@@ -112,6 +113,7 @@ impl ReleaseListBuilder {
 
     #[cfg(feature = "s3-auth")]
     /// Set the access key
+    #[doc(alias = "access_key_id")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
         self
@@ -240,6 +242,7 @@ impl UpdateBuilder {
 
     #[cfg(feature = "s3-auth")]
     /// Set the access key (an `(access_key_id, secret_access_key)` pair)
+    #[doc(alias = "access_key_id")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
         self

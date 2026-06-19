@@ -1,4 +1,4 @@
-use http::{HeaderValue, StatusCode};
+use http::HeaderValue;
 use serde::de::DeserializeOwned;
 
 use crate::Result;
@@ -38,8 +38,6 @@ pub struct ClientOverride {
 
 pub trait HttpResponse {
     fn headers(&self) -> &HeaderMap<HeaderValue>;
-
-    fn status(&self) -> StatusCode;
 
     fn body(self) -> impl std::io::Read;
 

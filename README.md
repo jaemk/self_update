@@ -98,7 +98,9 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
         .asset_prefix("something/self_update")
         .region("eu-west-2")
         .bin_name("self_update_example")
-        // .access_key((env!("AWS_ACCESS_KEY_ID"), env!("AWS_SECRET_ACCESS_KEY")))
+        // To authenticate (requires the `s3-auth` feature), read the credentials at
+        // runtime rather than baking them into the binary with `env!`:
+        // .access_key((std::env::var("AWS_ACCESS_KEY_ID")?, std::env::var("AWS_SECRET_ACCESS_KEY")?))
         .show_download_progress(true)
         .current_version(cargo_crate_version!())
         .build()?
@@ -108,8 +110,10 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
 }
 ```
 
-Separate utilities are also exposed (**NOTE**: the following example _requires_ the `archive-tar` feature,
-see the [features](#features) section above). It downloads, extracts, and replaces the running binary
+Separate utilities are also exposed (**NOTE**: the following example extracts a `.tar.gz`, which
+_requires_ both the `archive-tar` and `compression-flate2` features -- `archive-tar` reads the tar
+archive and `compression-flate2` decodes the gzip layer; see the [features](#features) section
+above). It downloads, extracts, and replaces the running binary
 by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
 and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
 (they are no longer re-exported from `self_update`):
@@ -161,6 +165,9 @@ move succeeds, or — on the first failure — all already-applied moves are rol
 update can't leave a half-installed tool. Because it uses `rename` (which can't cross
 filesystems), the source files, every destination, and the temp dir must all be on the same
 filesystem.
+
+**NOTE**: this example extracts a `.tar.gz`, which requires both the `archive-tar` and
+`compression-flate2` features.
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {
@@ -243,12 +250,16 @@ impl ReleaseSource for MyHost {
     }
 }
 
-let status = self_update::backends::custom::Update::configure()
-    .source(MyHost)
-    .bin_name("app")
-    .current_version(cargo_crate_version!())
-    .build()?
-    .update()?;
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::custom::Update::configure()
+        .source(MyHost)
+        .bin_name("app")
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("custom backend update status: `{}`!", status.version());
+    Ok(())
+}
 ```
 
 ### Async
@@ -282,7 +293,7 @@ for full control — custom TLS roots / mTLS, connection pooling, redirect polic
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
 It is used for both the release listing and the download. The setters are client-specific (the
 client types differ and are mutually exclusive): `reqwest_client` (a blocking
-[`reqwest::Client`](::reqwest::blocking::Client), used by the blocking API), `reqwest_async_client`
+[`reqwest::blocking::Client`](::reqwest::blocking::Client), used by the blocking API), `reqwest_async_client`
 (an async [`reqwest::Client`](::reqwest::Client), used by the `*_async` verbs), and `ureq_agent` (a
 [`ureq::Agent`](::ureq::Agent)). The selected client crate is re-exported (`self_update::reqwest` /
 `self_update::ureq`) so you don't need a separate dependency to name the type.

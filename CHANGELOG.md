@@ -44,7 +44,7 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   (`total` is `None` when the server sends no `Content-Length`). It is independent of the
   terminal progress bar, so GUI / headless / logging consumers can observe download progress.
 - Checksum verification behind the `checksums` feature: `Update::configure()
-  .verifying_checksum(Checksum::Sha256(hex))` (or `Checksum::Sha512(..)`) verifies the
+  .checksum(Checksum::Sha256(hex))` (or `Checksum::Sha512(..)`) verifies the
   downloaded artifact against a known digest — e.g. one published in a `SHA256SUMS` file —
   before installing it. The hash algorithm is selected by the `Checksum` variant, which is
   `#[non_exhaustive]` so more algorithms can be added later.

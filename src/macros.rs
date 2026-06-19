@@ -37,10 +37,11 @@ macro_rules! request_config_setters {
             self
         }
 
-        /// Number of times to retry a failed **release-listing** request, with exponential
-        /// backoff. Defaults to `0` (no retries). Intended for transient failures, though any
-        /// failed attempt (including a permanent one such as a 404) consumes the retry budget. The
-        /// binary **download** is not retried — this knob does not affect it.
+        /// Number of times to retry a failed API request (release listing, single-release-by-tag
+        /// fetches, and any other listing or lookup request), with exponential backoff. Defaults to
+        /// `0` (no retries). Intended for transient failures, though any failed attempt (including
+        /// a permanent one such as a 404) consumes the retry budget. The binary **download** is not
+        /// retried — this knob does not affect it.
         pub fn retries(&mut self, retries: u32) -> &mut Self {
             self.$($path).+.retries = retries;
             self
@@ -237,6 +238,8 @@ macro_rules! impl_common_builder_setters {
         /// latest available release is used. (Note that the `{{ version }}` substitution in
         /// [`bin_path_in_archive`](Self::bin_path_in_archive) is still the bare semver with any
         /// leading `v` stripped, regardless of what is passed here.)
+        #[doc(alias = "target_version_tag")]
+        #[doc(alias = "target_version")]
         pub fn release_tag(&mut self, ver: &str) -> &mut Self {
             self.common.release_tag = Some(ver.to_owned());
             self
@@ -253,6 +256,7 @@ macro_rules! impl_common_builder_setters {
         /// Set the identifiable token for the asset in case of multiple compatible assets.
         ///
         /// If unspecified, the first asset matching the target will be chosen.
+        #[doc(alias = "identifier")]
         pub fn asset_identifier(&mut self, identifier: &str) -> &mut Self {
             self.common.asset_identifier = Some(identifier.to_owned());
             self
@@ -320,6 +324,7 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Set download progress style.
+        #[doc(alias = "set_progress_style")]
         pub fn progress_style(
             &mut self,
             progress_template: impl Into<String>,
@@ -349,6 +354,7 @@ macro_rules! impl_common_builder_setters {
         /// sends no `Content-Length`). Independent of `show_download_progress`; use it to drive
         /// a GUI or structured logging. The callback is `Fn`, so track state via interior
         /// mutability (e.g. an `AtomicU64` or a channel).
+        #[doc(alias = "set_progress_callback")]
         pub fn progress_callback(
             &mut self,
             callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
@@ -390,6 +396,7 @@ macro_rules! impl_common_builder_setters {
         /// (e.g. one published in a `SHA256SUMS` file) before installing it. The algorithm is
         /// chosen by the `Checksum` variant.
         #[cfg(feature = "checksums")]
+        #[doc(alias = "verifying_checksum")]
         pub fn checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
             self

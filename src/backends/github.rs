@@ -83,6 +83,7 @@ impl ReleaseListBuilder {
 
     /// Set the optional arch `target` name, used to filter available releases
     #[doc(alias = "target")]
+    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: &str) -> &mut Self {
         self.target = Some(target.to_owned());
         self
@@ -91,6 +92,7 @@ impl ReleaseListBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
+    #[doc(alias = "with_url")]
     pub fn url(&mut self, url: &str) -> &mut Self {
         self.custom_url = Some(url.to_owned());
         self
@@ -212,6 +214,7 @@ impl UpdateBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
+    #[doc(alias = "with_url")]
     pub fn url(&mut self, url: &str) -> &mut Self {
         self.custom_url = Some(url.to_owned());
         self
@@ -297,14 +300,6 @@ impl ReleaseUpdate for Update {
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                api_url
-            )
-        }
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release(&json)
     }
@@ -340,14 +335,6 @@ impl ReleaseUpdate for Update {
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                api_url
-            )
-        }
         let json = resp.json::<serde_json::Value>()?;
         Release::from_release(&json)
     }
@@ -367,14 +354,6 @@ fn fetch_all_releases(
 ) -> Result<Vec<Release>> {
     collect_paginated(&first_page_url(base_url), |url| {
         let resp = send(url, api_headers(auth_token)?, req)?;
-        if !resp.status().is_success() {
-            bail!(
-                Error::Network,
-                "api request failed with status: {:?} - for: {:?}",
-                resp.status(),
-                url
-            )
-        }
         let headers = resp.headers().clone();
         let releases = resp
             .json::<serde_json::Value>()?
