@@ -2,8 +2,44 @@
 
 ## [unreleased]
 ### Added
-### Changed
+- `is_update_available()` (and `is_update_available_async()` under the `async` feature) on every
+  backend's built updater: a light "is there a newer compatible release?" check that returns a
+  `bool` without downloading or installing anything.
+- Documented paths for each backend's per-backend `ReleaseList` type
+  (`self_update::backends::<github|gitlab|gitea|s3>::ReleaseList`); the four backends each have a
+  distinct `ReleaseList` builder, so they are surfaced consistently rather than unified under one
+  crate-root type.
+- A new `examples/custom.rs` showing the custom backend: a minimal `ReleaseSource` impl driving a
+  sync update, plus an async variant under the `async` feature.
+
+### Changed (breaking)
+- The custom-endpoint setter on the gitlab and gitea backends is now `url(...)` (was
+  `instance_url(...)`), on both the `Update` and `ReleaseList` builders. github already used
+  `url(...)`, so every git backend now names the setter the same.
+- `Error::Zip` and `Error::Signature` are now opaque: each wraps
+  `Box<dyn std::error::Error + Send + Sync>` instead of the concrete `zip::result::ZipError` /
+  `zipsign_api::ZipsignError`. Code that matched the inner dependency type must inspect it via
+  `Error::source()` (or downcast the box) instead.
+- `Error::NonUTF8` is renamed to `Error::SignatureNonUTF8` (`signatures` feature).
+- `Status::uptodate()` and `UpdateStatus::uptodate()` are renamed to `is_up_to_date()`.
+- `Download`, `Extract`, `Move`, and `MoveAll` are now `#[non_exhaustive]`.
+- `Download::header()` now takes `TryInto<HeaderName>` / `TryInto<HeaderValue>` and returns a
+  `Result`, so string literals work (`.header("Accept", "application/octet-stream")?`); an invalid
+  header is reported instead of requiring a pre-parsed `HeaderName`/`HeaderValue`.
+- The sealed `UpdateConfig` accessor `bin_install_path()` returns `&Path` (was an owned
+  `PathBuf`). Only relevant if you named the return type.
+- `backends::custom::Blocking`'s inner field is now private. Construct it with
+  `Blocking::new(source)` and read the wrapped source via `into_inner()` / `as_inner()`.
+- `DEFAULT_PROGRESS_TEMPLATE` and `DEFAULT_PROGRESS_CHARS` are no longer public (internal defaults
+  only).
+- The `AsyncReleaseSource` trait now enforces `Send` on its returned futures at the type level, so
+  a non-`Send` impl fails to compile at the impl site rather than later at the spawn site. Existing
+  `Send` impls are unaffected.
+
 ### Removed
+- The s3 `auth_token` setter is removed. The S3 backend authenticates only by signing requests with
+  `access_key` (AWS SigV4), so use `.access_key((id, secret))` (the `s3-auth` feature) for
+  private-bucket access. `auth_token` remains on github/gitlab/gitea.
 
 ## [1.0.0]
 First stable release. This version makes a number of breaking changes to clean up the
@@ -93,8 +129,8 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 ### Changed
 - **Builder vocabulary unified** (the `with_` prefix is dropped, and setter/accessor names line
   up):
-  - the custom-endpoint setter is `url(...)` on `github` (its API endpoint, was `with_url`) and
-    `instance_url(...)` on `gitlab`/`gitea` (the instance base URL, was `with_host`);
+  - the custom-endpoint setter is `url(...)` on every git backend: `github` (its API endpoint, was
+    `with_url`), and `gitlab`/`gitea` (the instance base URL, was `with_host`);
   - the `ReleaseList` release filter is now `filter_target(...)` (was `with_target`/`target`),
     distinct from the build-target `target(...)` on the `Update` builder;
   - the s3 `UpdateBuilder::access_key_id` is now `access_key` (matching the
@@ -162,12 +198,12 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   ([#179](https://github.com/jaemk/self_update/pull/179)).
 - Print a short "up to date" message instead of nothing when no update is available
   ([#180](https://github.com/jaemk/self_update/pull/180)).
-- The s3 `UpdateBuilder::auth_token` setter is now `#[deprecated]` and a no-op: the S3 backend
-  authenticates by signing requests with `access_key` (AWS SigV4), never a bearer token, so the
-  setter has never had any effect there. Use `.access_key((id, secret))` instead. (It still
-  exists for one release to avoid a hard break and will be removed in the next major version.)
 
 ### Removed
+- The s3 `UpdateBuilder::auth_token` setter. The S3 backend authenticates by signing requests with
+  `access_key` (AWS SigV4), never a bearer token, so the setter never had any effect there. Use
+  `.access_key((id, secret))` (the `s3-auth` feature) instead. `auth_token` remains on
+  github/gitlab/gitea.
 - The `Error::Reqwest`, `Error::Ureq`, `Error::StdTimeError`, `Error::TimeError`,
   `Error::Digest`, and `Error::UrlParse` variants (replaced by `Error::Http` /
   `Error::S3Auth`).
@@ -204,9 +240,9 @@ The full walkthrough is in [`docs/migrations/0.x-to-1.0-human.md`](docs/migratio
 (and an [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling). Mechanical
 find/replace for the common cases:
 
-- Custom endpoint setter:
-  - `.with_url(` → `.url(`           (github API endpoint, kept)
-  - `.with_host(` → `.instance_url(` (gitlab, gitea)
+- Custom endpoint setter (now `url(...)` on every git backend):
+  - `.with_url(` → `.url(`  (github API endpoint, kept)
+  - `.with_host(` → `.url(` (gitlab, gitea)
 - Release-list target filter: `.with_target(` → `.filter_target(`
 - S3 credentials: `.access_key_id(` → `.access_key(`
 - Version tag / asset id setters: `.target_version_tag(` → `.release_tag(`, `.identifier(` →
