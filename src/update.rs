@@ -2,7 +2,6 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::env::consts::{ARCH, OS};
 use std::fs;
-use std::path::PathBuf;
 
 use crate::http_client::{self, header};
 use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
@@ -29,7 +28,13 @@ impl ReleaseAsset {
     }
 }
 
-/// Update status with extended information
+/// The richer result of [`update_extended`](ReleaseUpdate::update_extended) (and its async sibling
+/// `update_extended_async`): it carries the full [`Release`] that was installed.
+///
+/// This is the extended counterpart of [`Status`](crate::Status), the lightweight result of
+/// [`update`](ReleaseUpdate::update) which carries only the version tag. Reach for `UpdateStatus`
+/// when you need the installed release's details (name, date, body, assets); reach for `Status`
+/// when the version string is all you need. Convert with [`into_status`](UpdateStatus::into_status).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum UpdateStatus {
@@ -48,14 +53,14 @@ impl UpdateStatus {
         }
     }
 
-    /// Returns `true` if `Status::UpToDate`
-    pub fn uptodate(&self) -> bool {
+    /// Returns `true` if `UpdateStatus::UpToDate`
+    pub fn is_up_to_date(&self) -> bool {
         matches!(*self, UpdateStatus::UpToDate)
     }
 
-    /// Returns `true` if `Status::Updated`
+    /// Returns `true` if `UpdateStatus::Updated`
     pub fn updated(&self) -> bool {
-        !self.uptodate()
+        !self.is_up_to_date()
     }
 }
 
@@ -245,9 +250,12 @@ pub trait ReleaseSource: Send + Sync {
 /// checksum/signature verification, extraction, and the install.
 ///
 /// This trait is consumed through generics (the async updater is generic over its source, never a
-/// `dyn AsyncReleaseSource`), so the plain `async fn` methods need no boxing — there is no
-/// `async-trait` dependency. Implementations must be `Send + Sync`, and the returned futures must
-/// be `Send` (they are awaited inside the updater).
+/// `dyn AsyncReleaseSource`), so its methods need no boxing — there is no `async-trait`
+/// dependency. Each method returns `impl Future<Output = …> + Send` (return-position `impl Trait`
+/// in trait), which both keeps the futures unboxed and **enforces** the `Send` bound at the impl
+/// site: a non-`Send` implementation fails to compile here, not later at the spawn site.
+/// Implementations must be `Send + Sync`. You may still write the method bodies as `async fn`
+/// (the compiler checks the resulting future is `Send`).
 ///
 /// To reuse an existing `Clone` sync [`ReleaseSource`] from the async API, wrap it in
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking), which runs the sync fetches
@@ -258,17 +266,26 @@ pub trait ReleaseSource: Send + Sync {
 /// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
 /// for a misconfiguration.
 #[cfg(feature = "async")]
-#[allow(async_fn_in_trait)]
 pub trait AsyncReleaseSource: Send + Sync {
     /// Fetch the single newest release.
-    async fn get_latest_release(&self) -> Result<Release>;
+    ///
+    /// The returned future must be `Send` (it is awaited inside the updater). This is enforced at
+    /// the impl site via the `+ Send` bound on the return type, so a non-`Send` implementation
+    /// fails to compile here rather than later at the spawn site.
+    fn get_latest_release(&self) -> impl std::future::Future<Output = Result<Release>> + Send + '_;
 
     /// Fetch the candidate releases, **newest first**. See
     /// [`ReleaseSource::get_latest_releases`] for how the updater treats the returned list.
-    async fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+    fn get_latest_releases<'a>(
+        &'a self,
+        current_version: &'a str,
+    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + 'a;
 
     /// Fetch the release for an explicit tag/version.
-    async fn get_release_version(&self, ver: &str) -> Result<Release>;
+    fn get_release_version<'a>(
+        &'a self,
+        ver: &'a str,
+    ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a;
 }
 
 /// Internal async counterpart of the three backend fetch methods, implemented by every backend's
@@ -276,11 +293,18 @@ pub trait AsyncReleaseSource: Send + Sync {
 /// through generics (the async orchestrator is generic over `UpdateConfig + AsyncFetch`), never as
 /// a trait object, so `async fn` in the trait needs no boxing.
 #[cfg(feature = "async")]
-#[allow(async_fn_in_trait)]
 pub(crate) trait AsyncFetch {
-    async fn get_latest_release_async(&self) -> Result<Release>;
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>>;
-    async fn get_release_version_async(&self, ver: &str) -> Result<Release>;
+    fn get_latest_release_async(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Release>> + Send + '_;
+    fn get_latest_releases_async<'a>(
+        &'a self,
+        current_version: &'a str,
+    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + 'a;
+    fn get_release_version_async<'a>(
+        &'a self,
+        ver: &'a str,
+    ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a;
 }
 
 /// Implementation detail used to seal [`ReleaseUpdate`].
@@ -328,7 +352,7 @@ pub trait UpdateConfig: sealed::Sealed {
     fn bin_name(&self) -> &str;
 
     /// Installation path for the binary being updated
-    fn bin_install_path(&self) -> PathBuf;
+    fn bin_install_path(&self) -> &std::path::Path;
 
     /// Path of the binary to be extracted from release package
     fn bin_path_in_archive(&self) -> &str;
@@ -426,6 +450,18 @@ pub trait ReleaseUpdate: UpdateConfig {
 
     /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
+
+    /// Check whether an update is available without downloading or installing anything.
+    ///
+    /// Returns `true` when the backend's latest release is strictly newer than the configured
+    /// [`current_version`](UpdateConfig::current_version) (a semver comparison), and `false`
+    /// otherwise. This performs only the release-listing request — no asset is downloaded, no
+    /// confirmation is prompted, and nothing is installed. Use it for a lightweight "is there
+    /// anything to do?" check before deciding to call [`update`](Self::update).
+    fn is_update_available(&self) -> Result<bool> {
+        let latest = self.get_latest_release()?;
+        version::bump_is_greater(self.current_version(), &latest.version)
+    }
 
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user.
@@ -665,7 +701,7 @@ fn finish_update<U: UpdateConfig + ?Sized>(
 
     install_binary(
         &new_exe,
-        &u.bin_install_path(),
+        u.bin_install_path(),
         u.verify_callback().as_deref(),
     )?;
     println(show_output, "Done");
@@ -776,7 +812,7 @@ fn verify_signature(
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.as_bytes())
-            .ok_or(Error::NonUTF8)?;
+            .ok_or(Error::SignatureNonUTF8)?;
 
         let keys = keys.iter().copied().map(Ok);
         let keys =
@@ -960,6 +996,23 @@ mod tests {
         fn get_release_version(&self, v: &str) -> Result<Release> {
             Release::builder().version(v).build()
         }
+    }
+
+    // B6: `bin_install_path()` returns a borrow (`&Path`), not an owned `PathBuf`. Binding the
+    // result to a `&std::path::Path` only compiles with the borrowing accessor; the old owned
+    // `PathBuf` return would not coerce to `&Path` without a temporary, so this pins the change.
+    #[test]
+    fn bin_install_path_returns_a_borrow() {
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .bin_install_path("/tmp/app-install-path")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build()
+            .unwrap();
+        let p: &std::path::Path = upd.bin_install_path();
+        assert_eq!(p, std::path::Path::new("/tmp/app-install-path"));
     }
 
     #[test]

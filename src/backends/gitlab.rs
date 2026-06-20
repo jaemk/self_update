@@ -71,9 +71,9 @@ pub struct ReleaseListBuilder {
 impl ReleaseListBuilder {
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
     /// `https://gitlab.com`.
-    #[doc(alias = "url")]
+    #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn instance_url(&mut self, url: &str) -> &mut Self {
+    pub fn url(&mut self, url: &str) -> &mut Self {
         self.host = url.to_owned();
         self
     }
@@ -90,7 +90,13 @@ impl ReleaseListBuilder {
         self
     }
 
-    /// Set the optional arch `target` name, used to filter available releases
+    /// Set the optional arch `target` name, used to filter the releases this list returns to
+    /// those carrying an asset whose name contains `target`.
+    ///
+    /// This is the **`ReleaseList`** filter and differs from
+    /// [`Update::target`](UpdateBuilder::target): `filter_target` drops whole releases from the
+    /// listing when no asset matches, whereas the `Update` `target` selects *which asset* of the
+    /// chosen release to download.
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: &str) -> &mut Self {
@@ -199,9 +205,9 @@ impl UpdateBuilder {
 
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
     /// `https://gitlab.com`.
-    #[doc(alias = "url")]
+    #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn instance_url(&mut self, url: &str) -> &mut Self {
+    pub fn url(&mut self, url: &str) -> &mut Self {
         self.host = url.to_owned();
         self
     }
@@ -597,7 +603,7 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitlab_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .instance_url(base)
+            .url(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -610,7 +616,7 @@ mod tests {
     /// Available under both sync transports (reqwest blocking and ureq).
     fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
         Update::configure()
-            .instance_url(base)
+            .url(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -674,6 +680,69 @@ mod tests {
         );
         assert_eq!(releases[0].version, "1.0.0");
         assert_eq!(releases[1].version, "0.9.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn is_update_available_async_true_when_latest_is_newer() {
+        // A1 (async): the gitlab backend exposes `is_update_available_async` on the concrete
+        // `Update` (via `impl_async_update_methods!`). It must report an available update when the
+        // backend's latest release is newer than the current version, using only the listing
+        // request (no download/install). github/gitea share the identical generated method, so
+        // covering one git backend's async A1 path exercises the shared code path.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+        assert!(
+            upd.is_update_available_async().await.unwrap(),
+            "2.5.0 > 0.1.0 => async update available"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn is_update_available_async_false_when_latest_not_newer() {
+        // A1 (async) complement: no update when current >= latest.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gitlab_update(&base, "2.5.0");
+        assert!(
+            !upd.is_update_available_async().await.unwrap(),
+            "2.5.0 not newer than 2.5.0 => no async update"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn is_update_available_async_propagates_empty_array_error() {
+        // A1 (async): an empty releases array yields no latest release; the error from
+        // `get_latest_release_async` must propagate out of `is_update_available_async` rather than
+        // being swallowed into `Ok(false)`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.is_update_available_async().await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "an empty releases array must propagate as Error::Release out of \
+             is_update_available_async, got {:?}",
+            res
+        );
     }
 
     #[cfg(feature = "async")]
@@ -847,7 +916,7 @@ mod tests {
         });
 
         let upd = Update::configure()
-            .instance_url(&base)
+            .url(&base)
             .repo_owner("group/subgroup")
             .repo_name("r")
             .bin_name("app")
@@ -1024,11 +1093,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn instance_url_and_filter_target_setters_exist_on_release_list_builder() {
-        // The renamed `instance_url` / `filter_target` setters must exist on the gitlab
+    fn url_and_filter_target_setters_exist_on_release_list_builder() {
+        // The renamed `url` / `filter_target` setters must exist on the gitlab
         // `ReleaseListBuilder` and the builder must still build.
         let _list = super::ReleaseList::configure()
-            .instance_url("https://gitlab.example.com")
+            .url("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1037,10 +1106,10 @@ mod tests {
     }
 
     #[test]
-    fn instance_url_setter_exists_on_update_builder() {
-        // The renamed `instance_url` setter must exist on the gitlab `UpdateBuilder`.
+    fn url_setter_exists_on_update_builder() {
+        // The renamed `url` setter must exist on the gitlab `UpdateBuilder`.
         let _upd = Update::configure()
-            .instance_url("https://gitlab.example.com")
+            .url("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1221,6 +1290,85 @@ mod tests {
         assert!(
             res.is_err(),
             "non-2xx status on get_release_version must return an error, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn is_update_available_sync_true_when_latest_is_newer() {
+        // A1 (sync): the gitlab backend inherits `is_update_available` from `ReleaseUpdate`. The
+        // stub's newest release is 2.5.0, so an update is available from 0.1.0.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        assert!(
+            upd.is_update_available().unwrap(),
+            "2.5.0 > 0.1.0 => update available"
+        );
+    }
+
+    #[test]
+    fn is_update_available_sync_false_when_latest_not_newer() {
+        // A1 complement: when the current version is at/above the latest release, no update is
+        // available. `get_latest_release` returns the single release (2.5.0); current is 2.5.0.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gl_update(&base, "2.5.0");
+        assert!(
+            !upd.is_update_available().unwrap(),
+            "2.5.0 not newer than 2.5.0 => no update"
+        );
+    }
+
+    #[test]
+    fn is_update_available_sync_propagates_empty_array_error() {
+        // A1 (sync): `is_update_available` calls `get_latest_release` first. When the backend
+        // returns an empty releases array (no latest release), the error must propagate out of
+        // `is_update_available` rather than being swallowed into `Ok(false)`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let res = upd.is_update_available();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "an empty releases array must propagate as Error::Release out of \
+             is_update_available, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn is_update_available_sync_propagates_non_2xx_error() {
+        // A1 (sync): a backend HTTP failure (500) during the listing request must propagate out
+        // of `is_update_available`, not be hidden as "no update available".
+        let base = stub(|_| {
+            vec![Resp {
+                status: "500 Internal Server Error",
+                link: None,
+                body: r#"{"message":"boom"}"#.to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let res = upd.is_update_available();
+        assert!(
+            res.is_err(),
+            "a non-2xx listing response must propagate as an error out of \
+             is_update_available, got {:?}",
             res
         );
     }

@@ -42,6 +42,12 @@ macro_rules! request_config_setters {
         /// `0` (no retries). Intended for transient failures, though any failed attempt (including
         /// a permanent one such as a 404) consumes the retry budget. The binary **download** is not
         /// retried — this knob does not affect it.
+        ///
+        /// **No-op on the custom backend.** It only ever retried the crate's built-in
+        /// release-listing requests; on
+        /// [`backends::custom`](crate::backends::custom) the listing is performed entirely by your
+        /// [`ReleaseSource`](crate::ReleaseSource), so this setter has no effect there. Configure
+        /// retries inside your source implementation instead.
         pub fn retries(&mut self, retries: u32) -> &mut Self {
             self.$($path).+.retries = retries;
             self
@@ -132,8 +138,8 @@ macro_rules! impl_update_config_accessors {
         fn bin_name(&self) -> &str {
             &self.common.bin_name
         }
-        fn bin_install_path(&self) -> std::path::PathBuf {
-            self.common.bin_install_path.clone()
+        fn bin_install_path(&self) -> &std::path::Path {
+            &self.common.bin_install_path
         }
         fn bin_path_in_archive(&self) -> &str {
             &self.common.bin_path_in_archive
@@ -336,12 +342,23 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Toggle update output information, defaults to `true`.
+        ///
+        /// Unattended/daemon/CI callers usually want `.show_output(false)` (and must set
+        /// `.no_confirm(true)`, see [`no_confirm`](Self::no_confirm)) so the update does not write
+        /// the release-status block to stdout. That status block is printed *before* the
+        /// interactive confirmation prompt.
         pub fn show_output(&mut self, show: bool) -> &mut Self {
             self.common.show_output = show;
             self
         }
 
-        /// Toggle download confirmation. Defaults to `false`.
+        /// Toggle download confirmation. Defaults to `false` (interactive: the update prompts
+        /// "Do you want to continue?" and blocks on stdin).
+        ///
+        /// **Unattended/daemon/CI callers must set `.no_confirm(true)`** or the update will block
+        /// forever waiting for input; they usually also set `.show_output(false)`. Note the
+        /// release-status block is printed *before* this confirmation prompt, so silencing it
+        /// requires `show_output(false)` as well.
         pub fn no_confirm(&mut self, no_confirm: bool) -> &mut Self {
             self.common.no_confirm = no_confirm;
             self
@@ -449,6 +466,17 @@ macro_rules! impl_async_update_methods {
             &self,
         ) -> crate::errors::Result<crate::update::Release> {
             crate::update::AsyncFetch::get_latest_release_async(self).await
+        }
+
+        /// Async sibling of `is_update_available`: returns `true` when the backend's latest
+        /// release is strictly newer than the configured `current_version`, without downloading
+        /// or installing anything (only the release-listing request is made).
+        pub async fn is_update_available_async(&self) -> crate::errors::Result<bool> {
+            let latest = crate::update::AsyncFetch::get_latest_release_async(self).await?;
+            crate::version::bump_is_greater(
+                crate::update::UpdateConfig::current_version(self),
+                &latest.version,
+            )
         }
     };
 }

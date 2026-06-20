@@ -103,7 +103,13 @@ impl ReleaseListBuilder {
         self
     }
 
-    /// Set the optional arch `target` name, used to filter available releases
+    /// Set the optional arch `target` name, used to filter the releases this list returns to those
+    /// carrying an asset whose name contains `target`.
+    ///
+    /// This is the **`ReleaseList`** filter and differs from
+    /// [`Update::target`](UpdateBuilder::target): `filter_target` drops whole releases from the
+    /// listing when no asset matches, whereas the `Update` `target` selects *which asset* of the
+    /// chosen release to download.
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: &str) -> &mut Self {
@@ -249,19 +255,6 @@ impl UpdateBuilder {
     }
 
     impl_common_builder_setters!(no_auth_token);
-
-    /// **Deprecated and a no-op on the S3 backend.** S3 authenticates by signing requests with
-    /// an `access_key` (AWS SigV4), not a bearer token, so the stored token has never been read by
-    /// the S3 fetch path. Use [`access_key`](Self::access_key) instead. Retained for one release to avoid a
-    /// hard break; it will be removed in the next major version.
-    #[deprecated(
-        since = "1.0.0",
-        note = "S3 uses `access_key` (AWS SigV4 signing), not an auth token; `auth_token` is a \
-                no-op on the S3 backend. Use `.access_key((id, secret))` instead."
-    )]
-    pub fn auth_token(&mut self, _auth_token: &str) -> &mut Self {
-        self
-    }
 
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
@@ -1234,6 +1227,34 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
+    async fn is_update_available_async_true_then_false() {
+        // A1 (async): the s3 backend inherits `is_update_available_async`. The bucket's newest
+        // release is 2.0.0, so an update is available from 1.0.0 but not from 2.0.0. A fresh stub
+        // is needed per call because the loopback server serves one response per connection.
+        let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml.clone(),
+        }]);
+        let upd = s3_update(&base, "1.0.0");
+        assert!(
+            upd.is_update_available_async().await.unwrap(),
+            "2.0.0 > 1.0.0 => update available"
+        );
+
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update(&base, "2.0.0");
+        assert!(
+            !upd.is_update_available_async().await.unwrap(),
+            "2.0.0 not newer than 2.0.0 => no update"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
     async fn get_latest_release_async_multi_asset_merge() {
         // Two <Contents> entries for the same name+version are merged into a single release with
         // two assets. `get_latest_release_async` must return that merged release.
@@ -1394,22 +1415,6 @@ mod tests {
         assert_eq!(upd.asset_identifier(), Some("musl"));
         assert_eq!(upd.target(), "x86_64-unknown-linux-gnu");
         assert_eq!(upd.current_version(), "0.1.0");
-    }
-
-    #[test]
-    fn s3_auth_token_is_a_deprecated_noop() {
-        // The s3 backend overrides the shared `auth_token` setter with a `#[deprecated]` no-op
-        // (s3 authenticates via `access_key`/SigV4). Calling it stores nothing.
-        #[allow(deprecated)]
-        let upd = Update::configure()
-            .bucket_name("bucket")
-            .region("us-east-1")
-            .bin_name("my_bin")
-            .current_version("0.1.0")
-            .auth_token("ignored")
-            .build()
-            .unwrap();
-        assert_eq!(upd.auth_token(), None);
     }
 
     #[test]

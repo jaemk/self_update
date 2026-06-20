@@ -18,6 +18,14 @@ DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Upda
 > [agent-oriented guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0.md)
 > for automated migration tooling.
 
+> **Running unattended (daemon / CI / service)?** The defaults are interactive: `show_output`
+> is `true` and `no_confirm` is `false`, so `update()` prints a release-status block to stdout
+> and then **blocks on an interactive `yes/no` prompt** waiting on stdin. With no terminal
+> attached this stalls (or aborts). For any non-interactive caller set `.no_confirm(true)` to
+> skip the prompt, and usually `.show_output(false)` to silence the status block. These are
+> settings only — the defaults are unchanged. Note the status block is printed *before* the
+> confirmation prompt, so suppressing one does not suppress the other.
+
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
@@ -140,7 +148,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
+        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -218,6 +226,22 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Listing releases (`ReleaseList`)
+
+Each built-in backend exposes a `ReleaseList` builder for fetching the list of available releases
+without performing an update. There is **no single unifying `self_update::ReleaseList` type**:
+every backend has its own, distinct `ReleaseList` (the fields and request shape differ per host),
+so they are reached through their backend modules rather than re-exported at the crate root:
+
+* [`backends::github::ReleaseList`](backends::github::ReleaseList)
+* [`backends::gitlab::ReleaseList`](backends::gitlab::ReleaseList)
+* [`backends::gitea::ReleaseList`](backends::gitea::ReleaseList)
+* [`backends::s3::ReleaseList`](backends::s3::ReleaseList)
+
+The custom backend has no `ReleaseList` by design: listing is performed entirely by your
+[`ReleaseSource`] (or [`AsyncReleaseSource`]) implementation, which already returns
+[`Release`] values directly.
 
 ### Custom backends
 
@@ -436,9 +460,9 @@ pub use checksum::Checksum;
 
 use http_client::{header, HttpResponse};
 
-pub const DEFAULT_PROGRESS_TEMPLATE: &str =
+pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
-pub const DEFAULT_PROGRESS_CHARS: &str = "=>-";
+pub(crate) const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 /// Get the current target triple.
 ///
@@ -465,9 +489,15 @@ fn confirm(msg: &str) -> Result<()> {
     Ok(())
 }
 
-/// Status returned after updating
+/// The lightweight result of [`update`](update::ReleaseUpdate::update) (and its async sibling
+/// `update_async`): it carries only the version tag of the latest release.
 ///
-/// Wrapped `String`s are version tags
+/// Wrapped `String`s are version tags.
+///
+/// This is the lightweight counterpart of [`UpdateStatus`](update::UpdateStatus), the richer
+/// result of [`update_extended`](update::ReleaseUpdate::update_extended) which carries the full
+/// [`Release`](update::Release) (name, date, body, assets). Reach for `Status` when the version
+/// string is all you need; reach for `UpdateStatus` when you need the installed release's details.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Status {
@@ -485,7 +515,7 @@ impl Status {
     }
 
     /// Returns `true` if `Status::UpToDate`
-    pub fn uptodate(&self) -> bool {
+    pub fn is_up_to_date(&self) -> bool {
         matches!(*self, Status::UpToDate(_))
     }
 
@@ -594,6 +624,7 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
 ///     * Io - gzip decoding
 ///     * Io - archive unpacking
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Extract<'a> {
     source: &'a path::Path,
     archive: Option<ArchiveKind>,
@@ -835,6 +866,7 @@ impl<'a> Extract<'a> {
 /// * Errors:
 ///     * Io - copying / renaming
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Move<'a> {
     source: &'a path::Path,
     temp: Option<&'a path::Path>,
@@ -919,6 +951,7 @@ impl<'a> Move<'a> {
 ///     * Io - renaming a source into place or stashing an existing destination
 #[derive(Debug)]
 #[must_use = "queued moves are only applied when `.commit()` is called"]
+#[non_exhaustive]
 pub struct MoveAll<'a> {
     temp: &'a path::Path,
     moves: Vec<(path::PathBuf, path::PathBuf)>,
@@ -1083,6 +1116,7 @@ impl std::fmt::Debug for AssetMatcher {
 ///
 /// With optional progress bar
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Download {
     show_progress: bool,
     url: String,
@@ -1200,15 +1234,29 @@ impl Download {
         self
     }
 
-    /// Set a download request header, inserts into the existing `HeaderMap`
+    /// Set a download request header, inserting into the existing `HeaderMap`. To add a single
+    /// header without discarding the others; to replace the whole map use
+    /// [`replace_headers`](Self::replace_headers).
+    ///
+    /// Accepts anything that converts into a header name/value, so both typed values and plain
+    /// strings work: `.header("X-Foo", "bar")?` or
+    /// `.header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or value
+    /// that is not a valid HTTP header returns an [`Error::Config`](errors::Error::Config) rather
+    /// than panicking. Mirrors the builders' `request_header`.
     #[doc(alias = "set_header")]
-    pub fn header(
-        &mut self,
-        name: http_client::header::HeaderName,
-        value: http_client::header::HeaderValue,
-    ) -> &mut Self {
+    pub fn header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
+    where
+        N: ::core::convert::TryInto<http_client::header::HeaderName>,
+        V: ::core::convert::TryInto<http_client::header::HeaderValue>,
+    {
+        let name = name.try_into().map_err(|_| {
+            Error::Config("invalid HTTP header name passed to `header`".to_string())
+        })?;
+        let value = value.try_into().map_err(|_| {
+            Error::Config("invalid HTTP header value passed to `header`".to_string())
+        })?;
         self.headers.insert(name, value);
-        self
+        Ok(self)
     }
 
     /// Download the file behind the given `url` into the specified `dest`.
@@ -1366,6 +1414,118 @@ mod tests {
         io::{self, Read, Write},
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn status_is_up_to_date() {
+        assert!(Status::UpToDate("1.2.3".to_string()).is_up_to_date());
+        assert!(!Status::Updated("1.2.3".to_string()).is_up_to_date());
+        // `updated()` is the complement.
+        assert!(Status::Updated("1.2.3".to_string()).updated());
+        assert!(!Status::UpToDate("1.2.3".to_string()).updated());
+    }
+
+    #[test]
+    fn download_header_accepts_str_name_and_value() {
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        // Plain string literals must convert into a valid name/value.
+        dl.header("x-custom-header", "custom-value")
+            .expect("valid str header should be accepted");
+        let stored = dl
+            .headers
+            .get("x-custom-header")
+            .expect("header should be inserted");
+        assert_eq!(stored, "custom-value");
+    }
+
+    #[test]
+    fn download_header_accepts_typed_name_and_value() {
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        // The typed `HeaderName` / `&str` value form still works.
+        dl.header(http_client::header::ACCEPT, "application/octet-stream")
+            .expect("typed name + str value should be accepted");
+        assert_eq!(
+            dl.headers.get(http_client::header::ACCEPT).unwrap(),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn download_header_overwrites_on_repeated_name() {
+        // B5: `header()` inserts into the existing map. Calling it twice with the same name must
+        // keep the *last* value (insert semantics), not append or keep the first.
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        dl.header("x-dup", "first").unwrap();
+        dl.header("x-dup", "second").unwrap();
+        // `get` returns the (single) value; `get_all` must contain exactly one entry.
+        assert_eq!(dl.headers.get("x-dup").unwrap(), "second");
+        assert_eq!(
+            dl.headers.get_all("x-dup").iter().count(),
+            1,
+            "a repeated header name must overwrite, not accumulate"
+        );
+    }
+
+    #[test]
+    fn replace_headers_wholesale_replaces_after_header_calls() {
+        // B5: after building up headers with `header()`, `replace_headers` must discard them all
+        // and install only the supplied map (it is a whole-map setter, not a merge).
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        dl.header("x-old-a", "a").unwrap();
+        dl.header("x-old-b", "b").unwrap();
+
+        let mut fresh = http_client::header::HeaderMap::new();
+        fresh.insert("x-new", "n".parse().unwrap());
+        dl.replace_headers(fresh);
+
+        assert!(
+            dl.headers.get("x-old-a").is_none(),
+            "replace_headers must drop previously-added headers"
+        );
+        assert!(dl.headers.get("x-old-b").is_none());
+        assert_eq!(dl.headers.get("x-new").unwrap(), "n");
+        assert_eq!(
+            dl.headers.len(),
+            1,
+            "replace_headers installs exactly the supplied map"
+        );
+
+        // And `header()` still works after a replace, inserting into the new map.
+        dl.header("x-after", "y").unwrap();
+        assert_eq!(dl.headers.get("x-after").unwrap(), "y");
+        assert_eq!(dl.headers.get("x-new").unwrap(), "n");
+    }
+
+    #[test]
+    fn download_header_rejects_invalid_value() {
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        // A newline is not a valid header value -> conversion fails -> Err, no panic.
+        let err = dl
+            .header("x-ok", "bad\nvalue")
+            .expect_err("invalid header value must be rejected");
+        assert!(
+            matches!(err, Error::Config(_)),
+            "expected Error::Config, got {:?}",
+            err
+        );
+        // The bad header must not have been inserted.
+        assert!(dl.headers.get("x-ok").is_none());
+    }
+
+    #[test]
+    fn download_header_rejects_invalid_name() {
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        // A space is not valid in a header name -> conversion fails -> Err, no panic.
+        let err = dl
+            .header("inva lid", "ok")
+            .expect_err("invalid header name must be rejected");
+        assert!(matches!(err, Error::Config(_)));
+        // The invalid name is rejected before any value insertion, so the map stays empty: no
+        // partial entry is left behind (the value "ok" must not leak in under some other key).
+        assert!(
+            dl.headers.is_empty(),
+            "an invalid header name must not leave a partial value inserted"
+        );
+    }
 
     #[test]
     fn detect_plain() {

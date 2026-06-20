@@ -344,33 +344,45 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncFetch for AsyncUp
 /// Wrap a sync source: `AsyncUpdate::configure().source(Blocking::new(my_sync_source))`. The inner
 /// source must be `Clone + 'static` because each fetch clones it into the blocking task.
 #[cfg(feature = "async")]
-pub struct Blocking<S>(pub S);
+pub struct Blocking<S> {
+    source: S,
+}
 
 #[cfg(feature = "async")]
 impl<S> Blocking<S> {
     /// Wrap a sync [`ReleaseSource`] so it can drive an [`AsyncUpdate`].
-    pub fn new(s: S) -> Self {
-        Self(s)
+    pub fn new(source: S) -> Self {
+        Self { source }
+    }
+
+    /// Consume the adapter and return the wrapped source.
+    pub fn into_inner(self) -> S {
+        self.source
+    }
+
+    /// Borrow the wrapped source.
+    pub fn as_inner(&self) -> &S {
+        &self.source
     }
 }
 
 #[cfg(feature = "async")]
 impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for Blocking<S> {
     async fn get_latest_release(&self) -> Result<Release> {
-        let s = self.0.clone();
+        let s = self.source.clone();
         tokio::task::spawn_blocking(move || s.get_latest_release())
             .await
             .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
     }
     async fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        let s = self.0.clone();
+        let s = self.source.clone();
         let current_version = current_version.to_owned();
         tokio::task::spawn_blocking(move || s.get_latest_releases(&current_version))
             .await
             .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
     }
     async fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let s = self.0.clone();
+        let s = self.source.clone();
         let ver = ver.to_owned();
         tokio::task::spawn_blocking(move || s.get_release_version(&ver))
             .await
@@ -473,6 +485,36 @@ mod tests {
         assert_eq!(upd.current_version(), "1.0.0");
         // The custom backend has no auth token (its source owns listing auth).
         assert_eq!(upd.auth_token(), None);
+    }
+
+    #[test]
+    fn is_update_available_true_when_latest_is_newer() {
+        // A1: the custom backend inherits `is_update_available` from `ReleaseUpdate`. FakeSource's
+        // latest release is 2.0.0; with current_version 1.0.0 an update is available.
+        let upd = configured(Arc::new(AtomicUsize::new(0)));
+        assert!(
+            upd.is_update_available().unwrap(),
+            "2.0.0 > 1.0.0 => update available"
+        );
+    }
+
+    #[test]
+    fn is_update_available_false_when_latest_not_newer() {
+        // A1 complement: when current_version equals the latest release version, no update is
+        // available. FakeSource reports 2.0.0, so configure current_version at 2.0.0.
+        let upd = Update::configure()
+            .source(FakeSource {
+                latest_calls: Arc::new(AtomicUsize::new(0)),
+            })
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("2.0.0")
+            .build()
+            .unwrap();
+        assert!(
+            !upd.is_update_available().unwrap(),
+            "latest (2.0.0) is not newer than current (2.0.0) => no update"
+        );
     }
 
     #[test]
@@ -855,7 +897,7 @@ mod tests {
                 .unwrap();
             let status = upd.update_extended_async().await.unwrap();
             assert!(
-                status.uptodate(),
+                status.is_up_to_date(),
                 "only current/older releases -> up-to-date through the async orchestrator"
             );
         }
@@ -984,7 +1026,7 @@ mod tests {
             assert_not_requiring_clone(&upd);
             // Drive it to an observable outcome (current is newer than the only release).
             let status = upd.update_extended_async().await.unwrap();
-            assert!(status.uptodate());
+            assert!(status.is_up_to_date());
         }
 
         #[tokio::test]
@@ -1019,6 +1061,78 @@ mod tests {
                 AsyncReleaseSource::get_release_version(&blk, "1.0.0").await,
                 Err(crate::errors::Error::Config(_))
             ));
+        }
+
+        // B7a: `Blocking`'s inner source field is private; the only ways to construct/inspect it
+        // are `new`, `as_inner`, and `into_inner`. (A `Blocking(SyncSource { .. })` tuple-struct
+        // literal would no longer compile, which is the breaking change this pins.)
+        #[test]
+        fn blocking_new_as_inner_and_into_inner_round_trip() {
+            #[derive(Clone, PartialEq, Debug)]
+            struct Marker(u32);
+            impl ReleaseSource for Marker {
+                fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                    Release::builder().version("1.0.0").build()
+                }
+                fn get_latest_releases(&self, _: &str) -> crate::errors::Result<Vec<Release>> {
+                    Ok(vec![])
+                }
+                fn get_release_version(&self, v: &str) -> crate::errors::Result<Release> {
+                    Release::builder().version(v).build()
+                }
+            }
+            let blk = Blocking::new(Marker(7));
+            assert_eq!(blk.as_inner(), &Marker(7), "as_inner borrows the source");
+            assert_eq!(blk.into_inner(), Marker(7), "into_inner returns the source");
+        }
+
+        // D2: the `AsyncReleaseSource` methods return `impl Future + Send`, so this generic helper
+        // (which requires the returned future to be `Send`) must compile for any conforming impl.
+        // If the `+ Send` bound were dropped from the trait, this `fn` would fail to compile.
+        fn assert_fetch_future_is_send<S: AsyncReleaseSource>(s: &S) {
+            fn is_send<T: Send>(_: &T) {}
+            is_send(&s.get_latest_release());
+        }
+
+        #[tokio::test]
+        async fn async_release_source_future_is_send() {
+            // Drive the D2 Send-enforcement helper against the native async source, proving the
+            // returned future satisfies the `Send` bound declared on the trait method.
+            let src = NativeAsyncSource {
+                latest_calls: Arc::new(AtomicUsize::new(0)),
+                releases_calls: Arc::new(AtomicUsize::new(0)),
+                version_calls: Arc::new(AtomicUsize::new(0)),
+            };
+            assert_fetch_future_is_send(&src);
+            // And it still resolves correctly when awaited.
+            assert_eq!(src.get_latest_release().await.unwrap().version, "2.0.0");
+        }
+
+        #[tokio::test]
+        async fn is_update_available_async_true_then_false() {
+            // A1 (async): `is_update_available_async` is inherent on `AsyncUpdate`. The native
+            // source's latest is 2.0.0, so an update is available from 1.0.0 but not from 2.0.0.
+            let mk = |cur: &str| {
+                AsyncUpdate::configure()
+                    .source(NativeAsyncSource {
+                        latest_calls: Arc::new(AtomicUsize::new(0)),
+                        releases_calls: Arc::new(AtomicUsize::new(0)),
+                        version_calls: Arc::new(AtomicUsize::new(0)),
+                    })
+                    .bin_name("app")
+                    .target("x86_64-unknown-linux-gnu")
+                    .current_version(cur)
+                    .build_async()
+                    .unwrap()
+            };
+            assert!(
+                mk("1.0.0").is_update_available_async().await.unwrap(),
+                "2.0.0 > 1.0.0 => update available"
+            );
+            assert!(
+                !mk("2.0.0").is_update_available_async().await.unwrap(),
+                "2.0.0 not newer than 2.0.0 => no update"
+            );
         }
     }
 }

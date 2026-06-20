@@ -7,6 +7,9 @@ use zip::result::ZipError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(feature = "signatures")]
+use zipsign_api::ZipsignError;
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -23,9 +26,13 @@ pub enum Error {
     Config(String),
     /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
-    /// A wrapper over a `zip::result::ZipError`.
+    /// A wrapper over a zip archive error (`archive-zip`).
+    ///
+    /// The concrete error is boxed so that the public API does not change when the underlying
+    /// `zip` implementation evolves. Use [`std::error::Error::source`] to inspect the underlying
+    /// error.
     #[cfg(feature = "archive-zip")]
-    Zip(ZipError),
+    Zip(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over a `serde_json::Error`.
     Json(serde_json::Error),
     /// A wrapper over the active HTTP client's error type (`reqwest` or `ureq`).
@@ -41,13 +48,17 @@ pub enum Error {
     /// Used when the repository archive does not contain any signatures to verify with.
     #[cfg(feature = "signatures")]
     NoSignatures(crate::ArchiveKind),
-    /// A wrapper over a `zipsign_api::ZipsignError`.
+    /// A wrapper over a signature-verification error (`signatures`).
+    ///
+    /// The concrete error is boxed so that the public API surface does not depend on the
+    /// signing implementation's internal error types. Use [`std::error::Error::source`]
+    /// to inspect the underlying error.
     #[cfg(feature = "signatures")]
-    Signature(zipsign_api::ZipsignError),
+    Signature(Box<dyn std::error::Error + Send + Sync>),
     /// Used when the path generated to store the repository archive
     /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
-    NonUTF8,
+    SignatureNonUTF8,
     /// A wrapper over the errors that can occur while signing S3 requests (`s3-auth`).
     ///
     /// The concrete error is boxed so that the public API surface does not depend on the
@@ -79,7 +90,9 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "signatures")]
             Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
-            NonUTF8 => write!(f, "Cannot verify signature of a file with a non-UTF-8 name"),
+            SignatureNonUTF8 => {
+                write!(f, "Cannot verify signature of a file with a non-UTF-8 name")
+            }
             #[cfg(feature = "s3-auth")]
             S3Auth(ref e) => write!(f, "S3AuthError: {}", e),
         }
@@ -93,8 +106,10 @@ impl std::error::Error for Error {
             Error::Json(ref e) => e,
             Error::Http(ref e) => &**e,
             Error::SemVer(ref e) => e,
+            #[cfg(feature = "archive-zip")]
+            Error::Zip(ref e) => &**e,
             #[cfg(feature = "signatures")]
-            Error::Signature(ref e) => e,
+            Error::Signature(ref e) => &**e,
             #[cfg(feature = "s3-auth")]
             Error::S3Auth(ref e) => &**e,
             _ => return None,
@@ -137,14 +152,14 @@ impl From<semver::Error> for Error {
 #[cfg(feature = "archive-zip")]
 impl From<ZipError> for Error {
     fn from(e: ZipError) -> Error {
-        Error::Zip(e)
+        Error::Zip(Box::new(e))
     }
 }
 
 #[cfg(feature = "signatures")]
-impl From<zipsign_api::ZipsignError> for Error {
-    fn from(e: zipsign_api::ZipsignError) -> Error {
-        Error::Signature(e)
+impl From<ZipsignError> for Error {
+    fn from(e: ZipsignError) -> Error {
+        Error::Signature(Box::new(e))
     }
 }
 
@@ -173,5 +188,102 @@ impl From<url::ParseError> for Error {
 impl From<time::error::ComponentRange> for Error {
     fn from(e: time::error::ComponentRange) -> Self {
         Error::S3Auth(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(any(feature = "archive-zip", feature = "signatures"))]
+    use super::Error;
+    #[cfg(any(feature = "archive-zip", feature = "signatures"))]
+    use std::error::Error as _;
+
+    // B2: `Error::Zip` is opaque (boxed). The `From<ZipError>` conversion must produce an
+    // `Error::Zip` whose `source()` surfaces the underlying boxed error, mirroring `Http`/`S3Auth`.
+    // Pre-fix this variant held a concrete `zip::result::ZipError` and exposed no `source()`.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn zip_error_is_opaque_with_source() {
+        let zip_err = zip::result::ZipError::FileNotFound;
+        let err: Error = zip_err.into();
+        assert!(matches!(err, Error::Zip(_)), "From<ZipError> -> Error::Zip");
+        assert!(
+            err.source().is_some(),
+            "Error::Zip must expose its underlying error via source()"
+        );
+    }
+
+    // B2: the boxed `Error::Zip` must still render with the `ZipError:` Display prefix and embed
+    // the inner error's message. Only `source()` was asserted before the box; this pins that the
+    // Display arm dereferences the box rather than printing the box's debug form or being dropped.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn zip_error_display_includes_prefix_and_inner_message() {
+        let err: Error = zip::result::ZipError::FileNotFound.into();
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("ZipError: "),
+            "Error::Zip Display must keep the `ZipError: ` prefix, got: {}",
+            shown
+        );
+        // The inner boxed error's own Display must be embedded (not the box debug form).
+        let inner = zip::result::ZipError::FileNotFound.to_string();
+        assert!(
+            shown.contains(&inner),
+            "Error::Zip Display must embed the inner error message `{}`, got: {}",
+            inner,
+            shown
+        );
+    }
+
+    // B2: `Error::Signature` is opaque (boxed) and surfaces its source. Pre-fix it held a concrete
+    // `zipsign_api::ZipsignError`; the `source()` arm now dereferences the box.
+    #[cfg(feature = "signatures")]
+    #[test]
+    fn signature_error_is_opaque_with_source() {
+        let inner = zipsign_api::ZipsignError::from(std::io::Error::other("boom"));
+        let err: Error = inner.into();
+        assert!(
+            matches!(err, Error::Signature(_)),
+            "From<ZipsignError> -> Error::Signature"
+        );
+        assert!(
+            err.source().is_some(),
+            "Error::Signature must expose its underlying error via source()"
+        );
+    }
+
+    // B2: the boxed `Error::Signature` must still render with the `SignatureError:` Display prefix
+    // and embed the inner error's message. Pins the Display arm dereferences the box.
+    #[cfg(feature = "signatures")]
+    #[test]
+    fn signature_error_display_includes_prefix_and_inner_message() {
+        let inner = zipsign_api::ZipsignError::from(std::io::Error::other("boom"));
+        let inner_shown = inner.to_string();
+        let err: Error = inner.into();
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("SignatureError: "),
+            "Error::Signature Display must keep the `SignatureError: ` prefix, got: {}",
+            shown
+        );
+        assert!(
+            shown.contains(&inner_shown),
+            "Error::Signature Display must embed the inner error message `{}`, got: {}",
+            inner_shown,
+            shown
+        );
+    }
+
+    // B7c: the signatures-gated non-UTF8 variant is named `SignatureNonUTF8` (was `NonUTF8`).
+    // Naming + Display are pinned here; the rename is what makes this compile.
+    #[cfg(feature = "signatures")]
+    #[test]
+    fn signature_non_utf8_variant_is_renamed_and_displays() {
+        let err = Error::SignatureNonUTF8;
+        assert_eq!(
+            err.to_string(),
+            "Cannot verify signature of a file with a non-UTF-8 name"
+        );
     }
 }

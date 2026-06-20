@@ -19,6 +19,14 @@ DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Upda
 > [agent-oriented guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0.md)
 > for automated migration tooling.
 
+> **Running unattended (daemon / CI / service)?** The defaults are interactive: `show_output`
+> is `true` and `no_confirm` is `false`, so `update()` prints a release-status block to stdout
+> and then **blocks on an interactive `yes/no` prompt** waiting on stdin. With no terminal
+> attached this stalls (or aborts). For any non-interactive caller set `.no_confirm(true)` to
+> skip the prompt, and usually `.show_output(false)` to silence the status block. These are
+> settings only — the defaults are unchanged. Note the status block is printed *before* the
+> confirmation prompt, so suppressing one does not suppress the other.
+
 ## Usage
 
 Update (replace) the current executable with the latest release downloaded
@@ -140,7 +148,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(&asset.download_url)
-        .header(self_update::http::header::ACCEPT, "application/octet-stream".parse()?)
+        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -216,6 +224,22 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Listing releases (`ReleaseList`)
+
+Each built-in backend exposes a `ReleaseList` builder for fetching the list of available releases
+without performing an update. There is **no single unifying `self_update::ReleaseList` type**:
+every backend has its own, distinct `ReleaseList` (the fields and request shape differ per host),
+so they are reached through their backend modules rather than re-exported at the crate root:
+
+* [`backends::github::ReleaseList`](backends::github::ReleaseList)
+* [`backends::gitlab::ReleaseList`](backends::gitlab::ReleaseList)
+* [`backends::gitea::ReleaseList`](backends::gitea::ReleaseList)
+* [`backends::s3::ReleaseList`](backends::s3::ReleaseList)
+
+The custom backend has no `ReleaseList` by design: listing is performed entirely by your
+[`ReleaseSource`] (or [`AsyncReleaseSource`]) implementation, which already returns
+[`Release`] values directly.
 
 ### Custom backends
 

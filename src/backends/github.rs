@@ -612,7 +612,7 @@ mod tests {
             .build_async()
             .unwrap();
         let status = upd.update_extended_async().await.unwrap();
-        assert!(status.uptodate(), "an older release means up-to-date");
+        assert!(status.is_up_to_date(), "an older release means up-to-date");
     }
 
     #[test]
