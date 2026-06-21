@@ -258,8 +258,10 @@ impl Releases {
     ///
     /// The check is order-independent — it scans the whole set rather than trusting the list to be
     /// newest-first — so it is correct even for a custom [`ReleaseSource`] that returns an unsorted
-    /// multi-element list. The first release whose version fails to parse as semver propagates its
-    /// error.
+    /// multi-element list. The scan short-circuits on the first strictly-newer release, returning
+    /// `Ok(true)` before any release positioned after it is examined; so a found update wins over a
+    /// later parse error. It is the first release *reached* whose version fails to parse as semver
+    /// that propagates its error.
     ///
     /// This consults only the already-fetched releases — no further request is made.
     pub fn is_update_available(&self) -> Result<bool> {

@@ -361,7 +361,7 @@ impl ReleaseUpdate for Update {
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let api_url = format!("{}/tags/{}", self.releases_url(), ver);
+        let api_url = format!("{}/tags/{}", self.releases_url(), urlencoding::encode(ver));
         let resp = send(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,
@@ -469,7 +469,7 @@ impl crate::update::AsyncFetch for Update {
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
         use crate::backends::send_async;
-        let api_url = format!("{}/tags/{}", self.releases_url(), ver);
+        let api_url = format!("{}/tags/{}", self.releases_url(), urlencoding::encode(ver));
         let resp = send_async(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,

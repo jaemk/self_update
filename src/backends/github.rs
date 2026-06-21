@@ -346,7 +346,7 @@ impl ReleaseUpdate for Update {
             self.api_base(),
             self.repo_owner,
             self.repo_name,
-            ver
+            urlencoding::encode(ver)
         );
         let resp = send(
             &api_url,
@@ -464,7 +464,7 @@ impl crate::update::AsyncFetch for Update {
             self.api_base(),
             self.repo_owner,
             self.repo_name,
-            ver
+            urlencoding::encode(ver)
         );
         let resp = send_async(
             &api_url,
@@ -870,6 +870,42 @@ mod tests {
             }
         });
         (base, captured)
+    }
+
+    #[test]
+    fn get_release_version_percent_encodes_the_tag_in_the_url() {
+        // The caller-supplied tag is interpolated into the request URL and must be
+        // percent-encoded. A tag with a URL-special `+` must appear as `%2B` on the wire, never
+        // raw. Without the fix the raw `+` reaches the path and this assertion fails.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v1.0.0+build.5"),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .url(&base)
+            .build()
+            .unwrap();
+        let rel = upd.get_release_version("v1.0.0+build.5").unwrap();
+        assert_eq!(rel.version, "1.0.0+build.5");
+        let request = &captured.lock().unwrap()[0];
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("/releases/tags/v1.0.0%2Bbuild.5"),
+            "tag should be percent-encoded in the request path, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("v1.0.0+build.5"),
+            "raw unencoded `+` must not reach the request path, got: {}",
+            request_line
+        );
     }
 
     #[test]
