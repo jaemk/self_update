@@ -29,6 +29,24 @@ create temp/working/plan files anywhere else in the repo.
 
 ---
 
+## Specifications (canonical behavior reference)
+`specs/` is the committed source of truth for what the crate does. The `specs/ref-*.md` files
+document the current behavior of each subsystem (pipeline, backends, http client, errors,
+features, etc.), cited to `file:line`, each ending with an invariants/regression checklist. The
+remaining specs record implemented decisions and deferred/needs-research work. See
+[specs/README.md](specs/README.md) for the index.
+
+Use the specs as the reference for defining existing and new functionality, evaluating a change,
+and detecting regressions:
+- Before changing a subsystem, read its `ref-*` spec for the current contract and the invariants
+  a change must preserve. If the code and a `ref-*` spec disagree, one of them is a bug.
+- When a change alters behavior, update the matching `ref-*` spec in the same change (the same
+  discipline as keeping `README.md` and `CHANGELOG.md` in sync).
+- When adding functionality, write or extend the relevant `ref-*` spec; move a deferred item to
+  `implemented` once it ships.
+
+---
+
 ## Project Overview
 `self_update` is a Rust crate providing updaters that replace the running executable in-place
 from a release-distribution backend. It is a **single crate** (the version lives only in the
@@ -193,4 +211,5 @@ Claude sub-agent definitions used by these skills live in `.claude/agents/`
 | `readme.sh` | README generation/check wrapper around `cargo-readme` |
 | `CHANGELOG.md` | Keep-a-changelog style; always has an `[unreleased]` section on top |
 | `docs/migrations/` | Per-release migration guides; `PREV-to-X.Y.Z.md` (agent/automation) and `PREV-to-X.Y.Z-human.md` (human). Current: `0.x-to-1.0.md` / `0.x-to-1.0-human.md` |
+| `specs/` | Canonical behavior reference (`ref-*.md`, cited to `file:line`) plus decision and deferred-work specs. Read before changing a subsystem; update when behavior changes. Index in `specs/README.md` |
 | `local/` | Gitignored scratch space — use for any temp/intermediate files |
