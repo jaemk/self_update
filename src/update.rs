@@ -222,6 +222,21 @@ impl Releases {
         &self.releases
     }
 
+    /// Number of releases held.
+    pub fn len(&self) -> usize {
+        self.releases.len()
+    }
+
+    /// Whether no releases are held.
+    pub fn is_empty(&self) -> bool {
+        self.releases.is_empty()
+    }
+
+    /// The version the releases were compared against (the updater's configured current version).
+    pub fn current_version(&self) -> &str {
+        &self.current_version
+    }
+
     /// The newest release (the first), or `None` when the list is empty.
     pub fn latest(&self) -> Option<&Release> {
         self.releases.first()
@@ -241,6 +256,26 @@ impl Releases {
             None => Ok(false),
             Some(latest) => version::bump_is_greater(&self.current_version, &latest.version),
         }
+    }
+}
+
+/// Owned iteration yields each [`Release`] (newest-first), consuming the `Releases`.
+impl IntoIterator for Releases {
+    type Item = Release;
+    type IntoIter = std::vec::IntoIter<Release>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.releases.into_iter()
+    }
+}
+
+/// Borrowed iteration yields a `&`[`Release`] for each held release (newest-first).
+impl<'a> IntoIterator for &'a Releases {
+    type Item = &'a Release;
+    type IntoIter = std::slice::Iter<'a, Release>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.releases.iter()
     }
 }
 
@@ -500,13 +535,21 @@ pub trait UpdateConfig: sealed::Sealed {
 pub trait ReleaseUpdate: UpdateConfig {
     /// Fetch the single newest release from the backend.
     ///
-    /// The result is a one-element [`Releases`] wrapping the newest release (carrying the
-    /// configured current version), so `.is_update_available()` / `.latest()` work the same as on
-    /// [`get_latest_releases`](Self::get_latest_releases).
+    /// The result is a one-element [`Releases`] wrapping the **raw** newest release, unfiltered
+    /// (carrying the configured current version). Because the newest release is always present,
+    /// `.latest()` is always `Some`, and `.is_update_available()` returns `false` when that newest
+    /// release is not strictly newer than the configured current version. This differs from
+    /// [`get_latest_releases`](Self::get_latest_releases), whose list is filtered to strictly-newer
+    /// releases (there, `.latest()` is `None` when up to date and any present entry is a genuine
+    /// update).
     fn get_latest_release(&self) -> Result<Releases>;
 
     /// Fetch the candidate releases from the backend as a [`Releases`] (newest-first, carrying the
     /// configured current version).
+    ///
+    /// The list is filtered to releases strictly newer than the configured current version, so it
+    /// is empty (`.latest()` is `None`) when already up to date, and any entry present is a genuine
+    /// update.
     fn get_latest_releases(&self) -> Result<Releases>;
 
     /// Fetch details of the release matching the specified version
@@ -954,6 +997,76 @@ mod tests {
         assert!(releases.all().is_empty());
     }
 
+    #[test]
+    fn releases_len_and_is_empty() {
+        let empty = Releases::new(vec![], "1.0.0".to_string());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        let some = Releases::new(vec![rel("2.0.0"), rel("1.0.0")], "1.0.0".to_string());
+        assert_eq!(some.len(), 2);
+        assert!(!some.is_empty());
+    }
+
+    #[test]
+    fn releases_current_version_accessor() {
+        let releases = Releases::new(vec![rel("2.0.0")], "1.2.3".to_string());
+        assert_eq!(releases.current_version(), "1.2.3");
+    }
+
+    #[test]
+    fn releases_into_iterator_owned_in_order() {
+        let releases = Releases::new(
+            vec![rel("2.0.0"), rel("1.5.0"), rel("1.0.0")],
+            "1.0.0".to_string(),
+        );
+        // Owned IntoIterator consumes the Releases and yields Release by value, newest-first.
+        let v: Vec<String> = releases.into_iter().map(|r| r.version).collect();
+        assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
+    }
+
+    #[test]
+    fn releases_into_iterator_borrowed_in_order() {
+        let releases = Releases::new(
+            vec![rel("2.0.0"), rel("1.5.0"), rel("1.0.0")],
+            "1.0.0".to_string(),
+        );
+        // Borrowed IntoIterator yields &Release without consuming.
+        let v: Vec<&str> = (&releases)
+            .into_iter()
+            .map(|r| r.version.as_str())
+            .collect();
+        assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
+        // Still usable afterwards (not consumed).
+        assert_eq!(releases.len(), 3);
+    }
+
+    #[test]
+    fn releases_into_iterator_empty_yields_nothing() {
+        // Boundary: iterating a zero-release `Releases` (the up-to-date filtered case) yields no
+        // items over both the owned and the borrowed iterator — no sentinel, no panic.
+        let borrowed = Releases::new(vec![], "1.0.0".to_string());
+        assert_eq!((&borrowed).into_iter().count(), 0, "&Releases over empty");
+        assert!(borrowed.is_empty());
+        let owned = Releases::new(vec![], "1.0.0".to_string());
+        assert_eq!(owned.into_iter().count(), 0, "owned Releases over empty");
+    }
+
+    #[test]
+    fn releases_into_iterator_order_matches_all() {
+        // The owned and borrowed IntoIterator orderings must be exactly the `all()` order, not just
+        // "some newest-first order" — pin them against `all()` itself, not a hand-written literal.
+        let releases = Releases::new(
+            vec![rel("3.0.0"), rel("2.1.0"), rel("2.0.0"), rel("1.0.0")],
+            "1.0.0".to_string(),
+        );
+        let expected: Vec<String> = releases.all().iter().map(|r| r.version.clone()).collect();
+        let borrowed: Vec<String> = (&releases).into_iter().map(|r| r.version.clone()).collect();
+        assert_eq!(borrowed, expected, "&Releases iteration == all() order");
+        let owned: Vec<String> = releases.into_iter().map(|r| r.version).collect();
+        assert_eq!(owned, expected, "owned iteration == all() order");
+    }
+
     // --- UpdateStatus::is_updated (C2) --------------------------------------------------------
 
     #[test]
@@ -1100,6 +1213,68 @@ mod tests {
         assert_eq!(target, "x86_64-unknown-linux-gnu");
         assert_eq!(accessor_via_dyn_release_update(&*upd), "1.0.0");
         assert_eq!(accessor_via_update_config_bound(&*upd), "app");
+    }
+
+    // --- F2: public async `get_release_version_async` ----------------------------------------
+    //
+    // The macro-generated inherent `get_release_version_async` is the *public* async sibling of the
+    // sync `get_release_version`. These tests deliberately do NOT bring the `pub(crate)`
+    // `AsyncFetch` trait into scope, so `upd.get_release_version_async(..)` can only resolve to the
+    // inherent method emitted by `impl_async_update_methods!`. If that method were missing from the
+    // macro, these tests would fail to compile — pinning sync/async parity on the public surface.
+
+    #[cfg(feature = "async")]
+    struct TaggedAsyncSource;
+
+    #[cfg(feature = "async")]
+    impl crate::update::AsyncReleaseSource for TaggedAsyncSource {
+        async fn get_latest_release(&self) -> Result<Release> {
+            Release::builder().version("2.0.0").build()
+        }
+        async fn get_latest_releases(&self, _current_version: &str) -> Result<Vec<Release>> {
+            Ok(vec![Release::builder().version("2.0.0").build()?])
+        }
+        async fn get_release_version(&self, ver: &str) -> Result<Release> {
+            if ver == "9.9.9" {
+                Err(crate::errors::Error::Release("no such tag".into()))
+            } else {
+                Release::builder().version(ver).build()
+            }
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn public_get_release_version_async_returns_tagged_release() {
+        let upd = crate::backends::custom::AsyncUpdate::configure()
+            .source(TaggedAsyncSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build_async()
+            .unwrap();
+        // Resolves to the inherent macro-generated method (AsyncFetch is intentionally not in
+        // scope), proving the public async-by-tag surface.
+        let rel = upd.get_release_version_async("1.5.0").await.unwrap();
+        assert_eq!(rel.version, "1.5.0");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn public_get_release_version_async_propagates_missing_tag_error() {
+        let upd = crate::backends::custom::AsyncUpdate::configure()
+            .source(TaggedAsyncSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build_async()
+            .unwrap();
+        let res = upd.get_release_version_async("9.9.9").await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::Release(_))),
+            "a missing tag must propagate as Error::Release, got {:?}",
+            res
+        );
     }
 
     struct BoundSource;

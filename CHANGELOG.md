@@ -4,8 +4,9 @@
 ### Added
 - A new `Releases` type, returned by the release-fetch methods, carrying the fetched releases plus
   the updater's current version. It has `all() -> &[Release]`, `latest() -> Option<&Release>`
-  (newest first), `into_vec() -> Vec<Release>`, and `is_update_available() -> Result<bool>` (true
-  when the latest release is strictly newer than the current version). The light pre-check is now
+  (newest first), `into_vec() -> Vec<Release>`, `len()`/`is_empty()`, `current_version() -> &str`,
+  `IntoIterator` (owned and borrowed), and `is_update_available() -> Result<bool>` (true when the
+  latest release is strictly newer than the current version). The light pre-check is now
   `updater.get_latest_releases()?.is_update_available()` (sync) or
   `updater.get_latest_releases_async().await?.is_update_available()` (async), which fetches the
   release list once instead of fetching twice. `Releases` is re-exported at the crate root and is

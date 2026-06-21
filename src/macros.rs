@@ -479,6 +479,16 @@ macro_rules! impl_async_update_methods {
         ) -> crate::errors::Result<crate::update::Releases> {
             crate::update::AsyncFetch::get_latest_releases_async(self).await
         }
+
+        /// Async sibling of `get_release_version`: fetch the [`Release`](crate::update::Release)
+        /// matching the given tag/version from the backend. The tag is used verbatim (including any
+        /// leading `v`); a missing tag is reported as an error.
+        pub async fn get_release_version_async(
+            &self,
+            ver: &str,
+        ) -> crate::errors::Result<crate::update::Release> {
+            crate::update::AsyncFetch::get_release_version_async(self, ver).await
+        }
     };
 }
 

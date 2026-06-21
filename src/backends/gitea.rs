@@ -721,6 +721,20 @@ mod tests {
         });
         let upd = gitea_update_sync(&base, "1.0.0");
         let list = upd.get_latest_releases().unwrap();
+        // F1 distinction: the RAW `get_latest_release` path keeps the newest tag (latest() is
+        // Some, above), but the strictly-newer-FILTERED `get_latest_releases` path drops it
+        // entirely — so here the list is empty and `latest()` is None, not merely "not newer".
+        // Asserting emptiness (not just `!is_update_available()`) pins the filter: a regression
+        // that stopped filtering would still report `!is_update_available()` but would leave
+        // latest() == Some("1.0.0"), which this catches.
+        assert!(
+            list.all().is_empty(),
+            "get_latest_releases: nothing strictly newer => filtered list is empty"
+        );
+        assert!(
+            list.latest().is_none(),
+            "get_latest_releases: empty filtered list => latest() is None"
+        );
         assert!(
             !list.is_update_available().unwrap(),
             "get_latest_releases: nothing strictly newer => not available (agrees with single path)"
@@ -972,7 +986,6 @@ mod tests {
                 body: release_obj_json("v4.2.1"),
             }]
         });
-        use crate::update::AsyncFetch;
         let upd = gitea_update(&base, "0.1.0");
         let rel = upd.get_release_version_async("v4.2.1").await.unwrap();
         assert_eq!(rel.version, "4.2.1");
@@ -989,7 +1002,6 @@ mod tests {
                 body: r#"{"created_at":"2020-01-01T00:00:00Z","assets":[]}"#.to_string(),
             }]
         });
-        use crate::update::AsyncFetch;
         let upd = gitea_update(&base, "0.1.0");
         let res = upd.get_release_version_async("v1.0.0").await;
         assert!(

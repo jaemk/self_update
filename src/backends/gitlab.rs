@@ -503,8 +503,6 @@ mod tests {
     // Shared loopback stub infrastructure (sync and async tests both use this)
     // -----------------------------------------------------------------------
 
-    #[cfg(feature = "async")]
-    use crate::update::AsyncFetch;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 

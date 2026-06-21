@@ -1347,7 +1347,6 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "0.1.0");
-        use crate::update::AsyncFetch;
         let rel = upd.get_release_version_async("1.0.0").await.unwrap();
         assert_eq!(rel.version, "1.0.0");
     }
@@ -1363,7 +1362,6 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "0.1.0");
-        use crate::update::AsyncFetch;
         let res = upd.get_release_version_async("9.9.9").await;
         assert!(
             matches!(res, Err(crate::errors::Error::Release(_))),
