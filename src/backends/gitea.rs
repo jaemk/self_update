@@ -235,10 +235,7 @@ impl UpdateBuilder {
 
     impl_common_builder_setters!();
 
-    /// Confirm config and create a ready-to-use `Update`
-    ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
+    /// Internal: validate config into a concrete `Update`. Shared by `build` / `build_async`.
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
             host: if let Some(ref host) = self.host {
@@ -328,6 +325,9 @@ impl Update {
         if releases.is_empty() {
             bail!(Error::Release, "no releases found");
         }
+        // Unlike github (which hits a dedicated `/releases/latest` endpoint), gitea has no such
+        // endpoint, so "newest" is `releases[0]` and relies on the list endpoint's default
+        // descending (newest-first) order.
         Release::from_release_gitea(&releases[0])
     }
 

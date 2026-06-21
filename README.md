@@ -228,7 +228,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Checking for an update without installing
 
 To check whether a newer release exists without downloading or installing anything, fetch the
-releases once and query the returned [`Releases`](update::Releases). The updater no longer has an
+releases once and query the returned `Releases`. The updater no longer has an
 `is_update_available()` method; instead call `get_latest_releases()` (the full candidate list) or
 `get_latest_release()` (a one-element list with just the newest release), then ask the result:
 `.is_update_available()` compares the newest fetched release against the configured
@@ -263,14 +263,14 @@ without performing an update. There is **no single unifying `self_update::Releas
 every backend has its own, distinct `ReleaseList` (the fields and request shape differ per host),
 so they are reached through their backend modules rather than re-exported at the crate root:
 
-* [`backends::github::ReleaseList`](backends::github::ReleaseList)
-* [`backends::gitlab::ReleaseList`](backends::gitlab::ReleaseList)
-* [`backends::gitea::ReleaseList`](backends::gitea::ReleaseList)
-* [`backends::s3::ReleaseList`](backends::s3::ReleaseList)
+* `backends::github::ReleaseList`
+* `backends::gitlab::ReleaseList`
+* `backends::gitea::ReleaseList`
+* `backends::s3::ReleaseList`
 
 The custom backend has no `ReleaseList` by design: listing is performed entirely by your
-[`ReleaseSource`] (or [`AsyncReleaseSource`]) implementation, which already returns
-[`Release`] values directly.
+`ReleaseSource` (or `AsyncReleaseSource`) implementation, which already returns
+`Release` values directly.
 
 ### Custom backends
 
@@ -322,7 +322,8 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
 returns a concrete `Update` with async (`*_async`) verbs — `update_async()`,
-`update_extended_async()`, and `get_latest_release_async()` — so a `tokio` application can update
+`update_extended_async()`, `get_latest_release_async()`, `get_latest_releases_async()`, and
+`get_release_version_async()` — so a `tokio` application can update
 without wrapping the blocking calls in `spawn_blocking`. The blocking API is unchanged; the async
 path is purely additive. It is **tokio-only and reqwest-only** (ureq has no async story, so `async`
 is incompatible with `ureq`). Network IO becomes async; the extract/replace step stays synchronous.

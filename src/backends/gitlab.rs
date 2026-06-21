@@ -310,6 +310,9 @@ impl Update {
         if releases.is_empty() {
             bail!(Error::Release, "no releases found");
         }
+        // Unlike github (which hits a dedicated `/releases/latest` endpoint), gitlab has no such
+        // endpoint, so "newest" is `releases[0]` and relies on the list endpoint's default
+        // descending (newest-first) order.
         Release::from_release_gitlab(&releases[0])
     }
 

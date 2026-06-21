@@ -237,7 +237,12 @@ impl Releases {
         &self.current_version
     }
 
-    /// The newest release (the first), or `None` when the list is empty.
+    /// The first release in the list, or `None` when the list is empty.
+    ///
+    /// This is the first element as ordered by the backend (newest-first for the built-in
+    /// backends), not necessarily the semver maximum — a custom [`ReleaseSource`] may return an
+    /// unsorted list. For an order-independent "is there anything newer?" check, use
+    /// [`is_update_available`](Self::is_update_available).
     pub fn latest(&self) -> Option<&Release> {
         self.releases.first()
     }
@@ -247,15 +252,23 @@ impl Releases {
         self.releases
     }
 
-    /// Whether an update is available: `true` when the newest fetched release is strictly newer
-    /// than the configured current version (a semver comparison), `false` when the list is empty.
+    /// Whether an update is available: `true` when **any** fetched release is strictly newer than
+    /// the configured current version (a semver comparison), `false` when none is (including when
+    /// the list is empty).
+    ///
+    /// The check is order-independent — it scans the whole set rather than trusting the list to be
+    /// newest-first — so it is correct even for a custom [`ReleaseSource`] that returns an unsorted
+    /// multi-element list. The first release whose version fails to parse as semver propagates its
+    /// error.
     ///
     /// This consults only the already-fetched releases — no further request is made.
     pub fn is_update_available(&self) -> Result<bool> {
-        match self.latest() {
-            None => Ok(false),
-            Some(latest) => version::bump_is_greater(&self.current_version, &latest.version),
+        for r in &self.releases {
+            if version::bump_is_greater(&self.current_version, &r.version)? {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 }
 
@@ -651,7 +664,7 @@ fn choose_latest_release(
         .filter(|r| version::bump_is_compatible(current_version, &r.version).unwrap_or(false))
         .collect::<Vec<_>>();
 
-    let release = if let Some(release) = compatible_releases.first().cloned() {
+    let release = if let Some(release) = compatible_releases.first() {
         println(
             show_output,
             &format!(
@@ -660,7 +673,7 @@ fn choose_latest_release(
                 compatible_releases.len()
             ),
         );
-        release.clone()
+        (*release).clone()
     } else if let Some(release) = releases.first() {
         println(
             show_output,
@@ -971,6 +984,34 @@ mod tests {
         assert!(
             !releases.is_update_available().unwrap(),
             "empty Releases => no update available"
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_true_when_newer_not_first() {
+        // An out-of-order multi-element list (a custom ReleaseSource may not sort): the only
+        // release newer than the current version (2.0.0) is NOT the first element. The check must
+        // still report an update available because it scans the whole set, not just first().
+        let releases = Releases::new(
+            vec![rel("0.9.0"), rel("1.0.0"), rel("2.0.0")],
+            "1.0.0".to_string(),
+        );
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.0.0 is newer than 1.0.0 even though it is not first => update available"
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_false_when_nothing_newer_unordered() {
+        // Out-of-order list where nothing exceeds the current version (1.0.0) => no update.
+        let releases = Releases::new(
+            vec![rel("0.9.0"), rel("1.0.0"), rel("0.5.0")],
+            "1.0.0".to_string(),
+        );
+        assert!(
+            !releases.is_update_available().unwrap(),
+            "no release exceeds 1.0.0 => no update available"
         );
     }
 

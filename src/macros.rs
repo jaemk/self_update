@@ -342,10 +342,10 @@ macro_rules! impl_common_builder_setters {
 
         /// Toggle update output information, defaults to `true`.
         ///
-        /// Unattended/daemon/CI callers usually want `.show_output(false)` (and must set
-        /// `.no_confirm(true)`, see [`no_confirm`](Self::no_confirm)) so the update does not write
-        /// the release-status block to stdout. That status block is printed *before* the
-        /// interactive confirmation prompt.
+        /// Unattended/daemon/CI callers usually want `.show_output(false)`. Note the
+        /// release-status block is still printed when an interactive confirmation is pending (the
+        /// default), since it is shown *before* the confirmation prompt, so fully silencing output
+        /// also requires `.no_confirm(true)` (see [`no_confirm`](Self::no_confirm)).
         pub fn show_output(&mut self, show: bool) -> &mut Self {
             self.common.show_output = show;
             self

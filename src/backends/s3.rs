@@ -1266,6 +1266,49 @@ mod tests {
         );
     }
 
+    /// Assert an s3 fetch result is the expected non-2xx error. The load-bearing contract is that
+    /// a non-2xx listing response is an `Err` (never an `Ok` parsed from the error body). The
+    /// precise variant differs by client: the reqwest path reaches the s3-relied-upon
+    /// `is_success()` bail (`Error::Network`), while ureq short-circuits at `call()?` and surfaces
+    /// its own status error as `Error::Http`. Both are pinned so the reqwest `Network` path the s3
+    /// code now depends on stays covered.
+    fn assert_non_2xx_err(res: crate::errors::Result<crate::update::Releases>) {
+        #[cfg(feature = "reqwest")]
+        assert!(
+            matches!(res, Err(crate::errors::Error::Network(_))),
+            "reqwest: a non-2xx listing response must surface as Error::Network, not Ok"
+        );
+        #[cfg(feature = "ureq")]
+        assert!(
+            matches!(res, Err(crate::errors::Error::Http(_))),
+            "ureq: a non-2xx listing response must surface as an Err (Error::Http), not Ok"
+        );
+    }
+
+    #[test]
+    fn fetch_non_2xx_status_surfaces_error() {
+        // The s3 fetch path dropped its own `status()` check and now relies on
+        // `http_client::get`/`send` bailing on a non-2xx status. When the bucket listing endpoint
+        // responds with a non-2xx (here `404 Not Found`), the sync fetch must return `Err` rather
+        // than parsing the 404 body as a (empty) `ListBucketResult` and returning `Ok`. This pins
+        // the contract on the sync lanes (both http clients).
+        let base = stub(vec![Resp {
+            status: "404 Not Found",
+            body: "<Error><Code>NoSuchBucket</Code></Error>".to_string(),
+        }]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        assert_non_2xx_err(upd.get_latest_release());
+
+        // `get_latest_releases` shares the same fetch path; a fresh stub is required because the
+        // loopback server serves one response per connection.
+        let base = stub(vec![Resp {
+            status: "404 Not Found",
+            body: "<Error><Code>NoSuchBucket</Code></Error>".to_string(),
+        }]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        assert_non_2xx_err(upd.get_latest_releases());
+    }
+
     #[test]
     fn get_release_version_sync_finds_exact_version() {
         // `get_release_version` (sync) returns only the release matching the requested version, and
