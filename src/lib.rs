@@ -413,26 +413,26 @@ on the system OpenSSL cert layout.
 // the raw symbol collision (both) or undefined-item error (neither) that would otherwise occur.
 #[cfg(all(feature = "reqwest", feature = "ureq"))]
 compile_error!(
-    "features `reqwest` and `ureq` are mutually exclusive — enable exactly one HTTP client \
+    "features `reqwest` and `ureq` are mutually exclusive - enable exactly one HTTP client \
      (for `ureq`, set `default-features = false`)"
 );
 #[cfg(not(any(feature = "reqwest", feature = "ureq")))]
 compile_error!(
-    "no HTTP client selected — enable exactly one of the `reqwest` (default) or `ureq` features"
+    "no HTTP client selected - enable exactly one of the `reqwest` (default) or `ureq` features"
 );
 
 // The TLS backend is also a single choice; enabling both forwards conflicting TLS features to
 // the selected client.
 #[cfg(all(feature = "default-tls", feature = "rustls"))]
 compile_error!(
-    "features `default-tls` and `rustls` are mutually exclusive — to use `rustls`, set \
+    "features `default-tls` and `rustls` are mutually exclusive - to use `rustls`, set \
      `default-features = false`"
 );
 
 // The async API is reqwest-only — ureq has no async story.
 #[cfg(all(feature = "async", feature = "ureq"))]
 compile_error!(
-    "feature `async` requires the `reqwest` client and is incompatible with `ureq` — \
+    "feature `async` requires the `reqwest` client and is incompatible with `ureq` - \
      `ureq` has no async API"
 );
 
