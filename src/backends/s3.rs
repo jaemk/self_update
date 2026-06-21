@@ -6,7 +6,7 @@ use crate::backends::send;
 use crate::http_client::HttpResponse;
 use crate::{
     errors::*,
-    update::{Release, ReleaseAsset, ReleaseUpdate},
+    update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
     version::bump_is_greater,
 };
 use log::debug;
@@ -297,6 +297,7 @@ impl Update {
 
 /// Updates to a specified or latest release distributed via S3
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Update {
     end_point: EndPoint,
     bucket_name: String,
@@ -401,12 +402,16 @@ fn find_version(releases: &[Release], ver: &str) -> Result<Release> {
 impl crate::update::sealed::Sealed for Update {}
 
 impl ReleaseUpdate for Update {
-    fn get_latest_release(&self) -> Result<Release> {
-        pick_latest(&self.fetch_releases()?)
+    fn get_latest_release(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = pick_latest(&self.fetch_releases()?)?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        Ok(sort_newer(self.fetch_releases()?, current_version))
+    fn get_latest_releases(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = sort_newer(self.fetch_releases()?, &current_version);
+        Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -418,15 +423,16 @@ impl_update_config_accessors!(Update);
 
 #[cfg(feature = "async")]
 impl crate::update::AsyncFetch for Update {
-    async fn get_latest_release_async(&self) -> Result<Release> {
-        pick_latest(&self.fetch_releases_async().await?)
+    async fn get_latest_release_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = pick_latest(&self.fetch_releases_async().await?)?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
-        Ok(sort_newer(
-            self.fetch_releases_async().await?,
-            current_version,
-        ))
+    async fn get_latest_releases_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = sort_newer(self.fetch_releases_async().await?, &current_version);
+        Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -1095,20 +1101,16 @@ mod tests {
     // Async-fetch tests via a loopback TCP stub
     // ---------------------------------------------------------------------------
 
-    #[cfg(feature = "async")]
     use std::io::{Read as _, Write as _};
-    #[cfg(feature = "async")]
     use std::net::TcpListener;
 
     /// Serve a single XML response over a loopback TCP listener, one connection per `Resp`.
     /// Returns the base URL (`http://127.0.0.1:<port>/`).
-    #[cfg(feature = "async")]
     struct Resp {
         status: &'static str,
         body: String,
     }
 
-    #[cfg(feature = "async")]
     fn stub(responses: Vec<Resp>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
@@ -1148,6 +1150,150 @@ mod tests {
             .unwrap()
     }
 
+    /// Sync sibling of [`s3_update`]: a `Box<dyn ReleaseUpdate>` pointed at the loopback stub via a
+    /// `Generic` endpoint (no region required).
+    fn s3_update_sync(base_url: &str, current_version: &str) -> Box<dyn ReleaseUpdate> {
+        Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base_url.to_owned(),
+            })
+            .bucket_name("test-bucket")
+            .bin_name("myapp")
+            .current_version(current_version)
+            .build()
+            .unwrap()
+    }
+
+    // --- Sync `Releases`-returning fetch coverage (gap #1) ------------------------------------
+    //
+    // The s3 stub harness is otherwise only exercised by the async tests above. These pin the
+    // *sync* `ReleaseUpdate` fetch methods on the same loopback stub: the one-element
+    // `get_latest_release` wrap, the strictly-newer-filtered `get_latest_releases` list, the
+    // current_version carry, and `is_update_available()` agreement between the two paths.
+
+    #[test]
+    fn get_latest_release_sync_wraps_newest_and_carries_current_version() {
+        // `get_latest_release` (sync) picks the highest version from the bucket listing and wraps
+        // it in a one-element `Releases` carrying the configured current version, so the pre-check
+        // works off the single newest release.
+        let xml = list_bucket_xml(&[
+            "myapp-0.9.0-x86_64-linux",
+            "myapp-2.1.0-x86_64-linux",
+            "myapp-1.0.0-x86_64-linux",
+        ]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(
+            releases.all().len(),
+            1,
+            "get_latest_release yields a one-element Releases"
+        );
+        assert_eq!(releases.latest().unwrap().version, "2.1.0");
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.1.0 > 1.0.0 via the one-element Releases pre-check"
+        );
+    }
+
+    #[test]
+    fn get_latest_releases_sync_filters_to_newer_and_prechecks() {
+        // `get_latest_releases` (sync) returns a `Releases` of strictly-newer releases (newest
+        // first); `.is_update_available()` / `.latest()` work off it without a second fetch.
+        let xml = list_bucket_xml(&[
+            "myapp-0.9.0-x86_64-linux",
+            "myapp-1.0.0-x86_64-linux",
+            "myapp-1.5.0-x86_64-linux",
+            "myapp-2.0.0-x86_64-linux",
+        ]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0"],
+            "only releases strictly newer than current, newest-first"
+        );
+        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert!(releases.is_update_available().unwrap());
+    }
+
+    #[test]
+    fn sync_is_update_available_agrees_between_paths_when_up_to_date() {
+        // gap #1/#4 (sync, s3): when the bucket's newest release equals the current version, the
+        // one-element `get_latest_release` path (which keeps the newest even if equal) and the
+        // strictly-newer-filtered `get_latest_releases` path must BOTH report not-available.
+        let xml = || {
+            list_bucket_xml(&[
+                "myapp-2.0.0-x86_64-linux",
+                "myapp-1.0.0-x86_64-linux",
+                "myapp-0.9.0-x86_64-linux",
+            ])
+        };
+
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml(),
+        }]);
+        let upd = s3_update_sync(&base, "2.0.0");
+        let single = upd.get_latest_release().unwrap();
+        assert_eq!(single.latest().unwrap().version, "2.0.0");
+        assert!(
+            !single.is_update_available().unwrap(),
+            "get_latest_release: newest (2.0.0) == current => not available"
+        );
+
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml(),
+        }]);
+        let upd = s3_update_sync(&base, "2.0.0");
+        let list = upd.get_latest_releases().unwrap();
+        assert!(
+            list.all().is_empty(),
+            "nothing strictly newer than 2.0.0 => empty list"
+        );
+        assert!(
+            !list.is_update_available().unwrap(),
+            "get_latest_releases agrees: not available"
+        );
+    }
+
+    #[test]
+    fn get_release_version_sync_finds_exact_version() {
+        // `get_release_version` (sync) returns only the release matching the requested version, and
+        // errors when none matches.
+        let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        let rel = upd.get_release_version("1.0.0").unwrap();
+        assert_eq!(rel.version, "1.0.0");
+
+        let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        assert!(
+            matches!(
+                upd.get_release_version("9.9.9"),
+                Err(crate::errors::Error::Release(_))
+            ),
+            "missing version must surface as Error::Release"
+        );
+    }
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn fetch_releases_from_s3_async_parses_xml_response() {
@@ -1159,7 +1305,8 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "0.1.0");
-        let rel = upd.get_latest_release_async().await.unwrap();
+        let releases = upd.get_latest_release_async().await.unwrap();
+        let rel = releases.latest().expect("one-element Releases");
         assert_eq!(rel.version, "2.1.0");
         assert_eq!(rel.name, "myapp");
     }
@@ -1180,9 +1327,8 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "1.0.0");
-        use crate::update::AsyncFetch;
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -1228,9 +1374,10 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn is_update_available_async_true_then_false() {
-        // A1 (async): the s3 backend inherits `is_update_available_async`. The bucket's newest
-        // release is 2.0.0, so an update is available from 1.0.0 but not from 2.0.0. A fresh stub
-        // is needed per call because the loopback server serves one response per connection.
+        // D2 (async): the pre-check is `get_latest_release_async().await?.is_update_available()`.
+        // The bucket's newest release is 2.0.0, so an update is available from 1.0.0 but not from
+        // 2.0.0. A fresh stub is needed per call because the loopback server serves one response
+        // per connection.
         let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"]);
         let base = stub(vec![Resp {
             status: "200 OK",
@@ -1238,7 +1385,11 @@ mod tests {
         }]);
         let upd = s3_update(&base, "1.0.0");
         assert!(
-            upd.is_update_available_async().await.unwrap(),
+            upd.get_latest_release_async()
+                .await
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.0.0 > 1.0.0 => update available"
         );
 
@@ -1248,7 +1399,11 @@ mod tests {
         }]);
         let upd = s3_update(&base, "2.0.0");
         assert!(
-            !upd.is_update_available_async().await.unwrap(),
+            !upd.get_latest_release_async()
+                .await
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.0.0 not newer than 2.0.0 => no update"
         );
     }
@@ -1264,7 +1419,8 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "0.1.0");
-        let rel = upd.get_latest_release_async().await.unwrap();
+        let releases = upd.get_latest_release_async().await.unwrap();
+        let rel = releases.latest().expect("one-element Releases");
         assert_eq!(rel.version, "3.0.0");
         assert_eq!(
             rel.assets.len(),

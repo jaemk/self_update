@@ -125,7 +125,7 @@ use std::sync::Arc;
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig};
 use crate::errors::*;
-use crate::update::{Release, ReleaseSource, ReleaseUpdate};
+use crate::update::{Release, ReleaseSource, ReleaseUpdate, Releases};
 
 /// `custom::Update` builder.
 ///
@@ -185,6 +185,7 @@ impl UpdateBuilder {
 }
 
 /// Updates to a specified or latest release from a user-defined [`ReleaseSource`].
+#[non_exhaustive]
 pub struct Update {
     source: Arc<dyn ReleaseSource>,
     common: CommonConfig,
@@ -211,12 +212,16 @@ impl crate::update::sealed::Sealed for Update {}
 impl_update_config_accessors!(Update);
 
 impl ReleaseUpdate for Update {
-    fn get_latest_release(&self) -> Result<Release> {
-        self.source.get_latest_release()
+    fn get_latest_release(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = self.source.get_latest_release()?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        self.source.get_latest_releases(current_version)
+    fn get_latest_releases(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = self.source.get_latest_releases(&current_version)?;
+        Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -294,6 +299,7 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdateBuilder<S> {
 ///
 /// Generic over the source (no trait object), so the source's `async fn`s need no boxing.
 #[cfg(feature = "async")]
+#[non_exhaustive]
 pub struct AsyncUpdate<S: crate::update::AsyncReleaseSource> {
     source: Arc<S>,
     common: CommonConfig,
@@ -327,11 +333,15 @@ impl_update_config_accessors!(AsyncUpdate<S>, where (S: crate::update::AsyncRele
 
 #[cfg(feature = "async")]
 impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncFetch for AsyncUpdate<S> {
-    async fn get_latest_release_async(&self) -> Result<Release> {
-        self.source.get_latest_release().await
+    async fn get_latest_release_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = self.source.get_latest_release().await?;
+        Ok(Releases::new(vec![release], current_version))
     }
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
-        self.source.get_latest_releases(current_version).await
+    async fn get_latest_releases_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = self.source.get_latest_releases(&current_version).await?;
+        Ok(Releases::new(releases, current_version))
     }
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
         self.source.get_release_version(ver).await
@@ -463,12 +473,18 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let upd = configured(calls.clone());
 
-        let rel = upd.get_latest_release().unwrap();
+        let latest = upd.get_latest_release().unwrap();
+        let rel = latest.latest().expect("one-element Releases");
         assert_eq!(rel.version, "2.0.0");
         assert_eq!(rel.assets.len(), 1);
+        assert_eq!(
+            latest.all().len(),
+            1,
+            "get_latest_release yields one element"
+        );
 
-        let rels = upd.get_latest_releases("1.0.0").unwrap();
-        assert_eq!(rels.len(), 1);
+        let rels = upd.get_latest_releases().unwrap();
+        assert_eq!(rels.all().len(), 1);
 
         let tagged = upd.get_release_version("1.5.0").unwrap();
         assert_eq!(tagged.version, "1.5.0");
@@ -489,18 +505,21 @@ mod tests {
 
     #[test]
     fn is_update_available_true_when_latest_is_newer() {
-        // A1: the custom backend inherits `is_update_available` from `ReleaseUpdate`. FakeSource's
-        // latest release is 2.0.0; with current_version 1.0.0 an update is available.
+        // D1: the pre-check now lives on `Releases`. FakeSource's latest release is 2.0.0; with
+        // current_version 1.0.0 an update is available.
         let upd = configured(Arc::new(AtomicUsize::new(0)));
         assert!(
-            upd.is_update_available().unwrap(),
+            upd.get_latest_releases()
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.0.0 > 1.0.0 => update available"
         );
     }
 
     #[test]
     fn is_update_available_false_when_latest_not_newer() {
-        // A1 complement: when current_version equals the latest release version, no update is
+        // D1 complement: when current_version equals the latest release version, no update is
         // available. FakeSource reports 2.0.0, so configure current_version at 2.0.0.
         let upd = Update::configure()
             .source(FakeSource {
@@ -512,15 +531,33 @@ mod tests {
             .build()
             .unwrap();
         assert!(
-            !upd.is_update_available().unwrap(),
+            !upd.get_latest_releases()
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "latest (2.0.0) is not newer than current (2.0.0) => no update"
+        );
+    }
+
+    #[test]
+    fn get_latest_release_carries_current_version_for_the_precheck() {
+        // D1: `get_latest_release` returns a one-element `Releases` carrying the configured
+        // current_version, so `.is_update_available()` works directly off the single newest
+        // release without a second fetch.
+        let upd = configured(Arc::new(AtomicUsize::new(0)));
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(releases.all().len(), 1);
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.0.0 > 1.0.0 via the one-element Releases pre-check"
         );
     }
 
     #[test]
     fn selects_asset_from_a_source_release() {
         let upd = configured(Arc::new(AtomicUsize::new(0)));
-        let rel = upd.get_latest_release().unwrap();
+        let releases = upd.get_latest_release().unwrap();
+        let rel = releases.latest().expect("one-element Releases");
         // The crate's asset selection runs over the source's release just like any backend.
         let asset = rel
             .asset_for("x86_64-unknown-linux-gnu", None)
@@ -739,14 +776,13 @@ mod tests {
                 .build_async()
                 .unwrap();
 
-            let rel = upd.get_latest_release_async().await.unwrap();
+            let latest_releases = upd.get_latest_release_async().await.unwrap();
+            let rel = latest_releases.latest().expect("one-element Releases");
             assert_eq!(rel.version, "2.0.0");
             assert_eq!(rel.assets.len(), 1);
 
-            let rels = AsyncFetch::get_latest_releases_async(&upd, "1.0.0")
-                .await
-                .unwrap();
-            assert_eq!(rels.len(), 1);
+            let rels = AsyncFetch::get_latest_releases_async(&upd).await.unwrap();
+            assert_eq!(rels.all().len(), 1);
 
             let tagged = AsyncFetch::get_release_version_async(&upd, "1.5.0")
                 .await
@@ -794,13 +830,19 @@ mod tests {
 
             // The async fetches run the sync source's methods on spawn_blocking and return them.
             assert_eq!(
-                upd.get_latest_release_async().await.unwrap().version,
+                upd.get_latest_release_async()
+                    .await
+                    .unwrap()
+                    .latest()
+                    .unwrap()
+                    .version,
                 "3.0.0"
             );
             assert_eq!(
-                AsyncFetch::get_latest_releases_async(&upd, "1.0.0")
+                AsyncFetch::get_latest_releases_async(&upd)
                     .await
                     .unwrap()
+                    .all()
                     .len(),
                 1
             );
@@ -1110,8 +1152,9 @@ mod tests {
 
         #[tokio::test]
         async fn is_update_available_async_true_then_false() {
-            // A1 (async): `is_update_available_async` is inherent on `AsyncUpdate`. The native
-            // source's latest is 2.0.0, so an update is available from 1.0.0 but not from 2.0.0.
+            // D2 (async): the pre-check is `get_latest_releases_async().await?.is_update_available()`.
+            // The native source's latest is 2.0.0, so an update is available from 1.0.0 but not
+            // from 2.0.0.
             let mk = |cur: &str| {
                 AsyncUpdate::configure()
                     .source(NativeAsyncSource {
@@ -1126,11 +1169,21 @@ mod tests {
                     .unwrap()
             };
             assert!(
-                mk("1.0.0").is_update_available_async().await.unwrap(),
+                mk("1.0.0")
+                    .get_latest_releases_async()
+                    .await
+                    .unwrap()
+                    .is_update_available()
+                    .unwrap(),
                 "2.0.0 > 1.0.0 => update available"
             );
             assert!(
-                !mk("2.0.0").is_update_available_async().await.unwrap(),
+                !mk("2.0.0")
+                    .get_latest_releases_async()
+                    .await
+                    .unwrap()
+                    .is_update_available()
+                    .unwrap(),
                 "2.0.0 not newer than 2.0.0 => no update"
             );
         }

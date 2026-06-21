@@ -311,10 +311,9 @@ macro_rules! impl_common_builder_setters {
         /// This also supports variable paths:
         /// - `{{ bin }}` is replaced with the value of `bin_name`
         /// - `{{ target }}` is replaced with the value of `target`
-        /// - `{{ version }}` is replaced with the configured `release_tag` if set,
-        ///   otherwise the value of the latest available release version is used. This is the bare
-        ///   semver (e.g. `1.2.3`); the built-in backends strip a leading `v` from the release tag,
-        ///   so a tag like `v1.2.3` substitutes as `1.2.3`.
+        /// - `{{ version }}` is replaced with the resolved release version — the bare semver of the
+        ///   release that the update actually installs, with any leading `v` stripped (e.g. `1.2.3`
+        ///   for a `v1.2.3` tag) — regardless of the raw `release_tag` you configured.
         ///
         /// For example, a value of `"{{ target }}-{{ version }}-bin/{{ bin }}"` extracts the
         /// `bin` from a `target`/`version`-named subdirectory of the archive.
@@ -461,22 +460,24 @@ macro_rules! impl_async_update_methods {
             crate::update::update_extended_async(self).await
         }
 
-        /// Async sibling of `get_latest_release`: fetch the latest release from the backend.
+        /// Async sibling of `get_latest_release`: fetch the single newest release from the
+        /// backend, as a one-element [`Releases`](crate::update::Releases). Call
+        /// `.is_update_available()` / `.latest()` on the result for a lightweight pre-check
+        /// without downloading or installing anything.
         pub async fn get_latest_release_async(
             &self,
-        ) -> crate::errors::Result<crate::update::Release> {
+        ) -> crate::errors::Result<crate::update::Releases> {
             crate::update::AsyncFetch::get_latest_release_async(self).await
         }
 
-        /// Async sibling of `is_update_available`: returns `true` when the backend's latest
-        /// release is strictly newer than the configured `current_version`, without downloading
-        /// or installing anything (only the release-listing request is made).
-        pub async fn is_update_available_async(&self) -> crate::errors::Result<bool> {
-            let latest = crate::update::AsyncFetch::get_latest_release_async(self).await?;
-            crate::version::bump_is_greater(
-                crate::update::UpdateConfig::current_version(self),
-                &latest.version,
-            )
+        /// Async sibling of `get_latest_releases`: fetch the candidate releases from the backend
+        /// as a [`Releases`](crate::update::Releases) (newest-first). Call
+        /// `.is_update_available()` on the result for a lightweight "is there anything to do?"
+        /// check without downloading or installing anything.
+        pub async fn get_latest_releases_async(
+            &self,
+        ) -> crate::errors::Result<crate::update::Releases> {
+            crate::update::AsyncFetch::get_latest_releases_async(self).await
         }
     };
 }

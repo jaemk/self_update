@@ -8,7 +8,7 @@ use crate::backends::{collect_paginated, first_page_url, next_link, send};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
-    update::{Release, ReleaseAsset, ReleaseUpdate},
+    update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
 
 impl ReleaseAsset {
@@ -264,6 +264,7 @@ impl Update {
 
 /// Updates to a specified or latest release distributed via GitHub
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Update {
     repo_owner: String,
     repo_name: String,
@@ -287,8 +288,9 @@ impl Update {
 
 impl crate::update::sealed::Sealed for Update {}
 
-impl ReleaseUpdate for Update {
-    fn get_latest_release(&self) -> Result<Release> {
+impl Update {
+    /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
+    fn fetch_latest_release(&self) -> Result<Release> {
         let api_url = format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base(),
@@ -304,7 +306,9 @@ impl ReleaseUpdate for Update {
         Release::from_release(&json)
     }
 
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+    /// Fetch the full release list, keeping only those newer than `current_version` (network
+    /// helper; returns a bare `Vec<Release>`). `current_version` still bounds the filter.
+    fn fetch_newer_releases(&self, current_version: &str) -> Result<Vec<Release>> {
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.api_base(),
@@ -320,6 +324,20 @@ impl ReleaseUpdate for Update {
             .into_iter()
             .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
             .collect())
+    }
+}
+
+impl ReleaseUpdate for Update {
+    fn get_latest_release(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = self.fetch_latest_release()?;
+        Ok(Releases::new(vec![release], current_version))
+    }
+
+    fn get_latest_releases(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = self.fetch_newer_releases(&current_version)?;
+        Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -398,8 +416,9 @@ async fn fetch_all_releases_async(
 
 #[cfg(feature = "async")]
 impl crate::update::AsyncFetch for Update {
-    async fn get_latest_release_async(&self) -> Result<Release> {
+    async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::send_async;
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base(),
@@ -413,10 +432,12 @@ impl crate::update::AsyncFetch for Update {
         )
         .await?;
         let json = resp.json::<serde_json::Value>().await?;
-        Release::from_release(&json)
+        let release = Release::from_release(&json)?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
+    async fn get_latest_releases_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.api_base(),
@@ -429,10 +450,11 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        Ok(releases
+        let releases = releases
             .into_iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .collect())
+            .filter(|r| bump_is_greater(&current_version, &r.version).unwrap_or(false))
+            .collect();
+        Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -527,7 +549,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "async")]
     fn release_obj_json(tag: &str) -> String {
         format!(
             r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[]}}"#
@@ -585,7 +606,8 @@ mod tests {
             .url(&base)
             .build_async()
             .unwrap();
-        let rel = upd.get_latest_release_async().await.unwrap();
+        let releases = upd.get_latest_release_async().await.unwrap();
+        let rel = releases.latest().expect("one-element Releases");
         assert_eq!(rel.version, "3.1.0");
     }
 
@@ -613,6 +635,129 @@ mod tests {
             .unwrap();
         let status = upd.update_extended_async().await.unwrap();
         assert!(status.is_up_to_date(), "an older release means up-to-date");
+    }
+
+    #[test]
+    fn get_latest_releases_sync_returns_releases_and_precheck() {
+        // D1 (sync, github): `get_latest_releases()` returns a `Releases` carrying the configured
+        // current version; `.is_update_available()` / `.latest()` work off it without a 2nd fetch.
+        // The stub lists v2.0.0 and v0.9.0; with current 1.0.0 only 2.0.0 is newer.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v2.0.0","created_at":"2020-01-01T00:00:00Z","name":"v2.0.0","assets":[]},{"tag_name":"v0.9.0","created_at":"2020-01-01T00:00:00Z","name":"v0.9.0","assets":[]}]"#.to_string(),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("1.0.0")
+            .url(&base)
+            .build()
+            .unwrap();
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["2.0.0"], "only strictly-newer releases kept");
+        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.0.0 > 1.0.0 via the returned Releases"
+        );
+    }
+
+    fn github_update_sync(
+        base: &str,
+        current_version: &str,
+    ) -> Box<dyn crate::update::ReleaseUpdate> {
+        super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version(current_version)
+            .url(base)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn get_latest_release_sync_wraps_single_object_into_one_element_releases() {
+        // gap #4 (sync, github): `get_latest_release` hits `/releases/latest`, which returns a
+        // single release *object* (not an array). The sync path must parse that bare object,
+        // strip the leading `v`, and wrap it in a one-element `Releases` carrying the current
+        // version, so `.is_update_available()` works off the single newest release.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v3.1.0"),
+            }]
+        });
+        let upd = github_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(
+            releases.all().len(),
+            1,
+            "get_latest_release yields a one-element Releases"
+        );
+        assert_eq!(releases.latest().unwrap().version, "3.1.0");
+        assert!(
+            releases.is_update_available().unwrap(),
+            "3.1.0 > 1.0.0 via the one-element Releases pre-check"
+        );
+    }
+
+    #[test]
+    fn get_latest_release_sync_reports_not_available_when_newest_equals_current() {
+        // gap #4 (sync, github): `/releases/latest` returns the newest tag even when it equals the
+        // current version, so the one-element `Releases` must report not-available (no false
+        // positive), agreeing with the strictly-newer-filtered list path.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v1.0.0"),
+            }]
+        });
+        let upd = github_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(releases.latest().unwrap().version, "1.0.0");
+        assert!(
+            !releases.is_update_available().unwrap(),
+            "newest (1.0.0) == current => not available on the one-element path"
+        );
+    }
+
+    #[test]
+    fn update_extended_sync_reports_up_to_date_through_the_orchestrator() {
+        // gap #3 (sync, git backend): the sync `update_extended()` orchestrator must drive
+        // fetch -> choose_latest_release(releases.into_vec()) to an UpToDate outcome when the only
+        // listed release is older than current, without touching the download. This is the git
+        // backend analogue of the custom-backend sync end-to-end tests and the github *async*
+        // up-to-date test.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("2.0.0")
+            .url(&base)
+            .no_confirm(true)
+            .show_output(false)
+            .build()
+            .unwrap();
+        let status = upd.update_extended().unwrap();
+        assert!(
+            status.is_up_to_date(),
+            "an older listed release means up-to-date through the sync orchestrator"
+        );
     }
 
     #[test]

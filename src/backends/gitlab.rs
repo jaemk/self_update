@@ -8,7 +8,7 @@ use crate::backends::{collect_paginated, first_page_url, next_link, send};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
-    update::{Release, ReleaseAsset, ReleaseUpdate},
+    update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
 
 impl ReleaseAsset {
@@ -268,6 +268,7 @@ impl Update {
 
 /// Updates to a specified or latest release distributed via Gitlab
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Update {
     host: String,
     repo_owner: String,
@@ -293,8 +294,9 @@ impl Update {
 
 impl crate::update::sealed::Sealed for Update {}
 
-impl ReleaseUpdate for Update {
-    fn get_latest_release(&self) -> Result<Release> {
+impl Update {
+    /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
+    fn fetch_latest_release(&self) -> Result<Release> {
         let api_url = self.releases_url();
         let resp = send(
             &api_url,
@@ -311,7 +313,9 @@ impl ReleaseUpdate for Update {
         Release::from_release_gitlab(&releases[0])
     }
 
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+    /// Fetch the full (paginated) release list, keeping only those newer than `current_version`
+    /// (network helper; returns a bare `Vec<Release>`). `current_version` still bounds the filter.
+    fn fetch_newer_releases(&self, current_version: &str) -> Result<Vec<Release>> {
         let api_url = self.releases_url();
         let releases = fetch_all_releases(
             &api_url,
@@ -322,6 +326,20 @@ impl ReleaseUpdate for Update {
             .into_iter()
             .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
             .collect())
+    }
+}
+
+impl ReleaseUpdate for Update {
+    fn get_latest_release(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = self.fetch_latest_release()?;
+        Ok(Releases::new(vec![release], current_version))
+    }
+
+    fn get_latest_releases(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = self.fetch_newer_releases(&current_version)?;
+        Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -405,8 +423,9 @@ async fn fetch_all_releases_async(
 
 #[cfg(feature = "async")]
 impl crate::update::AsyncFetch for Update {
-    async fn get_latest_release_async(&self) -> Result<Release> {
+    async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::send_async;
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = self.releases_url();
         let resp = send_async(
             &api_url,
@@ -421,10 +440,12 @@ impl crate::update::AsyncFetch for Update {
         if releases.is_empty() {
             bail!(Error::Release, "no releases found");
         }
-        Release::from_release_gitlab(&releases[0])
+        let release = Release::from_release_gitlab(&releases[0])?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
+    async fn get_latest_releases_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = self.releases_url();
         let releases = fetch_all_releases_async(
             &api_url,
@@ -432,10 +453,11 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        Ok(releases
+        let releases = releases
             .into_iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .collect())
+            .filter(|r| bump_is_greater(&current_version, &r.version).unwrap_or(false))
+            .collect();
+        Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -643,8 +665,8 @@ mod tests {
         });
         let upd = gitlab_update(&base, "0.1.0");
 
-        let rel = upd.get_latest_release_async().await.unwrap();
-        assert_eq!(rel.version, "2.5.0");
+        let releases = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(releases.latest().unwrap().version, "2.5.0");
     }
 
     #[cfg(feature = "async")]
@@ -685,11 +707,11 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn is_update_available_async_true_when_latest_is_newer() {
-        // A1 (async): the gitlab backend exposes `is_update_available_async` on the concrete
-        // `Update` (via `impl_async_update_methods!`). It must report an available update when the
-        // backend's latest release is newer than the current version, using only the listing
-        // request (no download/install). github/gitea share the identical generated method, so
-        // covering one git backend's async A1 path exercises the shared code path.
+        // D2 (async): the pre-check is now `get_latest_release_async().await?.is_update_available()`
+        // on the returned `Releases`. It must report an available update when the backend's latest
+        // release is newer than the current version, using only the listing request (no
+        // download/install). github/gitea share the identical generated method, so covering one git
+        // backend's async path exercises the shared code path.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -699,7 +721,11 @@ mod tests {
         });
         let upd = gitlab_update(&base, "0.1.0");
         assert!(
-            upd.is_update_available_async().await.unwrap(),
+            upd.get_latest_release_async()
+                .await
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.5.0 > 0.1.0 => async update available"
         );
     }
@@ -707,7 +733,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn is_update_available_async_false_when_latest_not_newer() {
-        // A1 (async) complement: no update when current >= latest.
+        // D2 (async) complement: no update when current >= latest.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -717,7 +743,11 @@ mod tests {
         });
         let upd = gitlab_update(&base, "2.5.0");
         assert!(
-            !upd.is_update_available_async().await.unwrap(),
+            !upd.get_latest_release_async()
+                .await
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.5.0 not newer than 2.5.0 => no async update"
         );
     }
@@ -725,9 +755,9 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn is_update_available_async_propagates_empty_array_error() {
-        // A1 (async): an empty releases array yields no latest release; the error from
-        // `get_latest_release_async` must propagate out of `is_update_available_async` rather than
-        // being swallowed into `Ok(false)`.
+        // D2 (async): an empty releases array yields no latest release; the error from
+        // `get_latest_release_async` must propagate (rather than being swallowed into `Ok(false)`)
+        // when the caller chains `.is_update_available()` — the error happens at the fetch.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -736,11 +766,11 @@ mod tests {
             }]
         });
         let upd = gitlab_update(&base, "0.1.0");
-        let res = upd.is_update_available_async().await;
+        let res = upd.get_latest_release_async().await;
         assert!(
             matches!(res, Err(crate::errors::Error::Release(_))),
             "an empty releases array must propagate as Error::Release out of \
-             is_update_available_async, got {:?}",
+             get_latest_release_async, got {:?}",
             res
         );
     }
@@ -777,8 +807,8 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -799,11 +829,11 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        let releases = upd.get_latest_releases_async().await.unwrap();
         assert!(
-            releases.is_empty(),
+            releases.all().is_empty(),
             "no release newer than current => empty list, got {:?}",
-            releases
+            releases.all()
         );
     }
 
@@ -828,8 +858,8 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["3.0.0"],
@@ -1233,8 +1263,8 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "0.1.0");
-        let rel = upd.get_latest_release().unwrap();
-        assert_eq!(rel.version, "2.5.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(releases.latest().unwrap().version, "2.5.0");
     }
 
     #[test]
@@ -1249,8 +1279,8 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases("1.0.0").unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -1296,8 +1326,8 @@ mod tests {
 
     #[test]
     fn is_update_available_sync_true_when_latest_is_newer() {
-        // A1 (sync): the gitlab backend inherits `is_update_available` from `ReleaseUpdate`. The
-        // stub's newest release is 2.5.0, so an update is available from 0.1.0.
+        // D1 (sync): the pre-check is now `get_latest_releases()?.is_update_available()`. The stub's
+        // newest release is 2.5.0, so an update is available from 0.1.0.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -1307,15 +1337,19 @@ mod tests {
         });
         let upd = gl_update(&base, "0.1.0");
         assert!(
-            upd.is_update_available().unwrap(),
+            upd.get_latest_releases()
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.5.0 > 0.1.0 => update available"
         );
     }
 
     #[test]
     fn is_update_available_sync_false_when_latest_not_newer() {
-        // A1 complement: when the current version is at/above the latest release, no update is
-        // available. `get_latest_release` returns the single release (2.5.0); current is 2.5.0.
+        // D1 complement: when the current version is at/above the latest release, no update is
+        // available. `get_latest_releases` returns the single newer-filtered list (empty here);
+        // current is 2.5.0, so nothing is newer.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -1325,37 +1359,18 @@ mod tests {
         });
         let upd = gl_update(&base, "2.5.0");
         assert!(
-            !upd.is_update_available().unwrap(),
+            !upd.get_latest_releases()
+                .unwrap()
+                .is_update_available()
+                .unwrap(),
             "2.5.0 not newer than 2.5.0 => no update"
         );
     }
 
     #[test]
-    fn is_update_available_sync_propagates_empty_array_error() {
-        // A1 (sync): `is_update_available` calls `get_latest_release` first. When the backend
-        // returns an empty releases array (no latest release), the error must propagate out of
-        // `is_update_available` rather than being swallowed into `Ok(false)`.
-        let base = stub(|_| {
-            vec![Resp {
-                status: "200 OK",
-                link: None,
-                body: "[]".to_string(),
-            }]
-        });
-        let upd = gl_update(&base, "0.1.0");
-        let res = upd.is_update_available();
-        assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
-            "an empty releases array must propagate as Error::Release out of \
-             is_update_available, got {:?}",
-            res
-        );
-    }
-
-    #[test]
     fn is_update_available_sync_propagates_non_2xx_error() {
-        // A1 (sync): a backend HTTP failure (500) during the listing request must propagate out
-        // of `is_update_available`, not be hidden as "no update available".
+        // D1 (sync): a backend HTTP failure (500) during the listing request must propagate out
+        // of `get_latest_releases`, not be hidden as "no update available".
         let base = stub(|_| {
             vec![Resp {
                 status: "500 Internal Server Error",
@@ -1364,11 +1379,11 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "0.1.0");
-        let res = upd.is_update_available();
+        let res = upd.get_latest_releases();
         assert!(
             res.is_err(),
             "a non-2xx listing response must propagate as an error out of \
-             is_update_available, got {:?}",
+             get_latest_releases, got {:?}",
             res
         );
     }

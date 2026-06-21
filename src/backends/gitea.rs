@@ -7,7 +7,7 @@ use crate::http_client::{header, HttpResponse};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
-    update::{Release, ReleaseAsset, ReleaseUpdate},
+    update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
 
 impl ReleaseAsset {
@@ -288,6 +288,7 @@ impl Update {
 
 /// Updates to a specified or latest release distributed via gitea
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Update {
     host: String,
     repo_owner: String,
@@ -311,8 +312,9 @@ impl Update {
 
 impl crate::update::sealed::Sealed for Update {}
 
-impl ReleaseUpdate for Update {
-    fn get_latest_release(&self) -> Result<Release> {
+impl Update {
+    /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
+    fn fetch_latest_release(&self) -> Result<Release> {
         let api_url = self.releases_url();
         let resp = send(
             &api_url,
@@ -329,7 +331,9 @@ impl ReleaseUpdate for Update {
         Release::from_release_gitea(&releases[0])
     }
 
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+    /// Fetch the full (paginated) release list, keeping only those newer than `current_version`
+    /// (network helper; returns a bare `Vec<Release>`). `current_version` still bounds the filter.
+    fn fetch_newer_releases(&self, current_version: &str) -> Result<Vec<Release>> {
         let api_url = self.releases_url();
         let releases = fetch_all_releases(
             &api_url,
@@ -340,6 +344,20 @@ impl ReleaseUpdate for Update {
             .into_iter()
             .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
             .collect())
+    }
+}
+
+impl ReleaseUpdate for Update {
+    fn get_latest_release(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let release = self.fetch_latest_release()?;
+        Ok(Releases::new(vec![release], current_version))
+    }
+
+    fn get_latest_releases(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
+        let releases = self.fetch_newer_releases(&current_version)?;
+        Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -412,8 +430,9 @@ async fn fetch_all_releases_async(
 
 #[cfg(feature = "async")]
 impl crate::update::AsyncFetch for Update {
-    async fn get_latest_release_async(&self) -> Result<Release> {
+    async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::send_async;
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = self.releases_url();
         let resp = send_async(
             &api_url,
@@ -428,10 +447,12 @@ impl crate::update::AsyncFetch for Update {
         if releases.is_empty() {
             bail!(Error::Release, "no releases found");
         }
-        Release::from_release_gitea(&releases[0])
+        let release = Release::from_release_gitea(&releases[0])?;
+        Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self, current_version: &str) -> Result<Vec<Release>> {
+    async fn get_latest_releases_async(&self) -> Result<Releases> {
+        let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let api_url = self.releases_url();
         let releases = fetch_all_releases_async(
             &api_url,
@@ -439,10 +460,11 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        Ok(releases
+        let releases = releases
             .into_iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .collect())
+            .filter(|r| bump_is_greater(&current_version, &r.version).unwrap_or(false))
+            .collect();
+        Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -484,12 +506,9 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
 mod tests {
     use super::Update;
 
-    #[cfg(feature = "async")]
     use std::io::{Read, Write};
-    #[cfg(feature = "async")]
     use std::net::TcpListener;
 
-    #[cfg(feature = "async")]
     struct Resp {
         status: &'static str,
         link: Option<String>,
@@ -499,7 +518,6 @@ mod tests {
     /// Bind a loopback listener and serve `make(base_url)`'s responses in order, one per
     /// incoming connection, on a background thread. Returns the server's base URL
     /// (`http://127.0.0.1:<port>`). No external network is used.
-    #[cfg(feature = "async")]
     fn stub(make: impl FnOnce(&str) -> Vec<Resp>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -532,7 +550,6 @@ mod tests {
     }
 
     /// A JSON array of one release (used by the async pagination and latest-release tests).
-    #[cfg(feature = "async")]
     fn release_json(tag: &str) -> String {
         format!(
             r#"[{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[],"body":null}}]"#
@@ -541,7 +558,6 @@ mod tests {
 
     /// A JSON array of several releases (one object per `tag`), used by the
     /// `get_latest_releases_async` filtering test.
-    #[cfg(feature = "async")]
     fn releases_json(tags: &[&str]) -> String {
         let objs = tags
             .iter()
@@ -574,6 +590,141 @@ mod tests {
             .current_version(current_version)
             .build_async()
             .unwrap()
+    }
+
+    /// Build a `ReleaseUpdate` (sync) gitea `Update` pointed at the loopback stub.
+    fn gitea_update_sync(
+        base: &str,
+        current_version: &str,
+    ) -> Box<dyn crate::update::ReleaseUpdate> {
+        Update::configure()
+            .url(base)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version(current_version)
+            .build()
+            .unwrap()
+    }
+
+    // --- Sync `Releases`-returning fetch coverage (gap #2) ------------------------------------
+    //
+    // The async fetch methods were exercised above; these pin the *sync* `ReleaseUpdate` fetch
+    // methods on the same loopback stub, proving they wrap into a `Releases` carrying the
+    // configured current version and that `latest()`/`all()`/`is_update_available()` work off it.
+
+    #[test]
+    fn get_latest_release_sync_wraps_newest_into_one_element_releases() {
+        // `get_latest_release` parses the first element of the gitea releases array and wraps it
+        // in a one-element `Releases` carrying the configured current version, so the pre-check
+        // works directly off that single release without a second fetch.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.5.0"),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(
+            releases.all().len(),
+            1,
+            "get_latest_release yields a one-element Releases"
+        );
+        assert_eq!(releases.latest().unwrap().version, "2.5.0");
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.5.0 > 1.0.0 via the one-element Releases pre-check"
+        );
+    }
+
+    #[test]
+    fn get_latest_releases_sync_returns_releases_and_filters_to_newer() {
+        // `get_latest_releases` (sync) follows pagination, filters to strictly-newer releases,
+        // wraps them in a `Releases`, and the returned `Releases` agrees on availability with the
+        // list path.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0"],
+            "only releases strictly newer than the current version are kept, in order"
+        );
+        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert!(
+            releases.is_update_available().unwrap(),
+            "the list path reports an update available when something newer exists"
+        );
+    }
+
+    #[test]
+    fn get_latest_releases_sync_reports_no_update_when_up_to_date() {
+        // gap #4 (sync, gitea): when nothing is strictly newer, the strictly-newer-filtered list
+        // path is empty and `is_update_available()` must report false (no panic, no error).
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v1.0.0", "v0.9.0"]),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_releases().unwrap();
+        assert!(releases.all().is_empty(), "no newer release => empty list");
+        assert!(
+            !releases.is_update_available().unwrap(),
+            "empty list => no update available"
+        );
+    }
+
+    #[test]
+    fn get_latest_release_sync_agrees_with_list_path_when_newest_equals_current() {
+        // gap #4 (sync, gitea): the one-element `get_latest_release` path wraps the newest tag even
+        // when it equals current, so its `is_update_available()` must report false; the
+        // strictly-newer-filtered `get_latest_releases` path must agree (empty => false). Both
+        // paths must answer "not available" off the same stubbed listing.
+        let make_body = || {
+            // get_latest_release reads the FIRST element; place the newest (equal to current) first.
+            releases_json(&["v1.0.0", "v0.9.0"])
+        };
+
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: make_body(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "1.0.0");
+        let single = upd.get_latest_release().unwrap();
+        assert_eq!(single.latest().unwrap().version, "1.0.0");
+        assert!(
+            !single.is_update_available().unwrap(),
+            "get_latest_release: newest (1.0.0) == current => not available"
+        );
+
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: make_body(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "1.0.0");
+        let list = upd.get_latest_releases().unwrap();
+        assert!(
+            !list.is_update_available().unwrap(),
+            "get_latest_releases: nothing strictly newer => not available (agrees with single path)"
+        );
     }
 
     #[test]
@@ -770,8 +921,8 @@ mod tests {
             .current_version("0.1.0")
             .build_async()
             .unwrap();
-        let rel = upd.get_latest_release_async().await.unwrap();
-        assert_eq!(rel.version, "2.5.0");
+        let releases = upd.get_latest_release_async().await.unwrap();
+        assert_eq!(releases.latest().unwrap().version, "2.5.0");
     }
 
     #[cfg(feature = "async")]
@@ -861,10 +1012,9 @@ mod tests {
                 body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
             }]
         });
-        use crate::update::AsyncFetch;
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -884,13 +1034,12 @@ mod tests {
                 body: releases_json(&["v1.0.0", "v0.9.0"]),
             }]
         });
-        use crate::update::AsyncFetch;
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
+        let releases = upd.get_latest_releases_async().await.unwrap();
         assert!(
-            releases.is_empty(),
+            releases.all().is_empty(),
             "no release newer than current => empty list, got {:?}",
-            releases
+            releases.all()
         );
     }
 
@@ -913,10 +1062,9 @@ mod tests {
                 },
             ]
         });
-        use crate::update::AsyncFetch;
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async("1.0.0").await.unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
         assert_eq!(
             versions,
             vec!["3.0.0"],

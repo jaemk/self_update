@@ -227,6 +227,37 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Checking for an update without installing
+
+To check whether a newer release exists without downloading or installing anything, fetch the
+releases once and query the returned [`Releases`](update::Releases). The updater no longer has an
+`is_update_available()` method; instead call `get_latest_releases()` (the full candidate list) or
+`get_latest_release()` (a one-element list with just the newest release), then ask the result:
+`.is_update_available()` compares the newest fetched release against the configured
+`current_version`, and `.latest()` / `.all()` expose the releases themselves. The fetch happens
+once; every query reads the already-fetched data.
+
+```rust
+fn check() -> Result<(), Box<dyn std::error::Error>> {
+    let releases = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .build()?
+        .get_latest_releases()?;
+
+    if releases.is_update_available()? {
+        if let Some(latest) = releases.latest() {
+            println!("update available: {}", latest.version);
+        }
+    } else {
+        println!("already up to date");
+    }
+    Ok(())
+}
+```
+
 ### Listing releases (`ReleaseList`)
 
 Each built-in backend exposes a `ReleaseList` builder for fetching the list of available releases
@@ -412,7 +443,8 @@ pub use reqwest;
 #[cfg(feature = "async")]
 pub use update::AsyncReleaseSource;
 pub use update::{
-    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, UpdateConfig, UpdateStatus,
+    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, Releases, UpdateConfig,
+    UpdateStatus,
 };
 #[cfg(feature = "ureq")]
 pub use ureq;
@@ -520,7 +552,7 @@ impl Status {
     }
 
     /// Returns `true` if `Status::Updated`
-    pub fn updated(&self) -> bool {
+    pub fn is_updated(&self) -> bool {
         matches!(*self, Status::Updated(_))
     }
 }
@@ -1419,9 +1451,9 @@ mod tests {
     fn status_is_up_to_date() {
         assert!(Status::UpToDate("1.2.3".to_string()).is_up_to_date());
         assert!(!Status::Updated("1.2.3".to_string()).is_up_to_date());
-        // `updated()` is the complement.
-        assert!(Status::Updated("1.2.3".to_string()).updated());
-        assert!(!Status::UpToDate("1.2.3".to_string()).updated());
+        // `is_updated()` is the complement.
+        assert!(Status::Updated("1.2.3".to_string()).is_updated());
+        assert!(!Status::UpToDate("1.2.3".to_string()).is_updated());
     }
 
     #[test]

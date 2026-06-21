@@ -34,7 +34,11 @@ pub enum Error {
     #[cfg(feature = "archive-zip")]
     Zip(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over a `serde_json::Error`.
-    Json(serde_json::Error),
+    ///
+    /// The concrete error is boxed so that the public API does not change when the underlying
+    /// `serde_json` implementation evolves. Use [`std::error::Error::source`] to inspect the
+    /// underlying error.
+    Json(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over the active HTTP client's error type (`reqwest` or `ureq`).
     ///
     /// The concrete error is boxed so that the public API does not change when the
@@ -42,7 +46,11 @@ pub enum Error {
     /// to inspect the underlying error.
     Http(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over a `semver::Error`.
-    SemVer(semver::Error),
+    ///
+    /// The concrete error is boxed so that the public API does not change when the underlying
+    /// `semver` implementation evolves. Use [`std::error::Error::source`] to inspect the
+    /// underlying error.
+    SemVer(Box<dyn std::error::Error + Send + Sync>),
     /// Used when the `archive-zip` feature is not enabled.
     ArchiveNotEnabled(String),
     /// Used when the repository archive does not contain any signatures to verify with.
@@ -103,9 +111,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match *self {
             Error::Io(ref e) => e,
-            Error::Json(ref e) => e,
+            Error::Json(ref e) => &**e,
             Error::Http(ref e) => &**e,
-            Error::SemVer(ref e) => e,
+            Error::SemVer(ref e) => &**e,
             #[cfg(feature = "archive-zip")]
             Error::Zip(ref e) => &**e,
             #[cfg(feature = "signatures")]
@@ -125,7 +133,7 @@ impl From<std::io::Error> for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Error {
-        Error::Json(e)
+        Error::Json(Box::new(e))
     }
 }
 
@@ -145,7 +153,7 @@ impl From<ureq::Error> for Error {
 
 impl From<semver::Error> for Error {
     fn from(e: semver::Error) -> Error {
-        Error::SemVer(e)
+        Error::SemVer(Box::new(e))
     }
 }
 
@@ -193,10 +201,90 @@ impl From<time::error::ComponentRange> for Error {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "archive-zip", feature = "signatures"))]
     use super::Error;
-    #[cfg(any(feature = "archive-zip", feature = "signatures"))]
     use std::error::Error as _;
+
+    /// Produce a real `serde_json::Error` by parsing malformed JSON.
+    fn json_error() -> serde_json::Error {
+        serde_json::from_str::<serde_json::Value>("{").unwrap_err()
+    }
+
+    /// Produce a real `semver::Error` by parsing an invalid requirement.
+    fn semver_error() -> semver::Error {
+        "not a version".parse::<semver::Version>().unwrap_err()
+    }
+
+    // C1: `Error::Json` is opaque (boxed). The `From<serde_json::Error>` conversion must produce an
+    // `Error::Json` whose `source()` surfaces the underlying boxed error, mirroring `Http`/`S3Auth`.
+    // Pre-fix this variant held a concrete `serde_json::Error` (still `source()`-able, but not
+    // boxed); after the box the `source()` arm must deref the box (`&**e`).
+    #[test]
+    fn json_error_is_opaque_with_source() {
+        let err: Error = json_error().into();
+        assert!(
+            matches!(err, Error::Json(_)),
+            "From<serde_json::Error> -> Error::Json"
+        );
+        assert!(
+            err.source().is_some(),
+            "Error::Json must expose its underlying error via source()"
+        );
+    }
+
+    // C1: the boxed `Error::Json` must still render with the `JsonError:` Display prefix and embed
+    // the inner error's message (the Display arm dereferences the box, not the box debug form).
+    #[test]
+    fn json_error_display_includes_prefix_and_inner_message() {
+        let inner = json_error();
+        let inner_shown = inner.to_string();
+        let err: Error = inner.into();
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("JsonError: "),
+            "Error::Json Display must keep the `JsonError: ` prefix, got: {}",
+            shown
+        );
+        assert!(
+            shown.contains(&inner_shown),
+            "Error::Json Display must embed the inner error message `{}`, got: {}",
+            inner_shown,
+            shown
+        );
+    }
+
+    // C1: `Error::SemVer` is opaque (boxed) and surfaces its source via the dereferenced box.
+    #[test]
+    fn semver_error_is_opaque_with_source() {
+        let err: Error = semver_error().into();
+        assert!(
+            matches!(err, Error::SemVer(_)),
+            "From<semver::Error> -> Error::SemVer"
+        );
+        assert!(
+            err.source().is_some(),
+            "Error::SemVer must expose its underlying error via source()"
+        );
+    }
+
+    // C1: the boxed `Error::SemVer` keeps the `SemVerError:` Display prefix and inner message.
+    #[test]
+    fn semver_error_display_includes_prefix_and_inner_message() {
+        let inner = semver_error();
+        let inner_shown = inner.to_string();
+        let err: Error = inner.into();
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("SemVerError: "),
+            "Error::SemVer Display must keep the `SemVerError: ` prefix, got: {}",
+            shown
+        );
+        assert!(
+            shown.contains(&inner_shown),
+            "Error::SemVer Display must embed the inner error message `{}`, got: {}",
+            inner_shown,
+            shown
+        );
+    }
 
     // B2: `Error::Zip` is opaque (boxed). The `From<ZipError>` conversion must produce an
     // `Error::Zip` whose `source()` surfaces the underlying boxed error, mirroring `Http`/`S3Auth`.

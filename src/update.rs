@@ -59,7 +59,7 @@ impl UpdateStatus {
     }
 
     /// Returns `true` if `UpdateStatus::Updated`
-    pub fn updated(&self) -> bool {
+    pub fn is_updated(&self) -> bool {
         !self.is_up_to_date()
     }
 }
@@ -191,6 +191,59 @@ impl ReleaseBuilder {
     }
 }
 
+/// The releases fetched from a backend, newest-first, together with the updater's configured
+/// current version.
+///
+/// Returned by [`ReleaseUpdate::get_latest_release`] (a one-element list holding the single newest
+/// release) and [`ReleaseUpdate::get_latest_releases`] (the full candidate list). Use it for a
+/// lightweight pre-check: a single listing request fetches the releases, then
+/// [`is_update_available`](Self::is_update_available), [`latest`](Self::latest), and
+/// [`all`](Self::all) answer "is there anything newer?" / "what is it?" without downloading or
+/// installing anything.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Releases {
+    releases: Vec<Release>,
+    current_version: String,
+}
+
+impl Releases {
+    /// Construct a `Releases` from a fetched (newest-first) release list and the updater's current
+    /// version. Built by the backends; not part of the public construction surface.
+    pub(crate) fn new(releases: Vec<Release>, current_version: String) -> Self {
+        Self {
+            releases,
+            current_version,
+        }
+    }
+
+    /// All fetched releases, newest-first.
+    pub fn all(&self) -> &[Release] {
+        &self.releases
+    }
+
+    /// The newest release (the first), or `None` when the list is empty.
+    pub fn latest(&self) -> Option<&Release> {
+        self.releases.first()
+    }
+
+    /// Consume the `Releases` and return the underlying release vec (newest-first).
+    pub fn into_vec(self) -> Vec<Release> {
+        self.releases
+    }
+
+    /// Whether an update is available: `true` when the newest fetched release is strictly newer
+    /// than the configured current version (a semver comparison), `false` when the list is empty.
+    ///
+    /// This consults only the already-fetched releases — no further request is made.
+    pub fn is_update_available(&self) -> Result<bool> {
+        match self.latest() {
+            None => Ok(false),
+            Some(latest) => version::bump_is_greater(&self.current_version, &latest.version),
+        }
+    }
+}
+
 /// A source of releases for a custom update backend.
 ///
 /// Implement this to update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`)
@@ -296,11 +349,10 @@ pub trait AsyncReleaseSource: Send + Sync {
 pub(crate) trait AsyncFetch {
     fn get_latest_release_async(
         &self,
-    ) -> impl std::future::Future<Output = Result<Release>> + Send + '_;
-    fn get_latest_releases_async<'a>(
-        &'a self,
-        current_version: &'a str,
-    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + 'a;
+    ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
+    fn get_latest_releases_async(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
     fn get_release_version_async<'a>(
         &'a self,
         ver: &'a str,
@@ -441,27 +493,24 @@ pub trait UpdateConfig: sealed::Sealed {
 /// The shared accessor methods live on the [`UpdateConfig`] supertrait. They resolve on a
 /// `dyn ReleaseUpdate` without importing it; bring it into scope (`use self_update::UpdateConfig;`)
 /// only to call them from generic code bounded `R: ReleaseUpdate`.
+///
+/// The trait is sealed transitively: its [`UpdateConfig`] supertrait requires
+/// [`sealed::Sealed`](sealed) (implemented only inside this crate), so `ReleaseUpdate` cannot be
+/// implemented for a foreign type even though the trait itself has no visible seal.
 pub trait ReleaseUpdate: UpdateConfig {
-    /// Fetch details of the latest release from the backend
-    fn get_latest_release(&self) -> Result<Release>;
+    /// Fetch the single newest release from the backend.
+    ///
+    /// The result is a one-element [`Releases`] wrapping the newest release (carrying the
+    /// configured current version), so `.is_update_available()` / `.latest()` work the same as on
+    /// [`get_latest_releases`](Self::get_latest_releases).
+    fn get_latest_release(&self) -> Result<Releases>;
 
-    /// Fetch details of the latest release from the backend
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+    /// Fetch the candidate releases from the backend as a [`Releases`] (newest-first, carrying the
+    /// configured current version).
+    fn get_latest_releases(&self) -> Result<Releases>;
 
     /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
-
-    /// Check whether an update is available without downloading or installing anything.
-    ///
-    /// Returns `true` when the backend's latest release is strictly newer than the configured
-    /// [`current_version`](UpdateConfig::current_version) (a semver comparison), and `false`
-    /// otherwise. This performs only the release-listing request — no asset is downloaded, no
-    /// confirmation is prompted, and nothing is installed. Use it for a lightweight "is there
-    /// anything to do?" check before deciding to call [`update`](Self::update).
-    fn is_update_available(&self) -> Result<bool> {
-        let latest = self.get_latest_release()?;
-        version::bump_is_greater(self.current_version(), &latest.version)
-    }
 
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user.
@@ -484,8 +533,8 @@ pub trait ReleaseUpdate: UpdateConfig {
         let release = match self.release_tag() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
-                let releases = self.get_latest_releases(current_version)?;
-                match choose_latest_release(releases, current_version, show_output)? {
+                let releases = self.get_latest_releases()?;
+                match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                     Some(release) => release,
                     None => return Ok(UpdateStatus::UpToDate),
                 }
@@ -728,8 +777,8 @@ where
     let release = match u.release_tag() {
         None => {
             print_flush(show_output, "Checking latest released version... ")?;
-            let releases = u.get_latest_releases_async(current_version).await?;
-            match choose_latest_release(releases, current_version, show_output)? {
+            let releases = u.get_latest_releases_async().await?;
+            match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                 Some(release) => release,
                 None => return Ok(UpdateStatus::UpToDate),
             }
@@ -841,13 +890,81 @@ fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_latest_release, install_binary};
+    use super::{choose_latest_release, install_binary, Releases};
     use crate::errors::Result;
     use crate::update::Release;
     use crate::DynVerifyFn;
 
     fn rel(version: &str) -> Release {
         Release::builder().version(version).build().unwrap()
+    }
+
+    // --- Releases (D1) ------------------------------------------------------------------------
+
+    #[test]
+    fn releases_is_update_available_true_when_latest_newer() {
+        // Newest-first list; latest (2.0.0) is strictly newer than the held current version.
+        let releases = Releases::new(vec![rel("2.0.0"), rel("1.0.0")], "1.0.0".to_string());
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.0.0 > 1.0.0 => update available"
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_false_when_latest_not_newer() {
+        // latest (1.0.0) equals the current version => not strictly newer.
+        let releases = Releases::new(vec![rel("1.0.0"), rel("0.9.0")], "1.0.0".to_string());
+        assert!(
+            !releases.is_update_available().unwrap(),
+            "1.0.0 not newer than 1.0.0 => no update"
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_false_when_empty() {
+        // An empty list is "nothing available", not an error.
+        let releases = Releases::new(vec![], "1.0.0".to_string());
+        assert!(
+            !releases.is_update_available().unwrap(),
+            "empty Releases => no update available"
+        );
+    }
+
+    #[test]
+    fn releases_latest_all_and_into_vec() {
+        let releases = Releases::new(
+            vec![rel("2.0.0"), rel("1.5.0"), rel("1.0.0")],
+            "1.0.0".to_string(),
+        );
+        // latest() is the first (newest) element.
+        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        // all() returns the whole slice, newest-first.
+        let all: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(all, vec!["2.0.0", "1.5.0", "1.0.0"]);
+        // into_vec() consumes and yields the same order.
+        let v: Vec<String> = releases.into_vec().into_iter().map(|r| r.version).collect();
+        assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
+    }
+
+    #[test]
+    fn releases_latest_is_none_when_empty() {
+        let releases = Releases::new(vec![], "1.0.0".to_string());
+        assert!(releases.latest().is_none());
+        assert!(releases.all().is_empty());
+    }
+
+    // --- UpdateStatus::is_updated (C2) --------------------------------------------------------
+
+    #[test]
+    fn update_status_is_updated_predicate() {
+        let updated = super::UpdateStatus::Updated(rel("1.2.3"));
+        assert!(updated.is_updated(), "Updated => is_updated() true");
+        assert!(!updated.is_up_to_date());
+
+        let up_to_date = super::UpdateStatus::UpToDate;
+        assert!(!up_to_date.is_updated(), "UpToDate => is_updated() false");
+        assert!(up_to_date.is_up_to_date());
     }
 
     #[test]
