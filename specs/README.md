@@ -34,3 +34,4 @@ decision taken (or, for deferred work, what it would take and why it waits).
 | [choose-latest-release-sort.md](choose-latest-release-sort.md) | needs research | A total-order comparator in `choose_latest_release`. |
 | [async-future-extensions.md](async-future-extensions.md) | not implemented | Further async work beyond the current verbs. |
 | [checksum-from-asset.md](checksum-from-asset.md) | not implemented | Fetching and parsing a `SHA256SUMS` asset for the digest. |
+| [release-tag-url-encoding.md](release-tag-url-encoding.md) | not implemented | Percent-encoding the tag segment in the fetch-by-tag URLs. |
