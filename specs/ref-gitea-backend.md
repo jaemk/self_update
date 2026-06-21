@@ -45,12 +45,16 @@ Both delegate to the private `build_update()` helper (see below).
 - Fetch-by-tag appends `/tags/{tag}` to that base, with the tag percent-encoded via
   `urlencoding::encode(ver)`: `<base>/tags/{encoded_tag}`
   (`gitea.rs:364` sync, `gitea.rs:472` async).
-- The custom host is set with `url(host)` on both builders (`gitea.rs:77-80`,
-  `gitea.rs:219-222`). The method carries `#[doc(alias = "instance_url")]` and
-  `#[doc(alias = "with_host")]` so it is discoverable under the old `instance_url`
-  name. Gitea has no canonical public host, so `url` is required: `build()` /
-  `build_update()` `bail!` with `Error::Config` when it is unset
-  (`gitea.rs:128-132`, `gitea.rs:244-248`).
+- The custom host is set with `url(impl Into<String>)` on both builders
+  (`gitea.rs:77-80`, `gitea.rs:219-222`). The method carries
+  `#[doc(alias = "instance_url")]` and `#[doc(alias = "with_host")]` so it is
+  discoverable under the old `instance_url` name. Its doc states the instance host
+  only (scheme + host, no trailing slash and no `/api/v1`): the crate appends the
+  `/api/v1/...` path itself (`gitea.rs:76-77`, `gitea.rs:221-222`). Gitea has no
+  canonical public host, so `url` is required: `build()` / `build_update()` `bail!`
+  with `Error::Config` when it is unset (`gitea.rs:128-132`, `gitea.rs:244-248`).
+  The string setters (`url`, `repo_owner`, `repo_name`, `filter_target`,
+  `auth_token`, and the `Update` builder's common setters) take `impl Into<String>`.
 - Unlike GitHub, Gitea has no dedicated `/releases/latest` endpoint, so "latest" is
   derived from the list endpoint (see ordering below) (`gitea.rs:328-331`).
 

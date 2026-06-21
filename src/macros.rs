@@ -217,8 +217,8 @@ macro_rules! impl_common_builder_setters {
         /// This is to support private repos where you need an auth token.
         /// **Make sure not to bake the token into your app**; it is recommended you obtain
         /// it via another mechanism, such as environment variables or prompting the user.
-        pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-            self.common.auth_token = Some(auth_token.to_owned());
+        pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
+            self.common.auth_token = Some(auth_token.into());
             self
         }
     };
@@ -232,8 +232,8 @@ macro_rules! impl_common_builder_setters {
         /// Required. Set the current app version, used to compare against the latest available
         /// version. The `cargo_crate_version!` macro can be used to pull the version from your
         /// `Cargo.toml`
-        pub fn current_version(&mut self, ver: &str) -> &mut Self {
-            self.common.current_version = Some(ver.to_owned());
+        pub fn current_version(&mut self, ver: impl Into<String>) -> &mut Self {
+            self.common.current_version = Some(ver.into());
             self
         }
 
@@ -246,16 +246,16 @@ macro_rules! impl_common_builder_setters {
         /// leading `v` stripped, regardless of what is passed here.)
         #[doc(alias = "target_version_tag")]
         #[doc(alias = "target_version")]
-        pub fn release_tag(&mut self, ver: &str) -> &mut Self {
-            self.common.release_tag = Some(ver.to_owned());
+        pub fn release_tag(&mut self, ver: impl Into<String>) -> &mut Self {
+            self.common.release_tag = Some(ver.into());
             self
         }
 
         /// Set the target triple that will be downloaded, e.g. `x86_64-unknown-linux-gnu`.
         ///
         /// If unspecified, the build target of the crate will be used.
-        pub fn target(&mut self, target: &str) -> &mut Self {
-            self.common.target = Some(target.to_owned());
+        pub fn target(&mut self, target: impl Into<String>) -> &mut Self {
+            self.common.target = Some(target.into());
             self
         }
 
@@ -263,8 +263,8 @@ macro_rules! impl_common_builder_setters {
         ///
         /// If unspecified, the first asset matching the target will be chosen.
         #[doc(alias = "identifier")]
-        pub fn asset_identifier(&mut self, identifier: &str) -> &mut Self {
-            self.common.asset_identifier = Some(identifier.to_owned());
+        pub fn asset_identifier(&mut self, identifier: impl Into<String>) -> &mut Self {
+            self.common.asset_identifier = Some(identifier.into());
             self
         }
 
@@ -278,7 +278,8 @@ macro_rules! impl_common_builder_setters {
         /// [`bin_path_in_archive`](Self::bin_path_in_archive) *before* `bin_name` keeps your value
         /// (`bin_name` won't overwrite it); a later `bin_name` call also leaves an already-set path
         /// untouched.
-        pub fn bin_name(&mut self, name: &str) -> &mut Self {
+        pub fn bin_name(&mut self, name: impl Into<String>) -> &mut Self {
+            let name = name.into();
             let raw_bin_name = format!(
                 "{}{}",
                 name.trim_end_matches(std::env::consts::EXE_SUFFIX),
@@ -317,8 +318,8 @@ macro_rules! impl_common_builder_setters {
         ///
         /// For example, a value of `"{{ target }}-{{ version }}-bin/{{ bin }}"` extracts the
         /// `bin` from a `target`/`version`-named subdirectory of the archive.
-        pub fn bin_path_in_archive(&mut self, bin_path: &str) -> &mut Self {
-            self.common.bin_path_in_archive = Some(bin_path.to_owned());
+        pub fn bin_path_in_archive(&mut self, bin_path: impl Into<String>) -> &mut Self {
+            self.common.bin_path_in_archive = Some(bin_path.into());
             self
         }
 
@@ -400,6 +401,12 @@ macro_rules! impl_common_builder_setters {
         /// **before** it replaces the installed one, the closure is called with the path to the
         /// extracted binary; returning `false` aborts the update (nothing is installed), so a bad
         /// release cannot replace a working binary. Typical use: run `new --version` and check it.
+        ///
+        /// This runs **last** in the verification chain and on the **extracted binary**, not the
+        /// downloaded archive. The full order is: [`checksum`](Self::checksum) (digest of the
+        /// archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
+        /// extract -> `verify_with` (the extracted binary) -> replace. Use `checksum`/`verifying_keys`
+        /// to gate the download by content; use `verify_with` to gate it by running the new binary.
         pub fn verify_with(
             &mut self,
             verify: impl Fn(&std::path::Path) -> bool + Send + Sync + 'static,
@@ -418,10 +425,16 @@ macro_rules! impl_common_builder_setters {
             self
         }
 
-        /// Specify a slice of ed25519ph verifying keys to validate a download's authenticity.
+        /// Specify the set of ed25519ph verifying keys used to validate a download's authenticity.
         ///
-        /// If the feature is activated AND at least one key was provided, a download is
-        /// verified. At least one key has to match.
+        /// Signature verification runs only when the `signatures` feature is enabled **and** at
+        /// least one key is provided; a download then has to match one of the keys. Passing an
+        /// empty set (or never calling this) leaves signature verification **disabled** — it is not
+        /// an error, so don't rely on this as your only integrity check unless you know a key is
+        /// always supplied.
+        ///
+        /// This **replaces** the key set on each call (unlike [`request_header`](Self::request_header),
+        /// which appends); the last call wins.
         #[cfg(feature = "signatures")]
         pub fn verifying_keys(
             &mut self,

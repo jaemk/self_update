@@ -68,13 +68,13 @@ Current behavior per subsystem. All `implemented`.
 | [s3-auth-token-removal.md](s3-auth-token-removal.md) | Removed the no-op s3 `auth_token` setter. |
 | [post-update-verify.md](post-update-verify.md) | `verify_with` hook on the extracted binary before swap. |
 | [release-tag-url-encoding.md](release-tag-url-encoding.md) | Percent-encoding the tag segment in the fetch-by-tag URLs. |
+| [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) | Renamed `Http` to `Transport` and split non-2xx into `NotFound`/`Unauthorized`/`HttpStatus`. |
 
 ### Deferred (not implemented)
 
 | Spec | Summary |
 |------|---------|
-| [error-variant-granularity.md](error-variant-granularity.md) | Splitting the stringly-typed catch-all `Error` variants. |
-| [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) | Clarifying `Error::Network` vs `Error::Http`. |
+| [error-variant-granularity.md](error-variant-granularity.md) | Splitting the stringly-typed catch-all `Error` variants (status variants done; `Update`/`Release`/`Config` remain). |
 | [s3-max-keys-configurable.md](s3-max-keys-configurable.md) | A builder setter for the s3 `MAX_KEYS` per-request cap. |
 | [async-future-extensions.md](async-future-extensions.md) | Further async work beyond the current verbs. |
 | [checksum-from-asset.md](checksum-from-asset.md) | Fetching and parsing a `SHA256SUMS` asset for the digest. |

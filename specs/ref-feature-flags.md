@@ -8,8 +8,10 @@ Documents every Cargo feature of the `self_update` crate, the dependencies and
 public API surface each feature gates, the feature-to-feature implication graph,
 and the compile-time mutual-exclusion guards that enforce exactly one HTTP
 client and exactly one TLS backend. Source of truth: the `[features]` table in
-`Cargo.toml` (lines 66-92), the `compile_error!` guards in `src/lib.rs`
-(lines 412-437), and the `#[cfg(feature = ...)]` sites across `src/`.
+`Cargo.toml` (lines 66-90), the `compile_error!` guards in `src/lib.rs`
+(lines 412-437), and the `#[cfg(feature = ...)]` sites across `src/`. The S3
+backend is always compiled and gates on no feature; there is no `s3` alias
+feature (only `s3-auth`, for private-bucket request signing).
 
 ## Behavior
 
@@ -30,8 +32,7 @@ All features and their wiring (`Cargo.toml:66-92`):
 | `compression-flate2` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:73`, `lib.rs:665-668`) |
 | `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:74`) |
 | `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:75`) |
-| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | - | SigV4 request signing for private buckets (`Cargo.toml:87`) |
-| `s3` | (empty) | - | no-op alias; the s3 backend is always compiled (`Cargo.toml:89-92`) |
+| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | - | SigV4 request signing for private buckets; the s3 backend itself is always compiled and needs no feature (`Cargo.toml:88-90`) |
 
 Implication notes:
 
@@ -98,7 +99,9 @@ Feature-gated public items:
 
 `ArchiveKind` and `Extract` are public unconditionally, but `ArchiveKind` is
 `#[non_exhaustive]` and its `Tar`/`Zip` variants only exist under their archive
-features (`lib.rs:572-580`). `detect_archive` returns
+features (`lib.rs:572-580`). `ArchiveKind` implements `Display` (`lib.rs:589`),
+rendering `tar.gz` / `zip` / `tar` / `gz` / `plain`; the `Error::NoSignatures`
+message uses it instead of the `Debug` form. `detect_archive` returns
 `Error::ArchiveNotEnabled` for an extension whose archive feature is off
 (`lib.rs:600-603,611-614`).
 
@@ -114,9 +117,9 @@ features (`lib.rs:572-580`). `detect_archive` returns
   `ureq` (and `default-tls` + `rustls`) simultaneously, tripping the guards.
   Every build/test/clippy lane therefore selects exactly one client explicitly
   (`Makefile` header comment; `Cargo.toml:15`).
-- `s3` is a no-op alias (empty feature list); `features = ["s3"]` resolves but
-  enables nothing. Only private-bucket request signing needs `s3-auth`
-  (`Cargo.toml:89-92`).
+- The s3 backend is always compiled and gates on no feature; there is no `s3`
+  alias feature. Only private-bucket request signing needs `s3-auth`
+  (`Cargo.toml:88-90`).
 - A signed archive of a given kind verifies only when both `signatures` and the
   matching `archive-*` feature are enabled (the `verify-*` sub-feature rides on
   the archive feature, `Cargo.toml:69,72,74`).

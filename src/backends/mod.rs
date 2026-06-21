@@ -330,9 +330,13 @@ mod test {
     fn collect_paginated_propagates_fetch_error() {
         use crate::backends::collect_paginated;
         use crate::errors::Error;
-        let res: crate::errors::Result<Vec<i32>> =
-            collect_paginated("u", |_url| Err(Error::Network("boom".to_string())));
-        assert!(matches!(res, Err(Error::Network(_))));
+        let res: crate::errors::Result<Vec<i32>> = collect_paginated("u", |_url| {
+            Err(Error::HttpStatus {
+                status: 503,
+                url: "u".into(),
+            })
+        });
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
     }
 
     #[test]
@@ -365,11 +369,14 @@ mod test {
             0,
             || {
                 calls.set(calls.get() + 1);
-                Err(Error::Network("boom".into()))
+                Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                })
             },
             |_e, b| backoffs.borrow_mut().push(b),
         );
-        assert!(matches!(res, Err(Error::Network(_))));
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
         assert_eq!(calls.get(), 1);
         assert!(backoffs.borrow().is_empty());
     }
@@ -385,11 +392,14 @@ mod test {
             2,
             || {
                 calls.set(calls.get() + 1);
-                Err(Error::Network("boom".into()))
+                Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                })
             },
             |_e, b| backoffs.borrow_mut().push(b),
         );
-        assert!(matches!(res, Err(Error::Network(_))));
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
         // initial attempt + 2 retries
         assert_eq!(calls.get(), 3);
         assert_eq!(*backoffs.borrow(), vec![100, 200]);
@@ -407,7 +417,10 @@ mod test {
             || {
                 calls.set(calls.get() + 1);
                 if calls.get() < 3 {
-                    Err(Error::Network("transient".into()))
+                    Err(Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    })
                 } else {
                     Ok(42)
                 }
@@ -444,11 +457,14 @@ mod test {
             1,
             || {
                 calls.set(calls.get() + 1);
-                Err(Error::Network("boom".into()))
+                Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                })
             },
             |_e, b| backoffs.borrow_mut().push(b),
         );
-        assert!(matches!(res, Err(Error::Network(_))));
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
         // initial attempt + 1 retry; the `>` vs `>=` budget boundary
         assert_eq!(calls.get(), 2);
         assert_eq!(*backoffs.borrow(), vec![100]);
@@ -468,11 +484,14 @@ mod test {
             6,
             || {
                 calls.set(calls.get() + 1);
-                Err(Error::Network("boom".into()))
+                Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                })
             },
             |_e, b| backoffs.borrow_mut().push(b),
         );
-        assert!(matches!(res, Err(Error::Network(_))));
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
         assert_eq!(calls.get(), 7);
         assert_eq!(*backoffs.borrow(), vec![100, 200, 400, 800, 1600, 3200]);
     }
@@ -489,13 +508,18 @@ mod test {
             2,
             || {
                 calls.set(calls.get() + 1);
-                async { Err(Error::Network("boom".into())) }
+                async {
+                    Err(Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    })
+                }
             },
             |_e, b| backoffs.borrow_mut().push(b),
             |_b| async {},
         )
         .await;
-        assert!(matches!(res, Err(Error::Network(_))));
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
         assert_eq!(calls.get(), 3);
         assert_eq!(*backoffs.borrow(), vec![100, 200]);
     }
@@ -517,7 +541,10 @@ mod test {
                     if done {
                         Ok(42)
                     } else {
-                        Err(Error::Network("transient".into()))
+                        Err(Error::HttpStatus {
+                            status: 503,
+                            url: "u".into(),
+                        })
                     }
                 }
             },

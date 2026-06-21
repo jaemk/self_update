@@ -71,22 +71,25 @@ pub struct ReleaseListBuilder {
 impl ReleaseListBuilder {
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
     /// `https://gitlab.com`.
+    ///
+    /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
+    /// `/api/v4/...` path itself. Do not include `/api/v4`.
     #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn url(&mut self, url: &str) -> &mut Self {
-        self.host = url.to_owned();
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.host = url.into();
         self
     }
 
     /// Required. Set the repo owner, used to build a gitlab api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a gitlab api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 
@@ -99,8 +102,8 @@ impl ReleaseListBuilder {
     /// chosen release to download.
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
-    pub fn filter_target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
+    pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
+        self.target = Some(target.into());
         self
     }
 
@@ -110,8 +113,8 @@ impl ReleaseListBuilder {
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
-    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-        self.auth_token = Some(auth_token.to_owned());
+    pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
+        self.auth_token = Some(auth_token.into());
         self
     }
 
@@ -205,22 +208,25 @@ impl UpdateBuilder {
 
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
     /// `https://gitlab.com`.
+    ///
+    /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
+    /// `/api/v4/...` path itself. Do not include `/api/v4`.
     #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn url(&mut self, url: &str) -> &mut Self {
-        self.host = url.to_owned();
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.host = url.into();
         self
     }
 
     /// Required. Set the repo owner, used to build a gitlab api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a gitlab api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 
@@ -974,10 +980,9 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn get_latest_release_async_errors_on_non_2xx_status() {
-        // The http client bails on any non-2xx status before the body is parsed. Under the async
-        // transport (reqwest-only) this surfaces as `Error::Network`. Drive the single-page
-        // `get_latest_release_async` against a 500 so the status guard, not the JSON parser, is
-        // what fails.
+        // The http client bails on any non-2xx status before the body is parsed. A 500 maps to
+        // `Error::HttpStatus`. Drive the single-page `get_latest_release_async` against a 500 so
+        // the status guard, not the JSON parser, is what fails.
         let base = stub(|_| {
             vec![Resp {
                 status: "500 Internal Server Error",
@@ -988,8 +993,8 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Network(_))),
-            "non-2xx status on get_latest_release_async must surface as Error::Network, got {:?}",
+            matches!(res, Err(crate::errors::Error::HttpStatus { status: 500, .. })),
+            "non-2xx 500 on get_latest_release_async must surface as Error::HttpStatus(500), got {:?}",
             res
         );
     }
@@ -997,9 +1002,8 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn get_release_version_async_errors_on_non_2xx_status() {
-        // Same non-2xx guard for the single-tag fetch path (`.../releases/{ver}`). A 404 (the
-        // realistic "unknown tag" response from GitLab) must surface as an error, not a parse
-        // attempt on the error body.
+        // Same non-2xx guard for the single-tag fetch path (`.../releases/{ver}`). A 404 maps to
+        // `Error::NotFound`, not a parse attempt on the error body.
         let base = stub(|_| {
             vec![Resp {
                 status: "404 Not Found",
@@ -1010,8 +1014,8 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_release_version_async("v9.9.9").await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Network(_))),
-            "non-2xx status on get_release_version_async must surface as Error::Network, got {:?}",
+            matches!(res, Err(crate::errors::Error::NotFound { .. })),
+            "non-2xx 404 on get_release_version_async must surface as Error::NotFound, got {:?}",
             res
         );
     }
@@ -1020,7 +1024,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_all_releases_async_errors_on_non_2xx_status() {
         // The paginated async fetch path also enforces the non-2xx status guard on each page. A
-        // 503 on the first page must abort the whole accumulation with `Error::Network`.
+        // 503 on the first page must abort the whole accumulation with `Error::HttpStatus`.
         let base = stub(|_| {
             vec![Resp {
                 status: "503 Service Unavailable",
@@ -1035,8 +1039,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Network(_))),
-            "non-2xx status on fetch_all_releases_async must surface as Error::Network, got {:?}",
+            matches!(res, Err(crate::errors::Error::HttpStatus { status: 503, .. })),
+            "non-2xx 503 on fetch_all_releases_async must surface as Error::HttpStatus(503), got {:?}",
             res
         );
     }
@@ -1319,8 +1323,8 @@ mod tests {
         let upd = gl_update(&base, "0.1.0");
         let res = upd.get_release_version("v9.9.9");
         assert!(
-            res.is_err(),
-            "non-2xx status on get_release_version must return an error, got {:?}",
+            matches!(res, Err(crate::errors::Error::NotFound { .. })),
+            "non-2xx 404 on get_release_version (sync) must surface as Error::NotFound, got {:?}",
             res
         );
     }

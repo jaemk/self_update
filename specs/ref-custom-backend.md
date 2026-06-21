@@ -47,8 +47,9 @@ compile where it is defined, not later at the spawn site (`update.rs:357-361`, `
 Implementors may still write the bodies as `async fn`; the compiler checks the resulting future
 is `Send`.
 
-On failure, both traits return public `Error` variants (`Error::Network`, `Error::Release`,
-`Error::Config`), which are plain constructible tuple variants (`update.rs:321-324`,
+On failure, both traits return public `Error` variants (`Error::Release`, `Error::Config`, or a
+request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status, url }` /
+`Error::Transport`), which are constructible from a custom source (`update.rs:321-324`,
 `367-370`).
 
 ### The custom adapter and Blocking

@@ -19,11 +19,11 @@ fetch-method contract they document; the orchestration helpers
 ### Release and ReleaseAsset
 
 `ReleaseAsset` (`src/update.rs:9-29`) is a `#[non_exhaustive]` struct deriving
-`Clone, Debug, Default` with two public fields: `download_url: String` and
-`name: String`. Because it is `#[non_exhaustive]`, outside code cannot build it
-with a struct literal; `ReleaseAsset::new(name, download_url)` is the public
-constructor (`src/update.rs:23`). Note the constructor argument order is
-`(name, download_url)`, the reverse of the field declaration order.
+`Clone, Debug, Default` with two public fields, declared `name: String` then
+`download_url: String` (`src/update.rs:12-15`). Because it is `#[non_exhaustive]`,
+outside code cannot build it with a struct literal; `ReleaseAsset::new(name,
+download_url)` is the public constructor (`src/update.rs:23`). The constructor
+argument order matches the field declaration order (`name`, then `download_url`).
 
 `Release` (`src/update.rs:67-124`) is a `#[non_exhaustive]` struct deriving
 `Clone, Debug, Default` with public fields `name: String`, `version: String`,
@@ -82,6 +82,17 @@ Iteration: owned `IntoIterator for Releases` (`:278-285`) yields `Release` by
 value, consuming the collection (`std::vec::IntoIter`); borrowed
 `IntoIterator for &'a Releases` (`:288-295`) yields `&'a Release` without
 consuming (`std::slice::Iter`). Both iterate in `all()` order (newest-first).
+
+### UpdateStatus release accessors
+
+`UpdateStatus` (`src/update.rs:40`, `#[non_exhaustive]`, `UpToDate` or
+`Updated(Release)`) carries the installed `Release` on the `Updated` arm. Besides
+`into_status`, `is_up_to_date`, and `is_updated`, it exposes two accessors that read
+the installed release without forcing a `match` (which `#[non_exhaustive]` would
+require a wildcard arm on): `updated_release(&self) -> Option<&Release>`
+(`src/update.rs:70`) borrows it, and `into_updated_release(self) -> Option<Release>`
+(`src/update.rs:78`) consumes the status and yields it owned. Both return `None` for
+`UpToDate`.
 
 ### Sealed traits
 
@@ -153,7 +164,7 @@ the impl site.
 
 ## Public surface
 
-- `pub struct ReleaseAsset { pub download_url, pub name }` `#[non_exhaustive]`;
+- `pub struct ReleaseAsset { pub name, pub download_url }` `#[non_exhaustive]`;
   `ReleaseAsset::new(name, download_url)`.
 - `pub struct Release { pub name, version, date, body, assets }`
   `#[non_exhaustive]`; `Release::builder()`, `has_target_asset`, `asset_for`.

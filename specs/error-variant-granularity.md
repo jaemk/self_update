@@ -1,14 +1,23 @@
 # Error variant granularity
 
-Status: not implemented
+Status: partially implemented
 
 ## Problem
 
 The catch-all stringly-typed variants `Error::Update(String)`,
-`Error::Network(String)`, `Error::Release(String)`, and `Error::Config(String)`
-carry only a message. A caller cannot match on them to handle distinct failure modes
-(for example, distinguishing a missing release from an unparseable response, or a
-rate-limit response from a generic network failure).
+`Error::Release(String)`, and `Error::Config(String)` carry only a message. A caller
+cannot match on them to handle distinct failure modes (for example, distinguishing a
+missing release from an unparseable response, or a config error from the field that
+caused it).
+
+## Shipped
+
+The HTTP-status part of this is done. `Error::Network(String)` is gone, replaced by the
+structured `Error::NotFound { url }`, `Error::Unauthorized { status, url }`, and
+`Error::HttpStatus { status, url }`, with an `Error::http_status()` accessor, so a caller
+can distinguish release-not-found from auth failure from other statuses without parsing a
+message (see `ref-errors.md` and `error-network-vs-http-semantics.md`). The
+`Update`/`Release`/`Config` string variants are unchanged and still the remaining gap.
 
 ## What it would take
 

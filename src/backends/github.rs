@@ -70,22 +70,22 @@ pub struct ReleaseListBuilder {
 }
 impl ReleaseListBuilder {
     /// Required. Set the repo owner, used to build a github api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a github api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 
     /// Set the optional arch `target` name, used to filter available releases
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
-    pub fn filter_target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
+    pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
+        self.target = Some(target.into());
         self
     }
 
@@ -93,8 +93,8 @@ impl ReleaseListBuilder {
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
     #[doc(alias = "with_url")]
-    pub fn url(&mut self, url: &str) -> &mut Self {
-        self.custom_url = Some(url.to_owned());
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.custom_url = Some(url.into());
         self
     }
 
@@ -104,8 +104,8 @@ impl ReleaseListBuilder {
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
-    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-        self.auth_token = Some(auth_token.to_owned());
+    pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
+        self.auth_token = Some(auth_token.into());
         self
     }
 
@@ -200,14 +200,14 @@ impl UpdateBuilder {
     }
 
     /// Required. Set the repo owner, used to build a github api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a github api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 
@@ -215,8 +215,8 @@ impl UpdateBuilder {
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
     #[doc(alias = "with_url")]
-    pub fn url(&mut self, url: &str) -> &mut Self {
-        self.custom_url = Some(url.to_owned());
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.custom_url = Some(url.into());
         self
     }
 
@@ -806,12 +806,13 @@ mod tests {
             None,
             &crate::backends::common::RequestConfig::default(),
         );
-        // A non-2xx status is always an error, though the variant differs by client:
-        // `reqwest` returns the response (mapped to `Network` by our status check) while
-        // `ureq` fails the request itself (mapped to `Http`).
+        // A non-2xx status always produces a structured status variant (NotFound /
+        // Unauthorized / HttpStatus). Both reqwest and ureq map consistently after this change.
         assert!(matches!(
             res,
-            Err(crate::errors::Error::Network(_)) | Err(crate::errors::Error::Http(_))
+            Err(crate::errors::Error::NotFound { .. })
+                | Err(crate::errors::Error::Unauthorized { .. })
+                | Err(crate::errors::Error::HttpStatus { .. })
         ));
     }
 

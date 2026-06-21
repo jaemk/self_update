@@ -65,15 +65,15 @@ only `@shared`, for backends like s3 that authenticate differently.
 
 The `@shared` vocabulary (`macros.rs:231-433`):
 
-- `current_version(&str)` (`macros.rs:235`) - required.
-- `release_tag(&str)` (`macros.rs:249`) - aliased `target_version_tag` /
+- `current_version(impl Into<String>)` (`macros.rs:235`) - required.
+- `release_tag(impl Into<String>)` (`macros.rs:249`) - aliased `target_version_tag` /
   `target_version`; used verbatim.
-- `target(&str)` (`macros.rs:257`).
-- `asset_identifier(&str)` (`macros.rs:266`) - aliased `identifier`.
-- `bin_name(&str)` (`macros.rs:281`) - required; appends `EXE_SUFFIX` if absent
+- `target(impl Into<String>)` (`macros.rs:257`).
+- `asset_identifier(impl Into<String>)` (`macros.rs:266`) - aliased `identifier`.
+- `bin_name(impl Into<String>)` (`macros.rs:281`) - required; appends `EXE_SUFFIX` if absent
   and seeds `bin_path_in_archive` only if it is still unset.
-- `bin_install_path<A: AsRef<Path>>(A)` (`macros.rs:296`).
-- `bin_path_in_archive(&str)` (`macros.rs:320`) - supports `{{ bin }}`,
+- `bin_install_path<A: AsRef<Path>>(A)` (`macros.rs:297`).
+- `bin_path_in_archive(impl Into<String>)` (`macros.rs:321`) - supports `{{ bin }}`,
   `{{ target }}`, `{{ version }}` substitutions.
 - `show_download_progress(bool)` (`macros.rs:326`).
 - `progress_style(impl Into<String>, impl Into<String>)` (`macros.rs:333`) -
@@ -88,12 +88,17 @@ The `@shared` vocabulary (`macros.rs:231-433`):
   `set_progress_callback`.
 - `asset_matcher(impl Fn(&[ReleaseAsset]) -> Option<ReleaseAsset> ...)`
   (`macros.rs:388`).
-- `verify_with(impl Fn(&Path) -> bool ...)` (`macros.rs:403`).
-- `checksum(Checksum)` (`macros.rs:416`, under `checksums`) - aliased
+- `verify_with(impl Fn(&Path) -> bool ...)` (`macros.rs:410`) - the post-update
+  hook on the extracted binary; its doc records the full verification order
+  (`checksum` -> signature/`verifying_keys` -> extract -> `verify_with` -> replace),
+  so it runs last.
+- `checksum(Checksum)` (`macros.rs:423`, under `checksums`) - aliased
   `verifying_checksum`.
-- `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:426`, under
-  `signatures`).
-- `auth_token(&str)` (`macros.rs:220`, only the `()` form).
+- `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:439`, under
+  `signatures`) - **replaces** the key set on each call (last call wins, unlike
+  `request_header` which appends); an empty set (or never calling it) leaves
+  signature verification disabled, which is not an error.
+- `auth_token(impl Into<String>)` (`macros.rs:220`, only the `()` form).
 
 ### Accessor macro: impl_update_config_accessors!
 
@@ -104,10 +109,13 @@ The `@shared` vocabulary (`macros.rs:231-433`):
 `progress_chars` (`macros.rs:126-161`); `Option<&str>` via `.as_deref()` for
 `release_tag`, `asset_identifier`, `auth_token` (`macros.rs:132,135,162`);
 `&Path` for `bin_install_path` (`macros.rs:141`); plain `bool`/`Copy` returns
-for the toggles. The `#[doc(hidden)]` block (`macros.rs:165-197`) exposes
+for the toggles. The `#[doc(hidden)]` accessors (`macros.rs:165-193`) expose
 `request_timeout`, `request_headers`, `request_client`, `progress_callback`,
-`verify_callback`, `asset_matcher`, `checksum` (gated), and `verifying_keys`
-(gated).
+`verify_callback`, `asset_matcher`, and `checksum` (`checksums`-gated, both
+`#[doc(hidden)]` and `#[cfg(feature = "checksums")]`). `verifying_keys`
+(`macros.rs:194-197`) is **not** `#[doc(hidden)]`: it carries only
+`#[cfg(feature = "signatures")]` and returns `&[VerifyingKey]`, so it is a
+documented public accessor unlike the hidden `checksum` next to it.
 
 Three invocation forms: bare `($t)` (`macros.rs:109`) for the default
 `api_headers`; `($t, { ... })` (`macros.rs:112`) splices a custom `api_headers`

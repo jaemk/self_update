@@ -67,11 +67,14 @@ releases base, percent-encoding the tag (`gitlab.rs:349`, `gitlab.rs:468`):
 This route returns a single release *object* (not an array), parsed directly by
 `Release::from_release_gitlab`.
 
-Custom host: `url(&str)` (`gitlab.rs:76`, `gitlab.rs:210`) overrides `host`. It is
-doc-aliased `#[doc(alias = "instance_url")]` and `#[doc(alias = "with_host")]`
+Custom host: `url(impl Into<String>)` (`gitlab.rs:76`, `gitlab.rs:210`) overrides `host`. It
+is doc-aliased `#[doc(alias = "instance_url")]` and `#[doc(alias = "with_host")]`
 (`gitlab.rs:74-75`, `gitlab.rs:208-209`); the setter was renamed from `instance_url` to
-`url`. There is no trailing-slash normalization, so callers pass a host with no trailing
-slash (e.g. `https://gitlab.example.com`).
+`url`. Its doc states the instance host only (scheme + host, no trailing slash and no
+`/api/v4`): the crate appends the `/api/v4/...` path itself (`gitlab.rs:75-76`,
+`gitlab.rs:212-213`), so callers pass e.g. `https://gitlab.example.com`. The string setters
+(`url`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's
+common setters) take `impl Into<String>`.
 
 ### Authentication
 
@@ -122,10 +125,12 @@ and `name`, each bailing `Error::Release` when missing (`gitlab.rs:20-25`). Miss
 
 ### Errors
 
-Non-2xx responses are rejected by the HTTP client inside `send` / `send_async` before any
-body is parsed, surfacing as `Error::Network` (e.g. a 404 unknown-tag, a 500/503 listing
-failure). JSON shape and field problems (non-array listing payload, empty array on the
-latest path, missing `tag_name`/`created_at`/`assets.links`, missing asset `url`/`name`)
+A completed non-2xx response is rejected by `send` / `send_async` before any body is parsed
+and mapped to a structured variant by status (`status_to_error`, `errors.rs:254`): 404 ->
+`Error::NotFound` (e.g. an unknown tag), 401/403 -> `Error::Unauthorized`, any other non-2xx
+-> `Error::HttpStatus` (e.g. a 500/503 listing failure). A request that cannot complete is
+`Error::Transport`. JSON shape and field problems (non-array listing payload, empty array on
+the latest path, missing `tag_name`/`created_at`/`assets.links`, missing asset `url`/`name`)
 surface as `Error::Release`. Builder/config problems (missing `repo_owner`/`repo_name`,
 deferred bad `request_header`, unparseable auth token) surface as `Error::Config`.
 
@@ -165,7 +170,7 @@ In-file tests (`gitlab.rs:501-1410`) use a loopback `TcpListener` stub (no exter
 network). Coverage: sync and async latest/newer/by-tag parsing and version trimming;
 `Link: rel="next"` pagination accumulation across two pages; newer-than filtering after
 pagination; empty-array and non-array error paths; missing `tag_name` and missing
-`assets.links` parser guards; non-2xx (404/500/503) surfacing as `Error::Network`;
+`assets.links` parser guards; non-2xx (404 -> `NotFound`, 500/503 -> `HttpStatus`);
 `releases_url_encodes_repo_owner_with_slash` asserting `%2F` (and absence of a literal
 `group/subgroup`) in the captured request line; `url`/`filter_target` setter existence;
 `api_headers` Bearer + User-Agent wiring; invalid-header `Error::Config` at build; and
@@ -177,6 +182,6 @@ pagination; empty-array and non-array error paths; missing `tag_name` and missin
 - `release-tag-url-encoding.md` - tag percent-encoding on the by-tag route.
 - `release-scan-pagination.md` - the shared `Link: rel="next"` pagination and page bound.
 - `transport-control.md` - per-request headers, timeout, retries, client override.
-- `error-network-vs-http-semantics.md` - non-2xx -> `Error::Network` vs parse -> `Error::Release`.
+- `error-network-vs-http-semantics.md` - non-2xx -> structured status variant vs parse -> `Error::Release`.
 - `ref-release-model.md` - the `Release` / `ReleaseAsset` model the JSON maps onto.
 - `async-api.md` - `build_async` and the `AsyncFetch` surface.

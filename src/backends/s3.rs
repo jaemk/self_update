@@ -64,6 +64,27 @@ impl From<String> for EndPoint {
     }
 }
 
+/// Whether `end_point` needs a `region` to form its URL. The AWS-family endpoints embed the region
+/// in the host; `GCS` and `Generic` do not use it.
+fn endpoint_requires_region(end_point: &EndPoint) -> bool {
+    matches!(
+        end_point,
+        EndPoint::S3 | EndPoint::S3DualStack | EndPoint::DigitalOceanSpaces
+    )
+}
+
+/// Validate the endpoint/region pairing at build time so a missing `region` is reported from
+/// `build()` (like every other required field) rather than at the first network call.
+fn check_endpoint_region(end_point: &EndPoint, region: &Option<String>) -> Result<()> {
+    if endpoint_requires_region(end_point) && region.is_none() {
+        bail!(
+            Error::Config,
+            "`region` required for the S3, S3DualStack, and DigitalOceanSpaces endpoints; call `.region(...)`"
+        );
+    }
+    Ok(())
+}
+
 /// `ReleaseList` Builder
 #[derive(Clone, Debug)]
 #[must_use]
@@ -80,20 +101,30 @@ pub struct ReleaseListBuilder {
 
 impl ReleaseListBuilder {
     /// Set the bucket name, used to build an S3 api url
-    pub fn bucket_name(&mut self, name: &str) -> &mut Self {
-        self.bucket_name = Some(name.to_owned());
+    pub fn bucket_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.bucket_name = Some(name.into());
         self
     }
 
-    /// Set the optional asset name prefix, used to filter available assets with a prefix string
-    pub fn asset_prefix(&mut self, prefix: &str) -> &mut Self {
-        self.asset_prefix = Some(prefix.to_owned());
+    /// Set an optional S3 key prefix, sent as the `prefix=` parameter of the bucket listing.
+    ///
+    /// This scopes the listing to keys under that prefix (e.g. a subdirectory) on the S3 side; it
+    /// is **not** a client-side filter of asset file names (for that, see
+    /// [`filter_target`](Self::filter_target)). The prefix is stripped from the returned names, so a
+    /// `releases/` prefix lets you keep assets in a subdirectory.
+    pub fn asset_prefix(&mut self, prefix: impl Into<String>) -> &mut Self {
+        self.asset_prefix = Some(prefix.into());
         self
     }
 
-    /// Set the S3 region used in the download url
-    pub fn region(&mut self, region: &str) -> &mut Self {
-        self.region = Some(region.to_owned());
+    /// Set the S3 region embedded in the endpoint host.
+    ///
+    /// Required for the `S3`, `S3DualStack`, and `DigitalOceanSpaces` endpoints (it is part of
+    /// their hostname) and validated by [`build`](Self::build). Ignored by `GCS` and `Generic`
+    /// endpoints, which carry no region in the URL (under `s3-auth`, SigV4 still defaults the
+    /// signing region to `us-east-1` when none is set).
+    pub fn region(&mut self, region: impl Into<String>) -> &mut Self {
+        self.region = Some(region.into());
         self
     }
 
@@ -112,8 +143,8 @@ impl ReleaseListBuilder {
     /// chosen release to download.
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
-    pub fn filter_target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
+    pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
+        self.target = Some(target.into());
         self
     }
 
@@ -130,6 +161,7 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
+        check_endpoint_region(&self.end_point, &self.region)?;
         Ok(ReleaseList {
             end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
@@ -229,20 +261,29 @@ impl UpdateBuilder {
     }
 
     /// Set the bucket name, used to build a s3 api url
-    pub fn bucket_name(&mut self, name: &str) -> &mut Self {
-        self.bucket_name = Some(name.to_owned());
+    pub fn bucket_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.bucket_name = Some(name.into());
         self
     }
 
-    /// Set the optional asset name prefix, used to filter available assets with a prefix string
-    pub fn asset_prefix(&mut self, prefix: &str) -> &mut Self {
-        self.asset_prefix = Some(prefix.to_owned());
+    /// Set an optional S3 key prefix, sent as the `prefix=` parameter of the bucket listing.
+    ///
+    /// This scopes the listing to keys under that prefix (e.g. a subdirectory) on the S3 side; it
+    /// is **not** a client-side filter of asset file names. The prefix is stripped from the
+    /// returned names, so a `releases/` prefix lets you keep assets in a subdirectory.
+    pub fn asset_prefix(&mut self, prefix: impl Into<String>) -> &mut Self {
+        self.asset_prefix = Some(prefix.into());
         self
     }
 
-    /// Set the S3 region used in the download url
-    pub fn region(&mut self, region: &str) -> &mut Self {
-        self.region = Some(region.to_owned());
+    /// Set the S3 region embedded in the endpoint host.
+    ///
+    /// Required for the `S3`, `S3DualStack`, and `DigitalOceanSpaces` endpoints (it is part of
+    /// their hostname) and validated by [`build`](Self::build). Ignored by `GCS` and `Generic`
+    /// endpoints, which carry no region in the URL (under `s3-auth`, SigV4 still defaults the
+    /// signing region to `us-east-1` when none is set).
+    pub fn region(&mut self, region: impl Into<String>) -> &mut Self {
+        self.region = Some(region.into());
         self
     }
 
@@ -257,6 +298,7 @@ impl UpdateBuilder {
     impl_common_builder_setters!(no_auth_token);
 
     fn build_update(&self) -> Result<Update> {
+        check_endpoint_region(&self.end_point, &self.region)?;
         Ok(Update {
             end_point: self.end_point.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
@@ -456,16 +498,28 @@ mod auth {
 
     /// S3 access credentials used to sign requests (AWS SigV4) for private buckets.
     ///
-    /// Construct one from an `(access_key_id, secret_access_key)` pair via [`From`] (e.g.
-    /// `("AKIA…", "secret").into()`), which is what [`access_key`](super::UpdateBuilder::access_key)
-    /// accepts. It is `#[non_exhaustive]` so future credential fields (e.g. an STS session token)
-    /// can be added without a breaking change; build it through the `From` impls rather than a
-    /// struct literal.
+    /// Construct one with [`AccessKey::new`] or from an `(access_key_id, secret_access_key)` pair
+    /// via [`From`] (e.g. `("AKIA…", "secret").into()`), which is what
+    /// [`access_key`](super::UpdateBuilder::access_key) accepts. It is `#[non_exhaustive]` so future
+    /// credential fields (e.g. an STS session token) can be added without a breaking change; build
+    /// it through `new` or the `From` impls rather than a struct literal.
     #[derive(Clone, Debug)]
     #[non_exhaustive]
     pub struct AccessKey {
         pub access_key_id: String,
         pub secret_access_key: String,
+    }
+
+    impl AccessKey {
+        /// Construct an `AccessKey` from an access-key id and secret. Equivalent to the `From`
+        /// pair conversions, but discoverable as a named constructor (the type is
+        /// `#[non_exhaustive]`, so it can't be built with a struct literal from outside the crate).
+        pub fn new(access_key_id: impl Into<String>, secret_access_key: impl Into<String>) -> Self {
+            Self {
+                access_key_id: access_key_id.into(),
+                secret_access_key: secret_access_key.into(),
+            }
+        }
     }
 
     impl From<(&str, &str)> for AccessKey {
@@ -1266,38 +1320,71 @@ mod tests {
         );
     }
 
-    /// Assert an s3 fetch result is the expected non-2xx error. The load-bearing contract is that
-    /// a non-2xx listing response is an `Err` (never an `Ok` parsed from the error body). The
-    /// precise variant differs by client: the reqwest path reaches the s3-relied-upon
-    /// `is_success()` bail (`Error::Network`), while ureq short-circuits at `call()?` and surfaces
-    /// its own status error as `Error::Http`. Both are pinned so the reqwest `Network` path the s3
-    /// code now depends on stays covered.
-    fn assert_non_2xx_err(res: crate::errors::Result<crate::update::Releases>) {
-        #[cfg(feature = "reqwest")]
-        assert!(
-            matches!(res, Err(crate::errors::Error::Network(_))),
-            "reqwest: a non-2xx listing response must surface as Error::Network, not Ok"
+    /// Assert an s3 fetch result is the EXACT structured status error expected for `expected_status`,
+    /// not merely "one of the three status variants". The load-bearing contract is that a non-2xx
+    /// listing response is an `Err` carrying the precise status mapping (404 -> `NotFound`,
+    /// 401/403 -> `Unauthorized`, else -> `HttpStatus`) and that `http_status()` recovers the code.
+    /// Both reqwest and ureq must produce the identical variant for the same status, so this is
+    /// client-agnostic and pins cross-client agreement.
+    fn assert_status_err(
+        res: crate::errors::Result<crate::update::Releases>,
+        expected_status: u16,
+    ) {
+        use crate::errors::Error;
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "a non-2xx ({}) listing response must surface as Err, got Ok",
+                expected_status
+            ),
+        };
+        assert_eq!(
+            err.http_status(),
+            Some(expected_status),
+            "http_status() must recover the injected status {}, got {:?}",
+            expected_status,
+            err
         );
-        #[cfg(feature = "ureq")]
-        assert!(
-            matches!(res, Err(crate::errors::Error::Http(_))),
-            "ureq: a non-2xx listing response must surface as an Err (Error::Http), not Ok"
-        );
+        match expected_status {
+            404 => assert!(
+                matches!(err, Error::NotFound { .. }),
+                "status 404 must surface as Error::NotFound, got {:?}",
+                err
+            ),
+            401 | 403 => assert!(
+                matches!(err, Error::Unauthorized { status, .. } if status == expected_status),
+                "status {} must surface as Error::Unauthorized, got {:?}",
+                expected_status,
+                err
+            ),
+            _ => assert!(
+                matches!(err, Error::HttpStatus { status, .. } if status == expected_status),
+                "status {} must surface as Error::HttpStatus, got {:?}",
+                expected_status,
+                err
+            ),
+        }
     }
 
-    #[test]
-    fn fetch_non_2xx_status_surfaces_error() {
-        // The s3 fetch path dropped its own `status()` check and now relies on
-        // `http_client::get`/`send` bailing on a non-2xx status. When the bucket listing endpoint
-        // responds with a non-2xx (here `404 Not Found`), the sync fetch must return `Err` rather
-        // than parsing the 404 body as a (empty) `ListBucketResult` and returning `Ok`. This pins
-        // the contract on the sync lanes (both http clients).
+    /// Serve `status` (with an HTTP error body) over a fresh loopback stub and return the sync
+    /// fetch result for `get_latest_release`. A fresh stub is required per call because the
+    /// loopback server serves one response per connection.
+    fn fetch_with_status(status: &'static str) -> crate::errors::Result<crate::update::Releases> {
         let base = stub(vec![Resp {
-            status: "404 Not Found",
+            status,
             body: "<Error><Code>NoSuchBucket</Code></Error>".to_string(),
         }]);
         let upd = s3_update_sync(&base, "0.1.0");
-        assert_non_2xx_err(upd.get_latest_release());
+        upd.get_latest_release()
+    }
+
+    #[test]
+    fn fetch_404_surfaces_not_found() {
+        // The s3 fetch path dropped its own `status()` check and now relies on
+        // `http_client::get`/`send` bailing on a non-2xx status. A 404 must surface as the exact
+        // `Error::NotFound` variant (not merely "some error", and never an `Ok` parsed from the
+        // error body), on the sync lane of whichever http client is built in.
+        assert_status_err(fetch_with_status("404 Not Found"), 404);
 
         // `get_latest_releases` shares the same fetch path; a fresh stub is required because the
         // loopback server serves one response per connection.
@@ -1306,7 +1393,28 @@ mod tests {
             body: "<Error><Code>NoSuchBucket</Code></Error>".to_string(),
         }]);
         let upd = s3_update_sync(&base, "0.1.0");
-        assert_non_2xx_err(upd.get_latest_releases());
+        assert_status_err(upd.get_latest_releases(), 404);
+    }
+
+    #[test]
+    fn fetch_401_and_403_surface_unauthorized() {
+        // 401 and 403 both map to the `Unauthorized` variant, carrying their exact code.
+        assert_status_err(fetch_with_status("401 Unauthorized"), 401);
+        assert_status_err(fetch_with_status("403 Forbidden"), 403);
+    }
+
+    #[test]
+    fn fetch_500_and_503_surface_http_status() {
+        // A server-error status that is not 404/401/403 maps to `HttpStatus` with its exact code.
+        assert_status_err(fetch_with_status("500 Internal Server Error"), 500);
+        assert_status_err(fetch_with_status("503 Service Unavailable"), 503);
+    }
+
+    #[test]
+    fn fetch_400_surfaces_http_status() {
+        // Boundary: a 4xx that is not 404/401/403 (here 400) maps to `HttpStatus`, not
+        // `Unauthorized`/`NotFound`.
+        assert_status_err(fetch_with_status("400 Bad Request"), 400);
     }
 
     #[test]
@@ -1554,6 +1662,7 @@ mod tests {
         // builder must build with the required fields present.
         let _list = super::ReleaseList::configure()
             .bucket_name("bucket")
+            .region("us-east-1")
             .filter_target("x86_64-unknown-linux-gnu")
             .build()
             .unwrap();
@@ -1772,6 +1881,52 @@ mod tests {
             None
         )
         .is_ok());
+    }
+
+    // The endpoint/region pairing is now validated at `build()` time (not deferred to the first
+    // network call), so a region-requiring endpoint without a region fails where every other
+    // required-field error is reported.
+    #[test]
+    fn build_errors_without_region_for_region_endpoints() {
+        let res = Update::configure()
+            .end_point(super::EndPoint::S3)
+            .bucket_name("bucket")
+            .bin_name("bin")
+            .current_version("0.1.0")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "S3 endpoint without region must fail at build() with Error::Config"
+        );
+
+        let list = super::ReleaseList::configure()
+            .end_point(super::EndPoint::DigitalOceanSpaces)
+            .bucket_name("bucket")
+            .build();
+        assert!(
+            matches!(list, Err(crate::errors::Error::Config(_))),
+            "ReleaseList build() must also enforce the region requirement"
+        );
+    }
+
+    #[test]
+    fn build_succeeds_without_region_for_generic_and_gcs() {
+        assert!(Update::configure()
+            .end_point(super::EndPoint::GCS)
+            .bucket_name("bucket")
+            .bin_name("bin")
+            .current_version("0.1.0")
+            .build()
+            .is_ok());
+        assert!(Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: "https://s3.example.com/".to_owned()
+            })
+            .bucket_name("bucket")
+            .bin_name("bin")
+            .current_version("0.1.0")
+            .build()
+            .is_ok());
     }
 
     // ---------------------------------------------------------------------------

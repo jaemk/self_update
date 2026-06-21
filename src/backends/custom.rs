@@ -1083,7 +1083,10 @@ mod tests {
                     &self,
                     _current: &str,
                 ) -> crate::errors::Result<Vec<Release>> {
-                    Err(crate::errors::Error::Network("net".into()))
+                    Err(crate::errors::Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    })
                 }
                 fn get_release_version(&self, _ver: &str) -> crate::errors::Result<Release> {
                     Err(crate::errors::Error::Config("cfg".into()))
@@ -1097,7 +1100,7 @@ mod tests {
             ));
             assert!(matches!(
                 AsyncReleaseSource::get_latest_releases(&blk, "1.0.0").await,
-                Err(crate::errors::Error::Network(_))
+                Err(crate::errors::Error::HttpStatus { .. })
             ));
             assert!(matches!(
                 AsyncReleaseSource::get_release_version(&blk, "1.0.0").await,

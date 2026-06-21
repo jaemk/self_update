@@ -36,7 +36,13 @@ asset (`s3.rs:115`, via `has_target_asset` in `fetch`, `s3.rs:191`); the `Update
 `target` (a common setter) selects which asset of the chosen release to download.
 
 Both `build` paths require `bucket_name`, bailing `Error::Config` with
-"`bucket_name` required" otherwise (`s3.rs:138`, `s3.rs:265`).
+"`bucket_name` required" otherwise (`s3.rs:138`, `s3.rs:265`). They also validate
+the endpoint/region pairing up front via `check_endpoint_region` (`s3.rs:78`),
+called from `ReleaseListBuilder::build` (`s3.rs:164`) and
+`UpdateBuilder::build_update` (`s3.rs:301`), so a missing required region is an
+`Error::Config` from `build()` rather than from the first request. All the string
+setters (`bucket_name`, `asset_prefix`, `region`, `filter_target`, and the common
+setters) take `impl Into<String>`.
 
 ### URL / endpoint composition
 
@@ -52,9 +58,13 @@ Both `build` paths require `bucket_name`, bailing `Error::Config` with
 - `Generic { end_point }`: the supplied URL used verbatim as the base (`s3.rs:649`)
 
 `region` is `Option<String>`. The three host-interpolating endpoints (`S3`,
-`S3DualStack`, `DigitalOceanSpaces`) require it: a missing region surfaces as
-`Error::Config("`region` required")` (`s3.rs:631`). `GCS` and `Generic` never read
-the region and build without it.
+`S3DualStack`, `DigitalOceanSpaces`) require it (`endpoint_requires_region`,
+`s3.rs:69`): a missing region surfaces as `Error::Config("`region` required for the
+S3, S3DualStack, and DigitalOceanSpaces endpoints; call `.region(...)`")`. This is
+now validated at `build()` time via `check_endpoint_region` (`s3.rs:78`), not
+deferred to URL construction. `GCS` and `Generic` never read the region and build
+without it (under `s3-auth`, SigV4 still defaults the signing region to `us-east-1`
+when none is set).
 
 ### Listing + MAX_KEYS + prefix
 
@@ -112,12 +122,13 @@ siblings (`s3.rs:424`).
 ### Signing under s3-auth
 
 The `auth` module (`s3.rs:444`) is gated on `feature = "s3-auth"`. `AccessKey`
-(`s3.rs:466`) is `#[non_exhaustive]` with fields `access_key_id` and
-`secret_access_key`, built only through `From<(&str, &str)>` / `From<(String,
-String)>` (`s3.rs:471`); it is re-exported as
+(`s3.rs:508`) is `#[non_exhaustive]` with fields `access_key_id` and
+`secret_access_key`, built through `AccessKey::new(access_key_id,
+secret_access_key)` (`s3.rs:517`, both args `impl Into<String>`) or the
+`From<(&str, &str)>` / `From<(String, String)>` impls; it is re-exported as
 `self_update::backends::s3::AccessKey` (`s3.rs:26`). The `#[non_exhaustive]`
-attribute reserves room for a future STS session token (`s3.rs:462`); no
-`session_token` field exists today.
+attribute reserves room for a future STS session token; no `session_token` field
+exists today.
 
 `s3_signature_v4` (`s3.rs:542`) implements AWS SigV4 presigned-query signing. With
 no `AccessKey` it returns the URL unchanged (`s3.rs:550`) -- so public buckets are
@@ -142,11 +153,13 @@ so it sets a single `Authorization: token ...` header and no `User-Agent`.
 
 A non-2xx listing response is always an `Err`, never an `Ok` parsed from the error
 body: `send` / `http_client::get` bail on any non-2xx status before returning
-(`s3.rs:692`). The precise variant is client-dependent -- reqwest reaches the
-`is_success()` bail (`Error::Network`), ureq short-circuits at `call()?`
-(`Error::Http`). XML parse errors surface as `Error::Release` with the buffer
-position (`s3.rs:834`). Missing region is `Error::Config`; missing bucket is
-`Error::Config`.
+(`s3.rs:692`). Both clients now map a completed non-2xx to the same structured
+variant by status: 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`,
+any other non-2xx -> `Error::HttpStatus` (`status_to_error`, `errors.rs:254`); a
+request that cannot complete (connection/TLS/timeout) is `Error::Transport`. XML
+parse errors surface as `Error::Release` with the buffer position (`s3.rs:834`).
+Missing region (for the region-requiring endpoints) and missing bucket are both
+`Error::Config`, now raised from `build()` rather than the first request.
 
 ## Public surface
 
@@ -158,7 +171,8 @@ position (`s3.rs:834`). Missing region is `Error::Config`; missing bucket is
   request-config setters, `build`).
 - `s3::UpdateBuilder`, `s3::Update` (`#[non_exhaustive]`); `Update::configure`,
   `build` -> `Box<dyn ReleaseUpdate>`, `build_async` -> `Update` [async].
-- `s3::AccessKey` [s3-auth], re-exported, `#[non_exhaustive]`, tuple `From` impls.
+- `s3::AccessKey` [s3-auth], re-exported, `#[non_exhaustive]`, `AccessKey::new`
+  plus tuple `From` impls.
 
 ## Invariants and regression checklist
 

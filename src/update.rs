@@ -10,8 +10,8 @@ use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct ReleaseAsset {
-    pub download_url: String,
     pub name: String,
+    pub download_url: String,
 }
 
 impl ReleaseAsset {
@@ -61,6 +61,25 @@ impl UpdateStatus {
     /// Returns `true` if `UpdateStatus::Updated`
     pub fn is_updated(&self) -> bool {
         !self.is_up_to_date()
+    }
+
+    /// The [`Release`] that was installed, or `None` if already up to date.
+    ///
+    /// Convenience accessor so callers can read the installed release without a
+    /// `match` (which `#[non_exhaustive]` would force a wildcard arm onto).
+    pub fn updated_release(&self) -> Option<&Release> {
+        match self {
+            UpdateStatus::Updated(release) => Some(release),
+            UpdateStatus::UpToDate => None,
+        }
+    }
+
+    /// Consume the status and return the installed [`Release`], or `None` if already up to date.
+    pub fn into_updated_release(self) -> Option<Release> {
+        match self {
+            UpdateStatus::Updated(release) => Some(release),
+            UpdateStatus::UpToDate => None,
+        }
     }
 }
 
@@ -263,7 +282,9 @@ impl Releases {
     /// later parse error. It is the first release *reached* whose version fails to parse as semver
     /// that propagates its error.
     ///
-    /// This consults only the already-fetched releases — no further request is made.
+    /// This consults only the already-fetched releases — no further request is made, so the only
+    /// `Err` this can return is a version-parse failure ([`Error::SemVer`]); it never surfaces a
+    /// transport or HTTP error.
     pub fn is_update_available(&self) -> Result<bool> {
         for r in &self.releases {
             if version::bump_is_greater(&self.current_version, &r.version)? {
@@ -318,10 +339,13 @@ impl<'a> IntoIterator for &'a Releases {
 /// sync `ReleaseSource` from the async API, wrap it in
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking).
 ///
-/// On failure, return one of the public [`Error`](crate::errors::Error) variants — they are plain
-/// constructible tuple variants, e.g. `Error::Network("…".into())` for a failed request,
-/// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
-/// for a misconfiguration.
+/// On failure, return one of the public [`Error`](crate::errors::Error) variants. For a completed
+/// request with a non-2xx status use the structured variants — e.g.
+/// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
+/// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
+/// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
+/// failures use `Error::Release("…".into())`, and for configuration errors
+/// `Error::Config("…".into())`.
 pub trait ReleaseSource: Send + Sync {
     /// Fetch the single newest release.
     fn get_latest_release(&self) -> Result<Release>;
@@ -364,10 +388,13 @@ pub trait ReleaseSource: Send + Sync {
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking), which runs the sync fetches
 /// on [`tokio::task::spawn_blocking`].
 ///
-/// On failure, return one of the public [`Error`](crate::errors::Error) variants — they are plain
-/// constructible tuple variants, e.g. `Error::Network("…".into())` for a failed request,
-/// `Error::Release("…".into())` for a missing/unparseable release, or `Error::Config("…".into())`
-/// for a misconfiguration.
+/// On failure, return one of the public [`Error`](crate::errors::Error) variants. For a completed
+/// request with a non-2xx status use the structured variants — e.g.
+/// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
+/// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
+/// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
+/// failures use `Error::Release("…".into())`, and for configuration errors
+/// `Error::Config("…".into())`.
 #[cfg(feature = "async")]
 pub trait AsyncReleaseSource: Send + Sync {
     /// Fetch the single newest release.
@@ -1121,6 +1148,40 @@ mod tests {
         let up_to_date = super::UpdateStatus::UpToDate;
         assert!(!up_to_date.is_updated(), "UpToDate => is_updated() false");
         assert!(up_to_date.is_up_to_date());
+    }
+
+    #[test]
+    fn update_status_release_accessors() {
+        let updated = super::UpdateStatus::Updated(rel("1.2.3"));
+        assert_eq!(
+            updated.updated_release().map(|r| r.version.as_str()),
+            Some("1.2.3"),
+            "updated_release() borrows the installed release"
+        );
+        assert_eq!(
+            updated.into_updated_release().map(|r| r.version),
+            Some("1.2.3".to_string()),
+            "into_updated_release() yields the installed release"
+        );
+
+        let up_to_date = super::UpdateStatus::UpToDate;
+        assert!(
+            up_to_date.updated_release().is_none(),
+            "UpToDate => updated_release() None"
+        );
+        assert!(
+            up_to_date.into_updated_release().is_none(),
+            "UpToDate => into_updated_release() None"
+        );
+    }
+
+    // `ReleaseAsset::new(name, download_url)` argument order must match the field order so the two
+    // same-typed args can't be silently swapped. Pins the constructor maps arg 1 -> name, arg 2 -> url.
+    #[test]
+    fn release_asset_new_argument_order() {
+        let asset = super::ReleaseAsset::new("my-bin-x86_64.tar.gz", "https://host/dl");
+        assert_eq!(asset.name, "my-bin-x86_64.tar.gz");
+        assert_eq!(asset.download_url, "https://host/dl");
     }
 
     #[test]

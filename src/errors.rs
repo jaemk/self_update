@@ -15,8 +15,31 @@ use zipsign_api::ZipsignError;
 pub enum Error {
     /// Used as a catch-most for when the program fails to update.
     Update(String),
-    /// Used when a web request to a repository archive fails.
-    Network(String),
+    /// A request completed and returned HTTP 404 (resource not found).
+    ///
+    /// `url` is the request URL that produced the 404.
+    NotFound {
+        /// The URL whose response was HTTP 404.
+        url: String,
+    },
+    /// A request completed and returned HTTP 401 or 403 (not authorized).
+    ///
+    /// `status` is the exact HTTP status code (401 or 403). `url` is the request URL.
+    Unauthorized {
+        /// The HTTP status code (401 or 403).
+        status: u16,
+        /// The URL whose response was this status.
+        url: String,
+    },
+    /// A request completed and returned a non-2xx status other than 404, 401, or 403.
+    ///
+    /// `status` is the HTTP status code. `url` is the request URL.
+    HttpStatus {
+        /// The HTTP status code.
+        status: u16,
+        /// The URL whose response was this status.
+        url: String,
+    },
     /// If there is an issue with the most recent release (such as no
     /// binary for the current platform), this error is returned.
     Release(String),
@@ -39,12 +62,12 @@ pub enum Error {
     /// `serde_json` implementation evolves. Use [`std::error::Error::source`] to inspect the
     /// underlying error.
     Json(Box<dyn std::error::Error + Send + Sync>),
-    /// A wrapper over the active HTTP client's error type (`reqwest` or `ureq`).
+    /// The request could not be completed (connection/TLS/timeout/transport failure).
     ///
     /// The concrete error is boxed so that the public API does not change when the
     /// `reqwest` / `ureq` feature selection changes. Use [`std::error::Error::source`]
     /// to inspect the underlying error.
-    Http(Box<dyn std::error::Error + Send + Sync>),
+    Transport(Box<dyn std::error::Error + Send + Sync>),
     /// A wrapper over a `semver::Error`.
     ///
     /// The concrete error is boxed so that the public API does not change when the underlying
@@ -76,25 +99,51 @@ pub enum Error {
     S3Auth(Box<dyn std::error::Error + Send + Sync>),
 }
 
+impl Error {
+    /// The HTTP status code if this error came from a completed non-2xx response
+    /// (`NotFound` => 404, `Unauthorized`/`HttpStatus` => their code); `None` otherwise.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Error::NotFound { .. } => Some(404),
+            Error::Unauthorized { status, .. } => Some(*status),
+            Error::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use Error::*;
-        match *self {
+        match self {
             Update(ref s) => write!(f, "UpdateError: {}", s),
-            Network(ref s) => write!(f, "NetworkError: {}", s),
+            NotFound { url } => write!(f, "NotFoundError: no resource found at {} (HTTP 404)", url),
+            Unauthorized { status, url } => write!(
+                f,
+                "UnauthorizedError: request to {} was not authorized (HTTP {})",
+                url, status
+            ),
+            HttpStatus { status, url } => write!(
+                f,
+                "HttpStatusError: request to {} failed with status {}",
+                url, status
+            ),
             Release(ref s) => write!(f, "ReleaseError: {}", s),
             Config(ref s) => write!(f, "ConfigError: {}", s),
             Io(ref e) => write!(f, "IoError: {}", e),
             Json(ref e) => write!(f, "JsonError: {}", e),
-            Http(ref e) => write!(f, "HttpError: {}", e),
+            Transport(ref e) => write!(f, "TransportError: {}", e),
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
             #[cfg(feature = "signatures")]
-            NoSignatures(kind) => {
-                write!(f, "No signature verification implemented for {:?} files", kind)
-            }
+            NoSignatures(kind) => write!(
+                f,
+                "SignatureError: signature verification is only implemented for `.tar.gz` and \
+                 `.zip` assets, not {} files",
+                kind
+            ),
             #[cfg(feature = "signatures")]
             Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
@@ -112,7 +161,7 @@ impl std::error::Error for Error {
         Some(match *self {
             Error::Io(ref e) => e,
             Error::Json(ref e) => &**e,
-            Error::Http(ref e) => &**e,
+            Error::Transport(ref e) => &**e,
             Error::SemVer(ref e) => &**e,
             #[cfg(feature = "archive-zip")]
             Error::Zip(ref e) => &**e,
@@ -140,14 +189,14 @@ impl From<serde_json::Error> for Error {
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Error {
-        Error::Http(Box::new(e))
+        Error::Transport(Box::new(e))
     }
 }
 
 #[cfg(feature = "ureq")]
 impl From<ureq::Error> for Error {
     fn from(e: ureq::Error) -> Error {
-        Error::Http(Box::new(e))
+        Error::Transport(Box::new(e))
     }
 }
 
@@ -199,6 +248,25 @@ impl From<time::error::ComponentRange> for Error {
     }
 }
 
+/// Map an HTTP status code and URL to the appropriate structured error variant.
+///
+/// 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`, else -> `Error::HttpStatus`.
+pub(crate) fn status_to_error(status: u16, url: &str) -> Error {
+    match status {
+        404 => Error::NotFound {
+            url: url.to_string(),
+        },
+        401 | 403 => Error::Unauthorized {
+            status,
+            url: url.to_string(),
+        },
+        _ => Error::HttpStatus {
+            status,
+            url: url.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Error;
@@ -215,7 +283,7 @@ mod tests {
     }
 
     // C1: `Error::Json` is opaque (boxed). The `From<serde_json::Error>` conversion must produce an
-    // `Error::Json` whose `source()` surfaces the underlying boxed error, mirroring `Http`/`S3Auth`.
+    // `Error::Json` whose `source()` surfaces the underlying boxed error, mirroring `Transport`/`S3Auth`.
     // Pre-fix this variant held a concrete `serde_json::Error` (still `source()`-able, but not
     // boxed); after the box the `source()` arm must deref the box (`&**e`).
     #[test]
@@ -287,7 +355,7 @@ mod tests {
     }
 
     // B2: `Error::Zip` is opaque (boxed). The `From<ZipError>` conversion must produce an
-    // `Error::Zip` whose `source()` surfaces the underlying boxed error, mirroring `Http`/`S3Auth`.
+    // `Error::Zip` whose `source()` surfaces the underlying boxed error, mirroring `Transport`/`S3Auth`.
     // Pre-fix this variant held a concrete `zip::result::ZipError` and exposed no `source()`.
     #[cfg(feature = "archive-zip")]
     #[test]
@@ -372,6 +440,220 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Cannot verify signature of a file with a non-UTF-8 name"
+        );
+    }
+
+    // Transport variant: opaque (boxed), source() derefs the box, Display prefix "TransportError:".
+    // From<reqwest::Error> maps to Transport (reqwest feature).
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn reqwest_error_maps_to_transport_variant() {
+        // Construct a reqwest::Error by attempting to parse an invalid URL.
+        let e = reqwest::blocking::get("not-a-url").unwrap_err();
+        let err: Error = e.into();
+        assert!(
+            matches!(err, Error::Transport(_)),
+            "From<reqwest::Error> must produce Error::Transport, got {:?}",
+            err
+        );
+        assert!(
+            err.source().is_some(),
+            "Error::Transport must expose its underlying error via source()"
+        );
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("TransportError: "),
+            "Error::Transport Display must have 'TransportError: ' prefix, got: {}",
+            shown
+        );
+    }
+
+    // From<ureq::Error> maps to Transport (ureq feature).
+    #[cfg(feature = "ureq")]
+    #[test]
+    fn ureq_error_maps_to_transport_variant() {
+        let e = ureq::Error::BadUri("not-a-url".to_string());
+        let err: Error = e.into();
+        assert!(
+            matches!(err, Error::Transport(_)),
+            "From<ureq::Error> must produce Error::Transport, got {:?}",
+            err
+        );
+        assert!(
+            err.source().is_some(),
+            "Error::Transport must expose its underlying error via source()"
+        );
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("TransportError: "),
+            "Error::Transport Display must have 'TransportError: ' prefix, got: {}",
+            shown
+        );
+    }
+
+    // NotFound variant Display: "NotFoundError: no resource found at {url} (HTTP 404)"
+    #[test]
+    fn not_found_display_matches_spec() {
+        let err = Error::NotFound {
+            url: "https://example.com/releases".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "NotFoundError: no resource found at https://example.com/releases (HTTP 404)"
+        );
+    }
+
+    // Unauthorized variant Display: "UnauthorizedError: request to {url} was not authorized (HTTP {status})"
+    #[test]
+    fn unauthorized_display_matches_spec_401() {
+        let err = Error::Unauthorized {
+            status: 401,
+            url: "https://example.com/api".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "UnauthorizedError: request to https://example.com/api was not authorized (HTTP 401)"
+        );
+    }
+
+    #[test]
+    fn unauthorized_display_matches_spec_403() {
+        let err = Error::Unauthorized {
+            status: 403,
+            url: "https://example.com/private".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "UnauthorizedError: request to https://example.com/private was not authorized (HTTP 403)"
+        );
+    }
+
+    // HttpStatus variant Display: "HttpStatusError: request to {url} failed with status {status}"
+    #[test]
+    fn http_status_display_matches_spec() {
+        let err = Error::HttpStatus {
+            status: 503,
+            url: "https://example.com/releases".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "HttpStatusError: request to https://example.com/releases failed with status 503"
+        );
+    }
+
+    // http_status() returns Some(404) for NotFound
+    #[test]
+    fn http_status_helper_not_found() {
+        let err = Error::NotFound {
+            url: "u".to_string(),
+        };
+        assert_eq!(err.http_status(), Some(404));
+    }
+
+    // http_status() returns Some(status) for Unauthorized
+    #[test]
+    fn http_status_helper_unauthorized() {
+        assert_eq!(
+            Error::Unauthorized {
+                status: 401,
+                url: "u".to_string()
+            }
+            .http_status(),
+            Some(401)
+        );
+        assert_eq!(
+            Error::Unauthorized {
+                status: 403,
+                url: "u".to_string()
+            }
+            .http_status(),
+            Some(403)
+        );
+    }
+
+    // http_status() returns Some(status) for HttpStatus
+    #[test]
+    fn http_status_helper_http_status_variant() {
+        assert_eq!(
+            Error::HttpStatus {
+                status: 503,
+                url: "u".to_string()
+            }
+            .http_status(),
+            Some(503)
+        );
+        assert_eq!(
+            Error::HttpStatus {
+                status: 500,
+                url: "u".to_string()
+            }
+            .http_status(),
+            Some(500)
+        );
+    }
+
+    // http_status() returns None for non-HTTP variants
+    #[test]
+    fn http_status_helper_returns_none_for_non_http_variants() {
+        assert_eq!(Error::Update("x".into()).http_status(), None);
+        assert_eq!(Error::Release("x".into()).http_status(), None);
+        assert_eq!(Error::Config("x".into()).http_status(), None);
+        assert_eq!(Error::Io(std::io::Error::other("x")).http_status(), None);
+        assert_eq!(Error::Json(Box::new(json_error())).http_status(), None);
+        assert_eq!(
+            Error::Transport(Box::new(std::io::Error::other("x"))).http_status(),
+            None
+        );
+    }
+
+    // status_to_error maps 404 -> NotFound, 401/403 -> Unauthorized, other -> HttpStatus
+    #[test]
+    fn status_to_error_maps_404_to_not_found() {
+        let e = super::status_to_error(404, "https://example.com/r");
+        assert!(
+            matches!(e, Error::NotFound { ref url } if url == "https://example.com/r"),
+            "status 404 must map to Error::NotFound, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn status_to_error_maps_401_to_unauthorized() {
+        let e = super::status_to_error(401, "https://example.com/r");
+        assert!(
+            matches!(e, Error::Unauthorized { status: 401, ref url } if url == "https://example.com/r"),
+            "status 401 must map to Error::Unauthorized, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn status_to_error_maps_403_to_unauthorized() {
+        let e = super::status_to_error(403, "https://example.com/r");
+        assert!(
+            matches!(e, Error::Unauthorized { status: 403, ref url } if url == "https://example.com/r"),
+            "status 403 must map to Error::Unauthorized, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn status_to_error_maps_500_to_http_status() {
+        let e = super::status_to_error(500, "https://example.com/r");
+        assert!(
+            matches!(e, Error::HttpStatus { status: 500, ref url } if url == "https://example.com/r"),
+            "status 500 must map to Error::HttpStatus, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn status_to_error_maps_503_to_http_status() {
+        let e = super::status_to_error(503, "https://example.com/r");
+        assert!(
+            matches!(e, Error::HttpStatus { status: 503, .. }),
+            "status 503 must map to Error::HttpStatus, got {:?}",
+            e
         );
     }
 }

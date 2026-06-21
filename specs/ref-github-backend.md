@@ -20,7 +20,9 @@ and a default `RequestConfig` (`github.rs:149`). Setters: `repo_owner` (required
 `repo_name` (required), `filter_target` (optional asset-target filter, doc-aliased
 `target` and `with_target`, `github.rs:85`), `url` (custom base URL, doc-aliased
 `with_url`, `github.rs:95`), `auth_token` (`github.rs:107`), plus the shared
-transport setters from `request_config_setters!(request)` (`github.rs:112`).
+transport setters from `request_config_setters!(request)` (`github.rs:112`). The
+string setters (`repo_owner`, `repo_name`, `url`, `filter_target`, `auth_token`,
+and the `Update` builder's common setters) take `impl Into<String>`.
 `build()` calls `self.request.check()` first (surfacing a deferred
 `request_header` conversion error as `Error::Config`), then requires `repo_owner`
 and `repo_name`, bailing `Error::Config` if either is missing (`github.rs:115-133`).
@@ -115,9 +117,11 @@ but preserve order (`github.rs:323-326`, `453-456`).
 
 ### Errors
 
-Non-2xx responses are errors; the variant depends on the HTTP client. `reqwest`
-returns the response and the crate's status check maps it to `Error::Network`,
-while `ureq` fails the request and maps to `Error::Http` (see
+A completed non-2xx response is mapped to a structured variant by status,
+identically for both clients: 404 -> `Error::NotFound`, 401/403 ->
+`Error::Unauthorized`, any other non-2xx -> `Error::HttpStatus`
+(`status_to_error`, `errors.rs:254`); a request that cannot complete
+(connection/TLS/timeout) is `Error::Transport` (see
 `fetch_all_releases_errors_on_http_error_status`, `github.rs:796-816`). A 200 body
 that is not a JSON array on a list route yields `Error::Release` "No releases
 found" (`github.rs:379`, `407`). Missing required JSON keys yield `Error::Release`
@@ -170,8 +174,8 @@ stub (no external network):
   asserts `/releases/tags/v1.0.0%2Bbuild.5` on the wire and no raw `+`.
 - `fetch_all_releases_follows_link_pagination` (`github.rs:763`) and the async
   `fetch_all_releases_async_follows_pagination` (`github.rs:560`): two-page accumulation.
-- `fetch_all_releases_errors_on_http_error_status` (`github.rs:795`): non-2xx is
-  `Error::Network` or `Error::Http`.
+- `fetch_all_releases_errors_on_http_error_status` (`github.rs:795`): a non-2xx is
+  the structured status variant (`NotFound`/`Unauthorized`/`HttpStatus`).
 - `fetch_all_releases_errors_when_body_is_not_an_array` (`github.rs:818`):
   `Error::Release`.
 - `get_latest_release_sync_wraps_single_object_into_one_element_releases`
@@ -193,5 +197,5 @@ stub (no external network):
 - `transport-control.md` (timeout, retries, custom headers, injected clients)
 - `ref-release-model.md` (the `Release` / `ReleaseAsset` model and version
   normalization)
-- `error-network-vs-http-semantics.md` (non-2xx variant mapping by client)
+- `error-network-vs-http-semantics.md` (non-2xx -> structured status variant; transport failure -> `Error::Transport`)
 - `choose-latest-release-sort.md` (ordering and newest-release selection)

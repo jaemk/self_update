@@ -132,15 +132,20 @@ across all pages, sharing its connection pool; a per-call client is rebuilt per
 page. Pagination is bounded by `MAX_RELEASE_PAGES`. `collect_paginated_async`
 (`backends/mod.rs:218-245`) is the async sibling.
 
-### Error mapping (Network vs Http)
+### Error mapping (Transport vs status)
 
 A transport-layer failure (connect/timeout/TLS) surfaces through the `?` on the
 client's `send()` / `call()`, converted by `From<reqwest::Error>` /
-`From<ureq::Error>` into `Error::Http` (`errors.rs:141-152`). A response with a
-non-success status is mapped to `Error::Network` by the explicit status check in
-each `get` (`http_client/reqwest.rs:37-44`, `82-89`,
-`http_client/ureq.rs:48-55`). So "could not reach / talk to the server" is
-`Http` and "reached the server, got a bad status" is `Network`.
+`From<ureq::Error>` into `Error::Transport`. A response with a non-success status is
+mapped to a structured status variant by `errors::status_to_error` from the explicit
+status check in each `get` (`http_client/reqwest.rs`, `http_client/ureq.rs`): 404 =>
+`Error::NotFound { url }`, 401/403 => `Error::Unauthorized { status, url }`, any other
+non-2xx => `Error::HttpStatus { status, url }`. Both clients produce the same variants:
+for the default ureq agent this needs `http_status_as_error(false)` so the status check
+runs, and for an injected ureq agent the `ureq::Error::StatusCode(code)` arm maps the
+code instead of letting it fall through to `Transport`. So "could not reach / talk to
+the server" is `Transport` and "reached the server, got a bad status" is one of the
+status variants.
 
 ## Public surface
 
@@ -167,7 +172,8 @@ each `get` (`http_client/reqwest.rs:37-44`, `82-89`,
 - An injected client still honors `request_header` and `retries`; for reqwest it
   also honors the per-request `timeout`, for ureq the timeout defers to the
   agent. Proxy-env and TLS defer to the injected client.
-- Non-success status => `Error::Network`; transport failure => `Error::Http`.
+- Non-success status => a structured status variant (`NotFound` / `Unauthorized` /
+  `HttpStatus`), identically on both clients; transport failure => `Error::Transport`.
 - Injected clients are Arc-backed and reused across paginated pages.
 
 ## Tests

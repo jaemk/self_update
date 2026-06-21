@@ -20,8 +20,33 @@
   crate-root type.
 - A new `examples/custom.rs` showing the custom backend: a minimal `ReleaseSource` impl driving a
   sync update, plus an async variant under the `async` feature.
+- `UpdateStatus::updated_release() -> Option<&Release>` and `into_updated_release() -> Option<Release>`
+  to read the installed release without a `match` (which `#[non_exhaustive]` would force a wildcard
+  arm onto).
+- `Error::http_status() -> Option<u16>`, returning the HTTP status for a completed non-2xx response
+  (`NotFound` => 404, `Unauthorized`/`HttpStatus` => their code) and `None` otherwise.
+- `backends::s3::AccessKey::new(access_key_id, secret_access_key)`, a named constructor alongside the
+  existing `From` conversions.
+- `Display` for `ArchiveKind`, rendering a human-readable name (`tar.gz`, `zip`, ...) used in error
+  messages instead of the `Debug` form.
 
 ### Changed (breaking)
+- A non-2xx HTTP response is now a structured error instead of `Error::Network(String)`:
+  `Error::NotFound { url }` (404), `Error::Unauthorized { status, url }` (401/403), and
+  `Error::HttpStatus { status, url }` (any other non-2xx), so a consumer can distinguish
+  release-not-found from auth failure from other statuses. `Error::Http` is renamed to
+  `Error::Transport` (a request that could not complete: connection, TLS, timeout). Both the
+  `reqwest` and `ureq` clients now produce the same status variants (previously `ureq` surfaced a
+  non-2xx as `Error::Http`). Match on the new variants or call `Error::http_status()`.
+- The string builder setters now take `impl Into<String>` instead of `&str`:
+  `current_version`, `release_tag`, `target`, `asset_identifier`, `bin_name`, `bin_path_in_archive`,
+  `auth_token`, and the backend setters `repo_owner` / `repo_name` / `url` / `filter_target` /
+  `bucket_name` / `asset_prefix` / `region`. String-literal call sites are unchanged; a site that
+  passed `&some_string` now passes the `String` itself (drop the `&`) or `some_string.clone()`.
+- The s3 `Update` and `ReleaseList` `build()` now validate the endpoint/region pairing: the `S3`,
+  `S3DualStack`, and `DigitalOceanSpaces` endpoints require a `region`, so a missing region is an
+  `Error::Config` from `build()` rather than from the first request. `GCS` and `Generic` endpoints
+  are unaffected.
 - The custom-endpoint setter on the gitlab and gitea backends is now `url(...)` (was
   `instance_url(...)`), on both the `Update` and `ReleaseList` builders. github already used
   `url(...)`, so every git backend now names the setter the same.
@@ -59,6 +84,8 @@
 - The s3 `auth_token` setter is removed. The S3 backend authenticates only by signing requests with
   `access_key` (AWS SigV4), so use `.access_key((id, secret))` (the `s3-auth` feature) for
   private-bucket access. `auth_token` remains on github/gitlab/gitea.
+- The no-op `s3` cargo feature is removed. The S3 backend is always compiled, so `features = ["s3"]`
+  was a no-op; drop it. Only private-bucket request signing needs a feature (`s3-auth`).
 
 ## [1.0.0]
 First stable release. This version makes a number of breaking changes to clean up the

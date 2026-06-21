@@ -72,22 +72,25 @@ impl ReleaseListBuilder {
     ///
     /// Unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no canonical public
     /// host, so `build()` errors if this is not set.
+    ///
+    /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
+    /// `/api/v1/...` path itself. Do not include `/api/v1`.
     #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn url(&mut self, host: &str) -> &mut Self {
-        self.host = Some(host.to_owned());
+    pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = Some(host.into());
         self
     }
 
     /// Required. Set the repo owner, used to build a gitea api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a gitea api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 
@@ -100,8 +103,8 @@ impl ReleaseListBuilder {
     /// chosen release to download.
     #[doc(alias = "target")]
     #[doc(alias = "with_target")]
-    pub fn filter_target(&mut self, target: &str) -> &mut Self {
-        self.target = Some(target.to_owned());
+    pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
+        self.target = Some(target.into());
         self
     }
 
@@ -111,8 +114,8 @@ impl ReleaseListBuilder {
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
-    pub fn auth_token(&mut self, auth_token: &str) -> &mut Self {
-        self.auth_token = Some(auth_token.to_owned());
+    pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
+        self.auth_token = Some(auth_token.into());
         self
     }
 
@@ -214,22 +217,25 @@ impl UpdateBuilder {
     ///
     /// Unlike `gitlab` (which defaults to `https://gitlab.com`), Gitea has no canonical public
     /// host, so `build()` errors if this is not set.
+    ///
+    /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
+    /// `/api/v1/...` path itself. Do not include `/api/v1`.
     #[doc(alias = "instance_url")]
     #[doc(alias = "with_host")]
-    pub fn url(&mut self, host: &str) -> &mut Self {
-        self.host = Some(host.to_owned());
+    pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = Some(host.into());
         self
     }
 
     /// Required. Set the repo owner, used to build a gitea api url
-    pub fn repo_owner(&mut self, owner: &str) -> &mut Self {
-        self.repo_owner = Some(owner.to_owned());
+    pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
+        self.repo_owner = Some(owner.into());
         self
     }
 
     /// Required. Set the repo name, used to build a gitea api url
-    pub fn repo_name(&mut self, name: &str) -> &mut Self {
-        self.repo_name = Some(name.to_owned());
+    pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.repo_name = Some(name.into());
         self
     }
 

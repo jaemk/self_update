@@ -56,7 +56,7 @@ are _disabled_ by default; activate the one(s) your release files need:
 * `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
 * `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
-The S3 backend needs **no feature** — it is always compiled. (A no-op `s3` alias feature exists only so `features = ["s3"]` resolves for symmetry with the other backends; only private-bucket request signing needs an actual feature, `s3-auth`.)
+The S3 backend needs **no feature** — it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
 
 ### Example
 
@@ -568,20 +568,45 @@ impl std::fmt::Display for Status {
     }
 }
 
-/// Supported archive formats
+/// The archive format of a release asset, as detected from its file extension.
+///
+/// `#[non_exhaustive]`, and the `Tar`/`Zip` variants are gated on the `archive-tar` / `archive-zip`
+/// features: if the matching feature is off the variant does not exist and [`detect_archive`] for
+/// that extension returns [`Error::ArchiveNotEnabled`] instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ArchiveKind {
+    /// A tarball, optionally compressed (e.g. `.tar`, `.tar.gz`). Requires `archive-tar`.
     #[cfg(feature = "archive-tar")]
     Tar(Option<Compression>),
+    /// A bare file, optionally compressed (e.g. a plain binary, or a `.gz` of one).
     Plain(Option<Compression>),
+    /// A zip archive (`.zip`). Requires `archive-zip`.
     #[cfg(feature = "archive-zip")]
     Zip,
 }
 
+impl std::fmt::Display for ArchiveKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "archive-tar")]
+            ArchiveKind::Tar(Some(Compression::Gz)) => write!(f, "tar.gz"),
+            #[cfg(feature = "archive-tar")]
+            ArchiveKind::Tar(None) => write!(f, "tar"),
+            ArchiveKind::Plain(Some(Compression::Gz)) => write!(f, "gz"),
+            ArchiveKind::Plain(None) => write!(f, "plain"),
+            #[cfg(feature = "archive-zip")]
+            ArchiveKind::Zip => write!(f, "zip"),
+        }
+    }
+}
+
+/// A compression codec applied to an [`ArchiveKind`]. `#[non_exhaustive]`; `Gz` (gzip) is currently
+/// the only variant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Compression {
+    /// gzip (`.gz`); decoding the stream requires the `compression-flate2` feature.
     Gz,
 }
 
@@ -1455,6 +1480,24 @@ mod tests {
         // `is_updated()` is the complement.
         assert!(Status::Updated("1.2.3".to_string()).is_updated());
         assert!(!Status::UpToDate("1.2.3".to_string()).is_updated());
+    }
+
+    // `ArchiveKind` renders a friendly, human-readable name via `Display` (used in error messages),
+    // not the `Debug` form (which leaks the enum shape like `Tar(Some(Gz))`).
+    #[test]
+    fn archive_kind_display_is_human_readable() {
+        assert_eq!(ArchiveKind::Plain(None).to_string(), "plain");
+        assert_eq!(ArchiveKind::Plain(Some(Compression::Gz)).to_string(), "gz");
+        #[cfg(feature = "archive-tar")]
+        {
+            assert_eq!(ArchiveKind::Tar(None).to_string(), "tar");
+            assert_eq!(
+                ArchiveKind::Tar(Some(Compression::Gz)).to_string(),
+                "tar.gz"
+            );
+        }
+        #[cfg(feature = "archive-zip")]
+        assert_eq!(ArchiveKind::Zip.to_string(), "zip");
     }
 
     #[test]

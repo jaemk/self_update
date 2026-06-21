@@ -77,8 +77,10 @@ In `finish_update`, before any extraction or replacement:
 2. **Signature** (feature `signatures`): `verify_signature(archive_path, verifying_keys())`
    (`update.rs:783`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
-   archive file name as context; any other kind => `Error::NoSignatures`
-   (`update.rs:904-947`).
+   archive file name as context; any other kind => `Error::NoSignatures(kind)`
+   (`update.rs:904-947`), whose message names the kind via its `Display` impl
+   (`tar.gz` / `zip` / `tar` / `gz` / `plain`), e.g. "signature verification is only
+   implemented for `.tar.gz` and `.zip` assets, not gz files".
 
 Both run on the *downloaded archive bytes* and before extraction. The third hook,
 `verify_with`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
