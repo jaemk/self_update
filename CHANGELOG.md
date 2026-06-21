@@ -2,9 +2,17 @@
 
 ## [unreleased]
 ### Added
-- `is_update_available()` (and `is_update_available_async()` under the `async` feature) on every
-  backend's built updater: a light "is there a newer compatible release?" check that returns a
-  `bool` without downloading or installing anything.
+- A new `Releases` type, returned by the release-fetch methods, carrying the fetched releases plus
+  the updater's current version. It has `all() -> &[Release]`, `latest() -> Option<&Release>`
+  (newest first), `into_vec() -> Vec<Release>`, and `is_update_available() -> Result<bool>` (true
+  when the latest release is strictly newer than the current version). The light pre-check is now
+  `updater.get_latest_releases()?.is_update_available()` (sync) or
+  `updater.get_latest_releases_async().await?.is_update_available()` (async), which fetches the
+  release list once instead of fetching twice. `Releases` is re-exported at the crate root and is
+  distinct from the per-backend `ReleaseList` builder.
+- Async fetch parity (under the `async` feature) on the built updater:
+  `get_latest_release_async()` and `get_latest_releases_async()` returning `Result<Releases>`, and
+  `get_release_version_async()` returning `Result<Release>`.
 - Documented paths for each backend's per-backend `ReleaseList` type
   (`self_update::backends::<github|gitlab|gitea|s3>::ReleaseList`); the four backends each have a
   distinct `ReleaseList` builder, so they are surfaced consistently rather than unified under one
@@ -16,13 +24,20 @@
 - The custom-endpoint setter on the gitlab and gitea backends is now `url(...)` (was
   `instance_url(...)`), on both the `Update` and `ReleaseList` builders. github already used
   `url(...)`, so every git backend now names the setter the same.
-- `Error::Zip` and `Error::Signature` are now opaque: each wraps
+- `Error::Zip`, `Error::Signature`, `Error::Json`, and `Error::SemVer` are now opaque: each wraps
   `Box<dyn std::error::Error + Send + Sync>` instead of the concrete `zip::result::ZipError` /
-  `zipsign_api::ZipsignError`. Code that matched the inner dependency type must inspect it via
-  `Error::source()` (or downcast the box) instead.
+  `zipsign_api::ZipsignError` / `serde_json::Error` / `semver::Error`. Code that matched the inner
+  dependency type must inspect it via `Error::source()` (or downcast the box) instead.
 - `Error::NonUTF8` is renamed to `Error::SignatureNonUTF8` (`signatures` feature).
-- `Status::uptodate()` and `UpdateStatus::uptodate()` are renamed to `is_up_to_date()`.
-- `Download`, `Extract`, `Move`, and `MoveAll` are now `#[non_exhaustive]`.
+- `Status::uptodate()` and `UpdateStatus::uptodate()` are renamed to `is_up_to_date()`, and
+  `Status::updated()` / `UpdateStatus::updated()` to `is_updated()` (matching predicate pair).
+- The release-fetch surface on the sealed `ReleaseUpdate` trait now returns the new `Releases`
+  type: `get_latest_release()` and `get_latest_releases()` return `Result<Releases>` (the latter no
+  longer takes a `current_version` argument). The per-updater `is_update_available()` /
+  `is_update_available_async()` checks are removed; call `is_update_available()` on the returned
+  `Releases` instead (see Added).
+- `Download`, `Extract`, `Move`, and `MoveAll` are now `#[non_exhaustive]`, as are each backend's
+  concrete `Update` and `custom::AsyncUpdate` structs (the return types of `build_async()`).
 - `Download::header()` now takes `TryInto<HeaderName>` / `TryInto<HeaderValue>` and returns a
   `Result`, so string literals work (`.header("Accept", "application/octet-stream")?`); an invalid
   header is reported instead of requiring a pre-parsed `HeaderName`/`HeaderValue`.
@@ -37,6 +52,9 @@
   `Send` impls are unaffected.
 
 ### Removed
+- The per-updater `is_update_available()` / `is_update_available_async()` checks. They fetched the
+  release list a second time; fetch once and call `is_update_available()` on the returned `Releases`
+  instead (`updater.get_latest_releases()?.is_update_available()`).
 - The s3 `auth_token` setter is removed. The S3 backend authenticates only by signing requests with
   `access_key` (AWS SigV4), so use `.access_key((id, secret))` (the `s3-auth` feature) for
   private-bucket access. `auth_token` remains on github/gitlab/gitea.
