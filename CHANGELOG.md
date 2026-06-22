@@ -2,18 +2,45 @@
 
 ## [unreleased]
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.0.0-rc.1]
+First release candidate for 1.0. This version makes a number of breaking changes to clean up the
+public API surface before committing to long-term stability. Future `1.x` releases will remain
+backwards compatible.
+
+> **Upgrading from 0.x?** See the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)
+> for a complete walkthrough of every breaking change (and an
+> [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling).
+
+### Added
+- S3 auth support (request signing for private buckets) behind the `s3-auth` feature
+  ([#172](https://github.com/jaemk/self_update/pull/172)).
+- Re-export the `http` crate as `self_update::http`, so consumers can name the header
+  types accepted by `Download::header`/`replace_headers` (e.g.
+  `self_update::http::header::ACCEPT`) without a separate `http` dependency.
+- Re-export `ReleaseUpdate`, `ReleaseStatus`, `Release`, and `ReleaseAsset` at the crate root
+  (e.g. `self_update::ReleaseUpdate`) - the types returned by `update_extended()` / `fetch()`.
+- Re-export `zipsign_api` and add a `self_update::VerifyingKey` type alias (under the
+  `signatures` feature) so `verify_keys(...)` callers need neither a direct
+  `zipsign-api` dependency nor a hard-coded key length.
+- `asset_identifier(...)` builder setter on the `gitlab` and `s3` `UpdateBuilder`s (it already
+  existed on `github`/`gitea`), so every backend can disambiguate multiple matching assets.
+- `compile_error!` guards that turn invalid feature combinations into a clear message:
+  enabling both or neither of `reqwest`/`ureq`, or both `default-tls`/`rustls`.
+- `#[must_use]` on every builder type.
 - A new `Releases` type, returned by the release-fetch methods, carrying the fetched releases plus
   the updater's current version. It has `all() -> &[Release]`, `latest() -> Option<&Release>`
   (newest first), `into_vec() -> Vec<Release>`, `len()`/`is_empty()`, `current_version() -> &str`,
   `IntoIterator` (owned and borrowed), and `is_update_available() -> Result<bool>` (true when the
-  latest release is strictly newer than the current version). The light pre-check is now
+  latest release is strictly newer than the current version). The light pre-check is
   `updater.get_latest_releases()?.is_update_available()` (sync) or
   `updater.get_latest_releases_async().await?.is_update_available()` (async), which fetches the
   release list once instead of fetching twice. `Releases` is re-exported at the crate root and is
   distinct from the per-backend `ReleaseList` builder.
-- Async fetch parity (under the `async` feature) on the built updater:
-  `get_latest_release_async()` and `get_latest_releases_async()` returning `Result<Releases>`, and
-  `get_release_version_async()` returning `Result<Release>`.
 - Documented paths for each backend's per-backend `ReleaseList` type
   (`self_update::backends::<github|gitlab|gitea|s3>::ReleaseList`); the four backends each have a
   distinct `ReleaseList` builder, so they are surfaced consistently rather than unified under one
@@ -28,134 +55,18 @@
 - `Error::url() -> Option<&str>`, the failing request URL for `NotFound`/`Unauthorized`/`HttpStatus`
   and `None` otherwise, mirroring `http_status()`.
 - `Error::ChecksumMismatch { expected, computed }` (a checksum digest mismatch) and `Error::Aborted`
-  (the user declined the interactive confirmation prompt). Both were previously the catch-all
-  `Error::Update`. The fields/variant let a caller branch on these outcomes instead of matching a
-  string.
+  (the user declined the interactive confirmation prompt). Both were previously folded into the
+  catch-all `Error::Update`. The fields/variant let a caller branch on these outcomes instead of
+  matching a string.
 - `unattended()` on every backend `Update` and `ReleaseList` builder: sets `no_confirm(true)` and
   `show_output(false)` in one call for daemon/CI use. The default `no_confirm == false` blocks on
   stdin for an interactive confirmation.
-- A `#[deprecated]` no-op `auth_token(...)` shim on the s3 `Update` and `ReleaseList` builders,
-  pointing at `.access_key((id, secret))`. Porting a git-backend config to s3 then self-diagnoses
-  with a deprecation hint instead of a "no method" error; the shim stores nothing.
 - `backends::s3::AccessKey::new(access_key_id, secret_access_key)`, a named constructor alongside the
   existing `From` conversions.
 - `Display` for `ArchiveKind`, rendering a human-readable name (`tar.gz`, `zip`, ...) used in error
   messages instead of the `Debug` form.
 - docs.rs now renders feature-gate badges (`#[doc(cfg(...))]` on the gated re-exports, built with
   `rustdoc-args = ["--cfg", "docsrs"]`), and the crate-level docs open with a Quick start example.
-
-### Changed (breaking)
-- A non-2xx HTTP response is now a structured error instead of `Error::Network(String)`:
-  `Error::NotFound { url }` (404), `Error::Unauthorized { status, url }` (401/403), and
-  `Error::HttpStatus { status, url }` (any other non-2xx), so a consumer can distinguish
-  release-not-found from auth failure from other statuses. `Error::Http` is renamed to
-  `Error::Transport` (a request that could not complete: connection, TLS, timeout). Both the
-  `reqwest` and `ureq` clients now produce the same status variants (previously `ureq` surfaced a
-  non-2xx as `Error::Http`). Match on the new variants or call `Error::http_status()`.
-- The string builder setters now take `impl Into<String>` instead of `&str`:
-  `current_version`, `release_tag`, `target`, `asset_identifier`, `bin_name`, `bin_path_in_archive`,
-  `auth_token`, and the backend setters `repo_owner` / `repo_name` / `url` / `filter_target` /
-  `bucket_name` / `asset_prefix` / `region`. String-literal call sites are unchanged; a site that
-  passed `&some_string` now passes the `String` itself (drop the `&`) or `some_string.clone()`.
-- The s3 `Update` and `ReleaseList` `build()` now validate the endpoint/region pairing: the `S3`,
-  `S3DualStack`, and `DigitalOceanSpaces` endpoints require a `region`, so a missing region is an
-  `Error::Config` from `build()` rather than from the first request. `GCS` and `Generic` endpoints
-  are unaffected.
-- The custom-endpoint setter on the gitlab and gitea backends is now `url(...)` (was
-  `instance_url(...)`), on both the `Update` and `ReleaseList` builders. github already used
-  `url(...)`, so every git backend now names the setter the same.
-- `Error::Zip`, `Error::Signature`, `Error::Json`, and `Error::SemVer` are now opaque: each wraps
-  `Box<dyn std::error::Error + Send + Sync>` instead of the concrete `zip::result::ZipError` /
-  `zipsign_api::ZipsignError` / `serde_json::Error` / `semver::Error`. Code that matched the inner
-  dependency type must inspect it via `Error::source()` (or downcast the box) instead.
-- `Error::NonUTF8` is renamed to `Error::SignatureNonUTF8` (`signatures` feature).
-- The two update-result enums are renamed: `Status` (the lightweight result of `update()`, carrying
-  a version string) is now `VersionStatus`, and `UpdateStatus` (the extended result of
-  `update_extended()`, carrying a `Release`) is now `ReleaseStatus`. The method
-  `UpdateStatus::into_status(current_version)` is now `ReleaseStatus::into_version_status(current_version)`.
-  Both are still re-exported at the crate root; the variants (`UpToDate`/`Updated`) and the other
-  methods (`is_up_to_date`, `is_updated`, `updated_release`, `into_updated_release`) are unchanged.
-- A checksum digest mismatch is now `Error::ChecksumMismatch { expected, computed }` and a declined
-  confirmation prompt is now `Error::Aborted`; both were previously `Error::Update`. Code that
-  matched `Error::Update` for these cases must switch to the new variants. Genuine internal failures
-  (blocking-task join, extractor invariants, verify-callback rejection) stay `Error::Update`.
-- The verification builder setters are renamed for a consistent shape: `checksum(...)` is now
-  `verify_checksum(...)` and `verifying_keys(...)` is now `verify_keys(...)` (and the matching sealed
-  `UpdateConfig` accessors `checksum()` / `verifying_keys()` are now `verify_checksum()` /
-  `verify_keys()`). `verify_with(...)` is unchanged.
-- `Error` Display strings are normalized: `ArchiveNotEnabled` now renders with the
-  `"ArchiveNotEnabledError: ..."` prefix and `SignatureNonUTF8` with `"SignatureError: ..."`,
-  matching the `<Name>Error:` prefix of every other variant. Display strings are human-facing and
-  may change between releases; match on variants or use `http_status()` / `url()` for programmatic
-  decisions.
-- The status predicates are renamed to a matching pair: `uptodate()` is now `is_up_to_date()` and
-  `updated()` is now `is_updated()`, on both `VersionStatus` and `ReleaseStatus`.
-- All `#[doc(alias = "...")]` on the builder setters are dropped (the aliased names were never
-  callable methods, only a rustdoc-search footgun). Affected discoverable old names include
-  `identifier`, `target_version`, `target_version_tag`, `with_url`, `instance_url`, `with_host`,
-  `with_target`, `target` (on `filter_target`), `access_key_id`, `verifying_checksum`,
-  `set_progress_style`, and `set_progress_callback`. Use the canonical method name.
-- `bin_name` re-derives `bin_path_in_archive` when that path was auto-derived, so calling `bin_name`
-  twice no longer leaves a stale archive path. An explicitly-set `bin_path_in_archive` stays sticky.
-- The release-fetch surface on the sealed `ReleaseUpdate` trait now returns the new `Releases`
-  type: `get_latest_release()` and `get_latest_releases()` return `Result<Releases>` (the latter no
-  longer takes a `current_version` argument). The per-updater `is_update_available()` /
-  `is_update_available_async()` checks are removed; call `is_update_available()` on the returned
-  `Releases` instead (see Added).
-- `Download`, `Extract`, `Move`, and `MoveAll` are now `#[non_exhaustive]`, as are each backend's
-  concrete `Update` and `custom::AsyncUpdate` structs (the return types of `build_async()`).
-- `Download::header()` now takes `TryInto<HeaderName>` / `TryInto<HeaderValue>` and returns a
-  `Result`, so string literals work (`.header("Accept", "application/octet-stream")?`); an invalid
-  header is reported instead of requiring a pre-parsed `HeaderName`/`HeaderValue`.
-- The sealed `UpdateConfig` accessor `bin_install_path()` returns `&Path` (was an owned
-  `PathBuf`). Only relevant if you named the return type.
-- `backends::custom::Blocking`'s inner field is now private. Construct it with
-  `Blocking::new(source)` and read the wrapped source via `into_inner()` / `as_inner()`.
-- `DEFAULT_PROGRESS_TEMPLATE` and `DEFAULT_PROGRESS_CHARS` are no longer public (internal defaults
-  only).
-- The `AsyncReleaseSource` trait now enforces `Send` on its returned futures at the type level, so
-  a non-`Send` impl fails to compile at the impl site rather than later at the spawn site. Existing
-  `Send` impls are unaffected.
-
-### Changed
-- A builder `build()` error for a missing required field now names the setter to call, e.g.
-  `` `current_version` required (call `.current_version(...)`) `` and `` `bin_name` required (call
-  `.bin_name(...)`) ``.
-
-### Removed
-- The per-updater `is_update_available()` / `is_update_available_async()` checks. They fetched the
-  release list a second time; fetch once and call `is_update_available()` on the returned `Releases`
-  instead (`updater.get_latest_releases()?.is_update_available()`).
-- The no-op `s3` cargo feature is removed. The S3 backend is always compiled, so `features = ["s3"]`
-  was a no-op; drop it. Only private-bucket request signing needs a feature (`s3-auth`).
-
-## [1.0.0]
-First stable release. This version makes a number of breaking changes to clean up the
-public API surface. Future `1.x` releases will remain backwards compatible.
-
-> **Upgrading from 0.x?** See the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)
-> for a complete walkthrough of every breaking change (and an
-> [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling).
-
-### Added
-- S3 auth support (request signing for private buckets) behind the `s3-auth` feature
-  ([#172](https://github.com/jaemk/self_update/pull/172)).
-- Re-export the `http` crate as `self_update::http`, so consumers can name the header
-  types accepted by `Download::header`/`replace_headers` (e.g.
-  `self_update::http::header::ACCEPT`) without a separate `http` dependency.
-- Re-export `ReleaseUpdate`, `UpdateStatus`, `Release`, and `ReleaseAsset` at the crate root
-  (e.g. `self_update::ReleaseUpdate`) — the types returned by `update_extended()` / `fetch()`.
-- Re-export `zipsign_api` and add a `self_update::VerifyingKey` type alias (under the
-  `signatures` feature) so `verifying_keys(...)` callers need neither a direct
-  `zipsign-api` dependency nor a hard-coded key length.
-- `asset_identifier(...)` builder setter on the `gitlab` and `s3` `UpdateBuilder`s (it already
-  existed on `github`/`gitea`), so every backend can disambiguate multiple matching assets.
-- `compile_error!` guards that turn invalid feature combinations into a clear message:
-  enabling both or neither of `reqwest`/`ureq`, or both `default-tls`/`rustls`.
-- `#[must_use]` on every builder type.
-- A no-op `s3` alias cargo feature, so `features = ["s3"]` resolves for symmetry with the other
-  backends. The S3 backend itself needs no feature (it is always compiled); only private-bucket
-  request signing needs a feature (`s3-auth`).
 - Transport control on the `Update` and `ReleaseList` builders: `.timeout(Duration)` bounds
   every HTTP request the builder makes (release listing and, for `Update`, the download);
   `.request_header(name, value)` adds an extra header to every request (e.g. for a
@@ -168,8 +79,8 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   (`total` is `None` when the server sends no `Content-Length`). It is independent of the
   terminal progress bar, so GUI / headless / logging consumers can observe download progress.
 - Checksum verification behind the `checksums` feature: `Update::configure()
-  .checksum(Checksum::Sha256(hex))` (or `Checksum::Sha512(..)`) verifies the
-  downloaded artifact against a known digest — e.g. one published in a `SHA256SUMS` file —
+  .verify_checksum(Checksum::Sha256(hex))` (or `Checksum::Sha512(..)`) verifies the
+  downloaded artifact against a known digest - e.g. one published in a `SHA256SUMS` file -
   before installing it. The hash algorithm is selected by the `Checksum` variant, which is
   `#[non_exhaustive]` so more algorithms can be added later.
 - Post-update verification hook: `Update::configure().verify_with(|new_exe: &Path| -> bool ..)`
@@ -181,7 +92,7 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   asset names the default heuristic can't express. Returning `None` fails the update with "no asset
   found".
 - Transactional multi-file install: a new `MoveAll` primitive installs a set of `(source -> dest)`
-  moves atomically — either all succeed, or on the first failure every applied move is rolled back,
+  moves atomically - either all succeed, or on the first failure every applied move is rolled back,
   so a multi-file update (a binary plus sidecar libraries/resources) can't be left half-applied. A
   documented cookbook (`extract_into` the whole archive, then `MoveAll`) covers the multi-file /
   non-executable install case the single-binary `update()` flow doesn't.
@@ -195,15 +106,16 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   reuses one client across paginated requests instead of rebuilding one per call.
 - Async update API behind the `async` feature: every built-in backend's `Update` builder gains
   `build_async()` (returning a concrete `Update`) with async verbs `update_async()`,
-  `update_extended_async()`, and `get_latest_release_async()`. The blocking API is unchanged and the
-  async path reuses the same response parsers and the same extract/install tail (no logic fork);
-  only the release listing and the download are async. It is tokio-only and reqwest-only (`async` is
-  incompatible with `ureq`).
-- Custom backends: a new public `ReleaseSource` trait (three fetch methods — `get_latest_release`,
+  `update_extended_async()`, `get_latest_release_async()` / `get_latest_releases_async()` (returning
+  `Result<Releases>`), and `get_release_version_async()` (returning `Result<Release>`). The blocking
+  API is unchanged and the async path reuses the same response parsers and the same extract/install
+  tail (no logic fork); only the release listing and the download are async. It is tokio-only and
+  reqwest-only (`async` is incompatible with `ureq`).
+- Custom backends: a new public `ReleaseSource` trait (three fetch methods - `get_latest_release`,
   `get_latest_releases`, `get_release_version`) plus a `backends::custom::Update` builder let you
   update from a host the built-in backends don't cover (another forge, a private registry, a plain
   HTTP directory). You implement only *where releases come from*; the crate runs its usual
-  compare → select-asset → download → verify → extract → install flow over your source. The
+  compare -> select-asset -> download -> verify -> extract -> install flow over your source. The
   `ReleaseUpdate` trait stays sealed. To support this, `ReleaseAsset::new` and a `Release::builder()`
   (`ReleaseBuilder`) make those `#[non_exhaustive]` types constructible by downstream code (also
   handy for building `Release` values in your own tests).
@@ -225,21 +137,22 @@ public API surface. Future `1.x` releases will remain backwards compatible.
     `ReleaseListBuilder`; the setter takes the full `(id, secret)` pair);
   - the version-tag setter is `release_tag(...)` (was `target_version_tag`) and the
     asset-disambiguation setter is `asset_identifier(...)` (was `identifier`), on every `Update`
-    builder — each now matching its `ReleaseUpdate` accessor of the same name;
-  - the checksum setter is `checksum(...)` (was `verifying_checksum`), matching the `checksum()`
-    accessor;
+    builder - each now matching its `ReleaseUpdate` accessor of the same name;
+  - the verification setters are `verify_checksum(...)` (was `verifying_checksum`) and
+    `verify_keys(...)` (was `verifying_keys`), matching their `verify_checksum()` / `verify_keys()`
+    accessors;
   - the `Update`/`Download` progress setters are `progress_callback(...)` and `progress_style(...)`
     (were `set_progress_callback`/`set_progress_style`).
-- **`Download` setters renamed to match the `Update`/`ReleaseList` builders**: `set_timeout` →
-  `timeout`, `set_header` → `header`, `set_headers` → `replace_headers` (it replaces the whole
-  `HeaderMap`), `show_progress` → `show_download_progress`, `set_progress_callback` →
-  `progress_callback`, `set_progress_style` → `progress_style`. The old names remain as
-  `#[doc(alias)]`s.
+- **`Download` setters renamed to match the `Update`/`ReleaseList` builders**: `set_timeout` ->
+  `timeout`, `set_header` -> `header`, `set_headers` -> `replace_headers` (it replaces the whole
+  `HeaderMap`), `show_progress` -> `show_download_progress`, `set_progress_callback` ->
+  `progress_callback`, `set_progress_style` -> `progress_style`. The old names are gone, not even
+  available as `#[doc(alias)]`s; use the canonical method name.
 - **`request_header(name, value)` now accepts `TryInto<HeaderName>`/`TryInto<HeaderValue>`** on the
   `Update` and `ReleaseList` builders, so `.request_header("X-Foo", "bar")` works (no
   `.parse().unwrap()`); an invalid header is surfaced as `Error::Config` from `build()` instead of
   panicking. Typed-argument call sites still compile.
-- **`ReleaseUpdate` is now a sealed trait** — downstream code can call it (every backend's
+- **`ReleaseUpdate` is now a sealed trait** - downstream code can call it (every backend's
   `build()` returns a `Box<dyn ReleaseUpdate>`) but can no longer implement it for foreign
   types.
 - **`ReleaseUpdate` accessors return borrows**: `current_version`/`target`/`bin_name`/
@@ -248,6 +161,9 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   `Option<String>`); `api_headers` takes `Option<&str>`.
 - **`ReleaseUpdate` accessors renamed to match their setters**: the `target_version` accessor is
   now `release_tag` and `identifier` is now `asset_identifier`.
+- **The release-fetch surface on the sealed `ReleaseUpdate` trait now returns the new `Releases`
+  type**: `get_latest_release()` and `get_latest_releases()` return `Result<Releases>` (the latter no
+  longer takes a `current_version` argument).
 - **`ReleaseSource` is sync-only; a separate `AsyncReleaseSource` trait drives the async custom
   updater.** `ReleaseSource` is the three sync fetch methods plus `Send + Sync` (no `Clone` bound).
   For a natively-async source, implement the new public `AsyncReleaseSource` trait (the same three
@@ -255,46 +171,105 @@ public API surface. Future `1.x` releases will remain backwards compatible.
   `backends::custom::AsyncUpdate` + `build_async()`; to reuse a `Clone` sync `ReleaseSource` from the
   async API, wrap it in `backends::custom::Blocking` (which runs the sync fetches on
   `tokio::task::spawn_blocking`). `AsyncReleaseSource` is consumed through generics (`AsyncUpdate<S>`,
-  never a `dyn` object), so its `async fn`s need no `async-trait`/boxing. See *Added* below.
+  never a `dyn` object), so its `async fn`s need no `async-trait`/boxing. The trait also enforces
+  `Send` on its returned futures at the type level, so a non-`Send` impl fails to compile at the impl
+  site rather than later at the spawn site. See *Added* below.
 - **`ReleaseUpdate` accessors moved to a sealed `UpdateConfig` supertrait** (`ReleaseUpdate:
   UpdateConfig`). All the getters (`current_version`, `target`, `bin_name`, `release_tag`,
-  `asset_identifier`, `auth_token`, `api_headers`, the progress/transport/verify getters, …) now
-  live on `self_update::UpdateConfig`; `ReleaseUpdate` keeps the three fetches plus
+  `asset_identifier`, `auth_token`, `api_headers`, the progress/transport/verify getters, ...) now
+  live on `self_update::UpdateConfig`; `ReleaseUpdate` keeps the fetches plus
   `update`/`update_extended`. Calling an accessor on a `Box<dyn ReleaseUpdate>` is unchanged; a
   generic helper bounded `R: ReleaseUpdate` that calls an accessor needs `use self_update::UpdateConfig;`.
+  The accessor `bin_install_path()` returns `&Path` (was an owned `PathBuf`); only relevant if you
+  named the return type.
 - **`#[derive(Clone)]` added to every `UpdateBuilder`** (github/gitlab/gitea/s3/custom), matching
   the already-`Clone` `ReleaseListBuilder`s, so a configured builder can be cloned before `build()`.
 - **`ReleaseList::fetch` now takes `&self`** (was `self`) on the `github`/`gitlab`/`gitea`
   backends (the `s3` backend already borrowed).
-- **`Error` is now `#[non_exhaustive]`**, and the feature-specific variants are collapsed:
-  the `Reqwest`/`Ureq` variants are replaced by a single opaque `Http` variant, and the
-  `StdTimeError`/`TimeError`/`Digest`/`UrlParse` (`s3-auth`) variants by a single opaque
-  `S3Auth` variant. The underlying error is still reachable via `Error::source()`.
-- `Status`, `ArchiveKind`, `Compression`, `UpdateStatus`, `Release`, and `ReleaseAsset` are
-  now `#[non_exhaustive]`.
+- **`Error` is now `#[non_exhaustive]`**, and the feature-specific variants are restructured:
+  the old `Reqwest`/`Ureq` variants become a single opaque `Error::Transport` (a request that could
+  not complete: connection, TLS, timeout), and a completed non-2xx response - previously
+  `Error::Network(String)` - is now one of `Error::NotFound { url }` (404),
+  `Error::Unauthorized { status, url }` (401/403), or `Error::HttpStatus { status, url }` (any other
+  non-2xx), so a consumer can distinguish release-not-found from auth failure from other statuses.
+  Both the `reqwest` and `ureq` clients now produce the same status variants. Inspect them with
+  `Error::http_status()` / `Error::url()`. The `StdTimeError`/`TimeError`/`Digest`/`UrlParse`
+  (`s3-auth`) variants are collapsed into a single opaque `Error::S3Auth`. The underlying error is
+  still reachable via `Error::source()`.
+- `Error::Zip`, `Error::Signature`, `Error::Json`, and `Error::SemVer` are now opaque: each wraps
+  `Box<dyn std::error::Error + Send + Sync>` instead of the concrete `zip::result::ZipError` /
+  `zipsign_api::ZipsignError` / `serde_json::Error` / `semver::Error`. Code that matched the inner
+  dependency type must inspect it via `Error::source()` (or downcast the box) instead.
+- `Error::NonUTF8` is renamed to `Error::SignatureNonUTF8` (`signatures` feature).
+- A checksum digest mismatch is now `Error::ChecksumMismatch { expected, computed }` and a declined
+  confirmation prompt is now `Error::Aborted`; both were previously folded into `Error::Update`. Code
+  that matched `Error::Update` for these cases must switch to the new variants. Genuine internal
+  failures (blocking-task join, extractor invariants, verify-callback rejection) stay `Error::Update`.
+- `Error` Display strings are normalized: `ArchiveNotEnabled` now renders with the
+  `"ArchiveNotEnabledError: ..."` prefix and `SignatureNonUTF8` with `"SignatureError: ..."`,
+  matching the `<Name>Error:` prefix of every other variant. Display strings are human-facing and
+  may change between releases; match on variants or use `http_status()` / `url()` for programmatic
+  decisions.
+- The two update-result enums are renamed: `Status` (the lightweight result of `update()`, carrying
+  a version string) is now `VersionStatus`, and `UpdateStatus` (the extended result of
+  `update_extended()`, carrying a `Release`) is now `ReleaseStatus`. The method
+  `UpdateStatus::into_status(current_version)` is now `ReleaseStatus::into_version_status(current_version)`.
+  Both are re-exported at the crate root and `#[non_exhaustive]`. The status predicates are renamed
+  to a matching pair: `uptodate()` is now `is_up_to_date()` and `updated()` is now `is_updated()`, on
+  both `VersionStatus` and `ReleaseStatus`.
+- `ArchiveKind`, `Compression`, `Release`, and `ReleaseAsset` are now `#[non_exhaustive]`, as are
+  `Download`, `Extract`, `Move`, and `MoveAll`, and each backend's concrete `Update` and
+  `custom::AsyncUpdate` structs (the return types of `build_async()`).
+- The string builder setters now take `impl Into<String>` instead of `&str`:
+  `current_version`, `release_tag`, `target`, `asset_identifier`, `bin_name`, `bin_path_in_archive`,
+  `auth_token`, and the backend setters `repo_owner` / `repo_name` / `url` / `filter_target` /
+  `bucket_name` / `asset_prefix` / `region`. String-literal call sites are unchanged; a site that
+  passed `&some_string` now passes the `String` itself (drop the `&`) or `some_string.clone()`.
+- The s3 `Update` and `ReleaseList` `build()` now validate the endpoint/region pairing: the `S3`,
+  `S3DualStack`, and `DigitalOceanSpaces` endpoints require a `region`, so a missing region is an
+  `Error::Config` from `build()` rather than from the first request. `GCS` and `Generic` endpoints
+  are unaffected.
+- `bin_name` re-derives `bin_path_in_archive` when that path was auto-derived, so calling `bin_name`
+  twice no longer leaves a stale archive path. An explicitly-set `bin_path_in_archive` stays sticky.
+- `Download::header()` now takes `TryInto<HeaderName>` / `TryInto<HeaderValue>` and returns a
+  `Result`, so string literals work (`.header("Accept", "application/octet-stream")?`); an invalid
+  header is reported instead of requiring a pre-parsed `HeaderName`/`HeaderValue`.
 - `Download::progress_style` and each backend's `UpdateBuilder::progress_style` now
   accept `impl Into<String>`.
 - The `Download::header` doc example now uses `self_update::http::header::ACCEPT`, so it
   is client-agnostic and self-contained.
-- The `verifying_keys(...)` setter and accessor now use the `self_update::VerifyingKey` alias in
+- `backends::custom::Blocking`'s inner field is now private. Construct it with
+  `Blocking::new(source)` and read the wrapped source via `into_inner()` / `as_inner()`.
+- `DEFAULT_PROGRESS_TEMPLATE` and `DEFAULT_PROGRESS_CHARS` are no longer public (internal defaults
+  only).
+- The `verify_keys(...)` setter and accessor now use the `self_update::VerifyingKey` alias in
   their signatures (instead of the raw `[u8; zipsign_api::PUBLIC_KEY_LENGTH]` array).
 - The s3 `AccessKey` credential type is now public and re-exported as
   `self_update::backends::s3::AccessKey` (under `s3-auth`), and is `#[non_exhaustive]` so a future
   credential field (e.g. an STS session token) can be added without a break. Build it via its
-  `(id, secret)` `From` impls.
+  `(id, secret)` `From` impls or `AccessKey::new`.
+- A builder `build()` error for a missing required field now names the setter to call, e.g.
+  `` `current_version` required (call `.current_version(...)`) `` and `` `bin_name` required (call
+  `.bin_name(...)`) ``.
 - Respect pagination URLs when fetching GitHub releases
   ([#179](https://github.com/jaemk/self_update/pull/179)).
 - Print a short "up to date" message instead of nothing when no update is available
   ([#180](https://github.com/jaemk/self_update/pull/180)).
 
 ### Removed
-- The s3 `UpdateBuilder::auth_token` setter. The S3 backend authenticates by signing requests with
-  `access_key` (AWS SigV4), never a bearer token, so the setter never had any effect there. Use
-  `.access_key((id, secret))` (the `s3-auth` feature) instead. `auth_token` remains on
+- The per-updater `is_update_available()` / `is_update_available_async()` checks. They fetched the
+  release list a second time; fetch once and call `is_update_available()` on the returned `Releases`
+  instead (`updater.get_latest_releases()?.is_update_available()`).
+- The s3 `UpdateBuilder::auth_token` setter is now a `#[deprecated]` no-op shim that points at
+  `.access_key((id, secret))` (the `s3-auth` feature). The S3 backend authenticates by signing
+  requests with `access_key` (AWS SigV4), never a bearer token, so the setter never had any effect
+  there; the shim stores nothing and exists only so a config ported from a git backend self-diagnoses
+  with a deprecation hint instead of a "no method" error. `auth_token` remains functional on
   github/gitlab/gitea.
-- The `Error::Reqwest`, `Error::Ureq`, `Error::StdTimeError`, `Error::TimeError`,
-  `Error::Digest`, and `Error::UrlParse` variants (replaced by `Error::Http` /
-  `Error::S3Auth`).
+- The `Error::Reqwest`, `Error::Ureq`, and `Error::Network` variants (now `Error::Transport` for an
+  incomplete request and `Error::NotFound`/`Unauthorized`/`HttpStatus` for a completed non-2xx
+  response), and the `Error::StdTimeError`, `Error::TimeError`, `Error::Digest`, and `Error::UrlParse`
+  variants (replaced by `Error::S3Auth`).
 - The `self_replace` and `tempfile::TempDir` re-exports (`self_update::self_replace` /
   `self_update::TempDir`). They pinned consumers to the crate's exact dependency versions; depend
   on `self-replace` / `tempfile` directly instead. The `http`, `reqwest`/`ureq`, and `zipsign_api`
@@ -302,7 +277,7 @@ public API surface. Future `1.x` releases will remain backwards compatible.
 - `GetArchiveReaderResult` is no longer `pub` (it leaked `either::Either` /
   `flate2::read::GzDecoder` for a private function and had no consumer use).
 - The deprecated `std::error::Error::description` implementation on `Error`.
-- `should_update` (deprecated since 0.4.2) — use `version::bump_is_greater` or
+- `should_update` (deprecated since 0.4.2) - use `version::bump_is_greater` or
   `version::bump_is_compatible` instead.
 - The implicit setting of the `SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables on Linux.
   The crate previously mutated these process-wide (to hardcoded Debian/Ubuntu paths) via
@@ -329,25 +304,35 @@ The full walkthrough is in [`docs/migrations/0.x-to-1.0-human.md`](docs/migratio
 find/replace for the common cases:
 
 - Custom endpoint setter (now `url(...)` on every git backend):
-  - `.with_url(` → `.url(`  (github API endpoint, kept)
-  - `.with_host(` → `.url(` (gitlab, gitea)
-- Release-list target filter: `.with_target(` → `.filter_target(`
-- S3 credentials: `.access_key_id(` → `.access_key(`
-- Version tag / asset id setters: `.target_version_tag(` → `.release_tag(`, `.identifier(` →
-  `.asset_identifier(`; checksum setter `.verifying_checksum(` → `.checksum(`
-- `Download`/`Update` progress + transport setters: `.set_progress_callback(` →
-  `.progress_callback(`, `.set_progress_style(` → `.progress_style(`, and on `Download`
-  `.set_timeout(` → `.timeout(`, `.set_header(` → `.header(`, `.set_headers(` →
-  `.replace_headers(`, `.show_progress(` → `.show_download_progress(`
+  - `.with_url(` -> `.url(`  (github API endpoint, kept)
+  - `.with_host(` -> `.url(` (gitlab, gitea)
+- Release-list target filter: `.with_target(` -> `.filter_target(`
+- S3 credentials: `.access_key_id(` -> `.access_key(`
+- Version tag / asset id setters: `.target_version_tag(` -> `.release_tag(`, `.identifier(` ->
+  `.asset_identifier(`
+- Verification setters: `.verifying_checksum(` -> `.verify_checksum(`, `.verifying_keys(` ->
+  `.verify_keys(`
+- `Download`/`Update` progress + transport setters: `.set_progress_callback(` ->
+  `.progress_callback(`, `.set_progress_style(` -> `.progress_style(`, and on `Download`
+  `.set_timeout(` -> `.timeout(`, `.set_header(` -> `.header(`, `.set_headers(` ->
+  `.replace_headers(`, `.show_progress(` -> `.show_download_progress(`. The old names are gone (not
+  even `#[doc(alias)]`s).
+- Status enums: `Status` -> `VersionStatus`, `UpdateStatus` -> `ReleaseStatus`,
+  `into_status(` -> `into_version_status(`. Status predicates: `.uptodate(` -> `.is_up_to_date(`,
+  `.updated(` -> `.is_updated(`.
 - Dropped re-exports: replace `self_update::self_replace::` / `self_update::TempDir` with a direct
   `self-replace` / `tempfile` dependency.
 - Error matching (the enum is now `#[non_exhaustive]`, so add a `_ =>` arm):
-  - `Error::Reqwest(e)` / `Error::Ureq(e)` → `Error::Http(e)`
-  - `Error::StdTimeError(e)` / `Error::TimeError(e)` / `Error::Digest(e)` / `Error::UrlParse(e)` → `Error::S3Auth(e)`
+  - `Error::Reqwest(e)` / `Error::Ureq(e)` -> `Error::Transport(e)`
+  - a completed non-2xx response was `Error::Network(_)`; it is now one of
+    `Error::NotFound { url }` (404), `Error::Unauthorized { status, url }` (401/403), or
+    `Error::HttpStatus { status, url }` (any other non-2xx). Call `Error::http_status()` /
+    `Error::url()` to inspect them.
+  - `Error::StdTimeError(e)` / `Error::TimeError(e)` / `Error::Digest(e)` / `Error::UrlParse(e)` -> `Error::S3Auth(e)`
 - `ReleaseUpdate` accessors now return borrows: append `.to_string()` where you previously
   got an owned `String` (e.g. `updater.current_version().to_string()`).
-- Custom `impl ReleaseUpdate for MyType` is no longer possible (the trait is sealed); open
-  an issue if you need a custom backend.
+- Custom `impl ReleaseUpdate for MyType` is no longer possible (the trait is sealed); implement the
+  public `ReleaseSource` / `AsyncReleaseSource` trait and drive it through `backends::custom`.
 - Verifying keys: `[u8; zipsign_api::PUBLIC_KEY_LENGTH]` may now be written
   `self_update::VerifyingKey`.
 - Feature flags: enabling both `reqwest` and `ureq`, or both `default-tls` and `rustls`, is
