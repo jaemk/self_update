@@ -25,7 +25,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     #[cfg(feature = "signatures")]
     status_builder
         .repo_owner("Kijewski")
-        .verifying_keys([*include_bytes!("github-public.key")]);
+        .verify_keys([*include_bytes!("github-public.key")]);
     #[cfg(not(feature = "signatures"))]
     status_builder.repo_owner("jaemk");
 

@@ -17,8 +17,8 @@ on-disk binary.
 ### Entry points
 
 `update()` calls `update_extended()` and maps its result through
-`UpdateStatus::into_status(current_version)` (`update.rs:579`). `update_extended()`
-(`update.rs:586`) is the sync flow; `update_extended_async()` (`update.rs:823`) is the async
+`ReleaseStatus::into_version_status(current_version)` (`update.rs:607`-`611`). `update_extended()`
+(`update.rs:614`) is the sync flow; `update_extended_async()` (`update.rs:851`) is the async
 flow, which differs only in that the release listing and the download are awaited. Both share
 the same helpers; the verify/extract/replace tail (`finish_update`) is fully synchronous in
 both paths.
@@ -72,10 +72,10 @@ the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>
 
 In `finish_update`, before any extraction or replacement:
 
-1. **Checksum** (feature `checksums`): if `checksum()` is set, `checksum.verify(archive_path)`
-   on the downloaded archive; a mismatch aborts here (`update.rs:778-781`).
-2. **Signature** (feature `signatures`): `verify_signature(archive_path, verifying_keys())`
-   (`update.rs:783`). Empty key set is a no-op; otherwise the archive is detected and verified
+1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
+   on the downloaded archive; a mismatch aborts here (`update.rs:806-809`).
+2. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
+   (`update.rs:811`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
    archive file name as context; any other kind => `Error::NoSignatures(kind)`
    (`update.rs:904-947`), whose message names the kind via its `Display` impl
@@ -84,7 +84,7 @@ In `finish_update`, before any extraction or replacement:
 
 Both run on the *downloaded archive bytes* and before extraction. The third hook,
 `verify_with`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
-immediately before the swap. Ordering: checksum -> signature -> extract -> verify_with ->
+immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_with ->
 replace.
 
 ### Replace
@@ -120,8 +120,9 @@ Rollback is best-effort: a failing rollback step is logged via `log::error!`, no
 name, download URL, "will be downloaded/extracted and replaced") prints when either
 `show_output` is true or a confirmation will be prompted, so it prints even with
 `show_output(false)` unless `no_confirm(true)` is also set. The confirmation prompt
-(`confirm("Do you want to continue? [Y/n] ")`, `lib.rs:513`) reads stdin; blank or `y`
-continues, anything else => `Error::Update` "Update aborted". `print_check_header`,
+(`confirm("Do you want to continue? [Y/n] ")`, `lib.rs:521`) reads stdin; blank or `y`
+continues, anything else => `Error::Aborted` (Display "AbortedError: the update was not
+confirmed", `lib.rs:528`). `print_check_header`,
 `finish_update`'s "Extracting archive..."/"Done"/"Replacing binary file..." messages, and
 `choose_latest_release`'s release messages are all gated on `show_output`
 (`print_flush`/`println` helpers, `update.rs:890-902`). `show_download_progress()` toggles the
@@ -131,20 +132,20 @@ the bar.
 
 ### Status reported
 
-`UpdateStatus` (`update.rs:40`) is `UpToDate` or `Updated(Release)` (carries the full installed
+`ReleaseStatus` (`update.rs:41`) is `UpToDate` or `Updated(Release)` (carries the full installed
 `Release`). `update_extended` returns `Updated(release)` after a successful install
-(`update.rs:816`) or `UpToDate` when nothing newer was found. `update()` collapses this to
-`Status` (`lib.rs:536`), `UpToDate(String)` / `Updated(String)` carrying only the version tag,
-via `into_status`.
+(`update.rs:844`) or `UpToDate` when nothing newer was found. `update()` collapses this to
+`VersionStatus` (`lib.rs:545`), `UpToDate(String)` / `Updated(String)` carrying only the version tag,
+via `into_version_status`.
 
 ## Public surface
 
-- `update::ReleaseUpdate` (sealed): `update(&self) -> Result<Status>`,
-  `update_extended(&self) -> Result<UpdateStatus>`, plus `get_latest_release`,
+- `update::ReleaseUpdate` (sealed): `update(&self) -> Result<VersionStatus>`,
+  `update_extended(&self) -> Result<ReleaseStatus>`, plus `get_latest_release`,
   `get_latest_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
   supertrait.
-- `update::UpdateStatus` (`#[non_exhaustive]`): `into_status`, `is_up_to_date`, `is_updated`.
-- `Status` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
+- `update::ReleaseStatus` (`#[non_exhaustive]`): `into_version_status`, `is_up_to_date`, `is_updated`.
+- `VersionStatus` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
 - `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
   `progress_style`, `replace_headers`, `header`, `download_to`, `download_to_async`
   (feature `async`), `reqwest_client`/`reqwest_async_client`/`ureq_agent` (client-gated).
@@ -155,7 +156,7 @@ via `into_status`.
 - `MoveAll<'a>` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
 
 Async `update_async` / `update_extended_async` verbs are generated on each backend's `Update`
-under feature `async`; `update_extended_async` (`update.rs:823`) is `pub(crate)`.
+under feature `async`; `update_extended_async` (`update.rs:851`) is `pub(crate)`.
 
 ## Invariants and regression checklist
 
@@ -174,7 +175,7 @@ under feature `async`; `update_extended_async` (`update.rs:823`) is `pub(crate)`
   `!no_confirm`. Suppressing one does not suppress the other.
 - The download is never retried; user `request_headers` override the crate's ACCEPT/auth
   headers on the download.
-- `update()` reports `Status` (version only); `update_extended()` reports `UpdateStatus`
+- `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).
 
 ## Tests

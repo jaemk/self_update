@@ -82,8 +82,6 @@ impl ReleaseListBuilder {
     }
 
     /// Set the optional arch `target` name, used to filter available releases
-    #[doc(alias = "target")]
-    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
         self.target = Some(target.into());
         self
@@ -92,7 +90,6 @@ impl ReleaseListBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    #[doc(alias = "with_url")]
     pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
         self.custom_url = Some(url.into());
         self
@@ -118,12 +115,18 @@ impl ReleaseListBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
@@ -214,7 +217,6 @@ impl UpdateBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    #[doc(alias = "with_url")]
     pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
         self.custom_url = Some(url.into());
         self
@@ -227,12 +229,18 @@ impl UpdateBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             custom_url: self.custom_url.clone(),
             common: self.common.build()?,
@@ -1037,10 +1045,10 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .checksum(crate::Checksum::Sha256("ab".repeat(32)))
+            .verify_checksum(crate::Checksum::Sha256("ab".repeat(32)))
             .build()
             .unwrap();
-        assert!(upd.checksum().is_some());
+        assert!(upd.verify_checksum().is_some());
     }
 
     #[test]
@@ -1366,5 +1374,70 @@ mod tests {
             .unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "2.0.0");
+    }
+
+    // --- Item 3: unattended() convenience ---------------------------------------------------
+
+    #[test]
+    fn unattended_sets_no_confirm_and_hides_output() {
+        // Build a config without calling `unattended()` first to confirm the defaults.
+        let upd_default = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        assert!(
+            !upd_default.no_confirm(),
+            "default no_confirm must be false"
+        );
+        assert!(
+            upd_default.show_output(),
+            "default show_output must be true"
+        );
+
+        // After `unattended()` both flags flip.
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .unattended()
+            .build()
+            .unwrap();
+        assert!(upd.no_confirm(), "unattended() must set no_confirm to true");
+        assert!(
+            !upd.show_output(),
+            "unattended() must set show_output to false"
+        );
+    }
+
+    // --- Item 1: verify_keys builder setter and accessor -----------------------------------
+
+    #[cfg(feature = "signatures")]
+    #[test]
+    fn builder_stores_verify_keys() {
+        // A 32-byte zeroed key slice (VerifyingKey = [u8; 32]) is enough to prove the
+        // setter and accessor wire through.
+        let key_bytes = [0u8; 32];
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .verify_keys([key_bytes])
+            .build()
+            .unwrap();
+        assert_eq!(
+            upd.verify_keys().len(),
+            1,
+            "verify_keys() must return the key that was set"
+        );
+        assert_eq!(
+            upd.verify_keys()[0],
+            key_bytes,
+            "returned key bytes must match what was supplied"
+        );
     }
 }

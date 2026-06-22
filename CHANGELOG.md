@@ -20,15 +20,29 @@
   crate-root type.
 - A new `examples/custom.rs` showing the custom backend: a minimal `ReleaseSource` impl driving a
   sync update, plus an async variant under the `async` feature.
-- `UpdateStatus::updated_release() -> Option<&Release>` and `into_updated_release() -> Option<Release>`
+- `ReleaseStatus::updated_release() -> Option<&Release>` and `into_updated_release() -> Option<Release>`
   to read the installed release without a `match` (which `#[non_exhaustive]` would force a wildcard
   arm onto).
 - `Error::http_status() -> Option<u16>`, returning the HTTP status for a completed non-2xx response
   (`NotFound` => 404, `Unauthorized`/`HttpStatus` => their code) and `None` otherwise.
+- `Error::url() -> Option<&str>`, the failing request URL for `NotFound`/`Unauthorized`/`HttpStatus`
+  and `None` otherwise, mirroring `http_status()`.
+- `Error::ChecksumMismatch { expected, computed }` (a checksum digest mismatch) and `Error::Aborted`
+  (the user declined the interactive confirmation prompt). Both were previously the catch-all
+  `Error::Update`. The fields/variant let a caller branch on these outcomes instead of matching a
+  string.
+- `unattended()` on every backend `Update` and `ReleaseList` builder: sets `no_confirm(true)` and
+  `show_output(false)` in one call for daemon/CI use. The default `no_confirm == false` blocks on
+  stdin for an interactive confirmation.
+- A `#[deprecated]` no-op `auth_token(...)` shim on the s3 `Update` and `ReleaseList` builders,
+  pointing at `.access_key((id, secret))`. Porting a git-backend config to s3 then self-diagnoses
+  with a deprecation hint instead of a "no method" error; the shim stores nothing.
 - `backends::s3::AccessKey::new(access_key_id, secret_access_key)`, a named constructor alongside the
   existing `From` conversions.
 - `Display` for `ArchiveKind`, rendering a human-readable name (`tar.gz`, `zip`, ...) used in error
   messages instead of the `Debug` form.
+- docs.rs now renders feature-gate badges (`#[doc(cfg(...))]` on the gated re-exports, built with
+  `rustdoc-args = ["--cfg", "docsrs"]`), and the crate-level docs open with a Quick start example.
 
 ### Changed (breaking)
 - A non-2xx HTTP response is now a structured error instead of `Error::Network(String)`:
@@ -55,8 +69,34 @@
   `zipsign_api::ZipsignError` / `serde_json::Error` / `semver::Error`. Code that matched the inner
   dependency type must inspect it via `Error::source()` (or downcast the box) instead.
 - `Error::NonUTF8` is renamed to `Error::SignatureNonUTF8` (`signatures` feature).
-- `Status::uptodate()` and `UpdateStatus::uptodate()` are renamed to `is_up_to_date()`, and
-  `Status::updated()` / `UpdateStatus::updated()` to `is_updated()` (matching predicate pair).
+- The two update-result enums are renamed: `Status` (the lightweight result of `update()`, carrying
+  a version string) is now `VersionStatus`, and `UpdateStatus` (the extended result of
+  `update_extended()`, carrying a `Release`) is now `ReleaseStatus`. The method
+  `UpdateStatus::into_status(current_version)` is now `ReleaseStatus::into_version_status(current_version)`.
+  Both are still re-exported at the crate root; the variants (`UpToDate`/`Updated`) and the other
+  methods (`is_up_to_date`, `is_updated`, `updated_release`, `into_updated_release`) are unchanged.
+- A checksum digest mismatch is now `Error::ChecksumMismatch { expected, computed }` and a declined
+  confirmation prompt is now `Error::Aborted`; both were previously `Error::Update`. Code that
+  matched `Error::Update` for these cases must switch to the new variants. Genuine internal failures
+  (blocking-task join, extractor invariants, verify-callback rejection) stay `Error::Update`.
+- The verification builder setters are renamed for a consistent shape: `checksum(...)` is now
+  `verify_checksum(...)` and `verifying_keys(...)` is now `verify_keys(...)` (and the matching sealed
+  `UpdateConfig` accessors `checksum()` / `verifying_keys()` are now `verify_checksum()` /
+  `verify_keys()`). `verify_with(...)` is unchanged.
+- `Error` Display strings are normalized: `ArchiveNotEnabled` now renders with the
+  `"ArchiveNotEnabledError: ..."` prefix and `SignatureNonUTF8` with `"SignatureError: ..."`,
+  matching the `<Name>Error:` prefix of every other variant. Display strings are human-facing and
+  may change between releases; match on variants or use `http_status()` / `url()` for programmatic
+  decisions.
+- The status predicates are renamed to a matching pair: `uptodate()` is now `is_up_to_date()` and
+  `updated()` is now `is_updated()`, on both `VersionStatus` and `ReleaseStatus`.
+- All `#[doc(alias = "...")]` on the builder setters are dropped (the aliased names were never
+  callable methods, only a rustdoc-search footgun). Affected discoverable old names include
+  `identifier`, `target_version`, `target_version_tag`, `with_url`, `instance_url`, `with_host`,
+  `with_target`, `target` (on `filter_target`), `access_key_id`, `verifying_checksum`,
+  `set_progress_style`, and `set_progress_callback`. Use the canonical method name.
+- `bin_name` re-derives `bin_path_in_archive` when that path was auto-derived, so calling `bin_name`
+  twice no longer leaves a stale archive path. An explicitly-set `bin_path_in_archive` stays sticky.
 - The release-fetch surface on the sealed `ReleaseUpdate` trait now returns the new `Releases`
   type: `get_latest_release()` and `get_latest_releases()` return `Result<Releases>` (the latter no
   longer takes a `current_version` argument). The per-updater `is_update_available()` /
@@ -77,13 +117,15 @@
   a non-`Send` impl fails to compile at the impl site rather than later at the spawn site. Existing
   `Send` impls are unaffected.
 
+### Changed
+- A builder `build()` error for a missing required field now names the setter to call, e.g.
+  `` `current_version` required (call `.current_version(...)`) `` and `` `bin_name` required (call
+  `.bin_name(...)`) ``.
+
 ### Removed
 - The per-updater `is_update_available()` / `is_update_available_async()` checks. They fetched the
   release list a second time; fetch once and call `is_update_available()` on the returned `Releases`
   instead (`updater.get_latest_releases()?.is_update_available()`).
-- The s3 `auth_token` setter is removed. The S3 backend authenticates only by signing requests with
-  `access_key` (AWS SigV4), so use `.access_key((id, secret))` (the `s3-auth` feature) for
-  private-bucket access. `auth_token` remains on github/gitlab/gitea.
 - The no-op `s3` cargo feature is removed. The S3 backend is always compiled, so `features = ["s3"]`
   was a no-op; drop it. Only private-bucket request signing needs a feature (`s3-auth`).
 

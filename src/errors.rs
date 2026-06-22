@@ -10,11 +10,33 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(feature = "signatures")]
 use zipsign_api::ZipsignError;
 
+/// The crate's single public error type.
+///
+/// ## Matching on variants
+///
+/// `Error` is `#[non_exhaustive]`, so a `match` must include a wildcard arm. For programmatic
+/// decisions, prefer `http_status()` and `url()` over matching on the Display string — the
+/// Display strings are human-facing and may change between minor releases.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Used as a catch-most for when the program fails to update.
     Update(String),
+    /// The downloaded artifact's checksum did not match the expected digest.
+    ///
+    /// `expected` is the configured digest; `computed` is the one actually produced from the
+    /// downloaded file. Both are hex-encoded lowercase digests.
+    ChecksumMismatch {
+        /// The expected digest (from the configured `Checksum`), hex-encoded.
+        expected: String,
+        /// The digest produced from the downloaded file, hex-encoded.
+        computed: String,
+    },
+    /// The user declined the interactive confirmation prompt.
+    ///
+    /// Returned when `no_confirm` is `false` (the default) and the user answers anything other
+    /// than `y` / `Y` / Enter at the "Do you want to continue?" prompt.
+    Aborted,
     /// A request completed and returned HTTP 404 (resource not found).
     ///
     /// `url` is the request URL that produced the 404.
@@ -110,6 +132,17 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The URL of the request that failed, for the HTTP error variants
+    /// (`NotFound`/`Unauthorized`/`HttpStatus`); `None` otherwise.
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Error::NotFound { url } => Some(url.as_str()),
+            Error::Unauthorized { url, .. } => Some(url.as_str()),
+            Error::HttpStatus { url, .. } => Some(url.as_str()),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -117,6 +150,12 @@ impl std::fmt::Display for Error {
         use Error::*;
         match self {
             Update(ref s) => write!(f, "UpdateError: {}", s),
+            ChecksumMismatch { expected, computed } => write!(
+                f,
+                "ChecksumMismatchError: checksum mismatch (expected {}, computed {})",
+                expected, computed
+            ),
+            Aborted => write!(f, "AbortedError: the update was not confirmed"),
             NotFound { url } => write!(f, "NotFoundError: no resource found at {} (HTTP 404)", url),
             Unauthorized { status, url } => write!(
                 f,
@@ -136,7 +175,7 @@ impl std::fmt::Display for Error {
             SemVer(ref e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
             Zip(ref e) => write!(f, "ZipError: {}", e),
-            ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabled: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
+            ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabledError: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
             #[cfg(feature = "signatures")]
             NoSignatures(kind) => write!(
                 f,
@@ -148,7 +187,7 @@ impl std::fmt::Display for Error {
             Signature(ref e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
             SignatureNonUTF8 => {
-                write!(f, "Cannot verify signature of a file with a non-UTF-8 name")
+                write!(f, "SignatureError: cannot verify signature of a file with a non-UTF-8 name")
             }
             #[cfg(feature = "s3-auth")]
             S3Auth(ref e) => write!(f, "S3AuthError: {}", e),
@@ -433,13 +472,14 @@ mod tests {
 
     // B7c: the signatures-gated non-UTF8 variant is named `SignatureNonUTF8` (was `NonUTF8`).
     // Naming + Display are pinned here; the rename is what makes this compile.
+    // Display prefix corrected to "SignatureError: ..." for consistency with all other variants.
     #[cfg(feature = "signatures")]
     #[test]
     fn signature_non_utf8_variant_is_renamed_and_displays() {
         let err = Error::SignatureNonUTF8;
         assert_eq!(
             err.to_string(),
-            "Cannot verify signature of a file with a non-UTF-8 name"
+            "SignatureError: cannot verify signature of a file with a non-UTF-8 name"
         );
     }
 
@@ -654,6 +694,152 @@ mod tests {
             matches!(e, Error::HttpStatus { status: 503, .. }),
             "status 503 must map to Error::HttpStatus, got {:?}",
             e
+        );
+    }
+
+    // A 3xx redirect that a client did NOT auto-follow is not 404/401/403, so it must fall into the
+    // `_ =>` arm and classify as `HttpStatus` carrying its exact code -- never `NotFound` or
+    // `Unauthorized`. Pins the redirect-status boundary of the catch-all arm.
+    #[test]
+    fn status_to_error_maps_3xx_to_http_status() {
+        let e = super::status_to_error(301, "https://example.com/r");
+        assert!(
+            matches!(e, Error::HttpStatus { status: 301, ref url } if url == "https://example.com/r"),
+            "status 301 must map to Error::HttpStatus(301), got {:?}",
+            e
+        );
+
+        let e = super::status_to_error(304, "https://example.com/r");
+        assert!(
+            matches!(e, Error::HttpStatus { status: 304, .. }),
+            "status 304 must map to Error::HttpStatus(304), got {:?}",
+            e
+        );
+    }
+
+    // --- New structured variants (ChecksumMismatch, Aborted) ----------------------------------
+
+    // ChecksumMismatch: exact Display string, no http_status(), no url().
+    #[test]
+    fn checksum_mismatch_display_exact_string() {
+        let err = Error::ChecksumMismatch {
+            expected: "aabbcc".to_string(),
+            computed: "112233".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "ChecksumMismatchError: checksum mismatch (expected aabbcc, computed 112233)"
+        );
+    }
+
+    #[test]
+    fn checksum_mismatch_http_status_is_none() {
+        let err = Error::ChecksumMismatch {
+            expected: "aa".to_string(),
+            computed: "bb".to_string(),
+        };
+        assert_eq!(err.http_status(), None);
+    }
+
+    #[test]
+    fn checksum_mismatch_url_is_none() {
+        let err = Error::ChecksumMismatch {
+            expected: "aa".to_string(),
+            computed: "bb".to_string(),
+        };
+        assert_eq!(err.url(), None);
+    }
+
+    // Aborted: exact Display string.
+    #[test]
+    fn aborted_display_exact_string() {
+        assert_eq!(
+            Error::Aborted.to_string(),
+            "AbortedError: the update was not confirmed"
+        );
+    }
+
+    #[test]
+    fn aborted_http_status_is_none() {
+        assert_eq!(Error::Aborted.http_status(), None);
+    }
+
+    #[test]
+    fn aborted_url_is_none() {
+        assert_eq!(Error::Aborted.url(), None);
+    }
+
+    // url() returns Some for NotFound / Unauthorized / HttpStatus, None for non-HTTP variants.
+    #[test]
+    fn url_helper_not_found() {
+        let err = Error::NotFound {
+            url: "https://example.com/releases".to_string(),
+        };
+        assert_eq!(err.url(), Some("https://example.com/releases"));
+    }
+
+    #[test]
+    fn url_helper_unauthorized() {
+        let err = Error::Unauthorized {
+            status: 401,
+            url: "https://example.com/api".to_string(),
+        };
+        assert_eq!(err.url(), Some("https://example.com/api"));
+    }
+
+    #[test]
+    fn url_helper_http_status() {
+        let err = Error::HttpStatus {
+            status: 503,
+            url: "https://example.com/releases".to_string(),
+        };
+        assert_eq!(err.url(), Some("https://example.com/releases"));
+    }
+
+    #[test]
+    fn url_helper_returns_none_for_non_http_variants() {
+        assert_eq!(Error::Update("x".into()).url(), None);
+        assert_eq!(Error::Release("x".into()).url(), None);
+        assert_eq!(Error::Config("x".into()).url(), None);
+        assert_eq!(Error::Aborted.url(), None);
+        assert_eq!(
+            Error::ChecksumMismatch {
+                expected: "a".into(),
+                computed: "b".into()
+            }
+            .url(),
+            None
+        );
+        assert_eq!(Error::Io(std::io::Error::other("x")).url(), None);
+    }
+
+    // ArchiveNotEnabled Display prefix corrected to "ArchiveNotEnabledError: ...".
+    #[test]
+    fn archive_not_enabled_display_has_correct_prefix() {
+        let err = Error::ArchiveNotEnabled("zip".to_string());
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("ArchiveNotEnabledError: "),
+            "ArchiveNotEnabled Display must start with 'ArchiveNotEnabledError: ', got: {}",
+            shown
+        );
+        assert!(
+            shown.contains("zip"),
+            "ArchiveNotEnabled Display must contain the extension, got: {}",
+            shown
+        );
+    }
+
+    // SignatureNonUTF8 Display prefix corrected to "SignatureError: ...".
+    #[cfg(feature = "signatures")]
+    #[test]
+    fn signature_non_utf8_display_has_signature_error_prefix() {
+        let err = Error::SignatureNonUTF8;
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("SignatureError: "),
+            "SignatureNonUTF8 Display must start with 'SignatureError: ', got: {}",
+            shown
         );
     }
 }

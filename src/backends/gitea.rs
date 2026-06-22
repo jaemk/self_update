@@ -75,8 +75,6 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    #[doc(alias = "instance_url")]
-    #[doc(alias = "with_host")]
     pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
         self.host = Some(host.into());
         self
@@ -101,8 +99,6 @@ impl ReleaseListBuilder {
     /// [`Update::target`](UpdateBuilder::target): `filter_target` drops whole releases from the
     /// listing when no asset matches, whereas the `Update` `target` selects *which asset* of the
     /// chosen release to download.
-    #[doc(alias = "target")]
-    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
         self.target = Some(target.into());
         self
@@ -136,12 +132,18 @@ impl ReleaseListBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
@@ -220,8 +222,6 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    #[doc(alias = "instance_url")]
-    #[doc(alias = "with_host")]
     pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
         self.host = Some(host.into());
         self
@@ -255,12 +255,18 @@ impl UpdateBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             common: self.common.build()?,
         })
@@ -919,6 +925,54 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(upd.bin_path_in_archive(), "custom/path");
+    }
+
+    // --- Item 4: bin_name re-derive correctness ---------------------------------------------
+
+    #[test]
+    fn bin_name_rederives_archive_path_on_second_call() {
+        // Calling `.bin_name("a")` then `.bin_name("b")` must yield the archive path derived
+        // from `b`, not `a`: the second call re-derives because the first was an auto-derive.
+        let expected_b = format!("b{}", std::env::consts::EXE_SUFFIX);
+        let upd = Update::configure()
+            .url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("a")
+            .bin_name("b")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        assert_eq!(
+            upd.bin_path_in_archive(),
+            expected_b,
+            "second bin_name call must re-derive the archive path from the new name"
+        );
+        assert_eq!(
+            upd.bin_name(),
+            expected_b,
+            "bin_name() must reflect the second call"
+        );
+    }
+
+    #[test]
+    fn explicit_bin_path_survives_subsequent_bin_name_call() {
+        // Calling `.bin_path_in_archive("x")` then `.bin_name("b")` must keep `"x"` — the
+        // explicit set is sticky and a later `bin_name` re-derive must not overwrite it.
+        let upd = Update::configure()
+            .url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_path_in_archive("x")
+            .bin_name("b")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        assert_eq!(
+            upd.bin_path_in_archive(),
+            "x",
+            "an explicit bin_path_in_archive must not be overwritten by a later bin_name call"
+        );
     }
 
     #[cfg(feature = "async")]

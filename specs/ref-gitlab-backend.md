@@ -17,48 +17,51 @@ live in `src/backends/mod.rs`; common builder/config plumbing lives in
 ### Builders
 
 `ReleaseList` lists releases for a repo and returns `Vec<Release>`. It is configured via
-`ReleaseList::configure()` (`gitlab.rs:155`), which seeds `host` to `https://gitlab.com`
-(`gitlab.rs:157`). The builder (`ReleaseListBuilder`, `gitlab.rs:63`) exposes `url`,
+`ReleaseList::configure()` (`gitlab.rs:160`), which seeds `host` to `https://gitlab.com`
+(`gitlab.rs:162`). The builder (`ReleaseListBuilder`, `gitlab.rs:63`) exposes `url`,
 `repo_owner`, `repo_name`, `filter_target`, `auth_token`, the shared
-`request_config_setters!(request)` setters (`gitlab.rs:118`), and `build()`
-(`gitlab.rs:121`). `build()` calls `self.request.check()` first (surfacing any deferred
+`request_config_setters!(request)` setters (`gitlab.rs:117`), and `build()`
+(`gitlab.rs:120`). `build()` calls `self.request.check()` first (surfacing any deferred
 `request_header` error as `Error::Config`), then requires `repo_owner` and `repo_name`,
-each bailing `Error::Config` when unset (`gitlab.rs:122-138`). `repo_owner`/`repo_name` are
-stored `Option<String>` on the builder and resolved to `String` on `ReleaseList`.
+each bailing `Error::Config` when unset (`gitlab.rs:124-139`). The required-field messages
+name the setter to call: `` `repo_owner` required (call `.repo_owner(...)`) `` and
+`` `repo_name` required (call `.repo_name(...)`) `` (`gitlab.rs:129`, `gitlab.rs:137`).
+`repo_owner`/`repo_name` are stored `Option<String>` on the builder and resolved to
+`String` on `ReleaseList`.
 
-`filter_target` (`gitlab.rs:102`, doc-aliased `target` and `with_target`) sets a target
-that drops whole releases lacking a matching asset; `fetch()` applies it via
-`r.has_target_asset(target)` (`gitlab.rs:176-182`). This differs from `Update::target`,
+`filter_target` (`gitlab.rs:101`) sets a target that drops whole releases lacking a
+matching asset; it is the `ReleaseList` release filter. `fetch()` applies it via
+`r.has_target_asset(target)` (`gitlab.rs:181-186`). This differs from `Update::target`,
 which selects *which asset* to download.
 
-`Update` is built via `Update::configure()` -> `UpdateBuilder` (`gitlab.rs:193`,
-`gitlab.rs:280`). Backend-specific setters are `url`, `repo_owner`, `repo_name`; all common
-options come from `impl_common_builder_setters!()` (`gitlab.rs:227`). `build()` returns
-`Box<dyn ReleaseUpdate>` (`gitlab.rs:250`); under the `async` feature `build_async()`
+`Update` is built via `Update::configure()` -> `UpdateBuilder` (`gitlab.rs:198`,
+`gitlab.rs:283`). Backend-specific setters are `url`, `repo_owner`, `repo_name`; all common
+options come from `impl_common_builder_setters!()` (`gitlab.rs:233`). `build()` returns
+`Box<dyn ReleaseUpdate>` (`gitlab.rs:262`); under the `async` feature `build_async()`
 returns the concrete `Update` so the inherent `*_async` methods are reachable
-(`gitlab.rs:259`). Both delegate to `build_update()` (`gitlab.rs:229`), which requires
-`repo_owner`/`repo_name` (each bailing `Error::Config`) and calls `self.common.build()`
-(which runs the deferred-header `check` and validates `current_version`, `bin_name`,
-`bin_path_in_archive`). `UpdateBuilder::default()` seeds `host` to `https://gitlab.com`
-(`gitlab.rs:366-374`).
+(`gitlab.rs:271`). Both delegate to `build_update()` (`gitlab.rs:235`), which requires
+`repo_owner`/`repo_name` (each bailing `Error::Config` with the same setter-naming messages,
+`gitlab.rs:243`, `gitlab.rs:251`) and calls `self.common.build()` (which runs the
+deferred-header `check` and validates `current_version`, `bin_name`, `bin_path_in_archive`).
+`UpdateBuilder::default()` seeds `host` to `https://gitlab.com` (`gitlab.rs:378-386`).
 
 ### Route shapes, host, and project-path encoding
 
-The list/latest/newer routes share one base, `Update::releases_url()` (`gitlab.rs:285`),
-and `ReleaseList::fetch` builds the same shape (`gitlab.rs:169`):
+The list/latest/newer routes share one base, `Update::releases_url()` (`gitlab.rs:297`),
+and `ReleaseList::fetch` builds the same shape (`gitlab.rs:174`):
 
 ```
 <host>/api/v4/projects/<owner>%2F<repo>/releases
 ```
 
 The literal `%2F` separating owner and repo is hard-coded in the format string
-(`gitlab.rs:170-173`, `gitlab.rs:286-291`); only `repo_owner` is run through
+(`gitlab.rs:175-178`, `gitlab.rs:298-303`); only `repo_owner` is run through
 `urlencoding::encode`, while `repo_name` is interpolated verbatim. Encoding `repo_owner`
 matters for subgroup paths (e.g. `group/subgroup` becomes `group%2Fsubgroup`) so an
 embedded `/` does not create an extra path segment.
 
 Fetch-by-tag (`get_release_version` / `get_release_version_async`) appends the tag to the
-releases base, percent-encoding the tag (`gitlab.rs:349`, `gitlab.rs:468`):
+releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
 
 ```
 {releases_url}/{urlencoding::encode(tag)}
@@ -67,49 +70,49 @@ releases base, percent-encoding the tag (`gitlab.rs:349`, `gitlab.rs:468`):
 This route returns a single release *object* (not an array), parsed directly by
 `Release::from_release_gitlab`.
 
-Custom host: `url(impl Into<String>)` (`gitlab.rs:76`, `gitlab.rs:210`) overrides `host`. It
-is doc-aliased `#[doc(alias = "instance_url")]` and `#[doc(alias = "with_host")]`
-(`gitlab.rs:74-75`, `gitlab.rs:208-209`); the setter was renamed from `instance_url` to
-`url`. Its doc states the instance host only (scheme + host, no trailing slash and no
-`/api/v4`): the crate appends the `/api/v4/...` path itself (`gitlab.rs:75-76`,
-`gitlab.rs:212-213`), so callers pass e.g. `https://gitlab.example.com`. The string setters
+Custom host: `url(impl Into<String>)` (`gitlab.rs:77`, `gitlab.rs:216`) overrides `host`. The
+setter was renamed from `instance_url`/`with_host` to `url`; it carries no `#[doc(alias)]`
+(all builder-setter doc-aliases were dropped). Its doc states the instance host only (scheme
++ host, no trailing slash and no `/api/v4`): the crate appends the `/api/v4/...` path itself
+(`gitlab.rs:75-76`, `gitlab.rs:214-215`), so callers pass e.g. `https://gitlab.example.com`.
+The string setters
 (`url`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's
 common setters) take `impl Into<String>`.
 
 ### Authentication
 
-`api_headers(auth_token: Option<&str>)` (`gitlab.rs:480`) always sets
+`api_headers(auth_token: Option<&str>)` (`gitlab.rs:492`) always sets
 `User-Agent: rust-reqwest/self-update` and, when a token is present, inserts
-`Authorization: Bearer <token>` (`gitlab.rs:489-496`). A token that cannot be parsed into a
+`Authorization: Bearer <token>` (`gitlab.rs:501-508`). A token that cannot be parsed into a
 header value yields `Error::Config` ("Failed to parse auth token"). There is no
 `PRIVATE-TOKEN` header and no environment-variable lookup in this file; the token comes
-solely from the builder setter (`ReleaseListBuilder::auth_token`, `gitlab.rs:113`) or the
+solely from the builder setter (`ReleaseListBuilder::auth_token`, `gitlab.rs:112`) or the
 common `auth_token` setter for `Update` (`self.common.auth_token`). The
 `impl_update_config_accessors!` override arm wires this `api_headers` into the trait so the
 download path uses the Bearer scheme rather than the trait default `token` scheme
-(`gitlab.rs:360-364`).
+(`gitlab.rs:372-376`).
 
 ### Pagination and ordering
 
 Listing paths (`ReleaseList::fetch`, `Update::fetch_newer_releases`, and the async
 `get_latest_releases_async`) go through `fetch_all_releases` / `fetch_all_releases_async`
-(`gitlab.rs:378`, `gitlab.rs:400`). Each starts at `first_page_url(base_url)` (which
+(`gitlab.rs:390`, `gitlab.rs:412`). Each starts at `first_page_url(base_url)` (which
 appends `?per_page=100` when the URL has no query string) and follows GitLab's
 `Link: rel="next"` header via `collect_paginated` / `collect_paginated_async` and
-`next_link` (`gitlab.rs:383-394`, `gitlab.rs:407-424`). Pagination is bounded by
+`next_link` (`gitlab.rs:395-406`, `gitlab.rs:419-437`). Pagination is bounded by
 `MAX_RELEASE_PAGES` (100) in the shared helper; a still-advertised next page past that bound
 logs a warning and stops.
 
-Single-newest ordering: `fetch_latest_release` (`gitlab.rs:299`) and
-`get_latest_release_async` (`gitlab.rs:429`) issue one un-paginated request and take
-`releases[0]`. The comment at `gitlab.rs:313-315` records that, unlike GitHub, GitLab has
+Single-newest ordering: `fetch_latest_release` (`gitlab.rs:311`) and
+`get_latest_release_async` (`gitlab.rs:441`) issue one un-paginated request and take
+`releases[0]`. The comment at `gitlab.rs:325-327` records that, unlike GitHub, GitLab has
 no dedicated `/releases/latest` endpoint, so "newest" relies on the list endpoint's default
 descending (newest-first) order. An empty array or a non-array payload yields
-`Error::Release` ("no releases found") (`gitlab.rs:307-312`, `gitlab.rs:440-445`).
+`Error::Release` ("no releases found") (`gitlab.rs:319-324`, `gitlab.rs:452-457`).
 
 Newer-than filtering happens *after* pagination: `fetch_newer_releases` and
 `get_latest_releases_async` keep releases where `bump_is_greater(current_version, version)`
-is true, preserving order (`gitlab.rs:328-332`, `gitlab.rs:459-463`).
+is true, preserving order (`gitlab.rs:340-344`, `gitlab.rs:471-475`).
 
 ### JSON to model
 
@@ -143,10 +146,10 @@ deferred bad `request_header`, unparseable auth token) surface as `Error::Config
 - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, the common setters,
   `build() -> Result<Box<dyn ReleaseUpdate>>`, and (feature `async`)
   `build_async() -> Result<Update>`.
-- `Update` is `#[non_exhaustive]` (`gitlab.rs:271`), implements `ReleaseUpdate`
+- `Update` is `#[non_exhaustive]` (`gitlab.rs:283`), implements `ReleaseUpdate`
   (`get_latest_release`, `get_latest_releases`, `get_release_version`) and, under `async`,
   `AsyncFetch` plus the inherent `impl_async_update_methods!` methods.
-- `url` carries `#[doc(alias = "instance_url")]` and `#[doc(alias = "with_host")]`.
+- `url` carries no `#[doc(alias)]`; all builder-setter doc-aliases were dropped.
 
 ## Invariants and regression checklist
 
@@ -166,7 +169,7 @@ deferred bad `request_header`, unparseable auth token) surface as `Error::Config
 
 ## Tests
 
-In-file tests (`gitlab.rs:501-1410`) use a loopback `TcpListener` stub (no external
+In-file tests (`gitlab.rs:513-1420`) use a loopback `TcpListener` stub (no external
 network). Coverage: sync and async latest/newer/by-tag parsing and version trimming;
 `Link: rel="next"` pagination accumulation across two pages; newer-than filtering after
 pagination; empty-array and non-array error paths; missing `tag_name` and missing

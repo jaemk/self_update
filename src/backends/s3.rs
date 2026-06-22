@@ -141,8 +141,6 @@ impl ReleaseListBuilder {
     /// [`Update::target`](UpdateBuilder::target): `filter_target` drops whole releases from the
     /// listing when no asset matches, whereas the `Update` `target` selects *which asset* of the
     /// chosen release to download.
-    #[doc(alias = "target")]
-    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
         self.target = Some(target.into());
         self
@@ -150,9 +148,18 @@ impl ReleaseListBuilder {
 
     #[cfg(feature = "s3-auth")]
     /// Set the access key
-    #[doc(alias = "access_key_id")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
+        self
+    }
+
+    /// S3 does not authenticate via bearer tokens; use `.access_key((id, secret))` under the
+    /// `s3-auth` feature instead. This is a no-op shim so that code ported from a git backend
+    /// gets a helpful deprecation hint rather than a bare "no method" error.
+    #[deprecated(
+        note = "s3 authenticates via `.access_key((id, secret))` under the `s3-auth` feature, not auth tokens"
+    )]
+    pub fn auth_token(&mut self, _token: impl Into<String>) -> &mut Self {
         self
     }
 
@@ -289,9 +296,18 @@ impl UpdateBuilder {
 
     #[cfg(feature = "s3-auth")]
     /// Set the access key (an `(access_key_id, secret_access_key)` pair)
-    #[doc(alias = "access_key_id")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
+        self
+    }
+
+    /// S3 does not authenticate via bearer tokens; use `.access_key((id, secret))` under the
+    /// `s3-auth` feature instead. This is a no-op shim so that code ported from a git backend
+    /// gets a helpful deprecation hint rather than a bare "no method" error.
+    #[deprecated(
+        note = "s3 authenticates via `.access_key((id, secret))` under the `s3-auth` feature, not auth tokens"
+    )]
+    pub fn auth_token(&mut self, _token: impl Into<String>) -> &mut Self {
         self
     }
 
@@ -1909,6 +1925,53 @@ mod tests {
         );
     }
 
+    // Async sibling of `build_errors_without_region_for_region_endpoints`: `build_async()` runs the
+    // same `check_endpoint_region` validation as the sync `build()`, so a region-requiring endpoint
+    // without a region must fail at `build_async()` (not be deferred to the first network call), and
+    // a region-free endpoint (GCS/Generic) must build without one.
+    #[cfg(feature = "async")]
+    #[test]
+    fn build_async_errors_without_region_for_region_endpoints() {
+        let res = Update::configure()
+            .end_point(super::EndPoint::S3)
+            .bucket_name("b")
+            .bin_name("x")
+            .current_version("0.1.0")
+            .build_async();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "S3 endpoint without region must fail at build_async() with Error::Config, got {:?}",
+            res.map(|_| "Ok")
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn build_async_succeeds_without_region_for_generic_and_gcs() {
+        assert!(
+            Update::configure()
+                .end_point(super::EndPoint::GCS)
+                .bucket_name("b")
+                .bin_name("x")
+                .current_version("0.1.0")
+                .build_async()
+                .is_ok(),
+            "GCS endpoint needs no region at build_async()"
+        );
+        assert!(
+            Update::configure()
+                .end_point(super::EndPoint::Generic {
+                    end_point: "https://s3.example.com/".to_owned()
+                })
+                .bucket_name("b")
+                .bin_name("x")
+                .current_version("0.1.0")
+                .build_async()
+                .is_ok(),
+            "Generic endpoint needs no region at build_async()"
+        );
+    }
+
     #[test]
     fn build_succeeds_without_region_for_generic_and_gcs() {
         assert!(Update::configure()
@@ -2086,5 +2149,37 @@ mod tests {
                 .unwrap(),
             "token secret"
         );
+    }
+
+    // --- Item 6: auth_token deprecated shim ------------------------------------------------
+
+    #[test]
+    #[allow(deprecated)]
+    fn release_list_builder_auth_token_is_a_noop() {
+        // The deprecated `auth_token` shim must compile, accept a token, and have no visible
+        // effect: the bucket/key path required for a real build is still the deciding factor.
+        let result = crate::backends::s3::ReleaseList::configure()
+            .bucket_name("my-bucket")
+            .asset_prefix("myapp")
+            .region("us-east-1")
+            .auth_token("any-token")
+            .build();
+        // Build must succeed regardless of the shim token value.
+        assert!(result.is_ok(), "auth_token shim must not break the build");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn update_builder_auth_token_is_a_noop() {
+        // Same for the UpdateBuilder shim.
+        let result = Update::configure()
+            .bucket_name("my-bucket")
+            .asset_prefix("myapp")
+            .region("us-east-1")
+            .bin_name("myapp")
+            .current_version("0.1.0")
+            .auth_token("any-token")
+            .build();
+        assert!(result.is_ok(), "auth_token shim must not break the build");
     }
 }

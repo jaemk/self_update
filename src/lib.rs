@@ -10,7 +10,26 @@ distribution backends.
 
 Supported backends: **GitHub**, **GitLab**, **Gitea**, and **S3** (Amazon S3, Google GCS,
 DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Update`
-(configure → build → update) and `ReleaseList` builder API.
+(configure -> build -> update) and `ReleaseList` builder API.
+
+## Quick start
+
+```rust
+use self_update::cargo_crate_version;
+
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .show_download_progress(true)
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+```
 
 > **Upgrading from 0.x?** 1.0 makes a focused set of breaking changes to clean up the public
 > API. See the [1.0 migration guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0-human.md)
@@ -23,20 +42,15 @@ DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Upda
 > and then **blocks on an interactive `yes/no` prompt** waiting on stdin. With no terminal
 > attached this stalls (or aborts). For any non-interactive caller set `.no_confirm(true)` to
 > skip the prompt, and usually `.show_output(false)` to silence the status block. These are
-> settings only — the defaults are unchanged. Note the status block is printed *before* the
+> settings only -- the defaults are unchanged. Note the status block is printed *before* the
 > confirmation prompt, so suppressing one does not suppress the other.
 
 ## Usage
 
-Update (replace) the current executable with the latest release downloaded
-from `https://api.github.com/repos/jaemk/self_update/releases/latest`.
-Note, the [`trust`](https://github.com/japaric/trust) project provides a nice setup for
-producing release-builds via CI (travis/appveyor).
-
 ### Features
 
 Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
-exclusive — enabling both, or neither, is a compile error):
+exclusive -- enabling both, or neither, is a compile error):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
@@ -56,7 +70,7 @@ are _disabled_ by default; activate the one(s) your release files need:
 * `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
 * `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
-The S3 backend needs **no feature** — it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
+The S3 backend needs **no feature** -- it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
 
 ### Example
 
@@ -67,25 +81,6 @@ Run the following example to see `self_update` in action:
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
 `cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
-
-which runs something roughly equivalent to:
-
-```rust
-use self_update::cargo_crate_version;
-
-fn update() -> Result<(), Box<dyn std::error::Error>> {
-    let status = self_update::backends::github::Update::configure()
-        .repo_owner("jaemk")
-        .repo_name("self_update")
-        .bin_name("github")
-        .show_download_progress(true)
-        .current_version(cargo_crate_version!())
-        .build()?
-        .update()?;
-    println!("Update status: `{}`!", status.version());
-    Ok(())
-}
-```
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -220,7 +215,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
-        .checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
+        .verify_checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
         .build()?
         .update()?;
     Ok(())
@@ -409,6 +404,11 @@ on the system OpenSSL cert layout.
 
 */
 
+// Enable the `doc_cfg` feature on docs.rs (nightly-only, guarded by the `docsrs` cfg set via
+// `rustdoc-args = ["--cfg", "docsrs"]` in Cargo.toml). Stable builds are unaffected because
+// the cfg is never set outside of the docs.rs environment.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 // Exactly one HTTP client must be selected. Surface a human-readable diagnostic instead of
 // the raw symbol collision (both) or undefined-item error (neither) that would otherwise occur.
 #[cfg(all(feature = "reqwest", feature = "ureq"))]
@@ -440,14 +440,17 @@ pub use http;
 // Re-export the selected HTTP client so callers can name the types accepted by the client-injection
 // setters (`reqwest_client` / `reqwest_async_client` / `ureq_agent`) without a separate dependency.
 #[cfg(feature = "reqwest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub use reqwest;
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use update::AsyncReleaseSource;
 pub use update::{
-    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseUpdate, Releases, UpdateConfig,
-    UpdateStatus,
+    Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseStatus, ReleaseUpdate, Releases,
+    UpdateConfig,
 };
 #[cfg(feature = "ureq")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ureq")))]
 pub use ureq;
 
 /// Re-export of the [`zipsign_api`] crate, whose [`PUBLIC_KEY_LENGTH`] constant defines the
@@ -455,6 +458,7 @@ pub use ureq;
 ///
 /// [`PUBLIC_KEY_LENGTH`]: zipsign_api::PUBLIC_KEY_LENGTH
 #[cfg(feature = "signatures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub use zipsign_api;
 
 /// An ed25519ph verifying key used to validate a signed download (see the `signatures` feature).
@@ -462,6 +466,7 @@ pub use zipsign_api;
 /// This is a convenience alias for the fixed-size key array accepted by the `verifying_keys`
 /// builder methods, so consumers don't need to depend on `zipsign-api` directly.
 #[cfg(feature = "signatures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 
 #[cfg(feature = "compression-flate2")]
@@ -488,7 +493,10 @@ pub mod version;
 /// `self_update::Error` without naming the `errors` module.
 pub use errors::{Error, Result};
 
+/// A checksum variant (`Sha256` / `Sha512`) used with `verify_checksum` to validate a downloaded
+/// artifact against a known digest before installation. Requires the `checksums` feature.
 #[cfg(feature = "checksums")]
+#[cfg_attr(docsrs, doc(cfg(feature = "checksums")))]
 pub use checksum::Checksum;
 
 use http_client::{header, HttpResponse};
@@ -517,7 +525,7 @@ fn confirm(msg: &str) -> Result<()> {
     io::stdin().read_line(&mut s)?;
     let s = s.trim().to_lowercase();
     if !s.is_empty() && s != "y" {
-        bail!(Error::Update, "Update aborted");
+        return Err(Error::Aborted);
     }
     Ok(())
 }
@@ -527,40 +535,41 @@ fn confirm(msg: &str) -> Result<()> {
 ///
 /// Wrapped `String`s are version tags.
 ///
-/// This is the lightweight counterpart of [`UpdateStatus`](update::UpdateStatus), the richer
+/// This is the lightweight counterpart of [`ReleaseStatus`](update::ReleaseStatus), the richer
 /// result of [`update_extended`](update::ReleaseUpdate::update_extended) which carries the full
-/// [`Release`](update::Release) (name, date, body, assets). Reach for `Status` when the version
-/// string is all you need; reach for `UpdateStatus` when you need the installed release's details.
+/// [`Release`](update::Release) (name, date, body, assets). Reach for `VersionStatus` when the
+/// version string is all you need; reach for `ReleaseStatus` when you need the installed release's
+/// details.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum Status {
+pub enum VersionStatus {
     UpToDate(String),
     Updated(String),
 }
-impl Status {
+impl VersionStatus {
     /// Return the version tag
     pub fn version(&self) -> &str {
-        use Status::*;
+        use VersionStatus::*;
         match *self {
             UpToDate(ref s) => s,
             Updated(ref s) => s,
         }
     }
 
-    /// Returns `true` if `Status::UpToDate`
+    /// Returns `true` if `VersionStatus::UpToDate`
     pub fn is_up_to_date(&self) -> bool {
-        matches!(*self, Status::UpToDate(_))
+        matches!(*self, VersionStatus::UpToDate(_))
     }
 
-    /// Returns `true` if `Status::Updated`
+    /// Returns `true` if `VersionStatus::Updated`
     pub fn is_updated(&self) -> bool {
-        matches!(*self, Status::Updated(_))
+        matches!(*self, VersionStatus::Updated(_))
     }
 }
 
-impl std::fmt::Display for Status {
+impl std::fmt::Display for VersionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        use Status::*;
+        use VersionStatus::*;
         match *self {
             UpToDate(ref s) => write!(f, "UpToDate({})", s),
             Updated(ref s) => write!(f, "Updated({})", s),
@@ -578,11 +587,13 @@ impl std::fmt::Display for Status {
 pub enum ArchiveKind {
     /// A tarball, optionally compressed (e.g. `.tar`, `.tar.gz`). Requires `archive-tar`.
     #[cfg(feature = "archive-tar")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "archive-tar")))]
     Tar(Option<Compression>),
     /// A bare file, optionally compressed (e.g. a plain binary, or a `.gz` of one).
     Plain(Option<Compression>),
     /// A zip archive (`.zip`). Requires `archive-zip`.
     #[cfg(feature = "archive-zip")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "archive-zip")))]
     Zip,
 }
 
@@ -1202,14 +1213,12 @@ impl Download {
 
     /// Toggle the download progress bar. Named to match the `Update` builder's setter of the same
     /// name.
-    #[doc(alias = "show_progress")]
     pub fn show_download_progress(&mut self, b: bool) -> &mut Self {
         self.show_progress = b;
         self
     }
 
     /// Set a timeout for the download request. Defaults to no timeout.
-    #[doc(alias = "set_timeout")]
     pub fn timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
         self.timeout = Some(timeout);
         self
@@ -1221,7 +1230,6 @@ impl Download {
     /// ([`show_download_progress`](Self::show_download_progress)); use it to drive a GUI, structured logging, or
     /// any non-terminal progress display. The callback is `Fn`, so track state via interior
     /// mutability (e.g. an `AtomicU64` or a channel).
-    #[doc(alias = "set_progress_callback")]
     pub fn progress_callback(
         &mut self,
         callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
@@ -1241,7 +1249,6 @@ impl Download {
     }
 
     /// Set the progress style
-    #[doc(alias = "set_progress_style")]
     pub fn progress_style(
         &mut self,
         progress_template: impl Into<String>,
@@ -1254,7 +1261,6 @@ impl Download {
 
     /// Replace the entire download request `HeaderMap`. To add a single header without discarding
     /// the others, use [`header`](Self::header) instead.
-    #[doc(alias = "set_headers")]
     pub fn replace_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
         self
@@ -1301,7 +1307,6 @@ impl Download {
     /// `.header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or value
     /// that is not a valid HTTP header returns an [`Error::Config`](errors::Error::Config) rather
     /// than panicking. Mirrors the builders' `request_header`.
-    #[doc(alias = "set_header")]
     pub fn header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
     where
         N: ::core::convert::TryInto<http_client::header::HeaderName>,
@@ -1474,12 +1479,38 @@ mod tests {
     };
 
     #[test]
-    fn status_is_up_to_date() {
-        assert!(Status::UpToDate("1.2.3".to_string()).is_up_to_date());
-        assert!(!Status::Updated("1.2.3".to_string()).is_up_to_date());
+    fn version_status_is_up_to_date() {
+        assert!(VersionStatus::UpToDate("1.2.3".to_string()).is_up_to_date());
+        assert!(!VersionStatus::Updated("1.2.3".to_string()).is_up_to_date());
         // `is_updated()` is the complement.
-        assert!(Status::Updated("1.2.3".to_string()).is_updated());
-        assert!(!Status::UpToDate("1.2.3".to_string()).is_updated());
+        assert!(VersionStatus::Updated("1.2.3".to_string()).is_updated());
+        assert!(!VersionStatus::UpToDate("1.2.3".to_string()).is_updated());
+    }
+
+    #[test]
+    fn version_status_version_accessor() {
+        // version() returns the wrapped string for both variants.
+        assert_eq!(
+            VersionStatus::UpToDate("1.0.0".to_string()).version(),
+            "1.0.0"
+        );
+        assert_eq!(
+            VersionStatus::Updated("2.0.0".to_string()).version(),
+            "2.0.0"
+        );
+    }
+
+    #[test]
+    fn version_status_display() {
+        // Display is human-readable, not Debug form.
+        assert_eq!(
+            VersionStatus::UpToDate("1.0.0".to_string()).to_string(),
+            "UpToDate(1.0.0)"
+        );
+        assert_eq!(
+            VersionStatus::Updated("2.0.0".to_string()).to_string(),
+            "Updated(2.0.0)"
+        );
     }
 
     // `ArchiveKind` renders a friendly, human-readable name via `Display` (used in error messages),

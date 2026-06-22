@@ -89,6 +89,10 @@ pub(crate) struct CommonBuilderConfig {
     pub bin_name: Option<String>,
     pub bin_install_path: Option<PathBuf>,
     pub bin_path_in_archive: Option<String>,
+    /// `true` when `bin_path_in_archive` was auto-derived from `bin_name` (not set explicitly by
+    /// the user). Used by `bin_name` to re-derive when called again, while leaving an explicitly
+    /// set value untouched.
+    pub(crate) bin_path_in_archive_auto: bool,
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
@@ -115,6 +119,7 @@ impl Default for CommonBuilderConfig {
             bin_name: None,
             bin_install_path: None,
             bin_path_in_archive: None,
+            bin_path_in_archive_auto: false,
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
@@ -153,12 +158,12 @@ impl CommonBuilderConfig {
             current_version: self
                 .current_version
                 .clone()
-                .ok_or_else(|| Error::Config("`current_version` required".to_string()))?,
+                .ok_or_else(|| Error::Config("`current_version` required (call `.current_version(...)`)" .to_string()))?,
             release_tag: self.release_tag.clone(),
             bin_name: self
                 .bin_name
                 .clone()
-                .ok_or_else(|| Error::Config("`bin_name` required".to_string()))?,
+                .ok_or_else(|| Error::Config("`bin_name` required (call `.bin_name(...)`)" .to_string()))?,
             bin_install_path: match &self.bin_install_path {
                 Some(p) => p.clone(),
                 None => std::env::current_exe()?,
@@ -166,7 +171,7 @@ impl CommonBuilderConfig {
             bin_path_in_archive: self
                 .bin_path_in_archive
                 .clone()
-                .ok_or_else(|| Error::Config("`bin_path_in_archive` required".to_string()))?,
+                .ok_or_else(|| Error::Config("`bin_path_in_archive` required (call `.bin_name(...)` or `.bin_path_in_archive(...)`)" .to_string()))?,
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
@@ -334,5 +339,42 @@ mod tests {
             ..base
         };
         assert_eq!(with_target.build().unwrap().target, "custom-target");
+    }
+
+    // --- Item 5: self-fixing error messages --------------------------------------------------
+
+    #[test]
+    fn build_error_message_names_the_setter_for_current_version() {
+        let err = CommonBuilderConfig::default().build().unwrap_err();
+        match err {
+            crate::errors::Error::Config(msg) => {
+                assert!(
+                    msg.contains("current_version") && msg.contains("current_version("),
+                    "error message must name the setter, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Error::Config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_error_message_names_the_setter_for_bin_name() {
+        let err = CommonBuilderConfig {
+            current_version: Some("0.1.0".to_string()),
+            ..Default::default()
+        }
+        .build()
+        .unwrap_err();
+        match err {
+            crate::errors::Error::Config(msg) => {
+                assert!(
+                    msg.contains("bin_name") && msg.contains("bin_name("),
+                    "error message must name the setter, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Error::Config, got {:?}", other),
+        }
     }
 }

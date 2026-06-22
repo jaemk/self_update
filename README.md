@@ -11,7 +11,26 @@ distribution backends.
 
 Supported backends: **GitHub**, **GitLab**, **Gitea**, and **S3** (Amazon S3, Google GCS,
 DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Update`
-(configure → build → update) and `ReleaseList` builder API.
+(configure -> build -> update) and `ReleaseList` builder API.
+
+## Quick start
+
+```rust
+use self_update::cargo_crate_version;
+
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .show_download_progress(true)
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+```
 
 > **Upgrading from 0.x?** 1.0 makes a focused set of breaking changes to clean up the public
 > API. See the [1.0 migration guide](https://github.com/jaemk/self_update/blob/master/docs/migrations/0.x-to-1.0-human.md)
@@ -24,20 +43,15 @@ DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Upda
 > and then **blocks on an interactive `yes/no` prompt** waiting on stdin. With no terminal
 > attached this stalls (or aborts). For any non-interactive caller set `.no_confirm(true)` to
 > skip the prompt, and usually `.show_output(false)` to silence the status block. These are
-> settings only — the defaults are unchanged. Note the status block is printed *before* the
+> settings only -- the defaults are unchanged. Note the status block is printed *before* the
 > confirmation prompt, so suppressing one does not suppress the other.
 
 ## Usage
 
-Update (replace) the current executable with the latest release downloaded
-from `https://api.github.com/repos/jaemk/self_update/releases/latest`.
-Note, the [`trust`](https://github.com/japaric/trust) project provides a nice setup for
-producing release-builds via CI (travis/appveyor).
-
 ### Features
 
 Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
-exclusive — enabling both, or neither, is a compile error):
+exclusive -- enabling both, or neither, is a compile error):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
@@ -57,7 +71,7 @@ are _disabled_ by default; activate the one(s) your release files need:
 * `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
 * `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
 
-The S3 backend needs **no feature** — it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
+The S3 backend needs **no feature** -- it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
 
 ### Example
 
@@ -68,25 +82,6 @@ Run the following example to see `self_update` in action:
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
 `cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
-
-which runs something roughly equivalent to:
-
-```rust
-use self_update::cargo_crate_version;
-
-fn update() -> Result<(), Box<dyn std::error::Error>> {
-    let status = self_update::backends::github::Update::configure()
-        .repo_owner("jaemk")
-        .repo_name("self_update")
-        .bin_name("github")
-        .show_download_progress(true)
-        .current_version(cargo_crate_version!())
-        .build()?
-        .update()?;
-    println!("Update status: `{}`!", status.version());
-    Ok(())
-}
-```
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -218,7 +213,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
-        .checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
+        .verify_checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
         .build()?
         .update()?;
     Ok(())

@@ -20,23 +20,23 @@ fetch-method contract they document; the orchestration helpers
 
 `ReleaseAsset` (`src/update.rs:9-29`) is a `#[non_exhaustive]` struct deriving
 `Clone, Debug, Default` with two public fields, declared `name: String` then
-`download_url: String` (`src/update.rs:12-15`). Because it is `#[non_exhaustive]`,
+`download_url: String` (`src/update.rs:13-14`). Because it is `#[non_exhaustive]`,
 outside code cannot build it with a struct literal; `ReleaseAsset::new(name,
 download_url)` is the public constructor (`src/update.rs:23`). The constructor
 argument order matches the field declaration order (`name`, then `download_url`).
 
-`Release` (`src/update.rs:67-124`) is a `#[non_exhaustive]` struct deriving
+`Release` (`src/update.rs:87-144`) is a `#[non_exhaustive]` struct deriving
 `Clone, Debug, Default` with public fields `name: String`, `version: String`,
 `date: String`, `body: Option<String>`, and `assets: Vec<ReleaseAsset>`. It is
-built from outside the crate via `Release::builder()` (`src/update.rs:121`),
+built from outside the crate via `Release::builder()` (`src/update.rs:141`),
 which returns a `ReleaseBuilder`; only `version` is required, `name` defaults to
-the version, `date` defaults to empty, `body` to `None` (`src/update.rs:179-191`).
+the version, `date` defaults to empty, `body` to `None` (`src/update.rs:199-211`).
 
 Asset lookup:
 
-- `has_target_asset(target)` (`src/update.rs:80-82`): `true` if any asset's
+- `has_target_asset(target)` (`src/update.rs:100-102`): `true` if any asset's
   `name` contains the `target` substring.
-- `asset_for(target, identifier)` (`src/update.rs:86-114`): returns the first
+- `asset_for(target, identifier)` (`src/update.rs:106-134`): returns the first
   matching `ReleaseAsset` (cloned), trying three tiers in order: (1) an asset
   whose name contains `target` and, if `identifier` is `Some`, also contains the
   identifier; (2) failing that, an asset whose name contains both the build OS
@@ -47,27 +47,27 @@ Asset lookup:
 
 ### Releases
 
-`Releases` (`src/update.rs:203-275`) is `#[non_exhaustive]`, derives
+`Releases` (`src/update.rs:223-297`) is `#[non_exhaustive]`, derives
 `Debug, Clone`, and holds two private fields: `releases: Vec<Release>` (ordered
 newest-first by the built-in backends) and `current_version: String` (the
 version the list was compared against). It is constructed by
-`Releases::new(releases, current_version)` (`src/update.rs:213`), which is
+`Releases::new(releases, current_version)` (`src/update.rs:233`), which is
 `pub(crate)` and so not part of the public construction surface.
 
 Accessors:
 
-- `all(&self) -> &[Release]` (`:221`): all releases as a slice, newest-first.
-- `len(&self) -> usize` (`:226`): number of releases held.
-- `is_empty(&self) -> bool` (`:231`): whether no releases are held.
-- `current_version(&self) -> &str` (`:236`): the configured current version the
+- `all(&self) -> &[Release]` (`:241`): all releases as a slice, newest-first.
+- `len(&self) -> usize` (`:246`): number of releases held.
+- `is_empty(&self) -> bool` (`:251`): whether no releases are held.
+- `current_version(&self) -> &str` (`:256`): the configured current version the
   list was compared against.
-- `latest(&self) -> Option<&Release>` (`:246`): the first element
+- `latest(&self) -> Option<&Release>` (`:266`): the first element
   (`releases.first()`), or `None` when empty. This is the first element as
   ordered by the backend, not necessarily the semver maximum; a custom
   `ReleaseSource` may return an unsorted list.
-- `into_vec(self) -> Vec<Release>` (`:251`): consumes and returns the underlying
+- `into_vec(self) -> Vec<Release>` (`:271`): consumes and returns the underlying
   vec, same order.
-- `is_update_available(&self) -> Result<bool>` (`:267-274`): `true` when **any**
+- `is_update_available(&self) -> Result<bool>` (`:289-296`): `true` when **any**
   held release is strictly newer than `current_version`, via
   `version::bump_is_greater(current_version, r.version)`. The scan is
   order-independent (it examines the whole set, not just `latest()`), so it is
@@ -78,32 +78,32 @@ Accessors:
   empty list yields `Ok(false)`. No further request is made; only already-fetched
   releases are consulted.
 
-Iteration: owned `IntoIterator for Releases` (`:278-285`) yields `Release` by
+Iteration: owned `IntoIterator for Releases` (`:300-307`) yields `Release` by
 value, consuming the collection (`std::vec::IntoIter`); borrowed
-`IntoIterator for &'a Releases` (`:288-295`) yields `&'a Release` without
+`IntoIterator for &'a Releases` (`:310-317`) yields `&'a Release` without
 consuming (`std::slice::Iter`). Both iterate in `all()` order (newest-first).
 
-### UpdateStatus release accessors
+### ReleaseStatus release accessors
 
-`UpdateStatus` (`src/update.rs:40`, `#[non_exhaustive]`, `UpToDate` or
+`ReleaseStatus` (`src/update.rs:41`, `#[non_exhaustive]`, `UpToDate` or
 `Updated(Release)`) carries the installed `Release` on the `Updated` arm. Besides
-`into_status`, `is_up_to_date`, and `is_updated`, it exposes two accessors that read
+`into_version_status`, `is_up_to_date`, and `is_updated`, it exposes two accessors that read
 the installed release without forcing a `match` (which `#[non_exhaustive]` would
 require a wildcard arm on): `updated_release(&self) -> Option<&Release>`
-(`src/update.rs:70`) borrows it, and `into_updated_release(self) -> Option<Release>`
-(`src/update.rs:78`) consumes the status and yields it owned. Both return `None` for
+(`src/update.rs:71`) borrows it, and `into_updated_release(self) -> Option<Release>`
+(`src/update.rs:79`) consumes the status and yields it owned. Both return `None` for
 `UpToDate`.
 
 ### Sealed traits
 
-The seal is `sealed::Sealed` (`src/update.rs:417-419`), a `pub(crate)` empty
+The seal is `sealed::Sealed` (`src/update.rs:445-447`), a `pub(crate)` empty
 trait implemented only inside the crate. `UpdateConfig: sealed::Sealed`
-(`:434`) is the shared configuration/accessor surface (current version, target,
+(`:462`) is the shared configuration/accessor surface (current version, target,
 release tag, asset identifier, bin name/install path/path-in-archive, progress
 and output flags, progress template/chars, auth token, request timeout/headers/
 client, progress and verify callbacks, asset matcher, and feature-gated
-`checksum` / `verifying_keys`), plus the provided `api_headers` helper
-(`:518-533`). `ReleaseUpdate: UpdateConfig` (`:550`) adds the fetch methods and
+`verify_checksum` / `verify_keys`), plus the provided `api_headers` helper
+(`:546-561`). `ReleaseUpdate: UpdateConfig` (`:578`) adds the fetch methods and
 the provided `update` / `update_extended` flow. Because the supertrait chain
 requires `sealed::Sealed`, neither trait can be implemented for a foreign type:
 downstream code can *call* these traits (every backend `build()` returns a
@@ -113,11 +113,11 @@ evolve the surface without a breaking change.
 The accessors live on `UpdateConfig` (the supertrait), not on `ReleaseUpdate`,
 so they resolve on a `dyn ReleaseUpdate` value, on a generic `R: ReleaseUpdate`,
 and on the narrower `U: UpdateConfig` bound used by the async orchestrator
-(`update_extended_async`, `:823-829`) which needs the accessors but not the sync
+(`update_extended_async`, `:851-857`) which needs the accessors but not the sync
 fetch methods. The accessors borrow (e.g. `bin_install_path` returns `&Path`,
 `current_version` returns `&str`), they do not return owned values.
 
-`ReleaseSource` (`:325`) and `AsyncReleaseSource` (`:372`, `cfg(feature =
+`ReleaseSource` (`:350`) and `AsyncReleaseSource` (`:400`, `cfg(feature =
 "async")`) are the custom-backend source traits and are **not** sealed: they
 require `Send + Sync` and are meant to be implemented downstream. They are the
 implementable counterpart to the sealed `ReleaseUpdate`.
@@ -126,23 +126,23 @@ implementable counterpart to the sealed `ReleaseUpdate`.
 
 `ReleaseUpdate` exposes three sync fetch methods:
 
-- `get_latest_release(&self) -> Result<Releases>` (`:560`): a one-element
+- `get_latest_release(&self) -> Result<Releases>` (`:588`): a one-element
   `Releases` wrapping the **raw** newest release, unfiltered, carrying the
   configured current version. Because the newest release is always present,
   `latest()` is always `Some`, and `is_update_available()` returns `false` when
   that newest release is not strictly newer than the current version.
-- `get_latest_releases(&self) -> Result<Releases>` (`:568`): the candidate list
+- `get_latest_releases(&self) -> Result<Releases>` (`:596`): the candidate list
   as a `Releases`, newest-first, **filtered to releases strictly newer** than the
   configured current version. It is therefore empty (`latest()` is `None`) when
   already up to date, and any entry present is a genuine update. This is the
   documented distinction from `get_latest_release`: raw-newest vs
   strictly-newer-filtered.
-- `get_release_version(&self, ver) -> Result<Release>` (`:571`): the single
+- `get_release_version(&self, ver) -> Result<Release>` (`:599`): the single
   `Release` matching an explicit tag/version (returns a bare `Release`, not a
   `Releases`).
 
 The async counterparts are the `pub(crate)` `AsyncFetch` trait
-(`:399-410`, `cfg(feature = "async")`), used only through generics (never as a
+(`:427-438`, `cfg(feature = "async")`), used only through generics (never as a
 trait object) so its `async fn`s need no boxing:
 `get_latest_release_async() -> Result<Releases>`,
 `get_latest_releases_async() -> Result<Releases>`, and
@@ -152,13 +152,13 @@ and the same raw-newest vs strictly-newer-filtered distinction. A public
 inherent `get_release_version_async` is also macro-generated on each backend's
 `Update` so the async-by-tag surface is callable without importing `AsyncFetch`.
 
-The custom-source trait methods (`ReleaseSource`, `:326-339`) take the same
+The custom-source trait methods (`ReleaseSource`, `:351-364`) take the same
 shape but return plain `Release` / `Vec<Release>`: `get_latest_release()` is the
 single newest release; `get_latest_releases(current_version)` returns the
 candidate list newest-first (the updater discards non-newer entries, prefers the
 newest semver-compatible one, and otherwise offers the newest available flagged
 not-compatible, so the implementer need not filter); `get_release_version(ver)`
-is the release for an explicit tag. `AsyncReleaseSource` (`:373-391`) mirrors
+is the release for an explicit tag. `AsyncReleaseSource` (`:401-419`) mirrors
 these with `impl Future<... > + Send` returns and the `Send` bound enforced at
 the impl site.
 
@@ -198,7 +198,7 @@ the impl site.
 
 ## Tests
 
-In `src/update.rs` `mod tests` (`:949-1455`): `Releases` query/ordering
+In `src/update.rs` `mod tests` (`:977-1545`): `Releases` query/ordering
 coverage (`releases_is_update_available_*` for newer-first, equal, empty,
 newer-not-first, nothing-newer-unordered; `releases_latest_all_and_into_vec`,
 `releases_latest_is_none_when_empty`, `releases_len_and_is_empty`,

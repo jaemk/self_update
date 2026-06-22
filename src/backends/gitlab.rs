@@ -74,8 +74,6 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    #[doc(alias = "instance_url")]
-    #[doc(alias = "with_host")]
     pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
@@ -100,8 +98,6 @@ impl ReleaseListBuilder {
     /// [`Update::target`](UpdateBuilder::target): `filter_target` drops whole releases from the
     /// listing when no asset matches, whereas the `Update` `target` selects *which asset* of the
     /// chosen release to download.
-    #[doc(alias = "target")]
-    #[doc(alias = "with_target")]
     pub fn filter_target(&mut self, target: impl Into<String>) -> &mut Self {
         self.target = Some(target.into());
         self
@@ -128,12 +124,18 @@ impl ReleaseListBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
@@ -211,8 +213,6 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    #[doc(alias = "instance_url")]
-    #[doc(alias = "with_host")]
     pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
@@ -238,12 +238,18 @@ impl UpdateBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(Error::Config, "`repo_owner` required")
+                bail!(
+                    Error::Config,
+                    "`repo_owner` required (call `.repo_owner(...)`)"
+                )
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`repo_name` required")
+                bail!(
+                    Error::Config,
+                    "`repo_name` required (call `.repo_name(...)`)"
+                )
             },
             common: self.common.build()?,
         })

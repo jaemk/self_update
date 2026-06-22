@@ -27,6 +27,7 @@ features = [
   "s3-auth",
   "async",
 ]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 serde = "1"

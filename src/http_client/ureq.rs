@@ -136,6 +136,46 @@ mod tests {
             .expect("non-2xx must be an Err")
     }
 
+    /// Injected agent built with `http_status_as_error(false)` (the OTHER injected case): the user
+    /// disabled ureq's status-error, so `call()` returns `Ok(res)` even on a non-2xx. The
+    /// `StatusCode` arm is therefore NOT taken; instead control falls through to the bottom-of-`get`
+    /// `!res.status().is_success()` check, which routes the status through `status_to_error`. This
+    /// is the injected-agent path the implementor flagged as untested.
+    fn get_injected_no_status_error(status: &'static str) -> Error {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build(),
+        );
+        let client = ClientOverride { agent: Some(agent) };
+        let base = stub(status);
+        super::get(&base, HeaderMap::new(), None, &client)
+            .err()
+            .expect("non-2xx must be an Err")
+    }
+
+    #[test]
+    fn injected_agent_no_status_error_falls_through_to_is_success_check() {
+        // 404 must still map to NotFound via the bottom-of-`get` is_success() path (not the
+        // StatusCode arm, which never fires when http_status_as_error(false)).
+        let err = get_injected_no_status_error("404 Not Found");
+        assert!(
+            matches!(err, Error::NotFound { .. }),
+            "injected no-status-error 404 must map to Error::NotFound via is_success(), got {:?}",
+            err
+        );
+        assert_eq!(err.http_status(), Some(404));
+
+        // 500 maps to HttpStatus carrying its exact code through the same fall-through path.
+        let err = get_injected_no_status_error("500 Internal Server Error");
+        assert!(
+            matches!(err, Error::HttpStatus { status: 500, .. }),
+            "injected no-status-error 500 must map to Error::HttpStatus(500), got {:?}",
+            err
+        );
+        assert_eq!(err.http_status(), Some(500));
+    }
+
     #[test]
     fn injected_agent_status_code_arm_maps_404_to_not_found() {
         let err = get_injected("404 Not Found");

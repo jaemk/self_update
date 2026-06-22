@@ -8,31 +8,31 @@ Documents every Cargo feature of the `self_update` crate, the dependencies and
 public API surface each feature gates, the feature-to-feature implication graph,
 and the compile-time mutual-exclusion guards that enforce exactly one HTTP
 client and exactly one TLS backend. Source of truth: the `[features]` table in
-`Cargo.toml` (lines 66-90), the `compile_error!` guards in `src/lib.rs`
-(lines 412-437), and the `#[cfg(feature = ...)]` sites across `src/`. The S3
+`Cargo.toml` (lines 67-91), the `compile_error!` guards in `src/lib.rs`
+(lines 414-437), and the `#[cfg(feature = ...)]` sites across `src/`. The S3
 backend is always compiled and gates on no feature; there is no `s3` alias
 feature (only `s3-auth`, for private-bucket request signing).
 
 ## Behavior
 
-All features and their wiring (`Cargo.toml:66-92`):
+All features and their wiring (`Cargo.toml:67-91`):
 
 | Feature | Enables (deps / sub-features) | Implies | Notes |
 |---------|------------------------------|---------|-------|
-| `default` | `reqwest`, `default-tls` | client + TLS | the default client/TLS pair (`Cargo.toml:67`) |
-| `reqwest` | `dep:reqwest` (blocking, json, http2) | one HTTP client | mutually exclusive with `ureq` (`Cargo.toml:85`) |
-| `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | one HTTP client | requires `--no-default-features` to avoid pulling `reqwest` (`Cargo.toml:86`) |
-| `default-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | one TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:82`) |
-| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | one TLS backend | mutually exclusive with `default-tls` (`Cargo.toml:83`) |
-| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | reqwest-only; incompatible with `ureq` (`Cargo.toml:79`) |
-| `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:69`) |
-| `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:72`) |
-| `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:70`) |
-| `compression-zip-deflate` | `zip/deflate` | `archive-zip` | deflate inside zip (`Cargo.toml:71`) |
-| `compression-flate2` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:73`, `lib.rs:665-668`) |
-| `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:74`) |
-| `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:75`) |
-| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | - | SigV4 request signing for private buckets; the s3 backend itself is always compiled and needs no feature (`Cargo.toml:88-90`) |
+| `default` | `reqwest`, `default-tls` | client + TLS | the default client/TLS pair (`Cargo.toml:68`) |
+| `reqwest` | `dep:reqwest` (blocking, json, http2) | one HTTP client | mutually exclusive with `ureq` (`Cargo.toml:86`) |
+| `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | one HTTP client | requires `--no-default-features` to avoid pulling `reqwest` (`Cargo.toml:87`) |
+| `default-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | one TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
+| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | one TLS backend | mutually exclusive with `default-tls` (`Cargo.toml:84`) |
+| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | reqwest-only; incompatible with `ureq` (`Cargo.toml:80`) |
+| `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
+| `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
+| `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:71`) |
+| `compression-zip-deflate` | `zip/deflate` | `archive-zip` | deflate inside zip (`Cargo.toml:72`) |
+| `compression-flate2` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:74`, `lib.rs:665-668`) |
+| `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:75`) |
+| `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:76`) |
+| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | - | SigV4 request signing for private buckets; the s3 backend itself is always compiled and needs no feature (`Cargo.toml:91`) |
 
 Implication notes:
 
@@ -45,10 +45,10 @@ Implication notes:
   `verify-zip` / `verify-tar` sub-features are pulled in by `archive-zip` /
   `archive-tar` via the optional `zipsign-api?/verify-*` syntax, so signature
   verification of a given archive kind is enabled only when both `signatures`
-  and the matching archive feature are on (`Cargo.toml:69,72,74`;
+  and the matching archive feature are on (`Cargo.toml:70,73,75`;
   `update.rs:904-938`).
 - `async` requires the `reqwest` client plus `tokio` and `futures-util`, and is
-  incompatible with `ureq` (`Cargo.toml:79`, guard at `lib.rs:433-437`).
+  incompatible with `ureq` (`Cargo.toml:80`, guard at `lib.rs:433-437`).
 
 Mutual-exclusion guards (`src/lib.rs`), each a `compile_error!`:
 
@@ -67,32 +67,41 @@ Mutual-exclusion guards (`src/lib.rs`), each a `compile_error!`:
 
 MSRV / edition: `rust-version = "1.85"`, `edition = "2018"` (`Cargo.toml:12-13`).
 
-docs.rs feature set (`Cargo.toml:16-29`): `reqwest`, `default-tls`,
+docs.rs feature set (`Cargo.toml:17-29`): `reqwest`, `default-tls`,
 `archive-zip`, `compression-zip-bzip2`, `compression-zip-deflate`,
 `archive-tar`, `compression-flate2`, `signatures`, `checksums`, `s3-auth`,
 `async`. This is a single client (`reqwest`) + single TLS (`default-tls`) set
-because `--all-features` does not build (see invariants).
+because `--all-features` does not build (see invariants). The same
+`[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
+(`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
+`doc_cfg` feature (`lib.rs:410`) and the gated public re-exports carry
+`#[cfg_attr(docsrs, doc(cfg(...)))]`; docs.rs then renders a feature-gate badge
+on each gated item.
 
 ## Public surface
 
 Feature-gated public items:
 
-- `reqwest`: re-export `pub use reqwest` (`lib.rs:442-443`) and the
+- `reqwest`: re-export `pub use reqwest` (`lib.rs:442-444`) and the
   `reqwest_client()` builder setter (`macros.rs:64-68`).
-- `ureq`: re-export `pub use ureq` (`lib.rs:450-451`) and the `ureq_agent()`
+- `ureq`: re-export `pub use ureq` (`lib.rs:452-454`) and the `ureq_agent()`
   builder setter (`macros.rs:82-86`).
-- `async`: re-export `pub use update::AsyncReleaseSource` (`lib.rs:444-445`),
+- `async`: re-export `pub use update::AsyncReleaseSource` (`lib.rs:445-447`),
   the `reqwest_async_client()` setter (`macros.rs:72-76`), and the `*_async`
   verbs across the backends (e.g. `github.rs`, `gitlab.rs`, `gitea.rs`,
   `s3.rs`, `custom.rs`, `update.rs`).
 - `signatures`: re-export `pub use zipsign_api` and the
   `pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH]` alias
-  (`lib.rs:457-465`), plus the `verifying_keys` builder methods and accessor
-  (`macros.rs:194-197`).
-- `checksums`: `pub use checksum::Checksum` (`lib.rs:491-492`) and the
-  `checksum()` accessor (`macros.rs:190-192`).
-- `archive-tar`: `ArchiveKind::Tar` enum variant (`lib.rs:575-576`).
-- `archive-zip`: `ArchiveKind::Zip` enum variant (`lib.rs:578-579`).
+  (`lib.rs:460-470`), plus the `verify_keys` builder setter (`macros.rs:455`)
+  and accessor (`macros.rs:195-197`).
+- `checksums`: `pub use checksum::Checksum` (`lib.rs:498-500`) and the
+  `verify_checksum` builder setter (`macros.rs:438-442`) and accessor
+  (`macros.rs:191`).
+- All the gated crate-root re-exports above carry
+  `#[cfg_attr(docsrs, doc(cfg(feature = "...")))]`, so docs.rs renders a
+  feature-gate badge on each (`lib.rs:443,446,453,461,469,499`).
+- `archive-tar`: `ArchiveKind::Tar` enum variant (`lib.rs:589-591`).
+- `archive-zip`: `ArchiveKind::Zip` enum variant (`lib.rs:595-597`).
 - `s3-auth`: the SigV4 signing path and credential/region builder surface in
   `backends/s3.rs` (e.g. `s3.rs:25,76,120,...`). The s3 backend type itself is
   always compiled regardless of feature.
@@ -119,7 +128,7 @@ message uses it instead of the `Debug` form. `detect_archive` returns
   (`Makefile` header comment; `Cargo.toml:15`).
 - The s3 backend is always compiled and gates on no feature; there is no `s3`
   alias feature. Only private-bucket request signing needs `s3-auth`
-  (`Cargo.toml:88-90`).
+  (`Cargo.toml:89-91`).
 - A signed archive of a given kind verifies only when both `signatures` and the
   matching `archive-*` feature are enabled (the `verify-*` sub-feature rides on
   the archive feature, `Cargo.toml:69,72,74`).

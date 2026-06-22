@@ -18,7 +18,7 @@ use crate::errors::*;
 ///
 /// The variant selects the algorithm; the contained `String` is the expected digest, hex
 /// encoded (case-insensitive, surrounding whitespace ignored). Pass one to
-/// `Update::configure().checksum(..)`; the download is rejected before installation
+/// `Update::configure().verify_checksum(..)`; the download is rejected before installation
 /// if it does not match.
 ///
 /// ```
@@ -36,14 +36,6 @@ pub enum Checksum {
 }
 
 impl Checksum {
-    /// The hash algorithm's name, for diagnostics.
-    fn algorithm(&self) -> &'static str {
-        match self {
-            Checksum::Sha256(_) => "sha256",
-            Checksum::Sha512(_) => "sha512",
-        }
-    }
-
     /// The expected digest, hex encoded.
     fn expected(&self) -> &str {
         match self {
@@ -61,17 +53,15 @@ impl Checksum {
 
     /// Verify that the file at `path` matches this checksum, returning an error on mismatch.
     pub(crate) fn verify(&self, path: &Path) -> Result<()> {
-        let expected = self.expected().trim();
+        let expected = self.expected().trim().to_lowercase();
         let actual = self.hash_file(path)?;
-        if actual.eq_ignore_ascii_case(expected) {
+        if actual.eq_ignore_ascii_case(&expected) {
             Ok(())
         } else {
-            Err(Error::Update(format!(
-                "{} checksum mismatch: expected {}, computed {}",
-                self.algorithm(),
+            Err(Error::ChecksumMismatch {
                 expected,
-                actual,
-            )))
+                computed: actual,
+            })
         }
     }
 }
@@ -139,5 +129,61 @@ mod tests {
         // A SHA-256 digest is not a valid SHA-512 digest for the same content.
         let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         assert!(Checksum::Sha512(sha256.to_string()).verify(&path).is_err());
+    }
+
+    // A checksum mismatch through the verification path yields `Error::ChecksumMismatch` (not
+    // `Error::Update`). The variant must carry the expected and computed digests as fields, and
+    // its Display must contain "checksum mismatch".
+    #[test]
+    fn mismatch_yields_checksum_mismatch_variant() {
+        let (_dir, path) = write_tmp(b"hello");
+        let wrong_digest = "00".repeat(32);
+        let real_digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        let err = Checksum::Sha256(wrong_digest.clone())
+            .verify(&path)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, crate::errors::Error::ChecksumMismatch { .. }),
+            "a digest mismatch must produce Error::ChecksumMismatch, got {:?}",
+            err
+        );
+        if let crate::errors::Error::ChecksumMismatch { expected, computed } = err {
+            assert_eq!(
+                expected, wrong_digest,
+                "expected field must hold the configured digest (lowercased/trimmed)"
+            );
+            assert_eq!(
+                computed, real_digest,
+                "computed field must hold the actual file digest"
+            );
+        }
+    }
+
+    // The Display of ChecksumMismatch embeds the expected and computed digests.
+    #[test]
+    fn mismatch_display_contains_expected_and_computed() {
+        let (_dir, path) = write_tmp(b"hello");
+        let wrong_digest = "00".repeat(32);
+        let err = Checksum::Sha256(wrong_digest.clone())
+            .verify(&path)
+            .unwrap_err();
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("ChecksumMismatchError:"),
+            "Display must start with 'ChecksumMismatchError:', got: {}",
+            shown
+        );
+        assert!(
+            shown.contains(&wrong_digest),
+            "Display must contain the expected digest, got: {}",
+            shown
+        );
+        assert!(
+            shown.contains("2cf24dba"),
+            "Display must contain the computed digest, got: {}",
+            shown
+        );
     }
 }

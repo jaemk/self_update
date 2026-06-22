@@ -188,11 +188,11 @@ macro_rules! impl_update_config_accessors {
         }
         #[doc(hidden)]
         #[cfg(feature = "checksums")]
-        fn checksum(&self) -> Option<&crate::Checksum> {
+        fn verify_checksum(&self) -> Option<&crate::Checksum> {
             self.common.checksum.as_ref()
         }
         #[cfg(feature = "signatures")]
-        fn verifying_keys(&self) -> &[crate::VerifyingKey] {
+        fn verify_keys(&self) -> &[crate::VerifyingKey] {
             &self.common.verifying_keys
         }
         }
@@ -244,8 +244,6 @@ macro_rules! impl_common_builder_setters {
         /// latest available release is used. (Note that the `{{ version }}` substitution in
         /// [`bin_path_in_archive`](Self::bin_path_in_archive) is still the bare semver with any
         /// leading `v` stripped, regardless of what is passed here.)
-        #[doc(alias = "target_version_tag")]
-        #[doc(alias = "target_version")]
         pub fn release_tag(&mut self, ver: impl Into<String>) -> &mut Self {
             self.common.release_tag = Some(ver.into());
             self
@@ -262,22 +260,22 @@ macro_rules! impl_common_builder_setters {
         /// Set the identifiable token for the asset in case of multiple compatible assets.
         ///
         /// If unspecified, the first asset matching the target will be chosen.
-        #[doc(alias = "identifier")]
         pub fn asset_identifier(&mut self, identifier: impl Into<String>) -> &mut Self {
             self.common.asset_identifier = Some(identifier.into());
             self
         }
 
-        /// Required. Set the exe's name. Also sets `bin_path_in_archive` if it hasn't already been
-        /// set.
+        /// Required. Set the exe's name. Also derives `bin_path_in_archive` (with the platform
+        /// executable suffix appended) unless you called
+        /// [`bin_path_in_archive`](Self::bin_path_in_archive) explicitly.
         ///
-        /// This method will append the platform specific executable file suffix
-        /// (see `std::env::consts::EXE_SUFFIX`) to the name if it's missing.
+        /// Re-calling `bin_name` re-derives `bin_path_in_archive` (each call wins over the
+        /// previous auto-derive). An explicit [`bin_path_in_archive`](Self::bin_path_in_archive)
+        /// call blocks the auto-derive: calling `bin_name` after it will **not** overwrite your
+        /// explicit path.
         ///
-        /// Order matters only when you also set `bin_path_in_archive`: calling
-        /// [`bin_path_in_archive`](Self::bin_path_in_archive) *before* `bin_name` keeps your value
-        /// (`bin_name` won't overwrite it); a later `bin_name` call also leaves an already-set path
-        /// untouched.
+        /// This method appends the platform-specific executable suffix
+        /// (`std::env::consts::EXE_SUFFIX`) to the name when it is absent.
         pub fn bin_name(&mut self, name: impl Into<String>) -> &mut Self {
             let name = name.into();
             let raw_bin_name = format!(
@@ -285,8 +283,13 @@ macro_rules! impl_common_builder_setters {
                 name.trim_end_matches(std::env::consts::EXE_SUFFIX),
                 std::env::consts::EXE_SUFFIX
             );
-            if self.common.bin_path_in_archive.is_none() {
+            // Overwrite the archive path only when it is unset or was previously auto-derived (not
+            // explicitly set by the caller). An explicit `bin_path_in_archive(...)` call sets
+            // `bin_path_in_archive_auto = false`, making that value sticky even across re-calls to
+            // `bin_name`.
+            if self.common.bin_path_in_archive.is_none() || self.common.bin_path_in_archive_auto {
                 self.common.bin_path_in_archive = Some(raw_bin_name.clone());
+                self.common.bin_path_in_archive_auto = true;
             }
             self.common.bin_name = Some(raw_bin_name);
             self
@@ -318,8 +321,14 @@ macro_rules! impl_common_builder_setters {
         ///
         /// For example, a value of `"{{ target }}-{{ version }}-bin/{{ bin }}"` extracts the
         /// `bin` from a `target`/`version`-named subdirectory of the archive.
+        ///
+        /// Once called, subsequent [`bin_name`](Self::bin_name) calls will **not** overwrite this
+        /// value (the explicit path is sticky). Call this method after `bin_name` to override the
+        /// auto-derived path.
         pub fn bin_path_in_archive(&mut self, bin_path: impl Into<String>) -> &mut Self {
             self.common.bin_path_in_archive = Some(bin_path.into());
+            // An explicit set wins and is sticky: a subsequent `bin_name` call must not re-derive.
+            self.common.bin_path_in_archive_auto = false;
             self
         }
 
@@ -330,7 +339,6 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Set download progress style.
-        #[doc(alias = "set_progress_style")]
         pub fn progress_style(
             &mut self,
             progress_template: impl Into<String>,
@@ -364,6 +372,15 @@ macro_rules! impl_common_builder_setters {
             self
         }
 
+        /// Configure for unattended/CI use: disables interactive confirmation (`no_confirm(true)`)
+        /// and suppresses status output (`show_output(false)`) in one call. Without this, the
+        /// default (`no_confirm == false`) blocks on stdin waiting for a "y" confirmation.
+        pub fn unattended(&mut self) -> &mut Self {
+            self.common.no_confirm = true;
+            self.common.show_output = false;
+            self
+        }
+
         request_config_setters!(common.request);
 
         /// Register a callback invoked as the release downloads, with
@@ -371,7 +388,6 @@ macro_rules! impl_common_builder_setters {
         /// sends no `Content-Length`). Independent of `show_download_progress`; use it to drive
         /// a GUI or structured logging. The callback is `Fn`, so track state via interior
         /// mutability (e.g. an `AtomicU64` or a channel).
-        #[doc(alias = "set_progress_callback")]
         pub fn progress_callback(
             &mut self,
             callback: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
@@ -403,10 +419,11 @@ macro_rules! impl_common_builder_setters {
         /// release cannot replace a working binary. Typical use: run `new --version` and check it.
         ///
         /// This runs **last** in the verification chain and on the **extracted binary**, not the
-        /// downloaded archive. The full order is: [`checksum`](Self::checksum) (digest of the
-        /// archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
-        /// extract -> `verify_with` (the extracted binary) -> replace. Use `checksum`/`verifying_keys`
-        /// to gate the download by content; use `verify_with` to gate it by running the new binary.
+        /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
+        /// of the archive) -> signature ([`verify_keys`](Self::verify_keys), over the archive) ->
+        /// extract -> `verify_with` (the extracted binary) -> replace. Use
+        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_with` to
+        /// gate it by running the new binary.
         pub fn verify_with(
             &mut self,
             verify: impl Fn(&std::path::Path) -> bool + Send + Sync + 'static,
@@ -419,8 +436,7 @@ macro_rules! impl_common_builder_setters {
         /// (e.g. one published in a `SHA256SUMS` file) before installing it. The algorithm is
         /// chosen by the `Checksum` variant.
         #[cfg(feature = "checksums")]
-        #[doc(alias = "verifying_checksum")]
-        pub fn checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
+        pub fn verify_checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
             self
         }
@@ -436,7 +452,7 @@ macro_rules! impl_common_builder_setters {
         /// This **replaces** the key set on each call (unlike [`request_header`](Self::request_header),
         /// which appends); the last call wins.
         #[cfg(feature = "signatures")]
-        pub fn verifying_keys(
+        pub fn verify_keys(
             &mut self,
             keys: impl Into<Vec<crate::VerifyingKey>>,
         ) -> &mut Self {
@@ -453,23 +469,23 @@ macro_rules! impl_common_builder_setters {
 macro_rules! impl_async_update_methods {
     () => {
         /// Async sibling of `update`: display release info and update the current binary to the
-        /// latest release, returning the resulting [`Status`](crate::Status).
+        /// latest release, returning the resulting [`VersionStatus`](crate::VersionStatus).
         ///
         /// Requires a `tokio` runtime (provided by the caller). The release listing and the
         /// download are async; the extract/replace step is synchronous and runs inline, briefly
         /// blocking the executor — keep that in mind on a small single-threaded runtime.
-        pub async fn update_async(&self) -> crate::errors::Result<crate::Status> {
+        pub async fn update_async(&self) -> crate::errors::Result<crate::VersionStatus> {
             let current_version = crate::update::UpdateConfig::current_version(self).to_string();
             self.update_extended_async()
                 .await
-                .map(|s| s.into_status(current_version))
+                .map(|s| s.into_version_status(current_version))
         }
 
         /// Async sibling of `update_extended`: same as [`update_async`](Self::update_async) but
-        /// returns [`UpdateStatus`](crate::update::UpdateStatus).
+        /// returns [`ReleaseStatus`](crate::update::ReleaseStatus).
         pub async fn update_extended_async(
             &self,
-        ) -> crate::errors::Result<crate::update::UpdateStatus> {
+        ) -> crate::errors::Result<crate::update::ReleaseStatus> {
             crate::update::update_extended_async(self).await
         }
 

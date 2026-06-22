@@ -4,7 +4,7 @@ use std::env::consts::{ARCH, OS};
 use std::fs;
 
 use crate::http_client::{self, header};
-use crate::{confirm, errors::*, version, Download, Extract, Move, Status};
+use crate::{confirm, errors::*, version, Download, Extract, Move, VersionStatus};
 
 /// Release asset information
 #[derive(Clone, Debug, Default)]
@@ -31,34 +31,35 @@ impl ReleaseAsset {
 /// The richer result of [`update_extended`](ReleaseUpdate::update_extended) (and its async sibling
 /// `update_extended_async`): it carries the full [`Release`] that was installed.
 ///
-/// This is the extended counterpart of [`Status`](crate::Status), the lightweight result of
-/// [`update`](ReleaseUpdate::update) which carries only the version tag. Reach for `UpdateStatus`
-/// when you need the installed release's details (name, date, body, assets); reach for `Status`
-/// when the version string is all you need. Convert with [`into_status`](UpdateStatus::into_status).
+/// This is the extended counterpart of [`VersionStatus`](crate::VersionStatus), the lightweight
+/// result of [`update`](ReleaseUpdate::update) which carries only the version tag. Reach for
+/// `ReleaseStatus` when you need the installed release's details (name, date, body, assets); reach
+/// for `VersionStatus` when the version string is all you need. Convert with
+/// [`into_version_status`](ReleaseStatus::into_version_status).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum UpdateStatus {
+pub enum ReleaseStatus {
     /// Crate is up to date
     UpToDate,
     /// Crate was updated to the contained release
     Updated(Release),
 }
 
-impl UpdateStatus {
-    /// Turn the extended information into the crate's standard `Status` enum
-    pub fn into_status(self, current_version: String) -> Status {
+impl ReleaseStatus {
+    /// Turn the extended information into the crate's standard [`VersionStatus`](crate::VersionStatus) enum
+    pub fn into_version_status(self, current_version: String) -> VersionStatus {
         match self {
-            UpdateStatus::UpToDate => Status::UpToDate(current_version),
-            UpdateStatus::Updated(release) => Status::Updated(release.version),
+            ReleaseStatus::UpToDate => VersionStatus::UpToDate(current_version),
+            ReleaseStatus::Updated(release) => VersionStatus::Updated(release.version),
         }
     }
 
-    /// Returns `true` if `UpdateStatus::UpToDate`
+    /// Returns `true` if `ReleaseStatus::UpToDate`
     pub fn is_up_to_date(&self) -> bool {
-        matches!(*self, UpdateStatus::UpToDate)
+        matches!(*self, ReleaseStatus::UpToDate)
     }
 
-    /// Returns `true` if `UpdateStatus::Updated`
+    /// Returns `true` if `ReleaseStatus::Updated`
     pub fn is_updated(&self) -> bool {
         !self.is_up_to_date()
     }
@@ -69,16 +70,16 @@ impl UpdateStatus {
     /// `match` (which `#[non_exhaustive]` would force a wildcard arm onto).
     pub fn updated_release(&self) -> Option<&Release> {
         match self {
-            UpdateStatus::Updated(release) => Some(release),
-            UpdateStatus::UpToDate => None,
+            ReleaseStatus::Updated(release) => Some(release),
+            ReleaseStatus::UpToDate => None,
         }
     }
 
     /// Consume the status and return the installed [`Release`], or `None` if already up to date.
     pub fn into_updated_release(self) -> Option<Release> {
         match self {
-            UpdateStatus::Updated(release) => Some(release),
-            UpdateStatus::UpToDate => None,
+            ReleaseStatus::Updated(release) => Some(release),
+            ReleaseStatus::UpToDate => None,
         }
     }
 }
@@ -466,13 +467,10 @@ pub trait UpdateConfig: sealed::Sealed {
     fn target(&self) -> &str;
 
     /// Release tag optionally specified for the update (set via `release_tag`)
-    #[doc(alias = "target_version")]
-    #[doc(alias = "target_version_tag")]
     fn release_tag(&self) -> Option<&str>;
 
     /// Optional identifier for determining the asset among multiple matches (set via
     /// `asset_identifier`)
-    #[doc(alias = "identifier")]
     fn asset_identifier(&self) -> Option<&str> {
         None
     }
@@ -533,11 +531,11 @@ pub trait UpdateConfig: sealed::Sealed {
     /// Optional checksum to verify the downloaded artifact against before installing it.
     #[doc(hidden)]
     #[cfg(feature = "checksums")]
-    fn checksum(&self) -> Option<&crate::Checksum>;
+    fn verify_checksum(&self) -> Option<&crate::Checksum>;
 
     /// ed25519ph verifying keys to validate a download's authenticity
     #[cfg(feature = "signatures")]
-    fn verifying_keys(&self) -> &[crate::VerifyingKey] {
+    fn verify_keys(&self) -> &[crate::VerifyingKey] {
         &[]
     }
 
@@ -600,17 +598,17 @@ pub trait ReleaseUpdate: UpdateConfig {
     /// Display release information and update the current binary to the latest release, pending
     /// confirmation from the user.
     ///
-    /// Returns a [`Status`] carrying only the version tag. Use [`update_extended`](Self::update_extended)
-    /// instead if you need the full [`Release`] details (name, date, body, assets) of the installed
-    /// release.
-    fn update(&self) -> Result<Status> {
+    /// Returns a [`VersionStatus`] carrying only the version tag. Use
+    /// [`update_extended`](Self::update_extended) instead if you need the full [`Release`] details
+    /// (name, date, body, assets) of the installed release.
+    fn update(&self) -> Result<VersionStatus> {
         let current_version = self.current_version().to_string();
         self.update_extended()
-            .map(|s| s.into_status(current_version))
+            .map(|s| s.into_version_status(current_version))
     }
 
-    /// Same as `update`, but returns `UpdateStatus`.
-    fn update_extended(&self) -> Result<UpdateStatus> {
+    /// Same as `update`, but returns [`ReleaseStatus`].
+    fn update_extended(&self) -> Result<ReleaseStatus> {
         let current_version = self.current_version();
         let show_output = self.show_output();
         print_check_header(self.target(), current_version, show_output);
@@ -621,7 +619,7 @@ pub trait ReleaseUpdate: UpdateConfig {
                 let releases = self.get_latest_releases()?;
                 match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                     Some(release) => release,
-                    None => return Ok(UpdateStatus::UpToDate),
+                    None => return Ok(ReleaseStatus::UpToDate),
                 }
             }
             Some(ref ver) => {
@@ -799,16 +797,16 @@ fn finish_update<U: UpdateConfig + ?Sized>(
     release: Release,
     tmp_archive_dir: &tempfile::TempDir,
     tmp_archive_path: &std::path::Path,
-) -> Result<UpdateStatus> {
+) -> Result<ReleaseStatus> {
     let show_output = u.show_output();
 
     #[cfg(feature = "checksums")]
-    if let Some(checksum) = u.checksum() {
+    if let Some(checksum) = u.verify_checksum() {
         checksum.verify(tmp_archive_path)?;
     }
 
     #[cfg(feature = "signatures")]
-    verify_signature(tmp_archive_path, u.verifying_keys())?;
+    verify_signature(tmp_archive_path, u.verify_keys())?;
 
     print_flush(show_output, "Extracting archive... ")?;
 
@@ -840,14 +838,14 @@ fn finish_update<U: UpdateConfig + ?Sized>(
     )?;
     println(show_output, "Done");
 
-    Ok(UpdateStatus::Updated(release))
+    Ok(ReleaseStatus::Updated(release))
 }
 
 /// Async sibling of [`ReleaseUpdate::update_extended`]: identical flow with the release listing and
 /// the download done asynchronously, reusing the shared sync helpers for selection, confirmation,
 /// verification, extraction, and install.
 #[cfg(feature = "async")]
-pub(crate) async fn update_extended_async<U>(u: &U) -> Result<UpdateStatus>
+pub(crate) async fn update_extended_async<U>(u: &U) -> Result<ReleaseStatus>
 where
     // `AsyncFetch` is never used through a trait object (the async API hands out a concrete
     // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above. Only the
@@ -865,7 +863,7 @@ where
             let releases = u.get_latest_releases_async().await?;
             match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                 Some(release) => release,
-                None => return Ok(UpdateStatus::UpToDate),
+                None => return Ok(ReleaseStatus::UpToDate),
             }
         }
         Some(ref ver) => {
@@ -1137,22 +1135,50 @@ mod tests {
         assert_eq!(owned, expected, "owned iteration == all() order");
     }
 
-    // --- UpdateStatus::is_updated (C2) --------------------------------------------------------
+    // --- ReleaseStatus (C2) -------------------------------------------------------------------
 
     #[test]
-    fn update_status_is_updated_predicate() {
-        let updated = super::UpdateStatus::Updated(rel("1.2.3"));
+    fn release_status_into_version_status_updated() {
+        // into_version_status on Updated must yield VersionStatus::Updated with the release version.
+        let rs = super::ReleaseStatus::Updated(rel("2.0.0"));
+        let vs = rs.into_version_status("1.0.0".to_string());
+        assert!(
+            vs.is_updated(),
+            "ReleaseStatus::Updated => VersionStatus::Updated"
+        );
+        assert_eq!(vs.version(), "2.0.0", "version comes from the release");
+    }
+
+    #[test]
+    fn release_status_into_version_status_up_to_date() {
+        // into_version_status on UpToDate must yield VersionStatus::UpToDate with current_version.
+        let rs = super::ReleaseStatus::UpToDate;
+        let vs = rs.into_version_status("1.5.0".to_string());
+        assert!(
+            vs.is_up_to_date(),
+            "ReleaseStatus::UpToDate => VersionStatus::UpToDate"
+        );
+        assert_eq!(
+            vs.version(),
+            "1.5.0",
+            "version is the current_version passed in"
+        );
+    }
+
+    #[test]
+    fn release_status_is_updated_predicate() {
+        let updated = super::ReleaseStatus::Updated(rel("1.2.3"));
         assert!(updated.is_updated(), "Updated => is_updated() true");
         assert!(!updated.is_up_to_date());
 
-        let up_to_date = super::UpdateStatus::UpToDate;
+        let up_to_date = super::ReleaseStatus::UpToDate;
         assert!(!up_to_date.is_updated(), "UpToDate => is_updated() false");
         assert!(up_to_date.is_up_to_date());
     }
 
     #[test]
-    fn update_status_release_accessors() {
-        let updated = super::UpdateStatus::Updated(rel("1.2.3"));
+    fn release_status_release_accessors() {
+        let updated = super::ReleaseStatus::Updated(rel("1.2.3"));
         assert_eq!(
             updated.updated_release().map(|r| r.version.as_str()),
             Some("1.2.3"),
@@ -1164,7 +1190,7 @@ mod tests {
             "into_updated_release() yields the installed release"
         );
 
-        let up_to_date = super::UpdateStatus::UpToDate;
+        let up_to_date = super::ReleaseStatus::UpToDate;
         assert!(
             up_to_date.updated_release().is_none(),
             "UpToDate => updated_release() None"
@@ -1453,7 +1479,7 @@ mod tests {
             .bin_name("app")
             .target("x86_64-unknown-linux-gnu")
             .current_version("1.0.0")
-            .checksum(checksum)
+            .verify_checksum(checksum)
             .build()
             .unwrap()
     }
