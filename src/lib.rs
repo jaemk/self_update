@@ -2727,12 +2727,11 @@ mod tests {
         }
     }
 
-    // --- WS3 extractor `Internal { source: None }` variant-routing -----------------------------
+    // --- extractor `Internal { source: None }` variant-routing -----------------------------
     //
     // These pin the invariant-violation sites in `extract_file`/`extract_into` to EXACTLY
     // `Error::Internal` carrying NO source (the genuine-invariant residue, distinct from the
-    // JoinError `Internal { source: Some(..) }`). None of these had a direct variant-routing test
-    // before WS3.
+    // JoinError `Internal { source: Some(..) }`).
 
     // `extract_file` on a Plain source where the *requested* `file_to_extract` has no file name
     // (e.g. `..`) must route to `Error::Internal { source: None }` ("Extractor source has no

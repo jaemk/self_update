@@ -1104,7 +1104,7 @@ mod tests {
             ));
         }
 
-        // E3/E6: a panic inside the spawned blocking task fails the join, which the adapter maps to
+        // a panic inside the spawned blocking task fails the join, which the adapter maps to
         // `Error::Internal` carrying the tokio `JoinError` as a boxed `source()` (previously the
         // `JoinError` was stringified and dropped, so `source()` returned `None`).
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1139,7 +1139,7 @@ mod tests {
             );
         }
 
-        // B7a: `Blocking`'s inner source field is private; the only ways to construct/inspect it
+        // `Blocking`'s inner source field is private; the only ways to construct/inspect it
         // are `new`, `as_inner`, and `into_inner`. (A `Blocking(SyncSource { .. })` tuple-struct
         // literal would no longer compile, which is the breaking change this pins.)
         #[test]
@@ -1162,7 +1162,7 @@ mod tests {
             assert_eq!(blk.into_inner(), Marker(7), "into_inner returns the source");
         }
 
-        // D2: the `AsyncReleaseSource` methods return `impl Future + Send`, so this generic helper
+        // the `AsyncReleaseSource` methods return `impl Future + Send`, so this generic helper
         // (which requires the returned future to be `Send`) must compile for any conforming impl.
         // If the `+ Send` bound were dropped from the trait, this `fn` would fail to compile.
         fn assert_fetch_future_is_send<S: AsyncReleaseSource>(s: &S) {
@@ -1172,7 +1172,7 @@ mod tests {
 
         #[tokio::test]
         async fn async_release_source_future_is_send() {
-            // Drive the D2 Send-enforcement helper against the native async source, proving the
+            // Drive the Send-enforcement helper against the native async source, proving the
             // returned future satisfies the `Send` bound declared on the trait method.
             let src = NativeAsyncSource {
                 latest_calls: Arc::new(AtomicUsize::new(0)),
@@ -1186,7 +1186,7 @@ mod tests {
 
         #[tokio::test]
         async fn is_update_available_async_true_then_false() {
-            // D2 (async): the pre-check is `get_latest_releases_async().await?.is_update_available()`.
+            // the pre-check is `get_latest_releases_async().await?.is_update_available()`.
             // The native source's latest is 2.0.0, so an update is available from 1.0.0 but not
             // from 2.0.0.
             let mk = |cur: &str| {
@@ -1222,7 +1222,7 @@ mod tests {
             );
         }
 
-        // --- WS2 invariant 6: spawn_blocking finish tail driven to a real install ---------------
+        // --- spawn_blocking finish tail driven to a real install ---------------
         //
         // No other async test drives the full async pipeline (fetch -> download -> spawn_blocking
         // verify/extract/install) to a successful install. This one does: a loopback HTTP server

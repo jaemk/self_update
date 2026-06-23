@@ -541,7 +541,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 
 /// Build gitlab's base request headers (its User-Agent). The Authorization header is applied
 /// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
-/// gitlab's `Bearer` scheme on both the listing and download paths (B5), honoring a user override.
+/// gitlab's `Bearer` scheme on both the listing and download paths, honoring a user override.
 fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
@@ -1019,7 +1019,7 @@ mod tests {
         );
     }
 
-    // WS3 variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
+    // variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
     // `MissingAssetField { field: "tag_name" }` -- not `NoReleaseFound`. The sibling test above
     // accepts either via an `A | B` match; this pins the precise variant and the field name so a
     // regression that conflates a malformed-payload failure with the empty-listing variant (or
@@ -1051,7 +1051,7 @@ mod tests {
         }
     }
 
-    // WS3 variant-routing (exact): an empty top-level releases array yields zero parsed releases,
+    // variant-routing (exact): an empty top-level releases array yields zero parsed releases,
     // so the latest-release lookup finds nothing and must surface as EXACTLY
     // `NoReleaseFound { target: None }` -- the clean empty-listing negative, NOT a payload-field
     // failure. Pins the other side of the `NoReleaseFound | MissingAssetField` split.
@@ -1338,7 +1338,7 @@ mod tests {
         );
     }
 
-    // B5: gitlab resolves to the `Bearer` scheme, applied by the shared `apply_auth` on the request
+    // gitlab resolves to the `Bearer` scheme, applied by the shared `apply_auth` on the request
     // config consumed by BOTH the listing and download paths. A user `request_header(AUTHORIZATION)`
     // override wins.
     #[test]
@@ -1615,7 +1615,7 @@ mod tests {
         );
     }
 
-    // --- WS2 I2: gitlab git release-scan early-stop (per-backend parser wiring) ----------------
+    // --- gitlab git release-scan early-stop (per-backend parser wiring) ----------------
     //
     // The early-stop lives in shared code, but the gitlab parser (`from_release_gitlab` +
     // `release_array_page`) wires `stop_at` itself. These pin that wiring: the parser must set
@@ -1736,7 +1736,7 @@ mod tests {
         );
     }
 
-    // --- WS4 #5 (gitlab): a realistic populated payload parses through the DTO into a `Release`
+    // --- a realistic populated payload parses through the DTO into a `Release`
     // whose getters surface every field. The other gitlab parse tests use empty `assets.links`
     // and a null `description`; this pins the populated mapping that differs in shape from the
     // other forges (assets nested under `assets.links`, body in `description`).
@@ -1771,7 +1771,7 @@ mod tests {
         assert_eq!(rel.assets()[1].name(), "app-aarch64-linux.tar.gz");
     }
 
-    // --- WS4 #2 (gitlab): the listing `Releases` from `ReleaseList::fetch` carries NO current
+    // --- the listing `Releases` from `ReleaseList::fetch` carries NO current
     // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
     // `MissingField { field: "current_version" }` rather than silently answering. `into_vec()`
     // still recovers the underlying release vec.
@@ -1819,7 +1819,7 @@ mod tests {
         );
     }
 
-    // --- WS4 #1 (gitlab, sync lane): exact-variant routing on the sync transport. The sibling
+    // --- exact-variant routing on the sync transport (gitlab). The sibling
     // exact-variant tests are `#[cfg(feature = "async")]` only, so the ureq lane (no async) never
     // pins the precise variant. This pins it on whichever sync client is active: a release object
     // missing `tag_name` must surface as EXACTLY `MissingAssetField { field: "tag_name" }`.
@@ -1849,7 +1849,7 @@ mod tests {
         }
     }
 
-    // --- WS4 #1 (gitlab, sync lane): the other side of the split — an empty top-level releases
+    // --- the other side of the sync-lane split (gitlab): an empty top-level releases
     // array surfaces as EXACTLY `NoReleaseFound { target: None }`, not a payload-field failure.
     #[test]
     fn sync_empty_array_routes_to_no_release_found_exactly() {

@@ -1480,7 +1480,7 @@ mod tests {
         assert_eq!(asset.download_url(), "https://host/dl");
     }
 
-    // --- WS4 4a: getters return exactly the builder-set values --------------------------------
+    // --- getters return exactly the builder-set values --------------------------------
 
     #[test]
     fn release_getters_return_builder_set_values() {
@@ -1522,7 +1522,7 @@ mod tests {
         assert!(release.assets().is_empty());
     }
 
-    // --- WS4 4f: Arc<str> backing — Clone is cheap and shares the backing allocation ----------
+    // --- Arc<str> backing - Clone is cheap and shares the backing allocation ----------
 
     #[test]
     fn release_clone_shares_arc_backing() {
@@ -1553,7 +1553,7 @@ mod tests {
         ));
     }
 
-    // --- WS4 4b: `Releases::from_releases` builds a usable `Releases` --------------------------
+    // --- `Releases::from_releases` builds a usable `Releases` --------------------------
 
     #[test]
     fn releases_from_releases_builds_a_usable_collection() {
@@ -1573,7 +1573,7 @@ mod tests {
         assert!(!up_to_date.is_update_available().unwrap());
     }
 
-    // --- WS4 4e: `ReleaseStatus::version()` -----------------------------------------------------
+    // --- `ReleaseStatus::version()` -----------------------------------------------------
 
     #[test]
     fn release_status_version_returns_installed_version_or_none() {
@@ -1590,7 +1590,7 @@ mod tests {
         );
     }
 
-    // --- WS4 4b boundary: a listing-built `Releases` has no current version --------------------
+    // --- a listing-built `Releases` has no current version --------------------
 
     #[test]
     fn releases_from_listing_has_no_current_version_and_precheck_errors() {
@@ -1805,7 +1805,7 @@ mod tests {
         assert_eq!(rel.version(), "1.5.0");
     }
 
-    // --- WS2 5f: `AsyncReleaseUpdate` is usable as a generic bound -----------------------------
+    // --- `AsyncReleaseUpdate` is usable as a generic bound -----------------------------
     //
     // A generic fn bounded on `AsyncReleaseUpdate` must compile and drive the verbs, proving the
     // trait is nameable/bound-able (RPITIT => not object-safe, but usable as a bound, like
@@ -2035,14 +2035,14 @@ mod tests {
         );
     }
 
-    // WS3 variant-routing: the async finish tail (`finish_update_async`, ~update.rs:1022) runs the
+    // the async finish tail (`finish_update_async`, ~update.rs:1022) runs the
     // verify/extract/install tail under `tokio::task::spawn_blocking` and maps a `JoinError` (e.g.
     // a panic in that tail) to `Error::Internal { source: Some(Box::new(join_err)) }`. That site is
     // only reachable through the full async update flow (network download of a real asset, then a
     // panic in the private `finish_update_owned` tail), so it cannot be driven from a unit test
     // without breaking the install flow. What we pin here is the exact `map_err` mapping that site
     // performs: a real `JoinError` from a panicking `spawn_blocking` must route to `Error::Internal`
-    // with a NON-None, chained `source()` — distinguishing it from the genuine-invariant
+    // with a NON-None, chained `source()` - distinguishing it from the genuine-invariant
     // `Internal { source: None }` extractor sites. This mirrors `custom.rs`'s
     // `blocking_adapter_join_failure_chains_source`, which covers the structurally-identical
     // `Blocking` adapter mapping; together they pin both async JoinError->Internal sites.
@@ -2088,13 +2088,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // WS5 item 1 (HIGHEST RISK): the DOWNLOAD path applies the backend's derived
-    // Authorization scheme AND honors a user override — captured off a loopback TCP
-    // stub through the real http client (reqwest or ureq), exercising
-    // `build_download` + `download_to` end to end, not just `apply_auth` in isolation.
+    // the DOWNLOAD path applies the backend's derived Authorization scheme AND
+    // honors a user override, captured off a loopback TCP stub through the real
+    // http client (reqwest or ureq), exercising `build_download` + `download_to`
+    // end to end, not just `apply_auth` in isolation.
     //
     // The listing path already had a wire-level loopback test (backends::mod tests);
-    // the author flagged that the download path lacked one. These close that gap.
+    // the download path lacked one. These close that gap.
     // -----------------------------------------------------------------------
 
     /// Bind a loopback stub that accepts one request, captures its raw header lines, and replies
@@ -2217,13 +2217,13 @@ mod tests {
         );
     }
 
-    // WS5 item 7 (B9): the configured retry budget is forwarded onto the Download built by
-    // `build_download`. Without forwarding, a custom-backend `.retries(N)` would be a silent no-op
-    // on the one transport the crate controls (the download). We assert the budget reaches the GET
-    // by pointing the asset at a closed loopback port (immediate connection-refused) and counting
-    // attempts is impractical through the real client, so instead we drive the forwarding directly:
-    // a custom updater with `.retries(2)` must produce a download that retries. We prove the wiring
-    // by checking `build_download` carries the budget through to a re-established request via an
+    // the configured retry budget is forwarded onto the Download built by `build_download`.
+    // Without forwarding, a custom-backend `.retries(N)` would be a silent no-op on the one
+    // transport the crate controls (the download). We assert the budget reaches the GET by pointing
+    // the asset at a closed loopback port (immediate connection-refused) and counting attempts is
+    // impractical through the real client, so instead we drive the forwarding directly: a custom
+    // updater with `.retries(2)` must produce a download that retries. We prove the wiring by
+    // checking `build_download` carries the budget through to a re-established request via an
     // injected flaky client.
     #[test]
     fn build_download_forwards_configured_retry_budget() {
@@ -2311,7 +2311,7 @@ mod tests {
         );
     }
 
-    // WS5 item 6: download retry only covers the request-ESTABLISHMENT phase. A failure that occurs
+    // download retry only covers the request-ESTABLISHMENT phase. A failure that occurs
     // AFTER streaming has begun must NOT re-issue the GET (which would append a duplicate/partial
     // body to the destination and corrupt it). We assert: exactly one GET attempt despite a generous
     // retry budget, the call errors, and `dest` holds only the partial pre-failure bytes (never a

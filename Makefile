@@ -141,7 +141,7 @@ tests/async:
 	$(CARGO_COMMAND) test --features "$(ASYNC_FEATURES)"
 
 ################################################################################
-# Builds the crate with every feature enabled. This is the WS1 headline check:
+# Builds the crate with every feature enabled. This is the all-features check:
 # the object-safe HTTP trait seam means both http clients, both TLS backends, and
 # the async API all coexist, so `--all-features` must build.
 build/all-features:

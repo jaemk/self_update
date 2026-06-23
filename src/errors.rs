@@ -449,10 +449,10 @@ mod tests {
         "not a version".parse::<semver::Version>().unwrap_err()
     }
 
-    // C1: `Error::Json` is opaque (boxed). The `From<serde_json::Error>` conversion must produce an
+    // `Error::Json` is opaque (boxed). The `From<serde_json::Error>` conversion must produce an
     // `Error::Json` whose `source()` surfaces the underlying boxed error, mirroring `Transport`/`S3Auth`.
-    // Pre-fix this variant held a concrete `serde_json::Error` (still `source()`-able, but not
-    // boxed); after the box the `source()` arm must deref the box (`&**e`).
+    // Previously this variant held a concrete `serde_json::Error` (still `source()`-able, but not
+    // boxed); after boxing the `source()` arm must deref the box (`&**e`).
     #[test]
     fn json_error_is_opaque_with_source() {
         let err: Error = json_error().into();
@@ -466,7 +466,7 @@ mod tests {
         );
     }
 
-    // C1: the boxed `Error::Json` must still render with the `JsonError:` Display prefix and embed
+    // the boxed `Error::Json` must still render with the `JsonError:` Display prefix and embed
     // the inner error's message (the Display arm dereferences the box, not the box debug form).
     #[test]
     fn json_error_display_includes_prefix_and_inner_message() {
@@ -487,7 +487,7 @@ mod tests {
         );
     }
 
-    // C1: `Error::SemVer` is opaque (boxed) and surfaces its source via the dereferenced box.
+    // `Error::SemVer` is opaque (boxed) and surfaces its source via the dereferenced box.
     #[test]
     fn semver_error_is_opaque_with_source() {
         let err: Error = semver_error().into();
@@ -501,7 +501,7 @@ mod tests {
         );
     }
 
-    // C1: the boxed `Error::SemVer` keeps the `SemVerError:` Display prefix and inner message.
+    // the boxed `Error::SemVer` keeps the `SemVerError:` Display prefix and inner message.
     #[test]
     fn semver_error_display_includes_prefix_and_inner_message() {
         let inner = semver_error();
@@ -521,9 +521,9 @@ mod tests {
         );
     }
 
-    // B2: `Error::Zip` is opaque (boxed). The `From<ZipError>` conversion must produce an
+    // `Error::Zip` is opaque (boxed). The `From<ZipError>` conversion must produce an
     // `Error::Zip` whose `source()` surfaces the underlying boxed error, mirroring `Transport`/`S3Auth`.
-    // Pre-fix this variant held a concrete `zip::result::ZipError` and exposed no `source()`.
+    // Previously this variant held a concrete `zip::result::ZipError` and exposed no `source()`.
     #[cfg(feature = "archive-zip")]
     #[test]
     fn zip_error_is_opaque_with_source() {
@@ -536,8 +536,8 @@ mod tests {
         );
     }
 
-    // B2: the boxed `Error::Zip` must still render with the `ZipError:` Display prefix and embed
-    // the inner error's message. Only `source()` was asserted before the box; this pins that the
+    // the boxed `Error::Zip` must still render with the `ZipError:` Display prefix and embed
+    // the inner error's message. Only `source()` was asserted before boxing; this pins that the
     // Display arm dereferences the box rather than printing the box's debug form or being dropped.
     #[cfg(feature = "archive-zip")]
     #[test]
@@ -559,7 +559,7 @@ mod tests {
         );
     }
 
-    // B2: `Error::Signature` is opaque (boxed) and surfaces its source. Pre-fix it held a concrete
+    // `Error::Signature` is opaque (boxed) and surfaces its source. Previously it held a concrete
     // `zipsign_api::ZipsignError`; the `source()` arm now dereferences the box.
     #[cfg(feature = "signatures")]
     #[test]
@@ -576,8 +576,8 @@ mod tests {
         );
     }
 
-    // B2: the boxed `Error::Signature` must still render with the `SignatureError:` Display prefix
-    // and embed the inner error's message. Pins the Display arm dereferences the box.
+    // the boxed `Error::Signature` must still render with the `SignatureError:` Display prefix
+    // and embed the inner error's message. Pins that the Display arm dereferences the box.
     #[cfg(feature = "signatures")]
     #[test]
     fn signature_error_display_includes_prefix_and_inner_message() {
@@ -598,9 +598,9 @@ mod tests {
         );
     }
 
-    // B7c: the signatures-gated non-UTF8 variant is named `SignatureNonUTF8` (was `NonUTF8`).
-    // Naming + Display are pinned here; the rename is what makes this compile.
-    // Display prefix corrected to "SignatureError: ..." for consistency with all other variants.
+    // the signatures-gated non-UTF8 variant is named `SignatureNonUTF8` (was `NonUTF8`).
+    // Naming + Display are pinned here; if the variant were renamed this would not compile.
+    // Display prefix is "SignatureError: ..." for consistency with all other variants.
     #[cfg(feature = "signatures")]
     #[test]
     fn signature_non_utf8_variant_is_renamed_and_displays() {
@@ -985,7 +985,7 @@ mod tests {
         );
     }
 
-    // --- WS3 structured-variant unit tests ----------------------------------------------------
+    // --- structured-variant unit tests ----------------------------------------------------
 
     // `MissingField` Display: "ConfigError: `<field>` required".
     #[test]
@@ -1056,7 +1056,7 @@ mod tests {
         );
     }
 
-    // E6: `InvalidResponse` carries a boxed source and chains it through `source()`.
+    // `InvalidResponse` carries a boxed source and chains it through `source()`.
     #[test]
     fn invalid_response_chains_source() {
         let inner = json_error();
@@ -1078,7 +1078,7 @@ mod tests {
         );
     }
 
-    // E1/E6: `InvalidHeader` carries a boxed source and chains it through `source()`.
+    // `InvalidHeader` carries a boxed source and chains it through `source()`.
     #[test]
     fn invalid_header_chains_source() {
         let err = Error::InvalidHeader {
@@ -1094,7 +1094,7 @@ mod tests {
         );
     }
 
-    // E1/E6: `InvalidAuthToken` carries a boxed source and chains it through `source()`.
+    // `InvalidAuthToken` carries a boxed source and chains it through `source()`.
     #[test]
     fn invalid_auth_token_chains_source() {
         // A control char produces a real header-value parse error.
@@ -1114,7 +1114,7 @@ mod tests {
         );
     }
 
-    // E3/E6: `Internal` with a source chains it; without a source returns None.
+    // `Internal` with a source chains it; without a source returns None.
     #[test]
     fn internal_source_chaining() {
         let with = Error::Internal {
@@ -1137,7 +1137,7 @@ mod tests {
         );
     }
 
-    // E4: `Io` still carries the concrete `std::io::Error` (not boxed), exposing `ErrorKind`.
+    // `Io` still carries the concrete `std::io::Error` (not boxed), exposing `ErrorKind`.
     #[test]
     fn io_error_exposes_error_kind() {
         let err = Error::Io(std::io::Error::new(
@@ -1152,8 +1152,8 @@ mod tests {
         }
     }
 
-    // E4: `Error` is `#[non_exhaustive]`, so a downstream-style `match` with a wildcard arm
-    // compiles and the new struct variants stay non-breaking to add to.
+    // `Error` is `#[non_exhaustive]`, so a downstream-style `match` with a wildcard arm
+    // compiles and the struct variants stay non-breaking to add to.
     #[test]
     fn non_exhaustive_match_with_wildcard_compiles() {
         fn classify(err: &Error) -> &'static str {
@@ -1177,7 +1177,7 @@ mod tests {
         assert_eq!(classify(&Error::Aborted), "other");
     }
 
-    // E4/WS3: the `#[non_exhaustive]` struct variants require a trailing `..` to destructure from a
+    // the `#[non_exhaustive]` struct variants require a trailing `..` to destructure from a
     // downstream perspective (adding a field stays non-breaking). A destructure that binds the
     // current fields plus `..` must compile and read them. This pins the struct-level
     // non_exhaustive contract that the enum-level wildcard test above does not exercise.
@@ -1216,9 +1216,9 @@ mod tests {
         }
     }
 
-    // WS3 Display: every restructured/new variant has a non-panicking Display that keeps a sensible
-    // prefix and embeds its data. The per-variant tests above cover the exact strings; this is a
-    // belt-and-suspenders sweep that no new variant lost its message or panics on Display.
+    // every variant has a non-panicking Display that keeps a sensible prefix and embeds its data.
+    // The per-variant tests above cover the exact strings; this is a belt-and-suspenders sweep
+    // that no variant lost its message or panics on Display.
     #[test]
     fn all_new_variants_display_without_panicking() {
         let cases: Vec<(Error, &str)> = vec![

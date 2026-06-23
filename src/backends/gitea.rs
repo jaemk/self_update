@@ -527,7 +527,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 
 /// Build gitea's base request headers (its User-Agent). The Authorization header is applied
 /// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
-/// gitea's `token` scheme on both the listing and download paths (B5), honoring a user override.
+/// gitea's `token` scheme on both the listing and download paths, honoring a user override.
 fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
@@ -833,7 +833,7 @@ mod tests {
         (base, captured)
     }
 
-    // --- WS2 I2: gitea git release-scan early-stop (per-backend parser wiring) -----------------
+    // --- gitea git release-scan early-stop (per-backend parser wiring) -----------------
     //
     // The early-stop lives in shared code, but the gitea parser (`from_release` + the shared
     // `release_array_page`) wires `stop_at` itself. These pin that wiring: the parser must set
@@ -954,7 +954,7 @@ mod tests {
         );
     }
 
-    // --- WS4 #5 (gitea): a realistic populated payload parses through the DTO into a `Release`
+    // --- a realistic populated payload parses through the DTO into a `Release`
     // whose getters surface every field. The other gitea parse tests use empty `assets` and a
     // null `body`; this pins the populated mapping with gitea's distinct shapes (bare `assets`
     // array, download URL in `browser_download_url`, body in `body`).
@@ -989,7 +989,7 @@ mod tests {
         assert_eq!(rel.assets()[1].name(), "app-aarch64-linux.tar.gz");
     }
 
-    // --- WS4 #2 (gitea): the listing `Releases` from `ReleaseList::fetch` carries NO current
+    // --- the listing `Releases` from `ReleaseList::fetch` carries NO current
     // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
     // `MissingField { field: "current_version" }`. `into_vec()` recovers the release vec.
     #[test]
@@ -1036,7 +1036,7 @@ mod tests {
         );
     }
 
-    // --- WS4 #1 (gitea, sync lane): exact-variant routing on the sync transport. The sibling
+    // --- exact-variant routing on the sync transport (gitea). The sibling
     // exact-variant tests are `#[cfg(feature = "async")]` only, so the ureq lane never pins the
     // precise variant. A release object missing `tag_name` must surface as EXACTLY
     // `MissingAssetField { field: "tag_name" }`.
@@ -1064,7 +1064,7 @@ mod tests {
         }
     }
 
-    // --- WS4 #1 (gitea, sync lane): the other side of the split — an empty top-level releases
+    // --- the other side of the sync-lane split (gitea): an empty top-level releases
     // array surfaces as EXACTLY `NoReleaseFound { target: None }`.
     #[test]
     fn sync_empty_array_routes_to_no_release_found_exactly() {
@@ -1116,8 +1116,8 @@ mod tests {
     #[test]
     fn api_headers_override_uses_gitea_user_agent() {
         // The `{api_headers}` override arm must wire gitea's custom `api_headers` (User-Agent), not
-        // the trait default (which sets no User-Agent). After B5 the auth scheme/token is applied
-        // centrally by `apply_auth`, not baked here.
+        // the trait default (which sets no User-Agent). The auth scheme/token is applied centrally
+        // by `apply_auth`, not baked here.
         let upd = Update::configure()
             .url("https://gitea.example.com")
             .repo_owner("o")
@@ -1143,7 +1143,7 @@ mod tests {
         );
     }
 
-    // B5: gitea resolves to the `token` scheme, applied by the shared `apply_auth` on the request
+    // gitea resolves to the `token` scheme, applied by the shared `apply_auth` on the request
     // config consumed by BOTH the listing and download paths. A user override wins.
     #[test]
     fn gitea_token_scheme_applied_to_both_paths() {
@@ -1457,7 +1457,7 @@ mod tests {
         );
     }
 
-    // WS3 variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
+    // variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
     // `MissingAssetField { field: "tag_name" }` -- not `NoReleaseFound`. The sibling test above
     // accepts either via an `A | B` match; this pins the precise variant *and* the field name so a
     // regression that routes a payload-shape failure to the empty-listing variant (or names the
@@ -1488,7 +1488,7 @@ mod tests {
         }
     }
 
-    // WS3 variant-routing (exact): an empty top-level releases array yields zero parsed releases,
+    // variant-routing (exact): an empty top-level releases array yields zero parsed releases,
     // so the latest-release lookup finds nothing and must surface as EXACTLY
     // `NoReleaseFound { target: None }` -- the clean empty-listing negative, NOT a payload-field
     // failure. Pins the other side of the `NoReleaseFound | MissingAssetField` split.

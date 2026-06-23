@@ -1735,7 +1735,7 @@ mod tests {
             &None,
         );
         let err = result.expect_err("malformed XML must return Err");
-        // E2/E6: the XML parse failure surfaces as `InvalidResponse` and chains the underlying
+        // the XML parse failure surfaces as `InvalidResponse` and chains the underlying
         // quick-xml error through `source()` (previously the source was stringified and dropped).
         assert!(
             matches!(err, crate::errors::Error::InvalidResponse { .. }),
@@ -1933,7 +1933,7 @@ mod tests {
         (base, captured)
     }
 
-    // --- WS2 B2/I3: s3 continuation across a truncated (>100-key) listing ---------------------
+    // --- s3 continuation across a truncated (>100-key) listing ---------------------
 
     #[test]
     fn s3_listing_follows_continuation_token_across_two_responses() {
@@ -2024,7 +2024,7 @@ mod tests {
         );
     }
 
-    // --- WS2 I3: continuation under s3-auth — each continuation URL is FRESHLY SigV4-signed -----
+    // --- continuation under s3-auth, each continuation URL is FRESHLY SigV4-signed -----
 
     #[cfg(feature = "s3-auth")]
     #[test]
@@ -2128,7 +2128,7 @@ mod tests {
         );
     }
 
-    // --- WS2: s3 max_keys clamp + query threading --------------------------------------------
+    // --- s3 max_keys clamp + query threading --------------------------------------------
 
     #[test]
     fn max_keys_clamps_to_one_to_one_thousand() {
@@ -2253,7 +2253,7 @@ mod tests {
         assert!(releases.is_update_available().unwrap());
     }
 
-    // --- WS4 #2 (s3): `ReleaseList::fetch` returns a listing `Releases` with NO current version,
+    // --- `ReleaseList::fetch` returns a listing `Releases` with NO current version,
     // so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
     // `MissingField { field: "current_version" }`. `into_vec()` recovers the parsed release vec.
     #[test]
@@ -2300,7 +2300,7 @@ mod tests {
 
     #[test]
     fn sync_is_update_available_agrees_between_paths_when_up_to_date() {
-        // gap #1/#4 (sync, s3): when the bucket's newest release equals the current version, the
+        // when the bucket's newest release equals the current version, the
         // one-element `get_latest_release` path (which keeps the newest even if equal) and the
         // strictly-newer-filtered `get_latest_releases` path must BOTH report not-available.
         let xml = || {
@@ -2542,7 +2542,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn is_update_available_async_true_then_false() {
-        // D2 (async): the pre-check is `get_latest_release_async().await?.is_update_available()`.
+        // the pre-check is `get_latest_release_async().await?.is_update_available()`.
         // The bucket's newest release is 2.0.0, so an update is available from 1.0.0 but not from
         // 2.0.0. A fresh stub is needed per call because the loopback server serves one response
         // per connection.
@@ -2612,7 +2612,7 @@ mod tests {
         assert!(super::pick_latest(&[]).is_err());
     }
 
-    // I1: selection parity between the s3 `pick_latest`/`sort_newer` paths and the orchestrator's
+    // selection parity between the s3 `pick_latest`/`sort_newer` paths and the orchestrator's
     // `choose_latest_release`, all now built on the shared `cmp_releases_newest_first` comparator.
     // For a set with a newest compatible release, every path must agree on the same release
     // regardless of input order.
@@ -2785,7 +2785,7 @@ mod tests {
 
     #[test]
     fn default_api_headers_is_a_noop() {
-        // B5: the `UpdateConfig::api_headers` trait default is now a no-op (empty header map) — the
+        // the `UpdateConfig::api_headers` trait default is a no-op (empty header map) - the
         // authorization scheme lives in the per-backend `RequestConfig`, not baked here. s3 passes
         // no `{api_headers}` override, so it gets the default: no headers, never an error (even for
         // a token that would not encode as a header value).
@@ -3109,7 +3109,7 @@ mod tests {
         assert!(out.starts_with("https://b.s3.us-east-1.amazonaws.com/path/to/key?"));
     }
 
-    // WS3 variant-routing: the regex-build `InvalidResponse` branch in `parse_s3_response`
+    // variant-routing: the regex-build `InvalidResponse` branch in `parse_s3_response`
     // (~line 960) maps a `regex::Error` into `Error::InvalidResponse { source: Box::new(err) }`.
     // The pattern compiled there is a fixed string literal that always builds, so that exact branch
     // is statically unreachable from any test input (no interpolation, no runtime data). What IS
@@ -3146,11 +3146,11 @@ mod tests {
         );
     }
 
-    // WS3 variant-routing: the residual `Config(String)` site is the SigV4 host-extraction failure
+    // variant-routing: the residual `Config(String)` site is the SigV4 host-extraction failure
     // in `s3_signature_v4` (~line 699). A URL that parses but has no authority/host (a non-special
     // scheme such as `mailto:`) reaches `url.host_str() == None` and must route to EXACTLY
-    // `Error::Config`, with the offending URL embedded in the message. This is the only `Config`
-    // producer left after WS3, and it had no variant-identity test.
+    // `Error::Config`, with the offending URL embedded in the message. This pins the only remaining
+    // `Config` producer, which had no variant-identity test.
     #[cfg(feature = "s3-auth")]
     #[test]
     fn s3_signature_v4_hostless_url_routes_to_config() {
@@ -3188,7 +3188,7 @@ mod tests {
         );
     }
 
-    // --- WS2 5e: signature_ttl is threaded into the SigV4 X-Amz-Expires of signed URLs --------
+    // --- signature_ttl is threaded into the SigV4 X-Amz-Expires of signed URLs --------
 
     #[cfg(feature = "s3-auth")]
     #[test]
@@ -3353,12 +3353,12 @@ mod tests {
         );
     }
 
-    // A9/B6: the deprecated s3 `auth_token` shims have been removed. s3 authenticates via
+    // the deprecated s3 `auth_token` shims have been removed. s3 authenticates via
     // `.access_key((id, secret))` under the `s3-auth` feature; there is no `auth_token` setter on
     // either s3 builder. (A compile-fail test would require trybuild; the removal is covered by the
     // shim methods no longer existing.)
 
-    // WS5 item 7 (A10): the `endpoint(impl Into<Endpoint>)` setter must resolve a bare `&str` and a
+    // the `endpoint(impl Into<Endpoint>)` setter must resolve a bare `&str` and a
     // `String` through the `From` impls into `Endpoint::Generic`, so callers can pass a URL string
     // directly without naming the enum. Pins both `From<&str>` and `From<String>`.
     #[test]

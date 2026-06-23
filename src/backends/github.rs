@@ -532,7 +532,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 /// Build github's base request headers (its `rust/self-update` User-Agent). The Authorization
 /// header is no longer set here: the auth scheme/token is applied centrally by the shared
 /// [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) on both the listing and
-/// download paths (B5), which also honors a user `request_header(AUTHORIZATION, ..)` override. The
+/// download paths, which also honors a user `request_header(AUTHORIZATION, ..)` override. The
 /// `auth_token` argument is retained for signature compatibility but only gates whether an auth
 /// header *would* be added (it no longer is here).
 fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
@@ -552,7 +552,7 @@ mod tests {
     use std::net::TcpListener;
 
     // The crate-private internal accessors (`request_timeout`, `verify_callback`, `asset_matcher`,
-    // …) now live on `UpdateInternals` (B1); bring it into scope so `upd.request_timeout()` etc.
+    // ...) now live on `UpdateInternals`; bring it into scope so `upd.request_timeout()` etc.
     // resolve.
     #[allow(unused_imports)]
     use crate::update::UpdateInternals;
@@ -649,7 +649,7 @@ mod tests {
         format!("[{objs}]")
     }
 
-    // --- WS2 I2: git release-scan early-stop (selection parity + page-2 never requested) -------
+    // --- git release-scan early-stop (selection parity + page-2 never requested) -------
 
     #[test]
     fn get_latest_releases_early_stops_within_first_page_and_skips_page_two() {
@@ -747,8 +747,8 @@ mod tests {
 
     #[test]
     fn release_list_fetch_walks_all_pages_unfiltered() {
-        // WS2: `ReleaseList::fetch` is an UNFILTERED listing (stop_at = None) and must keep walking
-        // ALL pages — even when a page contains releases older than any current version (there is no
+        // `ReleaseList::fetch` is an UNFILTERED listing (stop_at = None) and must keep walking
+        // ALL pages - even when a page contains releases older than any current version (there is no
         // current version here). Page 1 advertises page 2; both must be accumulated.
         let (base, captured) = stub_capturing(|base| {
             vec![
@@ -772,7 +772,7 @@ mod tests {
             .unwrap()
             .fetch()
             .unwrap();
-        // `ReleaseList::fetch` now returns a `Releases` (with no current version); recover the raw
+        // `ReleaseList::fetch` returns a `Releases` (with no current version); recover the raw
         // vec via `into_vec()`.
         let releases = releases.into_vec();
         let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
@@ -788,11 +788,11 @@ mod tests {
         );
     }
 
-    // --- WS4 4c: `ReleaseList::fetch` returns a `Releases`; `into_vec()` recovers the releases --
+    // --- `ReleaseList::fetch` returns a `Releases`; `into_vec()` recovers the releases ----------
 
     #[test]
     fn release_list_fetch_returns_releases_and_into_vec_recovers_them() {
-        // `ReleaseList::fetch` now returns a `Releases` (A11/T3.3). It carries NO current version
+        // `ReleaseList::fetch` returns a `Releases` carrying NO current version
         // (a bare listing), so `current_version()` is `None` and `is_update_available()` errors;
         // `into_vec()` recovers the underlying `Vec<Release>` in listing order.
         let base = stub(|_| {
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(versions, vec!["2.0.0", "1.0.0"]);
     }
 
-    // --- WS4 4d: the github DTO parses a sample payload into a correct `Release` ----------------
+    // --- the github DTO parses a sample payload into a correct `Release` ----------------
 
     #[test]
     fn github_dto_parses_sample_payload_through_getters() {
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(rel.assets()[0].download_url(), "https://api/asset/1");
     }
 
-    // --- WS2 invariant 1: sync/async fetch parity (same plans + parsers) ----------------------
+    // --- sync/async fetch parity (same plans + parsers) ----------------------------------------
 
     #[cfg(feature = "async")]
     #[tokio::test]
@@ -1365,7 +1365,7 @@ mod tests {
         );
     }
 
-    // B5: github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
+    // github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
     // config that BOTH the listing and download paths consume. A configured auth_token renders as
     // `token <token>`; a user `request_header(AUTHORIZATION, ..)` override wins on both paths.
     #[test]
@@ -1406,9 +1406,9 @@ mod tests {
         );
     }
 
-    // E1/E6: an auth token that cannot be encoded as a header value surfaces as
+    // an auth token that cannot be encoded as a header value surfaces as
     // `Error::InvalidAuthToken` and chains the underlying header-parse error through `source()`.
-    // The derivation now lives in `apply_auth` (B5).
+    // The derivation lives in `apply_auth`.
     #[test]
     fn invalid_auth_token_chains_source() {
         use crate::http_client::header::HeaderMap;
@@ -1685,7 +1685,7 @@ mod tests {
         assert_eq!(releases[0].version(), "3.0.0");
     }
 
-    // --- WS1: trait-seam injection (client-agnostic, no reqwest/ureq) ------------------------
+    // --- trait-seam injection (client-agnostic, no reqwest/ureq) ------------------------
 
     /// A test-double [`HttpResponse`](crate::http_client::HttpResponse) wrapping a canned JSON body.
     /// `json_value`/`text` read the stored body; `body` streams it. This proves a backend can be
@@ -1931,7 +1931,7 @@ mod tests {
         assert_eq!(releases[0].version(), "2.0.0");
     }
 
-    // --- Item 3: unattended() convenience ---------------------------------------------------
+    // --- unattended() convenience ---------------------------------------------------
 
     #[test]
     fn unattended_sets_no_confirm_and_hides_output() {
@@ -1968,7 +1968,7 @@ mod tests {
         );
     }
 
-    // --- Item 1: verify_keys builder setter and accessor -----------------------------------
+    // --- verify_keys builder setter and accessor -----------------------------------
 
     #[cfg(feature = "signatures")]
     #[test]
