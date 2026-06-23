@@ -1,66 +1,84 @@
 #![cfg(feature = "ureq")]
 
+use std::time::Duration;
+
 use ureq::tls::TlsProvider;
 use ureq::{Agent, Body, http::Response};
 
-use super::{ClientOverride, HeaderMap, HttpResponse};
+use super::{HeaderMap, HttpClient, HttpResponse};
 use crate::{Error, Result, errors::status_to_error};
 
-pub fn get(
-    url: &str,
-    headers: HeaderMap,
-    timeout: Option<std::time::Duration>,
-    client: &ClientOverride,
-) -> Result<impl HttpResponse> {
-    // Use the injected agent if present (by reference — `Agent::get` takes `&self`), otherwise
-    // build one per call. An injected agent owns its own timeout/TLS/proxy config, so the
-    // per-request `timeout` is only applied to the per-call agent (see the `### Custom HTTP client`
-    // docs).
-    let built_agent;
-    let (agent, is_injected): (&Agent, bool) = match &client.agent {
-        Some(agent) => (agent, true),
-        None => {
-            #[cfg(feature = "rustls")]
-            let provider = TlsProvider::Rustls;
-            #[cfg(not(feature = "rustls"))]
-            let provider = TlsProvider::NativeTls;
+/// Sync [`HttpClient`] backed by a `ureq::Agent`.
+///
+/// The default (`UreqClient(None)`) builds a fresh per-call agent honoring the per-request timeout,
+/// the TLS feature, and proxy-env. A `UreqClient(Some(agent))` (built via `From<ureq::Agent>`, used
+/// by the `ureq_agent` convenience setter) reuses the injected agent, which owns its own
+/// timeout/TLS/proxy, so the per-request timeout is *not* applied to it.
+#[derive(Default)]
+pub struct UreqClient(Option<Agent>);
 
-            let config = Agent::config_builder()
-                .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
-                .timeout_global(timeout)
-                // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
-                .proxy(ureq::Proxy::try_from_env())
-                // Disable ureq's built-in status-error so we reach our own is_success() check,
-                // which maps the status to the structured NotFound/Unauthorized/HttpStatus variants.
-                .http_status_as_error(false)
-                .build();
-            built_agent = Agent::new_with_config(config);
-            (&built_agent, false)
-        }
-    };
-    let mut req = agent.get(url);
+impl From<Agent> for UreqClient {
+    fn from(agent: Agent) -> Self {
+        Self(Some(agent))
+    }
+}
 
-    for (key, value) in headers.into_iter() {
-        if let Some(key) = key {
+impl HttpClient for UreqClient {
+    fn get(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        timeout: Option<Duration>,
+    ) -> Result<Box<dyn HttpResponse>> {
+        // Use the injected agent if present (by reference — `Agent::get` takes `&self`), otherwise
+        // build one per call. An injected agent owns its own timeout/TLS/proxy config, so the
+        // per-request `timeout` is only applied to the per-call agent.
+        let built_agent;
+        let (agent, is_injected): (&Agent, bool) = match &self.0 {
+            Some(agent) => (agent, true),
+            None => {
+                // When both TLS features are enabled, rustls wins (it is the crate default);
+                // otherwise fall back to native-tls (also the case when no TLS feature is set).
+                #[cfg(feature = "rustls")]
+                let provider = TlsProvider::Rustls;
+                #[cfg(not(feature = "rustls"))]
+                let provider = TlsProvider::NativeTls;
+
+                let config = Agent::config_builder()
+                    .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
+                    .timeout_global(timeout)
+                    // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
+                    .proxy(ureq::Proxy::try_from_env())
+                    // Disable ureq's built-in status-error so we reach our own is_success() check,
+                    // which maps the status to the structured NotFound/Unauthorized/HttpStatus variants.
+                    .http_status_as_error(false)
+                    .build();
+                built_agent = Agent::new_with_config(config);
+                (&built_agent, false)
+            }
+        };
+        let mut req = agent.get(url);
+
+        for (key, value) in headers.iter() {
             req = req.header(key, value);
         }
-    }
 
-    let res = match req.call() {
-        Ok(r) => r,
-        Err(ureq::Error::StatusCode(code)) if is_injected => {
-            // An injected agent has http_status_as_error=true (the ureq default) and cannot be
-            // reconfigured. When it fires StatusCode, extract the code and map to structured error.
-            return Err(status_to_error(code, url));
+        let res = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(code)) if is_injected => {
+                // An injected agent has http_status_as_error=true (the ureq default) and cannot be
+                // reconfigured. When it fires StatusCode, extract the code and map to structured error.
+                return Err(status_to_error(code, url));
+            }
+            Err(e) => return Err(Error::Transport(Box::new(e))),
+        };
+
+        if !res.status().is_success() {
+            return Err(status_to_error(res.status().as_u16(), url));
         }
-        Err(e) => return Err(Error::Transport(Box::new(e))),
-    };
 
-    if !res.status().is_success() {
-        return Err(status_to_error(res.status().as_u16(), url));
+        Ok(Box::new(res))
     }
-
-    Ok(res)
 }
 
 impl HttpResponse for Response<Body> {
@@ -68,23 +86,23 @@ impl HttpResponse for Response<Body> {
         Response::headers(self)
     }
 
-    fn body(self) -> impl std::io::Read {
-        self.into_body().into_reader()
+    fn json_value(&mut self) -> Result<serde_json::Value> {
+        Ok(self.body_mut().read_json::<serde_json::Value>()?)
     }
 
-    fn json<T: serde::de::DeserializeOwned>(mut self) -> Result<T> {
-        Ok(self.body_mut().read_json::<T>()?)
-    }
-
-    fn text(mut self) -> Result<String> {
+    fn text(&mut self) -> Result<String> {
         Ok(self.body_mut().read_to_string()?)
+    }
+
+    fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+        Box::new((*self).into_body().into_reader())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http_client::ClientOverride;
+
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
@@ -115,9 +133,10 @@ mod tests {
     /// `http_status_as_error(false)`, so a non-2xx response is returned to our own `is_success()`
     /// check at the bottom of `get`, which routes it through `status_to_error`.
     fn get_default(status: &'static str) -> Error {
-        let client = ClientOverride::default();
+        let client = UreqClient::default();
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
     }
@@ -125,13 +144,13 @@ mod tests {
     /// Injected-agent path (`is_injected == true`): a user-supplied default `ureq::Agent` has
     /// `http_status_as_error == true` (the ureq default) and fires `ureq::Error::StatusCode(code)`
     /// on a non-2xx. That hits the `Err(ureq::Error::StatusCode(code)) if is_injected` arm, which
-    /// extracts the code and maps it through `status_to_error`. This is the arm the implementor
-    /// flagged as having no isolated unit test.
+    /// extracts the code and maps it through `status_to_error`.
     fn get_injected(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
-        let client = ClientOverride { agent: Some(agent) };
+        let client = UreqClient::from(agent);
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
     }
@@ -139,17 +158,17 @@ mod tests {
     /// Injected agent built with `http_status_as_error(false)` (the OTHER injected case): the user
     /// disabled ureq's status-error, so `call()` returns `Ok(res)` even on a non-2xx. The
     /// `StatusCode` arm is therefore NOT taken; instead control falls through to the bottom-of-`get`
-    /// `!res.status().is_success()` check, which routes the status through `status_to_error`. This
-    /// is the injected-agent path the implementor flagged as untested.
+    /// `!res.status().is_success()` check, which routes the status through `status_to_error`.
     fn get_injected_no_status_error(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .build(),
         );
-        let client = ClientOverride { agent: Some(agent) };
+        let client = UreqClient::from(agent);
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
     }
@@ -251,8 +270,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let url = format!("http://{}/", addr);
-        let client = ClientOverride::default();
-        let err = super::get(&url, HeaderMap::new(), None, &client)
+        let client = UreqClient::default();
+        let err = client
+            .get(&url, &HeaderMap::new(), None)
             .err()
             .expect("connection refused must be an Err");
         assert!(

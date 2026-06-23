@@ -3,7 +3,6 @@ Amazon S3 releases
 */
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::send;
-use crate::http_client::HttpResponse;
 use crate::{
     errors::*,
     update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
@@ -759,11 +758,13 @@ fn fetch_releases_from_s3(
 
     debug!("using api url: {:?}", api_url);
 
-    // `http_client::get` bails on any non-2xx status before returning the response.
+    // `send` bails on any non-2xx status before returning the response.
     let resp = send(&api_url, Default::default(), req)?;
-    let body = resp.text()?;
+    // Feed quick-xml from the streaming buffered body so the (potentially large) XML listing is not
+    // fully buffered into a `String` first (audit I7).
+    let reader = resp.body_buffered();
     parse_s3_response(
-        &body,
+        reader,
         &download_base_url,
         #[cfg(feature = "s3-auth")]
         region,
@@ -797,8 +798,10 @@ async fn fetch_releases_from_s3_async(
 
     let resp = send_async(&api_url, Default::default(), req).await?;
     let body = resp.text().await?;
+    // The async response trait yields the body as text (no streaming reader), so wrap it in an
+    // in-memory `BufRead` to feed the same reader-based XML parser as the sync path.
     parse_s3_response(
-        &body,
+        std::io::Cursor::new(body.into_bytes()),
         &download_base_url,
         #[cfg(feature = "s3-auth")]
         region,
@@ -811,13 +814,13 @@ async fn fetch_releases_from_s3_async(
 /// each asset's download URL against `download_base_url`. Pure when `s3-auth` is off; under
 /// `s3-auth` it signs each URL with a timestamped SigV4 signature and is therefore time-dependent.
 /// Shared by both fetch paths.
-fn parse_s3_response(
-    body: &str,
+fn parse_s3_response<R: std::io::BufRead>(
+    body: R,
     download_base_url: &str,
     #[cfg(feature = "s3-auth")] region: &Option<String>,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<Vec<Release>> {
-    let mut reader = Reader::from_str(body);
+    let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(true);
 
     // Let's now parse the response to extract the releases
@@ -970,7 +973,7 @@ mod tests {
         // suffix "-x86_64-linux". The trailing Eof flush emits that release.
         let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket.s3.us-east-1.amazonaws.com/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -999,7 +1002,7 @@ mod tests {
         // in the parsed release's `version` field, matching the regex's `[v]{0,1}` handling.
         let xml = list_bucket_xml(&["myapp-v2.0.0-arm-linux"]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1019,7 +1022,7 @@ mod tests {
         // start) handles the first.
         let xml = list_bucket_xml(&["myapp-3.0.0-x86_64-linux", "myapp-3.0.0-aarch64-linux"]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1054,7 +1057,7 @@ mod tests {
             "otherapp-1.5.0-x86_64-linux",
         ]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1079,7 +1082,7 @@ mod tests {
             "some/random/path/no-version",
         ]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1097,7 +1100,7 @@ mod tests {
         // the asset `name` must be just the filename component, not the full path.
         let xml = list_bucket_xml(&["releases/myapp-1.0.0-x86_64-linux"]);
         let releases = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1117,7 +1120,7 @@ mod tests {
         // A body that is not valid XML must surface as an `Err`, not panic.
         let bad_xml = "this is not xml at all <<<";
         let result = super::parse_s3_response(
-            bad_xml,
+            bad_xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1133,7 +1136,7 @@ mod tests {
         // an error), since there is simply nothing to parse.
         let xml = "<?xml version=\"1.0\"?><ListBucketResult></ListBucketResult>";
         let releases = super::parse_s3_response(
-            xml,
+            xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
             &None,
@@ -1142,6 +1145,54 @@ mod tests {
         )
         .unwrap();
         assert!(releases.is_empty(), "empty bucket produces empty list");
+    }
+
+    /// A test-double [`HttpResponse`](crate::http_client::HttpResponse) that streams a canned XML
+    /// body, used to prove `parse_s3_response` reads from the trait's streaming `body_buffered()`
+    /// path rather than a fully-buffered `String` (audit I7).
+    struct XmlResponse {
+        body: Vec<u8>,
+    }
+
+    impl crate::http_client::HttpResponse for XmlResponse {
+        fn headers(&self) -> &crate::http_client::HeaderMap {
+            // Leak a fresh empty map so the borrow lives long enough; never read in this test.
+            Box::leak(Box::new(crate::http_client::HeaderMap::new()))
+        }
+        fn json_value(&mut self) -> crate::errors::Result<serde_json::Value> {
+            unreachable!("s3 never parses JSON")
+        }
+        fn text(&mut self) -> crate::errors::Result<String> {
+            Ok(String::from_utf8_lossy(&self.body).into_owned())
+        }
+        fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+            Box::new(std::io::Cursor::new(self.body))
+        }
+    }
+
+    #[test]
+    fn parse_s3_response_parses_from_streaming_body_buffered() {
+        // The sync s3 fetch path feeds quick-xml from `resp.body_buffered()` (a streaming
+        // `BufRead`) instead of `resp.text()`, so the XML is never fully buffered into a String.
+        // Drive `parse_s3_response` from exactly that reader (the trait's default `body_buffered`
+        // wraps `body()` in a BufReader) and assert it parses the release.
+        let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
+        let resp: Box<dyn crate::http_client::HttpResponse> = Box::new(XmlResponse {
+            body: xml.into_bytes(),
+        });
+        let reader = resp.body_buffered();
+        let releases = super::parse_s3_response(
+            reader,
+            "https://bucket.s3.us-east-1.amazonaws.com/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1, "one release parsed from the stream");
+        assert_eq!(releases[0].version, "1.2.3");
+        assert_eq!(releases[0].assets[0].name, "myapp-1.2.3-x86_64-linux");
     }
 
     #[test]
@@ -2102,7 +2153,7 @@ mod tests {
 
         let key: super::AccessKey = ("AKIA", "secret").into();
         let signed = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://b.s3.us-east-1.amazonaws.com/",
             &region,
             &Some(key),
@@ -2116,7 +2167,7 @@ mod tests {
         );
 
         let unsigned = super::parse_s3_response(
-            &xml,
+            xml.as_bytes(),
             "https://b.s3.us-east-1.amazonaws.com/",
             &region,
             &None,

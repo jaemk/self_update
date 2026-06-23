@@ -12,7 +12,6 @@ exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
 edition = "2024"
 rust-version = "1.85"
 
-# Can't enable all features, reqwest and ureq are mutually exclusives
 [package.metadata.docs.rs]
 features = [
   "reqwest",
@@ -65,6 +64,9 @@ url = { version = "2.5.8", optional = true }
 
 tokio = { version = "1", optional = true, default-features = false, features = ["time"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+# Direct dep for the async response trait's `bytes_stream` chunk type (already a transitive reqwest
+# dep); gated under `async`.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
@@ -88,7 +90,7 @@ s3 = ["dep:quick-xml"]
 
 # Async update API (tokio-only, reqwest-only). Adds `*_async` verbs alongside the unchanged
 # blocking API. ureq has no async story, so this requires the `reqwest` client.
-async = ["reqwest", "reqwest?/stream", "dep:tokio", "dep:futures-util"]
+async = ["reqwest", "reqwest?/stream", "dep:tokio", "dep:futures-util", "dep:bytes"]
 
 
 native-tls = ["reqwest?/native-tls", "ureq?/native-tls"]

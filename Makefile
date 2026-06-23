@@ -5,10 +5,12 @@
 ################################################################################
 # Configuration variables
 
-# The crate has two MUTUALLY EXCLUSIVE http clients (`reqwest` (default) and
-# `ureq`) and two mutually exclusive TLS backends (`default-tls`/`rustls`), so
-# `--all-features` does not build. Every target instead selects exactly one
-# client via an explicit feature set.
+# The HTTP transport is an object-safe trait seam, so the two http clients
+# (`reqwest` (default) and `ureq`) and the two TLS backends (`native-tls` /
+# `rustls`) are NO LONGER mutually exclusive: `cargo build --all-features`
+# builds (proving both clients + both TLS + async coexist). The per-client
+# feature-set targets below still exist so clippy/tests run each lane in
+# isolation.
 #
 # The optional, client-independent feature set (archives + compression +
 # signatures + checksums + s3 auth):
@@ -35,10 +37,11 @@ SELF_UPDATE_EXAMPLE_TARGETS = $(addprefix examples/, $(SELF_UPDATE_EXAMPLES))
 
 EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)
 TEST_TARGETS    = tests tests/default tests/reqwest tests/ureq tests/async
+BUILD_TARGETS   = build/all-features
 DOC_TARGETS     = docs docs/readme
 CHECK_TARGETS   = check check/fmt check/readme check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help
 CLEAN_TARGETS   = clean clean/cargo
-HELP_TARGETS    = help ci $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
+HELP_TARGETS    = help ci $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(BUILD_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
 
 # Cargo command used to run `build`, `test`, `clippy`... Useful if you keep
 # multiple cargo versions installed on your machine.
@@ -59,13 +62,14 @@ export RUST_BACKTRACE = 1
 ################################################################################
 # GitHub Actions goal. Run this to test your changes before submitting your
 # final pull request.
-ci: check tests examples ## Run the full CI pipeline (checks, tests, example builds)
+ci: check tests build/all-features examples ## Run the full CI pipeline (checks, tests, all-features build, example builds)
 
 help: ## List all supported Make targets
 	@for target in $(HELP_TARGETS); do \
 		case "$$target" in \
 			help) desc="List all supported Make targets" ;; \
-			ci) desc="Run the full CI pipeline (checks, tests, example builds)" ;; \
+			ci) desc="Run the full CI pipeline (checks, tests, all-features build, example builds)" ;; \
+			build/all-features) desc="Build the crate with --all-features (both clients + both TLS + async)" ;; \
 			examples) desc="Build every backend example" ;; \
 			examples/*) desc="Build the '$${target#examples/}' backend example (full features)" ;; \
 			tests) desc="Run the full test matrix (default, reqwest, ureq)" ;; \
@@ -135,6 +139,14 @@ tests/ureq:
 tests/async:
 	@echo "[$@]: Running tests (async + full features)..."
 	$(CARGO_COMMAND) test --features "$(ASYNC_FEATURES)"
+
+################################################################################
+# Builds the crate with every feature enabled. This is the WS1 headline check:
+# the object-safe HTTP trait seam means both http clients, both TLS backends, and
+# the async API all coexist, so `--all-features` must build.
+build/all-features:
+	@echo "[$@]: Building with --all-features (both clients + both TLS + async)..."
+	$(CARGO_COMMAND) build --all-features
 
 ################################################################################
 # Syncs all docs.

@@ -343,12 +343,14 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
 The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
 for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
-It is used for both the release listing and the download. The setters are client-specific (the
-client types differ and are mutually exclusive): `reqwest_client` (a blocking
-`reqwest::blocking::Client`, used by the blocking API), `reqwest_async_client`
-(an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent` (a
-`ureq::Agent`). The selected client crate is re-exported (`self_update::reqwest` /
-`self_update::ureq`) so you don't need a separate dependency to name the type.
+It is used for both the release listing and the download. The client-specific convenience setters
+are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
+`reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
+(a `ureq::Agent`); each wraps your client behind the crate's object-safe HTTP transport trait. The
+compiled client crate(s) are re-exported (`self_update::reqwest` / `self_update::ureq`) so you don't
+need a separate dependency to name the type. (Since the transport is a runtime trait seam, `reqwest`
+and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
+when both are present.)
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
 release-listing requests (the download is never retried), and for `reqwest` the per-request

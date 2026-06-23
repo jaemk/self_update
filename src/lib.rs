@@ -349,12 +349,14 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
 The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
 for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
-It is used for both the release listing and the download. The setters are client-specific (the
-client types differ and are mutually exclusive): `reqwest_client` (a blocking
-`reqwest::blocking::Client`, used by the blocking API), `reqwest_async_client`
-(an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent` (a
-`ureq::Agent`). The selected client crate is re-exported (`self_update::reqwest` /
-`self_update::ureq`) so you don't need a separate dependency to name the type.
+It is used for both the release listing and the download. The client-specific convenience setters
+are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
+`reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
+(a `ureq::Agent`); each wraps your client behind the crate's object-safe HTTP transport trait. The
+compiled client crate(s) are re-exported (`self_update::reqwest` / `self_update::ureq`) so you don't
+need a separate dependency to name the type. (Since the transport is a runtime trait seam, `reqwest`
+and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
+when both are present.)
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
 release-listing requests (the download is never retried), and for `reqwest` the per-request
@@ -412,32 +414,19 @@ on the system OpenSSL cert layout.
 // the cfg is never set outside of the docs.rs environment.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-// Exactly one HTTP client must be selected. Surface a human-readable diagnostic instead of
-// the raw symbol collision (both) or undefined-item error (neither) that would otherwise occur.
-#[cfg(all(feature = "reqwest", feature = "ureq"))]
-compile_error!(
-    "features `reqwest` and `ureq` are mutually exclusive - enable exactly one HTTP client \
-     (for `ureq`, set `default-features = false`)"
-);
-#[cfg(not(any(feature = "reqwest", feature = "ureq")))]
-compile_error!(
-    "no HTTP client selected - enable exactly one of the `reqwest` (default) or `ureq` features"
-);
+// The HTTP transport is now an object-safe trait seam (`http_client::HttpClient`), so `reqwest` and
+// `ureq` are no longer mutually exclusive — both client impls can be compiled and one is selected at
+// runtime via `default_client()` (reqwest preferred when both are on). The genuine no-client case is
+// a `compile_error!` in `http_client/mod.rs`. TLS features can also coexist: when both `native-tls`
+// and `rustls` are enabled the per-call builders prefer rustls.
 
-// The TLS backend is also a single choice; enabling both forwards conflicting TLS features to
-// the selected client.
-#[cfg(all(feature = "native-tls", feature = "rustls"))]
-compile_error!(
-    "features `native-tls` and `rustls` are mutually exclusive - to use `rustls`, set \
-     `default-features = false`"
-);
-
-// The async API is reqwest-only — ureq has no async story.
-#[cfg(all(feature = "async", feature = "ureq"))]
-compile_error!(
-    "feature `async` requires the `reqwest` client and is incompatible with `ureq` - \
-     `ureq` has no async API"
-);
+// The async API is reqwest-only — ureq has no async story. With the trait seam the two clients are
+// no longer mutually exclusive, so `async` + `ureq` together is fine (async uses reqwest for the
+// async path, ureq serves the sync path). The genuine bad case is `async` without the `reqwest`
+// client at all; the `async` feature already implies `reqwest` (see Cargo.toml), so this guard only
+// fires if that implication is ever broken.
+#[cfg(all(feature = "async", not(feature = "reqwest")))]
+compile_error!("feature `async` requires the `reqwest` client - `ureq` has no async API");
 
 pub use http;
 // Re-export the selected HTTP client so callers can name the types accepted by the client-injection
@@ -504,7 +493,7 @@ pub use errors::{Error, Result};
 #[cfg_attr(docsrs, doc(cfg(feature = "checksums")))]
 pub use checksum::Checksum;
 
-use http_client::{HttpResponse, header};
+use http_client::header;
 
 #[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =
@@ -1191,7 +1180,6 @@ impl std::fmt::Debug for AssetMatcher {
 /// Download things into files
 ///
 /// With optional progress bar
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct Download {
     show_progress: bool,
@@ -1203,8 +1191,37 @@ pub struct Download {
     progress_chars: String,
     timeout: Option<std::time::Duration>,
     on_progress: Option<ProgressCallback>,
-    client: http_client::ClientOverride,
+    /// Optional user-supplied sync HTTP client (used through the trait); `None` => crate default.
+    client: Option<std::sync::Arc<dyn http_client::HttpClient>>,
+    /// Optional user-supplied async HTTP client; `None` => crate default. Async is reqwest-only.
+    #[cfg(feature = "async")]
+    async_client: Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>,
 }
+
+impl std::fmt::Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Download");
+        s.field("show_progress", &self.show_progress)
+            .field("url", &self.url)
+            .field("headers", &self.headers);
+        #[cfg(feature = "progress-bar")]
+        s.field("progress_template", &self.progress_template)
+            .field("progress_chars", &self.progress_chars);
+        s.field("timeout", &self.timeout)
+            .field(
+                "on_progress",
+                &self.on_progress.as_ref().map(|_| "<callback>"),
+            )
+            .field("client", &self.client.as_ref().map(|_| "<http_client>"));
+        #[cfg(feature = "async")]
+        s.field(
+            "async_client",
+            &self.async_client.as_ref().map(|_| "<async_http_client>"),
+        );
+        s.finish()
+    }
+}
+
 impl Download {
     /// Specify download url
     pub fn from_url(url: &str) -> Self {
@@ -1218,7 +1235,9 @@ impl Download {
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             timeout: None,
             on_progress: None,
-            client: http_client::ClientOverride::default(),
+            client: None,
+            #[cfg(feature = "async")]
+            async_client: None,
         }
     }
 
@@ -1278,35 +1297,67 @@ impl Download {
         self
     }
 
+    /// Use a custom [`HttpClient`](http_client::HttpClient) for the download instead of the
+    /// per-call client the crate builds. This is the canonical injection seam; the client-specific
+    /// setters below are thin convenience wrappers over it.
+    pub(crate) fn http_client(
+        &mut self,
+        client: std::sync::Arc<dyn http_client::HttpClient>,
+    ) -> &mut Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Async sibling of [`http_client`](Self::http_client).
+    #[cfg(feature = "async")]
+    pub(crate) fn http_client_async(
+        &mut self,
+        client: std::sync::Arc<dyn http_client::AsyncHttpClient>,
+    ) -> &mut Self {
+        self.async_client = Some(client);
+        self
+    }
+
     /// Use a pre-built blocking [`reqwest::Client`](::reqwest::blocking::Client) for the download
     /// instead of the per-call client. See the `Update` builder's `reqwest_client` for the
     /// rationale and precedence rules.
     #[cfg(feature = "reqwest")]
     pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
-        self.client.blocking = Some(client);
-        self
+        self.http_client(std::sync::Arc::new(http_client::ReqwestClient::from(
+            client,
+        )))
     }
 
     /// Async sibling of [`reqwest_client`](Self::reqwest_client), used by
     /// [`download_to_async`](Self::download_to_async).
     #[cfg(feature = "async")]
     pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
-        self.client.r#async = Some(client);
-        self
+        self.http_client_async(std::sync::Arc::new(http_client::ReqwestAsyncClient::from(
+            client,
+        )))
     }
 
     /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for the download instead of the per-call
     /// agent. The agent owns its own timeout / TLS / proxy config.
     #[cfg(feature = "ureq")]
     pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
-        self.client.agent = Some(agent);
-        self
+        self.http_client(std::sync::Arc::new(http_client::UreqClient::from(agent)))
     }
 
-    /// Internal: set the client override from an already-built one (used by the update flow to
+    /// Internal: set the injected HTTP clients from already-built `Arc`s (used by the update flow to
     /// forward an `Update`'s injected client to its download).
-    pub(crate) fn set_client_override(&mut self, client: http_client::ClientOverride) -> &mut Self {
+    pub(crate) fn set_http_client(
+        &mut self,
+        client: Option<std::sync::Arc<dyn http_client::HttpClient>>,
+        #[cfg(feature = "async")] async_client: Option<
+            std::sync::Arc<dyn http_client::AsyncHttpClient>,
+        >,
+    ) -> &mut Self {
         self.client = client;
+        #[cfg(feature = "async")]
+        {
+            self.async_client = async_client;
+        }
         self
     }
 
@@ -1356,7 +1407,15 @@ impl Download {
             );
         }
 
-        let resp = http_client::get(&self.url, headers, self.timeout, &self.client)?;
+        let default;
+        let client: &dyn http_client::HttpClient = match self.client.as_deref() {
+            Some(c) => c,
+            None => {
+                default = http_client::default_client();
+                &*default
+            }
+        };
+        let resp = client.get(&self.url, &headers, self.timeout)?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1431,7 +1490,15 @@ impl Download {
             );
         }
 
-        let resp = http_client::get_async(&self.url, headers, self.timeout, &self.client).await?;
+        let default;
+        let client: &dyn http_client::AsyncHttpClient = match self.async_client.as_deref() {
+            Some(c) => c,
+            None => {
+                default = http_client::default_async_client();
+                &*default
+            }
+        };
+        let resp = client.get(&self.url, &headers, self.timeout).await?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1816,6 +1883,237 @@ mod tests {
             last = *downloaded;
         }
         assert_eq!(calls.last().unwrap().0, 20_000);
+    }
+
+    /// A test-double [`HttpResponse`](http_client::HttpResponse) returning a canned body and a
+    /// configurable `Content-Length`. Used to prove `download_to` streams the injected client's
+    /// body through the trait (`headers()` + `body()`), not a real network response.
+    struct DlResponse {
+        body: Vec<u8>,
+        headers: http_client::header::HeaderMap,
+    }
+
+    impl http_client::HttpResponse for DlResponse {
+        fn headers(&self) -> &http_client::header::HeaderMap {
+            &self.headers
+        }
+        fn json_value(&mut self) -> Result<serde_json::Value> {
+            unreachable!("download_to never parses JSON")
+        }
+        fn text(&mut self) -> Result<String> {
+            Ok(String::from_utf8_lossy(&self.body).into_owned())
+        }
+        fn body(self: Box<Self>) -> Box<dyn io::Read> {
+            Box::new(io::Cursor::new(self.body))
+        }
+    }
+
+    /// A test-double [`HttpClient`](http_client::HttpClient) (neither reqwest nor ureq) that records
+    /// the requested URL and returns a canned [`DlResponse`].
+    struct DlClient {
+        body: Vec<u8>,
+        content_length: Option<u64>,
+        requested: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl http_client::HttpClient for DlClient {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<Box<dyn http_client::HttpResponse>> {
+            self.requested.lock().unwrap().push(url.to_string());
+            let mut headers = http_client::header::HeaderMap::new();
+            if let Some(len) = self.content_length {
+                headers.insert(
+                    http_client::header::CONTENT_LENGTH,
+                    len.to_string().parse().unwrap(),
+                );
+            }
+            Ok(Box::new(DlResponse {
+                body: self.body.clone(),
+                headers,
+            }))
+        }
+    }
+
+    #[test]
+    fn download_to_uses_injected_http_client_through_the_trait() {
+        // Gap #4 (sync Download path): an arbitrary `Arc<dyn HttpClient>` that is NOT reqwest/ureq,
+        // injected via `.http_client(...)`, must actually drive `download_to` — the streamed body
+        // comes from the fake and the fake records the requested URL. No network is touched (the URL
+        // is non-routable).
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"injected-binary-payload".to_vec();
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.http_client(client);
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(out, body, "download_to streamed the injected client's body");
+        let urls = requested.lock().unwrap();
+        assert_eq!(
+            urls.len(),
+            1,
+            "exactly one GET went through the injected client"
+        );
+        assert_eq!(urls[0], "https://nonroutable.invalid/asset.bin");
+    }
+
+    #[test]
+    fn download_to_handles_injected_client_without_content_length() {
+        // When the injected response carries no Content-Length, `download_to` must still stream the
+        // whole body to completion (size defaults to 0 -> no progress bar, `total == None`) and the
+        // progress callback still fires with `total = None`.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"no-length-body".to_vec();
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: None,
+            requested: requested.clone(),
+        });
+
+        let totals = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<u64>>::new()));
+        let sink = totals.clone();
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.http_client(client);
+        dl.progress_callback(move |_d, total| sink.lock().unwrap().push(total));
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(
+            out, body,
+            "the full body is streamed even with no Content-Length"
+        );
+        let totals = totals.lock().unwrap();
+        assert!(
+            totals.iter().all(|t| t.is_none()),
+            "with no Content-Length the callback's total must be None, got {:?}",
+            totals
+        );
+    }
+
+    /// Async test-double response: yields the body as a single `bytes_stream` chunk and as `text`.
+    #[cfg(feature = "async")]
+    struct DlAsyncResponse {
+        body: Vec<u8>,
+        headers: http_client::header::HeaderMap,
+    }
+
+    #[cfg(feature = "async")]
+    impl http_client::AsyncHttpResponse for DlAsyncResponse {
+        fn headers(&self) -> &http_client::header::HeaderMap {
+            &self.headers
+        }
+        fn text(self: Box<Self>) -> futures_util::future::BoxFuture<'static, Result<String>> {
+            Box::pin(async move { Ok(String::from_utf8_lossy(&self.body).into_owned()) })
+        }
+        fn bytes_stream(
+            self: Box<Self>,
+        ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
+            Box::pin(futures_util::stream::once(async move {
+                Ok(bytes::Bytes::from(self.body))
+            }))
+        }
+    }
+
+    /// Async test-double client (not reqwest) that records the URL and returns [`DlAsyncResponse`].
+    #[cfg(feature = "async")]
+    struct DlAsyncClient {
+        body: Vec<u8>,
+        content_length: Option<u64>,
+        requested: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[cfg(feature = "async")]
+    impl http_client::AsyncHttpClient for DlAsyncClient {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            _headers: &'a http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> futures_util::future::BoxFuture<'a, Result<Box<dyn http_client::AsyncHttpResponse>>>
+        {
+            self.requested.lock().unwrap().push(url.to_string());
+            let mut headers = http_client::header::HeaderMap::new();
+            if let Some(len) = self.content_length {
+                headers.insert(
+                    http_client::header::CONTENT_LENGTH,
+                    len.to_string().parse().unwrap(),
+                );
+            }
+            let body = self.body.clone();
+            Box::pin(async move {
+                Ok(Box::new(DlAsyncResponse { body, headers })
+                    as Box<dyn http_client::AsyncHttpResponse>)
+            })
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn download_to_async_uses_injected_async_client_through_the_trait() {
+        // Gap #4 (async Download path): an injected `Arc<dyn AsyncHttpClient>` (not reqwest) must
+        // drive `download_to_async` via `bytes_stream()`, independently of the sync injection path.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"async-injected-payload".to_vec();
+        let client = std::sync::Arc::new(DlAsyncClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.http_client_async(client);
+        dl.download_to_async(&mut out).await.unwrap();
+
+        assert_eq!(
+            out, body,
+            "download_to_async streamed the injected client's body"
+        );
+        let urls = requested.lock().unwrap();
+        assert_eq!(
+            urls.len(),
+            1,
+            "exactly one async GET went through the injected client"
+        );
+        assert_eq!(urls[0], "https://nonroutable.invalid/asset.bin");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn sync_and_async_injection_are_independent() {
+        // Setting only the async client must leave the sync client unset (and vice versa), proving
+        // the two injection slots are independent: a `download_to_async` with only an async client
+        // injected uses it, and does not fall back to / require the sync slot.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"only-async".to_vec();
+        let async_client = std::sync::Arc::new(DlAsyncClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.http_client_async(async_client);
+        // The sync slot was never set.
+        assert!(
+            dl.client.is_none(),
+            "injecting an async client must not populate the sync client slot"
+        );
+        assert!(dl.async_client.is_some(), "the async slot is populated");
+
+        let mut out = Vec::new();
+        dl.download_to_async(&mut out).await.unwrap();
+        assert_eq!(out, body);
     }
 
     // Regression: `progress_callback` (the byte-level hook) must still fire even when the

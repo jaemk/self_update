@@ -1,7 +1,7 @@
 /*!
 Gitlab releases
 */
-use crate::http_client::{HttpResponse, header};
+use crate::http_client::header;
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::{collect_paginated, first_page_url, next_link, send};
@@ -310,12 +310,12 @@ impl Update {
     /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
     fn fetch_latest_release(&self) -> Result<Release> {
         let api_url = self.releases_url();
-        let resp = send(
+        let mut resp = send(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json::<serde_json::Value>()?;
+        let json = resp.json_value()?;
         let releases = json
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
@@ -359,12 +359,12 @@ impl ReleaseUpdate for Update {
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
         let api_url = format!("{}/{}", self.releases_url(), urlencoding::encode(ver));
-        let resp = send(
+        let mut resp = send(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json::<serde_json::Value>()?;
+        let json = resp.json_value()?;
         Release::from_release_gitlab(&json)
     }
 }
@@ -393,10 +393,10 @@ fn fetch_all_releases(
     req: &RequestConfig,
 ) -> Result<Vec<Release>> {
     collect_paginated(&first_page_url(base_url), |url| {
-        let resp = send(url, api_headers(auth_token)?, req)?;
+        let mut resp = send(url, api_headers(auth_token)?, req)?;
         let headers = resp.headers().clone();
         let releases = resp
-            .json::<serde_json::Value>()?
+            .json_value()?
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
             .iter()
@@ -422,9 +422,9 @@ async fn fetch_all_releases_async(
         async move {
             let resp = send_async(&url, api_headers(auth.as_deref())?, &req).await?;
             let headers = resp.headers().clone();
-            let releases = resp
-                .json::<serde_json::Value>()
-                .await?
+            let body = resp.text().await?;
+            let json: serde_json::Value = serde_json::from_str(&body)?;
+            let releases = json
                 .as_array()
                 .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
                 .iter()
@@ -448,7 +448,8 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
+        let body = resp.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
         let releases = json
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
@@ -484,7 +485,8 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
+        let body = resp.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
         Release::from_release_gitlab(&json)
     }
 }

@@ -53,6 +53,32 @@ macro_rules! request_config_setters {
             self
         }
 
+        /// Use a custom [`HttpClient`](crate::http_client::HttpClient) for every request (release
+        /// listing and the download) instead of the client the crate builds per call. This is the
+        /// canonical, client-agnostic injection seam: hand over any `Arc<dyn HttpClient>` (a test
+        /// double, a wrapper around your application's client, etc.). The client-specific
+        /// convenience setters (`reqwest_client` / `ureq_agent`) are thin wrappers over this.
+        /// `.timeout()` and `.request_header()` still apply per request, but `HTTP(S)_PROXY` env and
+        /// the crate's TLS feature are left to your client.
+        pub fn http_client(
+            &mut self,
+            client: std::sync::Arc<dyn crate::http_client::HttpClient>,
+        ) -> &mut Self {
+            self.$($path).+.client = Some(client);
+            self
+        }
+
+        /// Async sibling of [`http_client`](Self::http_client): a custom
+        /// [`AsyncHttpClient`](crate::http_client::AsyncHttpClient) used by the `*_async` verbs.
+        #[cfg(feature = "async")]
+        pub fn http_client_async(
+            &mut self,
+            client: std::sync::Arc<dyn crate::http_client::AsyncHttpClient>,
+        ) -> &mut Self {
+            self.$($path).+.async_client = Some(client);
+            self
+        }
+
         /// Use a pre-built blocking [`reqwest::Client`](::reqwest::blocking::Client) for every
         /// request (release listing and the download) instead of the client the crate builds per
         /// call. Hand over a client when you need control the per-request knobs can't give —
@@ -60,29 +86,33 @@ macro_rules! request_config_setters {
         /// reuse your application's existing client. `.timeout()` and `.request_header()` still
         /// apply per request, but `HTTP(S)_PROXY` env and the crate's TLS feature are left to your
         /// client. Used by the blocking API; for the async path use `reqwest_async_client` (under
-        /// the `async` feature).
+        /// the `async` feature). Thin wrapper over [`http_client`](Self::http_client).
         #[cfg(feature = "reqwest")]
         pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
-            self.$($path).+.client.blocking = Some(client);
-            self
+            self.http_client(std::sync::Arc::new(
+                crate::http_client::ReqwestClient::from(client),
+            ))
         }
 
         /// Async sibling of [`reqwest_client`](Self::reqwest_client): a pre-built async
         /// [`reqwest::Client`](::reqwest::Client) used by the `*_async` verbs.
         #[cfg(feature = "async")]
         pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
-            self.$($path).+.client.r#async = Some(client);
-            self
+            self.http_client_async(std::sync::Arc::new(
+                crate::http_client::ReqwestAsyncClient::from(client),
+            ))
         }
 
         /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for every request instead of the agent
         /// the crate builds per call. The agent owns its own timeout / TLS / proxy config, so
         /// `.timeout()` does not apply to an injected agent (configure it on the agent); extra
-        /// `.request_header()`s are still applied per request.
+        /// `.request_header()`s are still applied per request. Thin wrapper over
+        /// [`http_client`](Self::http_client).
         #[cfg(feature = "ureq")]
         pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
-            self.$($path).+.client.agent = Some(agent);
-            self
+            self.http_client(std::sync::Arc::new(
+                crate::http_client::UreqClient::from(agent),
+            ))
         }
     };
 }
@@ -173,8 +203,15 @@ macro_rules! impl_update_config_accessors {
             &self.common.request.headers
         }
         #[doc(hidden)]
-        fn request_client(&self) -> &crate::http_client::ClientOverride {
-            &self.common.request.client
+        fn request_client(&self) -> Option<std::sync::Arc<dyn crate::http_client::HttpClient>> {
+            self.common.request.client.clone()
+        }
+        #[doc(hidden)]
+        #[cfg(feature = "async")]
+        fn request_async_client(
+            &self,
+        ) -> Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>> {
+            self.common.request.async_client.clone()
         }
         #[doc(hidden)]
         fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>> {

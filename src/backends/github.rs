@@ -1,7 +1,7 @@
 /*!
 GitHub releases
 */
-use crate::http_client::{HeaderMap, HttpResponse, header};
+use crate::http_client::{HeaderMap, header};
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::{collect_paginated, first_page_url, next_link, send};
@@ -305,12 +305,12 @@ impl Update {
             self.repo_owner,
             self.repo_name
         );
-        let resp = send(
+        let mut resp = send(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json::<serde_json::Value>()?;
+        let json = resp.json_value()?;
         Release::from_release(&json)
     }
 
@@ -356,12 +356,12 @@ impl ReleaseUpdate for Update {
             self.repo_name,
             urlencoding::encode(ver)
         );
-        let resp = send(
+        let mut resp = send(
             &api_url,
             api_headers(self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json::<serde_json::Value>()?;
+        let json = resp.json_value()?;
         Release::from_release(&json)
     }
 }
@@ -379,10 +379,10 @@ fn fetch_all_releases(
     req: &RequestConfig,
 ) -> Result<Vec<Release>> {
     collect_paginated(&first_page_url(base_url), |url| {
-        let resp = send(url, api_headers(auth_token)?, req)?;
+        let mut resp = send(url, api_headers(auth_token)?, req)?;
         let headers = resp.headers().clone();
         let releases = resp
-            .json::<serde_json::Value>()?
+            .json_value()?
             .as_array()
             .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
             .iter()
@@ -408,9 +408,9 @@ async fn fetch_all_releases_async(
         async move {
             let resp = send_async(&url, api_headers(auth.as_deref())?, &req).await?;
             let headers = resp.headers().clone();
-            let releases = resp
-                .json::<serde_json::Value>()
-                .await?
+            let body = resp.text().await?;
+            let json: serde_json::Value = serde_json::from_str(&body)?;
+            let releases = json
                 .as_array()
                 .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
                 .iter()
@@ -439,7 +439,8 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
+        let body = resp.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
         let release = Release::from_release(&json)?;
         Ok(Releases::new(vec![release], current_version))
     }
@@ -480,7 +481,8 @@ impl crate::update::AsyncFetch for Update {
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
+        let body = resp.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
         Release::from_release(&json)
     }
 }
@@ -1113,7 +1115,9 @@ mod tests {
             .reqwest_client(client)
             .build()
             .unwrap();
-        assert!(upd.request_client().blocking.is_some());
+        // The convenience setter wraps the client in a `ReqwestClient` and stores it as the
+        // injected `Arc<dyn HttpClient>`.
+        assert!(upd.request_client().is_some());
     }
 
     /// A `HeaderMap` with a single marker header, used as an injected client's `default_headers`
@@ -1145,8 +1149,12 @@ mod tests {
             .default_headers(marker_default_headers())
             .build()
             .unwrap();
-        let mut cfg = RequestConfig::default();
-        cfg.client.blocking = Some(client);
+        let cfg = RequestConfig {
+            client: Some(std::sync::Arc::new(
+                crate::http_client::ReqwestClient::from(client),
+            )),
+            ..Default::default()
+        };
         let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "1.2.3");
@@ -1169,7 +1177,7 @@ mod tests {
             .reqwest_async_client(client)
             .build()
             .unwrap();
-        assert!(upd.request_client().r#async.is_some());
+        assert!(upd.request_async_client().is_some());
     }
 
     #[cfg(feature = "async")]
@@ -1187,8 +1195,12 @@ mod tests {
             .default_headers(marker_default_headers())
             .build()
             .unwrap();
-        let mut cfg = RequestConfig::default();
-        cfg.client.r#async = Some(client);
+        let cfg = RequestConfig {
+            async_client: Some(std::sync::Arc::new(
+                crate::http_client::ReqwestAsyncClient::from(client),
+            )),
+            ..Default::default()
+        };
         let releases = super::fetch_all_releases_async(&format!("{base}/releases"), None, &cfg)
             .await
             .unwrap();
@@ -1221,15 +1233,120 @@ mod tests {
             .ureq_agent(agent)
             .build()
             .unwrap();
-        assert!(upd.request_client().agent.is_some());
+        assert!(upd.request_client().is_some());
 
         // And the injected agent actually performs the request.
         let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
-        let mut cfg = RequestConfig::default();
-        cfg.client.agent = Some(agent);
+        let cfg = RequestConfig {
+            client: Some(std::sync::Arc::new(crate::http_client::UreqClient::from(
+                agent,
+            ))),
+            ..Default::default()
+        };
         let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "3.0.0");
+    }
+
+    // --- WS1: trait-seam injection (client-agnostic, no reqwest/ureq) ------------------------
+
+    /// A test-double [`HttpResponse`](crate::http_client::HttpResponse) wrapping a canned JSON body.
+    /// `json_value`/`text` read the stored body; `body` streams it. This proves a backend can be
+    /// driven by an arbitrary response that is neither a reqwest nor a ureq type.
+    struct FakeResponse {
+        body: String,
+        headers: crate::http_client::HeaderMap,
+    }
+
+    impl crate::http_client::HttpResponse for FakeResponse {
+        fn headers(&self) -> &crate::http_client::HeaderMap {
+            &self.headers
+        }
+        fn json_value(&mut self) -> crate::errors::Result<serde_json::Value> {
+            Ok(serde_json::from_str(&self.body)?)
+        }
+        fn text(&mut self) -> crate::errors::Result<String> {
+            Ok(self.body.clone())
+        }
+        fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+            Box::new(std::io::Cursor::new(self.body.into_bytes()))
+        }
+    }
+
+    /// A test-double [`HttpClient`](crate::http_client::HttpClient) that records every requested URL
+    /// and returns a canned `Box<dyn HttpResponse>`. This is the testability payoff of the trait
+    /// seam: a backend can be exercised with no network and no concrete client crate.
+    struct FakeClient {
+        body: String,
+        requested: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::http_client::HttpClient for FakeClient {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &crate::http_client::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> crate::errors::Result<Box<dyn crate::http_client::HttpResponse>> {
+            self.requested.lock().unwrap().push(url.to_string());
+            Ok(Box::new(FakeResponse {
+                body: self.body.clone(),
+                headers: crate::http_client::HeaderMap::new(),
+            }))
+        }
+    }
+
+    #[test]
+    fn injected_fake_http_client_drives_a_backend_through_the_trait() {
+        // The github fetch path reads the release listing through `HttpClient::get` /
+        // `HttpResponse::json_value`. Inject a `FakeClient` (not reqwest/ureq) via `.http_client(...)`
+        // and assert (1) the backend parsed the canned body and (2) the fake recorded the URL the
+        // backend asked for — proving the request actually went through the injected trait object.
+        use crate::backends::common::RequestConfig;
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cfg = RequestConfig {
+            client: Some(std::sync::Arc::new(FakeClient {
+                body: release_json("v4.5.6"),
+                requested: requested.clone(),
+            })),
+            ..Default::default()
+        };
+        let releases =
+            super::fetch_all_releases("https://example.test/repos/o/r/releases", None, &cfg)
+                .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].version, "4.5.6",
+            "the backend parsed the fake client's canned body through the trait"
+        );
+        let urls = requested.lock().unwrap();
+        assert_eq!(urls.len(), 1, "exactly one request was issued");
+        assert!(
+            urls[0].contains("/repos/o/r/releases"),
+            "the fake client recorded the URL the backend requested through the trait, got {:?}",
+            urls[0]
+        );
+    }
+
+    #[test]
+    fn http_traits_are_object_safe() {
+        // Compile-time assertion that the seam traits are object-safe: if a non-object-safe method
+        // (e.g. a generic `json::<T>()`) crept back in, these `Box<dyn ...>` coercions would fail to
+        // compile. `FakeClient`/`FakeResponse` exercise the dyn coercion concretely.
+        let _client: Box<dyn crate::http_client::HttpClient> = Box::new(FakeClient {
+            body: "[]".to_string(),
+            requested: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let _resp: Box<dyn crate::http_client::HttpResponse> = Box::new(FakeResponse {
+            body: "[]".to_string(),
+            headers: crate::http_client::HeaderMap::new(),
+        });
+        // Arc<dyn HttpClient> is the injection carrier, so it must also be object-safe.
+        let _arc: std::sync::Arc<dyn crate::http_client::HttpClient> =
+            std::sync::Arc::new(FakeClient {
+                body: "[]".to_string(),
+                requested: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            });
     }
 
     #[test]

@@ -178,13 +178,22 @@ pub(crate) fn send(
     url: &str,
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
-) -> Result<impl http_client::HttpResponse> {
+) -> Result<Box<dyn http_client::HttpResponse>> {
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
+    // Dispatch through the injected client if present, else the crate's default per-call client.
+    let default;
+    let client: &dyn http_client::HttpClient = match config.client.as_deref() {
+        Some(c) => c,
+        None => {
+            default = http_client::default_client();
+            &*default
+        }
+    };
     retry(
         config.retries,
-        || http_client::get(url, base.clone(), config.timeout, &config.client),
+        || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
             std::thread::sleep(std::time::Duration::from_millis(backoff));
@@ -199,13 +208,21 @@ pub(crate) async fn send_async(
     url: &str,
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
-) -> Result<http_client::AsyncResponse> {
+) -> Result<Box<dyn http_client::AsyncHttpResponse>> {
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
+    let default;
+    let client: &dyn http_client::AsyncHttpClient = match config.async_client.as_deref() {
+        Some(c) => c,
+        None => {
+            default = http_client::default_async_client();
+            &*default
+        }
+    };
     retry_async(
         config.retries,
-        || http_client::get_async(url, base.clone(), config.timeout, &config.client),
+        || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
         },

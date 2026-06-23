@@ -27,18 +27,40 @@ use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 ///
 /// `headers` are extra headers merged into every request (on top of the backend's own auth /
 /// user-agent headers); `timeout` bounds each request.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RequestConfig {
     pub(crate) timeout: Option<Duration>,
     pub(crate) headers: HeaderMap,
     /// Number of times to retry a failed API request (with exponential backoff).
     pub(crate) retries: u32,
-    /// Optional user-supplied HTTP client to use instead of the per-call one the crate builds.
-    pub(crate) client: crate::http_client::ClientOverride,
+    /// Optional user-supplied HTTP client to use through the [`HttpClient`](crate::http_client::HttpClient)
+    /// trait instead of the per-call one the crate builds. `Arc`-backed so cloning a `RequestConfig`
+    /// shares the client (and its connection pool).
+    pub(crate) client: Option<std::sync::Arc<dyn crate::http_client::HttpClient>>,
+    /// Optional user-supplied async HTTP client, mirroring [`client`](Self::client) for the async
+    /// path. Async is reqwest-only.
+    #[cfg(feature = "async")]
+    pub(crate) async_client: Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>>,
     /// First error produced converting a `request_header(name, value)` argument that wasn't a
     /// valid HTTP header. Stored here so the builder setter can stay infallible (`-> &mut Self`)
     /// and the failure is surfaced from `build()` as an `Error::Config` instead of panicking.
     pub(crate) header_error: Option<String>,
+}
+
+impl std::fmt::Debug for RequestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("RequestConfig");
+        s.field("timeout", &self.timeout)
+            .field("headers", &self.headers)
+            .field("retries", &self.retries)
+            .field("client", &self.client.as_ref().map(|_| "<http_client>"));
+        #[cfg(feature = "async")]
+        s.field(
+            "async_client",
+            &self.async_client.as_ref().map(|_| "<async_http_client>"),
+        );
+        s.field("header_error", &self.header_error).finish()
+    }
 }
 
 impl RequestConfig {

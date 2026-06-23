@@ -512,9 +512,15 @@ pub trait UpdateConfig: sealed::Sealed {
     #[doc(hidden)]
     fn request_headers(&self) -> &http_client::HeaderMap;
 
-    /// Optional user-supplied HTTP client to apply to the download, mirroring the listing requests.
+    /// Optional user-supplied sync HTTP client to apply to the download, mirroring the listing
+    /// requests.
     #[doc(hidden)]
-    fn request_client(&self) -> &http_client::ClientOverride;
+    fn request_client(&self) -> Option<std::sync::Arc<dyn http_client::HttpClient>>;
+
+    /// Optional user-supplied async HTTP client to apply to the download (async path only).
+    #[doc(hidden)]
+    #[cfg(feature = "async")]
+    fn request_async_client(&self) -> Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>;
 
     /// Optional download-progress callback to forward to the download step.
     #[doc(hidden)]
@@ -781,7 +787,11 @@ fn build_download<U: UpdateConfig + ?Sized>(
     }
     download.replace_headers(headers);
     // Forward any injected HTTP client so the download reuses it too.
-    download.set_client_override(u.request_client().clone());
+    download.set_http_client(
+        u.request_client(),
+        #[cfg(feature = "async")]
+        u.request_async_client(),
+    );
     if let Some(timeout) = u.request_timeout() {
         download.timeout(timeout);
     }
