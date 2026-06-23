@@ -1,6 +1,6 @@
 # choose_latest_release sort comparator
 
-Status: implemented (WS5 / I1)
+Status: implemented
 
 ## Resolution
 

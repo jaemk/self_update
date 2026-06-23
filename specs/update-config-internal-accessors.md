@@ -1,6 +1,6 @@
 # UpdateConfig internal accessors
 
-Status: implemented (WS5 / B1)
+Status: implemented
 
 ## Resolution
 

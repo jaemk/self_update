@@ -17,8 +17,7 @@ The HTTP-status part shipped in 1.0: `Error::Network(String)` was replaced by th
 structured `Error::NotFound { url }`, `Error::Unauthorized { status, url }`, and
 `Error::HttpStatus { status, url }`, with an `Error::http_status()` accessor.
 
-The remaining `Update` / `Release` / `Config` string catch-alls are now structured (WS3 of
-the 3.0 release). See `ref-errors.md` for the full variant table and the construction-site
+The remaining `Update` / `Release` / `Config` string catch-alls are now structured. See `ref-errors.md` for the full variant table and the construction-site
 mapping. Summary:
 
 - `Config(String)` -> `MissingField { field: &'static str }` (required-field validation),
@@ -33,7 +32,7 @@ mapping. Summary:
   `verify_with` rejection) and `Internal { message, source }` (genuine invariant violations and
   blocking-task join failures, with the tokio `JoinError` carried as `source`).
 
-The `source()`-chain breaks (E6) are fixed: the S3 regex build / XML parse, the
+The `source()`-chain breaks are fixed: the S3 regex build / XML parse, the
 github/gitlab/gitea/`update.rs` auth-token parses, and the `custom.rs` / `update.rs`
 `JoinError` sites now carry a boxed `source` and chain through `Error::source()`.
 
@@ -50,4 +49,4 @@ The new struct-form variants are `#[non_exhaustive]` so future fields stay non-b
   `backends/github.rs` (`InvalidAuthToken` source chain), `backends/s3.rs`
   (`InvalidResponse` XML-parse source chain), `backends/custom.rs` (`Internal` JoinError
   source chain), and `update.rs` (`VerificationRejected`).
-- See the CHANGELOG entry for the 3.0 release.
+- See the CHANGELOG `[unreleased]` entry.

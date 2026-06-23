@@ -11,9 +11,7 @@ no recourse, which could brick the tool until a manual reinstall.
 ## Decision
 
 A user-supplied verification closure:
-`Update::configure().verify_binary(|new_exe: &Path| -> self_update::Result<()> ..)` (WS5 / P4+A6
-renamed `verify_with` -> `verify_binary` and switched the return type from `bool` to
-`Result<()>`). It runs on the extracted binary before the final swap; returning `Err(..)` aborts the
+`Update::configure().verify_binary(|new_exe: &Path| -> self_update::Result<()> ..)`. It runs on the extracted binary before the final swap; returning `Err(..)` aborts the
 update with nothing installed, and the hook error's message is carried as the reason of the
 resulting `Error::VerificationRejected { reason: Some(..) }` (a hook IO error propagates the same
 way). Verifying before the swap (rather than after, then rolling back) sidesteps the ordering

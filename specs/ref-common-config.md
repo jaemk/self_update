@@ -184,9 +184,9 @@ the required-field errors name the setter to call, and the `insert_header` /
 `check` cases (`common.rs:222-296`) covering deferred invalid-name /
 invalid-value errors, first-error-wins, and the ok path.
 
-## WS5 additions (self_update 3.0)
+## Auth scheme, retry backoff, and progress style
 
-- **Auth scheme (B5/B10).** `RequestConfig` carries `auth_scheme: AuthScheme`
+- **Auth scheme.** `RequestConfig` carries `auth_scheme: AuthScheme`
   (`Token` for github/gitea, `Bearer` for gitlab) and `auth_token: Option<String>`,
   resolved from `CommonBuilderConfig` (and the git `ReleaseList` builders) at build
   time. A single derivation, `RequestConfig::apply_auth(&mut headers)`, renders
@@ -195,15 +195,15 @@ invalid-value errors, first-error-wins, and the ok path.
   when the user supplied their own `Authorization` via `request_header` (the override
   wins on both paths). The per-backend `api_headers` overrides now only set the
   User-Agent; the `UpdateConfig::api_headers` trait default is a no-op.
-- **Retry backoff (I4).** `RequestConfig::{retry_base_delay, retry_max_delay}`
+- **Retry backoff.** `RequestConfig::{retry_base_delay, retry_max_delay}`
   (defaults 100ms / 3200ms) drive `retry_backoff_ms(attempt, base, max)`; set via the
   `retry_backoff(base, max)` builder setter.
-- **ProgressStyle (A5).** The two transposable `impl Into<String>` args of
+- **ProgressStyle.** The two transposable `impl Into<String>` args of
   `progress_style` were replaced by a typed `ProgressStyle { template, chars }`
   newtype (`ProgressStyle::new(template, chars)`), threaded through the
   `progress_template` / `progress_chars` config fields. Behind the `progress-bar`
   feature.
-- **UpdateInternals (B1).** The crate-private-typed accessors moved off the public
+- **UpdateInternals.** The crate-private-typed accessors moved off the public
   sealed `UpdateConfig` onto a `pub(crate) trait UpdateInternals`; see
   `update-config-internal-accessors.md`.
 

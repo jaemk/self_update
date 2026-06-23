@@ -6,10 +6,12 @@ Status: implemented
 
 Documents every Cargo feature of the `self_update` crate, the dependencies and
 public API surface each feature gates, the feature-to-feature implication graph,
-and the compile-time mutual-exclusion guards that enforce exactly one HTTP
-client and exactly one TLS backend. Source of truth: the `[features]` table in
-`Cargo.toml` (lines 67-92), the `compile_error!` guards in `src/lib.rs`
-(lines 414-437), and the `#[cfg(feature = ...)]` sites across `src/`. The S3
+and the client/TLS selection rules. `reqwest` and `ureq` may coexist (the crate
+picks `reqwest` by default and lets a caller inject any `HttpClient`), and so may
+`native-tls` and `rustls` (`rustls` wins); only a no-client build or `async`
+without `reqwest` is a `compile_error!`. Source of truth: the `[features]` table in
+`Cargo.toml` (lines 67-92), the `compile_error!` guards in `src/lib.rs` and
+`src/http_client/mod.rs`, and the `#[cfg(feature = ...)]` sites across `src/`. The S3
 backend is gated behind the `s3` feature; `s3-auth` (private-bucket request
 signing) implies `s3`.
 
@@ -20,10 +22,10 @@ All features and their wiring (`Cargo.toml:67-91`):
 | Feature | Enables (deps / sub-features) | Implies | Notes |
 |---------|------------------------------|---------|-------|
 | `default` | `reqwest`, `rustls`, `progress-bar`, `github` | client + TLS + progress + backend | the default feature set (`Cargo.toml:68`) |
-| `reqwest` | `dep:reqwest` (blocking, json, http2) | one HTTP client | mutually exclusive with `ureq` (`Cargo.toml:86`) |
-| `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | one HTTP client | requires `--no-default-features` to avoid pulling `reqwest` (`Cargo.toml:87`) |
-| `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | one TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
-| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | one TLS backend | mutually exclusive with `native-tls` (`Cargo.toml:84`) |
+| `reqwest` | `dep:reqwest` (blocking, json, http2) | an HTTP client | may coexist with `ureq`; `reqwest` is the default-picked client when both are on (`Cargo.toml:86`) |
+| `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | an HTTP client | to use `ureq` alone, set `--no-default-features` so `reqwest` (a default) is not pulled (`Cargo.toml:87`) |
+| `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | a TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
+| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | a TLS backend | may coexist with `native-tls`; `rustls` wins when both are on (`Cargo.toml:84`) |
 | `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | reqwest-only; incompatible with `ureq` (`Cargo.toml:80`) |
 | `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
 | `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
@@ -55,29 +57,29 @@ Implication notes:
 - `async` requires the `reqwest` client plus `tokio` and `futures-util`, and is
   incompatible with `ureq` (`Cargo.toml:80`, guard at `lib.rs:433-437`).
 
-Mutual-exclusion guards (`src/lib.rs`), each a `compile_error!`:
+Client and TLS coexistence: `reqwest` and `ureq` may both be enabled, and so may
+`native-tls` and `rustls`; `cargo build --all-features` builds. When more than one
+client is on, `default_client()` picks `reqwest` (`http_client/mod.rs:98-106`); when
+both TLS backends are on, the per-call client builders prefer `rustls`. An injected
+`http_client(Arc<dyn HttpClient>)` overrides the default pick entirely.
 
-- `reqwest` AND `ureq` both on -> error (`lib.rs:414-418`):
-  "features `reqwest` and `ureq` are mutually exclusive - enable exactly one
-  HTTP client (for `ureq`, set `default-features = false`)".
-- neither `reqwest` nor `ureq` -> error (`lib.rs:419-422`):
-  "no HTTP client selected - enable exactly one of the `reqwest` (default) or
-  `ureq` features".
-- `native-tls` AND `rustls` both on -> error (`lib.rs:426-430`):
-  "features `native-tls` and `rustls` are mutually exclusive - to use
-  `rustls`, set `default-features = false`".
-- `async` AND `ureq` both on -> error (`lib.rs:433-437`):
-  "feature `async` requires the `reqwest` client and is incompatible with
-  `ureq` - `ureq` has no async API".
+The only `compile_error!` guards that remain:
+
+- neither `reqwest` nor `ureq` -> error (`http_client/mod.rs:111`):
+  "no HTTP client selected - enable at least one of the `reqwest` (default) or
+  `ureq` features". A build with no client cannot service any request.
+- `async` without `reqwest` -> error (`lib.rs:434`):
+  "feature `async` requires the `reqwest` client - `ureq` has no async API".
+  (`async` implies `reqwest` in `Cargo.toml`, so this only fires on a manual
+  inconsistent feature set.)
 
 MSRV / edition: `rust-version = "1.85"`, `edition = "2024"` (`Cargo.toml:12-13`).
 
 docs.rs feature set (`Cargo.toml:17-29`): `reqwest`, `rustls`,
 `archive-zip`, `compression-zip-bzip2`, `compression-zip-deflate`,
 `archive-tar`, `compression-tar-gz`, `progress-bar`, `signatures`, `checksums`,
-`github`, `gitlab`, `gitea`, `s3`, `s3-auth`, `async`. This is a single client
-(`reqwest`) + single TLS (`rustls`) set because `--all-features` does not build
-(see invariants). The same
+`github`, `gitlab`, `gitea`, `s3`, `s3-auth`, `async`. This pins the documented
+client/TLS pair to `reqwest` + `rustls` for a stable rendered surface. The same
 `[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
 (`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
 `doc_cfg` feature (`lib.rs:410`) and the gated public re-exports carry
@@ -122,16 +124,18 @@ message uses it instead of the `Debug` form. `detect_archive` returns
 
 ## Invariants and regression checklist
 
-- Exactly one HTTP client is enforced at compile time: enabling both `reqwest`
-  and `ureq`, or neither, is a `compile_error!` (`lib.rs:414-422`).
-- Exactly one TLS backend is enforced at compile time: enabling both
-  `native-tls` and `rustls` is a `compile_error!` (`lib.rs:426-430`).
-- `async` excludes `ureq`: enabling both is a `compile_error!`
-  (`lib.rs:433-437`); `async` also force-enables `reqwest` (`Cargo.toml:79`).
-- `cargo build --all-features` MUST NOT build: it would turn on `reqwest` +
-  `ureq` (and `native-tls` + `rustls`) simultaneously, tripping the guards.
-  Every build/test/clippy lane therefore selects exactly one client explicitly
-  (`Makefile` header comment; `Cargo.toml:15`).
+- At least one HTTP client must be enabled: a build with neither `reqwest` nor
+  `ureq` is a `compile_error!` (`http_client/mod.rs:111`). Both may be on at once;
+  `default_client()` picks `reqwest` (`http_client/mod.rs:98-106`).
+- `native-tls` and `rustls` may both be on; the per-call client builders prefer
+  `rustls` when both are set. Neither combination is a `compile_error!`.
+- `async` requires `reqwest`: a build with `async` but not `reqwest` is a
+  `compile_error!` (`lib.rs:434`). `async` force-enables `reqwest` (`Cargo.toml:91`),
+  so this only fires on a hand-edited inconsistent feature set.
+- `cargo build --all-features` MUST build: with both clients and both TLS backends
+  coexisting, the only remaining guards are the no-client and async-without-reqwest
+  cases, neither of which `--all-features` triggers. `make ci` builds the
+  `--all-features` lane explicitly.
 - The s3 backend is gated behind the `s3` feature; `s3-auth` implies `s3` so
   enabling `s3-auth` is sufficient for private-bucket request signing
   (`Cargo.toml:91-92`).

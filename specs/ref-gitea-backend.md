@@ -48,8 +48,8 @@ Both delegate to the private `build_update()` helper (see below).
 - The custom host is set with `url(impl Into<String>)` on both builders. The setter
   carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped); it was
   renamed from `instance_url` / `with_host` in earlier work, but no alias remains.
-  WS5 / A1 renamed the setter's parameter from `host` to `url` so its name matches the
-  github/gitlab `url(url)` signature (behavior unchanged: it still writes `self.host`). Its doc states the instance host
+  The setter's parameter is named `url` (matching the github/gitlab `url(url)` signature;
+  behavior unchanged: it still writes `self.host`). Its doc states the instance host
   only (scheme + host, no trailing slash and no `/api/v1`): the crate appends the
   `/api/v1/...` path itself (`gitea.rs:71-77`, `gitea.rs:218-224`). Gitea has no
   canonical public host, so `url` is required: `build()` / `build_update()` `bail!`

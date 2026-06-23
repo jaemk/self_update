@@ -1,11 +1,102 @@
 # Changelog
 
 ## [unreleased]
+Further breaking changes finalizing the 1.0 surface (still in release-candidate). They make the
+HTTP transport an injectable object-safe trait, restructure the error type, finalize the release
+model, reshape the feature surface, and change several builder signatures. The crate moves to
+edition 2024 (MSRV unchanged at 1.85).
+
+> These changes are folded into the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)
+> (and its [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling).
+
 ### Added
+- `http_client(Arc<dyn HttpClient>)` (and `http_client_async(Arc<dyn AsyncHttpClient>)` under
+  `async`) on the `Update`/`ReleaseList` builders: inject any object-safe HTTP client (a test
+  double, a wrapper, your application's client), not just reqwest/ureq. The existing
+  `reqwest_client` / `ureq_agent` / `reqwest_async_client` setters are now thin wrappers over it.
+- Object-safe `HttpClient`/`HttpResponse` traits and async siblings `AsyncHttpClient`/
+  `AsyncHttpResponse`, in the now-public `self_update::http_client` module; `reqwest` and `ureq`
+  are built-in impls. Implement them for a custom transport. `HttpResponse` streams its body
+  via `body()` / `body_buffered()`.
+- A public sealed `AsyncReleaseUpdate` trait mirroring `ReleaseUpdate` for the async verbs
+  (re-exported at the crate root under `async`), usable as a bound.
+- `progress-bar` feature (default-on) gating `indicatif` and the terminal bar. The byte-level
+  `progress_callback` and `show_download_progress` stay always-on; with the feature off the bar
+  is a no-op.
+- Per-backend features: `github` (default), `gitlab`, `gitea`, `s3` (each gates its
+  `backends::<name>` module); `s3` also gates `quick-xml`.
+- `ProgressStyle` type (template + chars), passed to the `progress_style` setter so the two
+  strings can't be transposed (under `progress-bar`).
+- `version::cmp_versions(a, b) -> Result<Ordering>`, a total-order semver comparison.
+- `ReleaseStatus::version() -> Option<&str>`, mirroring `VersionStatus::version` (`None` on the
+  up-to-date arm).
+- `Releases::from_releases(..)` for constructing a `Releases` in downstream tests.
+- s3 `max_keys` (clamped `1..=1000`, default 1000) and `signature_ttl` (`s3-auth`, default 300s)
+  setters, replacing the hardcoded 100-key cap and 300s presigned-URL TTL.
+- `retry_backoff(base, max)` on the `Update`/`ReleaseList` builders to configure the exponential
+  retry backoff (default 100ms base, ~3.2s cap).
 
 ### Changed
+- Edition 2024 (MSRV unchanged at 1.85).
+- Default features changed from `["reqwest", "default-tls"]` to
+  `["reqwest", "rustls", "progress-bar", "github"]`: default TLS is now `rustls`, and only the
+  `github` backend is on by default (gitlab/gitea/s3 are opt-in).
+- Renamed features: `default-tls` -> `native-tls`, `compression-flate2` -> `compression-tar-gz`.
+  `s3-auth` now implies `s3`.
+- `reqwest` + `ureq` and `native-tls` + `rustls` are no longer mutually exclusive: the
+  compile-time guards are removed (the transport is now a runtime trait seam). The sync API
+  prefers `reqwest` when both clients are on; the per-call builders prefer `rustls` when both TLS
+  features are on. `cargo build --all-features` builds. The only remaining guards are
+  "at least one client" and "`async` requires `reqwest`".
+- `Error::Config(String)` is split into `Error::MissingField { field }`,
+  `Error::InvalidHeader { source }`, and `Error::InvalidAuthToken { source }` (a residual
+  `Config(String)` remains only for the s3-auth hostless-URL case).
+- `Error::Release(String)` is split into `Error::NoReleaseFound { target }`,
+  `Error::MissingAssetField { field }`, and `Error::InvalidResponse { source }`.
+- `Error::Update(String)` is split into `Error::VerificationRejected { reason }` and
+  `Error::Internal { message, source }`. `ChecksumMismatch` / `Aborted` are unchanged.
+- `Error::source()` now chains the wrapped cause for `InvalidResponse`, `InvalidHeader`,
+  `InvalidAuthToken`, and `Internal` (when it wraps one). The new struct variants and
+  `Unauthorized`/`HttpStatus` are `#[non_exhaustive]` (destructure with `..`). `Error::Io` still
+  wraps a concrete `std::io::Error`.
+- `Release` and `ReleaseAsset` fields are now private (`pub(crate)` `Arc<str>`); read them through
+  borrow getters of the same name (`name()`, `version()`, `date()`, `body() -> Option<&str>`,
+  `assets()`, and `name()` / `download_url()` on the asset). Construction stays via
+  `Release::builder()` / `ReleaseAsset::new(..)`.
+- `ReleaseList::fetch` returns `Result<Releases>` instead of `Result<Vec<Release>>`; recover the
+  vector with `.into_vec()`. A bare listing has `current_version() == None`.
+- The custom-source `get_latest_releases` (`ReleaseSource` / `AsyncReleaseSource`) no longer takes
+  a `current_version` argument.
+- The post-update verify hook is renamed `verify_with` -> `verify_binary` and its callback returns
+  `Result<()>` instead of `bool` (`Err(..)` rejects, producing `Error::VerificationRejected`).
+- `progress_style` takes a typed `ProgressStyle` instead of two `impl Into<String>` args (under
+  `progress-bar`).
+- `Download::header` is renamed `Download::request_header` (matching the builders' verb).
+- `Download::from_url` takes `impl Into<String>`; `Extract::from_source`, `Move::from_source` /
+  `replace_using_temp` / `to_dest`, and `MoveAll::from_temp` take `impl AsRef<Path>`, and
+  `Extract` / `Move` / `MoveAll` dropped their lifetime parameter.
+- s3 `EndPoint` is renamed `Endpoint`, its `Generic` variant is now a tuple `Generic(String)`, and
+  the `end_point(..)` setter is renamed `endpoint(..)`.
+- An `auth_token` is now applied to both the release-listing and the binary-download requests; the
+  scheme is per backend (`token` for github/gitea, `Bearer` for gitlab) and a user-set
+  `Authorization` via `request_header` overrides it on both paths.
+- The github/gitlab/gitea listing during `update()` stops paginating at the first release not
+  newer than the current version (`ReleaseList::fetch` still walks every page); the s3 listing
+  follows `NextContinuationToken` so multi-page buckets list fully.
+- The `retries` budget now also covers the binary download's request-establishment phase (before
+  any bytes stream); a mid-stream failure is still not retried.
 
 ### Removed
+- The deprecated no-op s3 `auth_token` setter (use `.access_key((id, secret))` under `s3-auth`).
+  `auth_token` remains functional on github/gitlab/gitea.
+- `Download::reqwest_client`, `Download::reqwest_async_client`, and `Download::ureq_agent`:
+  configure a custom client on the `Update` builder (which forwards it to the download) instead.
+- The `reqwest`/`ureq` and `native-tls`/`rustls` mutual-exclusion `compile_error!` guards (the
+  clients and TLS backends now coexist).
+
+### Migration guide
+The full walkthrough is in [`docs/migrations/0.x-to-1.0-human.md`](docs/migrations/0.x-to-1.0-human.md)
+(and an [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling).
 
 ## [1.0.0-rc.1]
 First release candidate for 1.0. This version makes a number of breaking changes to clean up the

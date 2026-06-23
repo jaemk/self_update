@@ -27,7 +27,7 @@ on the parsed `Version` (`src/version.rs:6`). They take bare `&str` version stri
   prerelease except in the prerelease-current branch.
 - `bump_is_major` / `bump_is_minor` / `bump_is_patch` compare the corresponding
   numeric fields (`src/version.rs:34-52`).
-- `cmp_versions(a, b) -> Result<Ordering>` (WS5 / I1) parses each version once and
+- `cmp_versions(a, b) -> Result<Ordering>` parses each version once and
   returns a true total order, including real `Equal` for equal versions (unlike the
   boolean `bump_is_greater`, which collapses equal/less into `false`). The shared
   release comparator `cmp_releases_newest_first(a, b) -> Ordering` builds on it for a

@@ -24,8 +24,8 @@ Two builders, each reached through a `configure()` entry point:
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
   `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`, and (under `s3-auth`)
   `access_key` and `signature_ttl`; plus the shared `request_config_setters!(request)`.
-  There is **no** `auth_token` setter on this builder (WS5 / A9 removed the deprecated
-  no-op shim); the credential setter is `access_key`.
+  There is **no** `auth_token` setter on this builder (the deprecated no-op was removed);
+  the credential setter is `access_key`.
 - `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
   implementation. `Update::configure` (`s3.rs:371`) returns an `UpdateBuilder`.
   `build` returns `Box<dyn ReleaseUpdate>` (`s3.rs:337`); `build_async` (under
@@ -33,8 +33,8 @@ Two builders, each reached through a `configure()` entry point:
   reachable (`s3.rs:346`). Backend setters mirror the list builder
   (`endpoint`, `bucket_name`, `asset_prefix`, `region`, `access_key`); the common
   setters come from `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`).
-  As on the list builder, there is **no** `auth_token` setter (WS5 / A9 removed the
-  deprecated shim); use `access_key`.
+  As on the list builder, there is **no** `auth_token` setter (the deprecated shim was
+  removed); use `access_key`.
 
 `filter_target` on the list builder drops whole releases that carry no matching
 asset (`s3.rs:144`, via `has_target_asset` in `fetch`, `s3.rs:234`); the `Update`
@@ -51,7 +51,7 @@ setters) take `impl Into<String>`.
 
 ### URL / endpoint composition
 
-`Endpoint` (WS5 / A10 renamed `EndPoint` -> `Endpoint`) is `#[non_exhaustive]`, derives
+`Endpoint` is `#[non_exhaustive]`, derives
 `Default` (defaulting to `S3`), and has `From<&str>` / `From<String>` impls that both
 produce `Generic(String)` (the variant is now a tuple variant, renamed from
 `Generic { end_point }`). The builder setter is `endpoint(impl Into<Endpoint>)` (renamed
@@ -156,12 +156,11 @@ HMAC-SHA256 and SHA-256, `percent-encoding` for URI encoding (reserving
 signed when an access key is present.
 
 The s3 backend does not authenticate via bearer token. The shared `auth_token`
-setter is omitted via `impl_common_builder_setters!(no_auth_token)`; WS5 / A9 also
-removed the previously-present `#[deprecated]` no-op `auth_token` shims from both s3
-builders (there is now no `auth_token` method at all — use `.access_key((id, secret))`
-under `s3-auth`). `api_headers` uses the `UpdateConfig` trait default, which after
-WS5 / B5 is a **no-op** (no `Authorization`, no `User-Agent`): s3 authenticates by
-SigV4-signing the URL, not via an auth header.
+setter is omitted via `impl_common_builder_setters!(no_auth_token)`; there is no
+`auth_token` method at all on the s3 builders (use `.access_key((id, secret))`
+under `s3-auth`). The shared auth derivation is a no-op for s3 (no `Authorization`,
+no `User-Agent`): `api_headers` uses the `UpdateConfig` trait default, which is a
+no-op, because s3 authenticates by SigV4-signing the URL, not via an auth header.
 
 ### Errors
 
