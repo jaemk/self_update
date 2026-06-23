@@ -56,6 +56,133 @@ pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
 /// against pathological release histories.
 pub(crate) const MAX_RELEASE_PAGES: usize = 100;
 
+/// A sans-io description of a single page request: *what* to fetch (`url` + `headers`) and *how*
+/// to parse the response body into items, the next page (if any), and an early-stop signal — with
+/// no transport. The two drivers ([`run_paginated`] / [`run_paginated_async`]) perform the IO by
+/// sending this via the shared `send`/`send_async` + `retry` machinery, then call `parse`.
+///
+/// `parse` is `+ Send` so [`run_paginated_async`]'s future stays `Send` (it is held across the
+/// await in the async driver).
+pub(crate) struct PageRequest<T> {
+    pub url: String,
+    pub headers: http_client::HeaderMap,
+    /// Pure parser: `(body bytes, response headers) -> this page's items + next page + early-stop`.
+    #[allow(clippy::type_complexity)]
+    pub parse: Box<dyn FnOnce(&[u8], &http_client::HeaderMap) -> Result<Page<T>> + Send>,
+}
+
+/// The parsed result of one [`PageRequest`]: the page's `items`, the optional `next` page request,
+/// and an early-`stop` flag. The driver appends `items`, then stops if `stop` is set, `next` is
+/// `None`, or the [`MAX_RELEASE_PAGES`] bound is hit.
+pub(crate) struct Page<T> {
+    pub items: Vec<T>,
+    pub next: Option<PageRequest<T>>,
+    pub stop: bool,
+}
+
+impl<T> Page<T> {
+    /// A terminal single-page result: these `items`, no next page, no early stop.
+    pub(crate) fn last(items: Vec<T>) -> Self {
+        Self {
+            items,
+            next: None,
+            stop: false,
+        }
+    }
+}
+
+/// Drive a sans-io [`PageRequest`] chain to completion over the sync transport.
+///
+/// Loops: send the request via [`send`] (reusing its retry/backoff machinery), read the body bytes
+/// once, call `parse`, extend the accumulator, then stop if `page.stop`, `page.next` is `None`, or
+/// the [`MAX_RELEASE_PAGES`] bound is reached (logging a warning if a further page was still
+/// advertised at the bound).
+pub(crate) fn run_paginated<T>(
+    first: PageRequest<T>,
+    config: &common::RequestConfig,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    let mut next = Some(first);
+    let mut pages = 0usize;
+    while let Some(request) = next {
+        let PageRequest {
+            url,
+            headers,
+            parse,
+        } = request;
+        let resp = send(&url, headers, config)?;
+        let resp_headers = resp.headers().clone();
+        let mut body = Vec::new();
+        let mut reader = resp.body();
+        std::io::Read::read_to_end(&mut reader, &mut body)?;
+        let page = parse(&body, &resp_headers)?;
+        out.extend(page.items);
+        pages += 1;
+        if page.stop {
+            break;
+        }
+        if pages >= MAX_RELEASE_PAGES {
+            if page.next.is_some() {
+                log::warn!(
+                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
+                     older releases may be omitted"
+                );
+            }
+            break;
+        }
+        next = page.next;
+    }
+    Ok(out)
+}
+
+/// Async sibling of [`run_paginated`]: drive a sans-io [`PageRequest`] chain over the async
+/// transport. Reuses [`send_async`]'s retry/backoff machinery; reads the body bytes via the async
+/// response trait, then calls the same `parse` closure.
+#[cfg(feature = "async")]
+pub(crate) async fn run_paginated_async<T>(
+    first: PageRequest<T>,
+    config: &common::RequestConfig,
+) -> Result<Vec<T>> {
+    use futures_util::StreamExt;
+
+    let mut out = Vec::new();
+    let mut next = Some(first);
+    let mut pages = 0usize;
+    while let Some(request) = next {
+        let PageRequest {
+            url,
+            headers,
+            parse,
+        } = request;
+        let resp = send_async(&url, headers, config).await?;
+        let resp_headers = resp.headers().clone();
+        // Drain the streamed body into a single buffer (one full read, honoring the I7 intent of
+        // not double-buffering: the bytes stream feeds the buffer directly).
+        let mut stream = resp.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(&chunk?);
+        }
+        let page = parse(&body, &resp_headers)?;
+        out.extend(page.items);
+        pages += 1;
+        if page.stop {
+            break;
+        }
+        if pages >= MAX_RELEASE_PAGES {
+            if page.next.is_some() {
+                log::warn!(
+                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
+                     older releases may be omitted"
+                );
+            }
+            break;
+        }
+        next = page.next;
+    }
+    Ok(out)
+}
+
 /// Build the first-page request URL, defaulting the page size to 100 — unless the base URL
 /// already carries query parameters (e.g. a `Link`-header "next" URL), in which case it is used
 /// verbatim so an existing `page`/`per_page` is not clobbered.
@@ -75,37 +202,6 @@ pub(crate) fn next_link(headers: &http_client::HeaderMap) -> Option<String> {
         .filter_map(|link| link.to_str().ok().and_then(find_rel_next_link))
         .next()
         .map(str::to_owned)
-}
-
-/// Accumulate items across `Link: rel="next"`-paginated pages, starting at `first_url`.
-///
-/// `fetch_page` performs one request and returns that page's items plus the next page's URL
-/// (`None` when there is no `rel="next"` link). At most [`MAX_RELEASE_PAGES`] pages are walked;
-/// if a further page is still advertised at that point, a warning is logged and the walk stops
-/// (returning what was collected) rather than looping unbounded.
-pub(crate) fn collect_paginated<T>(
-    first_url: &str,
-    mut fetch_page: impl FnMut(&str) -> Result<(Vec<T>, Option<String>)>,
-) -> Result<Vec<T>> {
-    let mut out = Vec::new();
-    let mut next = Some(first_url.to_owned());
-    let mut pages = 0usize;
-    while let Some(url) = next {
-        let (items, next_url) = fetch_page(&url)?;
-        out.extend(items);
-        pages += 1;
-        if pages >= MAX_RELEASE_PAGES {
-            if next_url.is_some() {
-                log::warn!(
-                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
-                     older releases may be omitted"
-                );
-            }
-            break;
-        }
-        next = next_url;
-    }
-    Ok(out)
 }
 
 /// Exponential backoff in milliseconds before retry `attempt` (0-based): 100, 200, 400, … capped
@@ -231,43 +327,12 @@ pub(crate) async fn send_async(
     .await
 }
 
-/// Async sibling of [`collect_paginated`]: accumulate items across `Link: rel="next"` pages.
-///
-/// `fetch_page` takes an owned page URL (so it can be captured across the `await`) and returns that
-/// page's items plus the next page URL. Bounded by [`MAX_RELEASE_PAGES`].
-#[cfg(feature = "async")]
-pub(crate) async fn collect_paginated_async<T, F, Fut>(
-    first_url: &str,
-    mut fetch_page: F,
-) -> Result<Vec<T>>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>)>>,
-{
-    let mut out = Vec::new();
-    let mut next = Some(first_url.to_owned());
-    let mut pages = 0usize;
-    while let Some(url) = next {
-        let (items, next_url) = fetch_page(url).await?;
-        out.extend(items);
-        pages += 1;
-        if pages >= MAX_RELEASE_PAGES {
-            if next_url.is_some() {
-                log::warn!(
-                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
-                     older releases may be omitted"
-                );
-            }
-            break;
-        }
-        next = next_url;
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod test {
+    use crate::backends::common::RequestConfig;
     use crate::backends::find_rel_next_link;
+    use crate::backends::{Page, PageRequest};
+    use crate::http_client::HeaderMap;
 
     #[test]
     fn test_find_rel_link() {
@@ -298,66 +363,338 @@ mod test {
         assert!(link.is_none());
     }
 
-    #[test]
-    fn collect_paginated_accumulates_pages() {
-        use crate::backends::collect_paginated;
+    // -----------------------------------------------------------------------
+    // run_paginated: sans-io page-chain driver (over a loopback TCP stub)
+    // -----------------------------------------------------------------------
 
-        // Three pages of items, then no more `next` link.
-        let mut pages = vec![
-            (vec![1, 2], Some("page2".to_string())),
-            (vec![3], Some("page3".to_string())),
-            (vec![4, 5], None),
-        ]
-        .into_iter();
-        let visited = std::cell::RefCell::new(Vec::new());
-        let got = collect_paginated::<i32>("page1", |url| {
-            visited.borrow_mut().push(url.to_string());
-            Ok(pages.next().unwrap())
-        })
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    /// A `PageRequest<i32>` that parses the body as a comma-separated list of ints and follows the
+    /// `rel="next"` Link header (never setting the early-stop flag).
+    fn int_page(url: String) -> PageRequest<i32> {
+        PageRequest {
+            url,
+            headers: HeaderMap::new(),
+            parse: Box::new(move |body, headers| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<i32>().unwrap())
+                    .collect();
+                let next = crate::backends::next_link(headers).map(int_page);
+                Ok(Page {
+                    items,
+                    next,
+                    stop: false,
+                })
+            }),
+        }
+    }
+
+    /// Build a stub serving pages whose `Link` next-URLs are wired to the stub's own base via the
+    /// supplied paths. `specs` is `(next_path, body)` per page; a `None` next_path is the last page.
+    fn linked_stub(
+        specs: Vec<(Option<&str>, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        // Bind first so we know the base, then resolve the relative next-paths against it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let pages: Vec<(Option<String>, String)> = specs
+            .into_iter()
+            .map(|(next, body)| (next.map(|p| format!("{base}{p}")), body.to_string()))
+            .collect();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for (link, body) in pages {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                sink.lock()
+                    .unwrap()
+                    .push(req.lines().next().unwrap_or("").to_string());
+                let mut out = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n".to_string();
+                if let Some(link) = link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    #[test]
+    fn run_paginated_accumulates_pages() {
+        // Three pages, the first two advertising a `rel="next"` link to the next.
+        let (base, captured) = linked_stub(vec![
+            (Some("/p2"), "1,2"),
+            (Some("/p3"), "3"),
+            (None, "4,5"),
+        ]);
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
         .unwrap();
         assert_eq!(got, vec![1, 2, 3, 4, 5]);
-        assert_eq!(*visited.borrow(), vec!["page1", "page2", "page3"]);
+        let paths = captured.lock().unwrap();
+        assert_eq!(paths.len(), 3, "exactly three pages were requested");
+        assert!(paths[0].contains("/p1"));
+        assert!(paths[1].contains("/p2"));
+        assert!(paths[2].contains("/p3"));
     }
 
     #[test]
-    fn collect_paginated_is_bounded_by_max_pages() {
-        use crate::backends::{MAX_RELEASE_PAGES, collect_paginated};
-
-        // A server that always advertises a next page must not loop forever.
-        let mut calls = 0usize;
-        let got = collect_paginated::<i32>("start", |_url| {
-            calls += 1;
-            Ok((vec![0], Some("next".to_string())))
-        })
+    fn run_paginated_single_page() {
+        let (base, captured) = linked_stub(vec![(None, "7,8,9")]);
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/only")),
+            &RequestConfig::default(),
+        )
         .unwrap();
-        assert_eq!(calls, MAX_RELEASE_PAGES);
-        assert_eq!(got.len(), MAX_RELEASE_PAGES);
-    }
-
-    #[test]
-    fn collect_paginated_single_page() {
-        use crate::backends::collect_paginated;
-        let mut calls = 0usize;
-        let got = collect_paginated::<i32>("only", |_url| {
-            calls += 1;
-            Ok((vec![7, 8, 9], None))
-        })
-        .unwrap();
-        assert_eq!(calls, 1);
         assert_eq!(got, vec![7, 8, 9]);
+        assert_eq!(captured.lock().unwrap().len(), 1, "one request only");
     }
 
     #[test]
-    fn collect_paginated_propagates_fetch_error() {
-        use crate::backends::collect_paginated;
-        use crate::errors::Error;
-        let res: crate::errors::Result<Vec<i32>> = collect_paginated("u", |_url| {
-            Err(Error::HttpStatus {
-                status: 503,
-                url: "u".into(),
-            })
+    fn run_paginated_stops_early_on_page_stop_flag() {
+        // Page 1 advertises a next page but sets `stop=true`; the driver must NOT request page 2.
+        let (base, captured) = linked_stub(vec![
+            (Some("/never"), "1,2"),
+            (None, "should-not-be-served"),
+        ]);
+        let stopping = PageRequest {
+            url: format!("{base}/p1"),
+            headers: HeaderMap::new(),
+            parse: Box::new(|body: &[u8], _headers: &HeaderMap| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text.split(',').map(|s| s.parse().unwrap()).collect();
+                // Pretend the server still advertises a next page but we stop early.
+                Ok(Page {
+                    items,
+                    next: Some(int_page("http://unused.invalid/never".into())),
+                    stop: true,
+                })
+            }),
+        };
+        let got = crate::backends::run_paginated(stopping, &RequestConfig::default()).unwrap();
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "stop=true must halt after page 1; page 2 must never be requested"
+        );
+    }
+
+    #[test]
+    fn run_paginated_is_bounded_by_max_pages() {
+        use crate::backends::MAX_RELEASE_PAGES;
+        // A server that always advertises a next page (pointing back at itself) must not loop
+        // forever — the driver is bounded by MAX_RELEASE_PAGES.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "0";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLink: <{base_for_thread}/n>; rel=\"next\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
         });
-        assert!(matches!(res, Err(Error::HttpStatus { .. })));
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/start")),
+            &RequestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            got.len(),
+            MAX_RELEASE_PAGES,
+            "the walk is bounded at MAX_RELEASE_PAGES even when next is always advertised"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_paginated_async: direct coverage of the async page-chain driver
+    // (body-drain via bytes_stream + async early-stop), mirroring the sync tests.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_accumulates_pages() {
+        let (base, captured) = linked_stub(vec![
+            (Some("/p2"), "1,2"),
+            (Some("/p3"), "3"),
+            (None, "4,5"),
+        ]);
+        let got = crate::backends::run_paginated_async(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, vec![1, 2, 3, 4, 5]);
+        let paths = captured.lock().unwrap();
+        assert_eq!(paths.len(), 3, "exactly three pages were requested");
+        assert!(paths[0].contains("/p1"));
+        assert!(paths[1].contains("/p2"));
+        assert!(paths[2].contains("/p3"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_stops_early_on_page_stop_flag() {
+        // Page 1 advertises a next page but sets `stop=true`; the async driver must NOT request
+        // page 2 (same contract as the sync driver).
+        let (base, captured) = linked_stub(vec![
+            (Some("/never"), "1,2"),
+            (None, "should-not-be-served"),
+        ]);
+        let stopping = PageRequest {
+            url: format!("{base}/p1"),
+            headers: HeaderMap::new(),
+            parse: Box::new(|body: &[u8], _headers: &HeaderMap| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text.split(',').map(|s| s.parse().unwrap()).collect();
+                Ok(Page {
+                    items,
+                    next: Some(int_page("http://unused.invalid/never".into())),
+                    stop: true,
+                })
+            }),
+        };
+        let got = crate::backends::run_paginated_async(stopping, &RequestConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "stop=true must halt after page 1; page 2 must never be requested (async)"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_is_bounded_by_max_pages() {
+        use crate::backends::MAX_RELEASE_PAGES;
+        // A server always advertising a next page (pointing back at itself) must not loop forever;
+        // the async driver is bounded by MAX_RELEASE_PAGES just like the sync one.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "0";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLink: <{base_for_thread}/n>; rel=\"next\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let got = crate::backends::run_paginated_async(
+            int_page(format!("{base}/start")),
+            &RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got.len(),
+            MAX_RELEASE_PAGES,
+            "the async walk is bounded at MAX_RELEASE_PAGES even when next is always advertised"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_propagates_fetch_error() {
+        // A non-2xx status on the first page must propagate as the structured error over the async
+        // transport, before any accumulation.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "boom";
+                let out = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let res = crate::backends::run_paginated_async(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
+        .await;
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 503, .. })
+        ));
+    }
+
+    #[test]
+    fn run_paginated_propagates_fetch_error() {
+        // A non-2xx status on the first page must propagate as the structured error.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "boom";
+                let out = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let res = crate::backends::run_paginated(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        );
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 503, .. })
+        ));
     }
 
     #[test]

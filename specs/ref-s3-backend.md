@@ -21,8 +21,8 @@ Two builders, each reached through a `configure()` entry point:
 - `ReleaseList` / `ReleaseListBuilder` (`s3.rs:91`, `s3.rs:151`): queries a bucket
   and returns a `Vec<Release>` via `ReleaseList::fetch` (`s3.rs:220`).
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
-  `asset_prefix`, `region`, `end_point`, `filter_target`, and (under `s3-auth`)
-  `access_key`; plus the shared `request_config_setters!(request)` (`s3.rs:166`).
+  `asset_prefix`, `region`, `end_point`, `filter_target`, `max_keys`, and (under `s3-auth`)
+  `access_key` and `signature_ttl`; plus the shared `request_config_setters!(request)`.
   `auth_token` exists on this builder only as a `#[deprecated]` no-op shim
   (`s3.rs:159`); the real credential setter is `access_key`.
 - `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
@@ -70,19 +70,25 @@ deferred to URL construction. `GCS` and `Generic` never read the region and buil
 without it (under `s3-auth`, SigV4 still defaults the signing region to `us-east-1`
 when none is set).
 
-### Listing + MAX_KEYS + prefix
+### Listing + max_keys + continuation + prefix
 
-`MAX_KEYS` is a `const u8 = 100` (`s3.rs:20`), the per-request item cap sent to the
-listing API. The listing query string is appended to the download base:
+`max_keys` is a `u16` field on the `Update` / `ReleaseList` builders, defaulting to 1000 (the
+ListObjectsV2 cap). The `max_keys(impl Into<u16>)` setter clamps to `1..=1000` via
+`clamp_max_keys`. The listing query string is appended to the download base:
 
 - S3 / S3DualStack / DigitalOceanSpaces / Generic:
-  `?list-type=2&max-keys=<MAX_KEYS><prefix>` (the ListBucket v2 API) (`s3.rs:726`)
-- GCS: `?max-keys=<MAX_KEYS><prefix>` (no `list-type=2`, which is S3-specific)
-  (`s3.rs:730`)
+  `?list-type=2&max-keys=<max_keys><prefix><continuation>` (the ListBucket v2 API)
+- GCS: `?max-keys=<max_keys><prefix><continuation>` (no `list-type=2`, which is S3-specific)
 
-`asset_prefix`, when set, is appended as `&prefix=<value>` (`s3.rs:697`); when
-`None` the segment is absent. The listing is a single request: there is no
-continuation-token pagination, so at most `MAX_KEYS` objects are listed.
+`asset_prefix`, when set, is appended as `&prefix=<value>`; when `None` the segment is absent.
+
+The listing is described transport-free as a `PageRequest<Release>` (`s3_listing_plan` ->
+`s3_page`) and driven by the sans-io `run_paginated` / `run_paginated_async` drivers. The parser
+reads `<IsTruncated>true</IsTruncated>` and `<NextContinuationToken>`, and when truncated emits
+`Page::next` as a fresh `PageRequest` with `&continuation-token=<token>` in the query, which the
+same driver follows. So a >1000-key bucket is walked across multiple requests, not truncated. Under
+`s3-auth` each continuation URL is freshly SigV4-signed. The `signature_ttl(Duration)` setter
+(default 300s) sets the `X-Amz-Expires` of signed listing and download URLs.
 
 ### XML to model
 
@@ -188,8 +194,11 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 - `bucket_name` required on both builders -> `Error::Config`.
 - Region required for `S3`/`S3DualStack`/`DigitalOceanSpaces`; ignored for
   `GCS`/`Generic`. Missing required region -> `Error::Config`.
-- S3-family and Generic listing query uses `list-type=2&max-keys=100`; GCS uses
-  `max-keys=100` only (no `list-type=2`).
+- S3-family and Generic listing query uses `list-type=2&max-keys=<max_keys>` (default 1000); GCS
+  uses `max-keys=<max_keys>` only (no `list-type=2`). `max_keys` clamps to `1..=1000`.
+- A truncated listing (`<IsTruncated>true</IsTruncated>` + `<NextContinuationToken>`) is followed
+  via `&continuation-token=<token>`, so a >1000-key bucket is walked across requests. Under
+  `s3-auth` each continuation URL is freshly signed; `signature_ttl` sets the `X-Amz-Expires`.
 - `asset_prefix` appended as `&prefix=<value>`; absent when unset.
 - Asset `name` is the key's filename component, not the full key path.
 - Version regex requires a `\d+\.\d+\.\d+` triple; leading `v` stripped; keys not

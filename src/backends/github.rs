@@ -4,7 +4,7 @@ GitHub releases
 use crate::http_client::{HeaderMap, header};
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
-use crate::backends::{collect_paginated, first_page_url, next_link, send};
+use crate::backends::{Page, PageRequest, first_page_url, next_link, run_paginated};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
@@ -171,7 +171,11 @@ impl ReleaseList {
             self.repo_owner,
             self.repo_name
         );
-        let releases = fetch_all_releases(&api_url, self.auth_token.as_deref(), &self.request)?;
+        // An unfiltered listing must walk ALL pages: `stop_at = None`.
+        let releases = run_paginated(
+            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
+            &self.request,
+        )?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -265,11 +269,6 @@ impl UpdateBuilder {
     }
 }
 
-#[cfg(feature = "async")]
-impl Update {
-    impl_async_update_methods!();
-}
-
 /// Updates to a specified or latest release distributed via GitHub
 #[derive(Debug)]
 #[non_exhaustive]
@@ -297,72 +296,74 @@ impl Update {
 impl crate::update::sealed::Sealed for Update {}
 
 impl Update {
-    /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
-    fn fetch_latest_release(&self) -> Result<Release> {
-        let api_url = format!(
-            "{}/repos/{}/{}/releases/latest",
-            self.api_base(),
-            self.repo_owner,
-            self.repo_name
-        );
-        let mut resp = send(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
-        let json = resp.json_value()?;
-        Release::from_release(&json)
-    }
-
-    /// Fetch the full release list, keeping only those newer than `current_version` (network
-    /// helper; returns a bare `Vec<Release>`). `current_version` still bounds the filter.
-    fn fetch_newer_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        let api_url = format!(
+    /// The `/repos/{owner}/{name}/releases` listing URL.
+    fn releases_url(&self) -> String {
+        format!(
             "{}/repos/{}/{}/releases",
             self.api_base(),
             self.repo_owner,
             self.repo_name
-        );
-        let releases = fetch_all_releases(
-            &api_url,
-            self.common.auth_token.as_deref(),
-            &self.common.request,
-        )?;
-        Ok(releases
-            .into_iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .collect())
+        )
+    }
+
+    /// The `/repos/{owner}/{name}/releases/latest` single-newest-release URL.
+    fn latest_url(&self) -> String {
+        format!(
+            "{}/repos/{}/{}/releases/latest",
+            self.api_base(),
+            self.repo_owner,
+            self.repo_name
+        )
+    }
+
+    /// The `/repos/{owner}/{name}/releases/tags/{ver}` single-release-by-tag URL.
+    fn tag_url(&self, ver: &str) -> String {
+        format!(
+            "{}/repos/{}/{}/releases/tags/{}",
+            self.api_base(),
+            self.repo_owner,
+            self.repo_name,
+            urlencoding::encode(ver)
+        )
     }
 }
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let release = self.fetch_latest_release()?;
+        let releases = run_paginated(
+            single_plan(self.latest_url(), self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )?;
+        let release = releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| format_err!(Error::Release, "No release was found"))?;
         Ok(Releases::new(vec![release], current_version))
     }
 
     fn get_latest_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.fetch_newer_releases(&current_version)?;
+        let releases = run_paginated(
+            releases_plan(
+                &self.releases_url(),
+                self.common.auth_token.as_deref(),
+                Some(&current_version),
+            )?,
+            &self.common.request,
+        )?;
         Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let api_url = format!(
-            "{}/repos/{}/{}/releases/tags/{}",
-            self.api_base(),
-            self.repo_owner,
-            self.repo_name,
-            urlencoding::encode(ver)
-        );
-        let mut resp = send(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        let releases = run_paginated(
+            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json_value()?;
-        Release::from_release(&json)
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| format_err!(Error::Release, "No release was found"))
     }
 }
 
@@ -372,118 +373,140 @@ impl_update_config_accessors!(Update, {
     }
 });
 
-/// Fetch every release from `base_url`, following GitHub's `Link: rel="next"` pagination.
-fn fetch_all_releases(
+/// Transport-free plan to fetch the paginated `releases` array, parsing each page with
+/// [`Release::from_release`] and following GitHub's `Link: rel="next"` pagination.
+///
+/// `stop_at` bounds the walk: when `Some(current_version)` the list is filtered to releases
+/// strictly newer than it, and the parser sets `Page::stop` as soon as it sees a release NOT
+/// strictly newer than `stop_at` (relying on the newest-first order) so older pages are never
+/// fetched. When `None` the listing is unfiltered and every page is walked (used by `ReleaseList`).
+fn releases_plan(
     base_url: &str,
     auth_token: Option<&str>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    collect_paginated(&first_page_url(base_url), |url| {
-        let mut resp = send(url, api_headers(auth_token)?, req)?;
-        let headers = resp.headers().clone();
-        let releases = resp
-            .json_value()?
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
-            .iter()
-            .map(Release::from_release)
-            .collect::<Result<Vec<Release>>>()?;
-        Ok((releases, next_link(&headers)))
-    })
-}
-
-/// Async sibling of [`fetch_all_releases`], following `Link: rel="next"` pagination with the async
-/// transport. Reuses the same [`Release::from_release`] parser.
-#[cfg(feature = "async")]
-async fn fetch_all_releases_async(
-    base_url: &str,
-    auth_token: Option<&str>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    use crate::backends::{collect_paginated_async, send_async};
+    stop_at: Option<&str>,
+) -> Result<PageRequest<Release>> {
+    let headers = api_headers(auth_token)?;
     let auth = auth_token.map(str::to_owned);
-    collect_paginated_async(&first_page_url(base_url), |url| {
-        let auth = auth.clone();
-        let req = req.clone();
-        async move {
-            let resp = send_async(&url, api_headers(auth.as_deref())?, &req).await?;
-            let headers = resp.headers().clone();
-            let body = resp.text().await?;
-            let json: serde_json::Value = serde_json::from_str(&body)?;
-            let releases = json
+    let stop_at = stop_at.map(str::to_owned);
+    Ok(release_array_page(
+        first_page_url(base_url),
+        headers,
+        auth,
+        stop_at,
+    ))
+}
+
+/// Build one `releases`-array [`PageRequest`], capturing what it needs to build the next page.
+fn release_array_page(
+    url: String,
+    headers: HeaderMap,
+    auth: Option<String>,
+    stop_at: Option<String>,
+) -> PageRequest<Release> {
+    PageRequest {
+        url,
+        headers,
+        parse: Box::new(move |body, resp_headers| {
+            let json: serde_json::Value = serde_json::from_slice(body)?;
+            let array = json
                 .as_array()
-                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
-                .iter()
-                .map(Release::from_release)
-                .collect::<Result<Vec<Release>>>()?;
-            Ok((releases, next_link(&headers)))
-        }
+                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+            let mut items = Vec::new();
+            let mut stop = false;
+            for value in array {
+                let release = Release::from_release(value)?;
+                if let Some(ref current) = stop_at {
+                    // Early-stop on the first release not strictly newer than `current` (rely on
+                    // newest-first order); still-newer items already pushed are kept.
+                    if !bump_is_greater(current, &release.version).unwrap_or(false) {
+                        stop = true;
+                        break;
+                    }
+                }
+                items.push(release);
+            }
+            let next = if stop {
+                None
+            } else {
+                next_link(resp_headers).map(|next_url| {
+                    release_array_page(
+                        next_url,
+                        api_headers_for(&auth),
+                        auth.clone(),
+                        stop_at.clone(),
+                    )
+                })
+            };
+            Ok(Page { items, next, stop })
+        }),
+    }
+}
+
+/// Transport-free plan to fetch a single release *object* (the `/releases/latest` and
+/// `/releases/tags/{ver}` endpoints), parsed with [`Release::from_release`] into a one-item page.
+fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers(auth_token)?;
+    Ok(PageRequest {
+        url,
+        headers,
+        parse: Box::new(|body, _resp_headers| {
+            let json: serde_json::Value = serde_json::from_slice(body)?;
+            Ok(Page::last(vec![Release::from_release(&json)?]))
+        }),
     })
-    .await
+}
+
+/// Build the github request headers, panicking only on an internal user-agent bug (never on the
+/// caller's auth token, which is validated). Used when rebuilding a next-page request inside the
+/// parser, where returning a `Result` is not possible — the auth token was already validated when
+/// the first page's headers were built, so this re-parse cannot fail for a caller-supplied token.
+fn api_headers_for(auth: &Option<String>) -> HeaderMap {
+    api_headers(auth.as_deref()).unwrap_or_default()
 }
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncFetch for Update {
+impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
-        use crate::backends::send_async;
+        use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let api_url = format!(
-            "{}/repos/{}/{}/releases/latest",
-            self.api_base(),
-            self.repo_owner,
-            self.repo_name
-        );
-        let resp = send_async(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        let releases = run_paginated_async(
+            single_plan(self.latest_url(), self.common.auth_token.as_deref())?,
             &self.common.request,
         )
         .await?;
-        let body = resp.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body)?;
-        let release = Release::from_release(&json)?;
+        let release = releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| format_err!(Error::Release, "No release was found"))?;
         Ok(Releases::new(vec![release], current_version))
     }
 
     async fn get_latest_releases_async(&self) -> Result<Releases> {
+        use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let api_url = format!(
-            "{}/repos/{}/{}/releases",
-            self.api_base(),
-            self.repo_owner,
-            self.repo_name
-        );
-        let releases = fetch_all_releases_async(
-            &api_url,
-            self.common.auth_token.as_deref(),
+        let releases = run_paginated_async(
+            releases_plan(
+                &self.releases_url(),
+                self.common.auth_token.as_deref(),
+                Some(&current_version),
+            )?,
             &self.common.request,
         )
         .await?;
-        let releases = releases
-            .into_iter()
-            .filter(|r| bump_is_greater(&current_version, &r.version).unwrap_or(false))
-            .collect();
         Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
-        use crate::backends::send_async;
-        let api_url = format!(
-            "{}/repos/{}/{}/releases/tags/{}",
-            self.api_base(),
-            self.repo_owner,
-            self.repo_name,
-            urlencoding::encode(ver)
-        );
-        let resp = send_async(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        use crate::backends::run_paginated_async;
+        let releases = run_paginated_async(
+            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
             &self.common.request,
         )
         .await?;
-        let body = resp.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body)?;
-        Release::from_release(&json)
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| format_err!(Error::Release, "No release was found"))
     }
 }
 
@@ -512,6 +535,32 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    // The async verbs are methods on the public sealed `AsyncReleaseUpdate` trait; bring it into
+    // scope so `upd.get_latest_release_async()` / `update_extended_async()` resolve in these tests.
+    #[cfg(feature = "async")]
+    use crate::update::AsyncReleaseUpdate;
+
+    /// Test wrapper: drive the sans-io `releases_plan` through the sync `run_paginated` driver.
+    /// `stop_at = None` => walk all pages (the unfiltered listing behavior).
+    fn fetch_all_releases(
+        base_url: &str,
+        auth_token: Option<&str>,
+        req: &crate::backends::common::RequestConfig,
+    ) -> crate::errors::Result<Vec<super::Release>> {
+        crate::backends::run_paginated(super::releases_plan(base_url, auth_token, None)?, req)
+    }
+
+    /// Async test wrapper over `releases_plan` + the async driver. `stop_at = None`.
+    #[cfg(feature = "async")]
+    async fn fetch_all_releases_async(
+        base_url: &str,
+        auth_token: Option<&str>,
+        req: &crate::backends::common::RequestConfig,
+    ) -> crate::errors::Result<Vec<super::Release>> {
+        crate::backends::run_paginated_async(super::releases_plan(base_url, auth_token, None)?, req)
+            .await
+    }
 
     struct Resp {
         status: &'static str,
@@ -565,6 +614,223 @@ mod tests {
         )
     }
 
+    /// A github-format releases JSON array with one entry per tag (newest-first as listed).
+    fn releases_array_json(tags: &[&str]) -> String {
+        let objs = tags
+            .iter()
+            .map(|tag| {
+                format!(
+                    r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{objs}]")
+    }
+
+    // --- WS2 I2: git release-scan early-stop (selection parity + page-2 never requested) -------
+
+    #[test]
+    fn get_latest_releases_early_stops_within_first_page_and_skips_page_two() {
+        // Page 1 (newest-first) ends with a release NOT strictly newer than current (1.0.0): the
+        // parser must set Page::stop as soon as it hits v1.0.0, keeping the still-newer items
+        // already seen and NOT requesting page 2 (which it advertises via a `rel="next"` link).
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/repos/o/r/releases?page=2")),
+                    body: releases_array_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+                },
+                // Page 2 must never be requested; if it were, the test would consume this and the
+                // captured-request count would be 2.
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_array_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let upd = github_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        // Only the strictly-newer items from page 1, in order; v1.0.0/v0.9.0 dropped by the filter,
+        // and v3.0.0 (page 2) never fetched.
+        assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "early-stop must halt within page 1; page 2 must never be requested"
+        );
+    }
+
+    #[test]
+    fn early_stop_selects_same_release_as_a_full_walk() {
+        // Selection parity: the early-stopped `get_latest_releases` must let the updater select the
+        // SAME release as a full unfiltered walk would. Drive the choice via the same
+        // `choose_latest_release` the orchestrator uses, comparing the early-stop list against a
+        // full-walk list of the identical releases.
+        let early_first_page = releases_array_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]);
+        let (base, _captured) = stub_capturing(move |base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/repos/o/r/releases?page=2")),
+                    body: early_first_page,
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_array_json(&["v0.5.0"]),
+                },
+            ]
+        });
+        let upd = github_update_sync(&base, "1.0.0");
+        let early = upd.get_latest_releases().unwrap().into_vec();
+        let early_choice =
+            crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
+
+        // A full walk would also see v1.0.0/v0.9.0/v0.5.0, but those are filtered/older, so the
+        // newest compatible release is the same: v1.5.0 (compatible with 1.0.0; 2.0.0 is a major
+        // bump and only chosen as a fallback if no compatible exists).
+        let full = vec![
+            crate::update::Release::builder()
+                .version("2.0.0")
+                .build()
+                .unwrap(),
+            crate::update::Release::builder()
+                .version("1.5.0")
+                .build()
+                .unwrap(),
+            crate::update::Release::builder()
+                .version("1.0.0")
+                .build()
+                .unwrap(),
+            crate::update::Release::builder()
+                .version("0.9.0")
+                .build()
+                .unwrap(),
+            crate::update::Release::builder()
+                .version("0.5.0")
+                .build()
+                .unwrap(),
+        ];
+        let full_choice =
+            crate::update::testing::choose_latest_release_for_test(full, "1.0.0").unwrap();
+        assert_eq!(
+            early_choice.map(|r| r.version),
+            full_choice.map(|r| r.version),
+            "early-stop must select the same release as a full walk"
+        );
+    }
+
+    #[test]
+    fn release_list_fetch_walks_all_pages_unfiltered() {
+        // WS2: `ReleaseList::fetch` is an UNFILTERED listing (stop_at = None) and must keep walking
+        // ALL pages — even when a page contains releases older than any current version (there is no
+        // current version here). Page 1 advertises page 2; both must be accumulated.
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/repos/o/r/releases?page=2")),
+                    body: releases_array_json(&["v2.0.0", "v0.5.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_array_json(&["v0.1.0"]),
+                },
+            ]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "0.5.0", "0.1.0"],
+            "the unfiltered ReleaseList must accumulate ALL pages, older releases included"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "both pages must be requested for the unfiltered listing"
+        );
+    }
+
+    // --- WS2 invariant 1: sync/async fetch parity (same plans + parsers) ----------------------
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn sync_and_async_get_latest_releases_agree_on_identical_responses() {
+        // Both paths share `releases_plan` + the parser + the early-stop filter, so for the SAME
+        // stubbed body they must yield the IDENTICAL filtered, ordered release list. Drive the sync
+        // fetch and the async fetch against two separate stubs serving the same body, and compare.
+        let body = releases_array_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]);
+
+        let sync_body = body.clone();
+        // The sync fetch uses a blocking client; run it off the async executor so its runtime is
+        // not dropped inside this async context.
+        let sync_versions: Vec<String> = tokio::task::spawn_blocking(move || {
+            let sync_base = stub(move |_| {
+                vec![Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: sync_body,
+                }]
+            });
+            github_update_sync(&sync_base, "1.0.0")
+                .get_latest_releases()
+                .unwrap()
+                .all()
+                .iter()
+                .map(|r| r.version.clone())
+                .collect()
+        })
+        .await
+        .unwrap();
+
+        let async_base = stub(move |_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body,
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("1.0.0")
+            .url(&async_base)
+            .build_async()
+            .unwrap();
+        let async_versions: Vec<String> = upd
+            .get_latest_releases_async()
+            .await
+            .unwrap()
+            .all()
+            .iter()
+            .map(|r| r.version.clone())
+            .collect();
+
+        assert_eq!(
+            sync_versions, async_versions,
+            "sync and async fetch must return the identical releases for the same response"
+        );
+        assert_eq!(
+            sync_versions,
+            vec!["2.0.0".to_string(), "1.5.0".to_string()],
+            "and both apply the strictly-newer early-stop filter"
+        );
+    }
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn fetch_all_releases_async_follows_pagination() {
@@ -582,7 +848,7 @@ mod tests {
                 },
             ]
         });
-        let releases = super::fetch_all_releases_async(
+        let releases = fetch_all_releases_async(
             &format!("{base}/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -787,7 +1053,7 @@ mod tests {
                 },
             ]
         });
-        let releases = super::fetch_all_releases(
+        let releases = fetch_all_releases(
             &format!("{base}/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -811,7 +1077,7 @@ mod tests {
                 body: "nope".to_string(),
             }]
         });
-        let res = super::fetch_all_releases(
+        let res = fetch_all_releases(
             &format!("{base}/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -835,7 +1101,7 @@ mod tests {
                 body: "{}".to_string(),
             }]
         });
-        let res = super::fetch_all_releases(
+        let res = fetch_all_releases(
             &format!("{base}/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -1155,7 +1421,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "1.2.3");
         let request = captured.lock().unwrap()[0].to_lowercase();
@@ -1201,7 +1467,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let releases = super::fetch_all_releases_async(&format!("{base}/releases"), None, &cfg)
+        let releases = fetch_all_releases_async(&format!("{base}/releases"), None, &cfg)
             .await
             .unwrap();
         assert_eq!(releases.len(), 1);
@@ -1243,7 +1509,7 @@ mod tests {
             ))),
             ..Default::default()
         };
-        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "3.0.0");
     }
@@ -1312,8 +1578,7 @@ mod tests {
             ..Default::default()
         };
         let releases =
-            super::fetch_all_releases("https://example.test/repos/o/r/releases", None, &cfg)
-                .unwrap();
+            fetch_all_releases("https://example.test/repos/o/r/releases", None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(
             releases[0].version, "4.5.6",
@@ -1370,7 +1635,7 @@ mod tests {
             headers,
             ..Default::default()
         };
-        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         let request = captured.lock().unwrap()[0].to_lowercase();
         assert!(
@@ -1396,7 +1661,7 @@ mod tests {
             ..Default::default()
         };
         let start = Instant::now();
-        let res = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg);
+        let res = fetch_all_releases(&format!("{base}/releases"), None, &cfg);
         assert!(res.is_err(), "expected a timeout error");
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -1432,7 +1697,7 @@ mod tests {
             retries: 2,
             ..Default::default()
         };
-        let releases = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
+        let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "1.0.0");
     }
@@ -1459,7 +1724,7 @@ mod tests {
             retries: 1,
             ..Default::default()
         };
-        let res = super::fetch_all_releases(&format!("{base}/releases"), None, &cfg);
+        let res = fetch_all_releases(&format!("{base}/releases"), None, &cfg);
         assert!(res.is_err());
     }
 

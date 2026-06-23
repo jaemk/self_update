@@ -141,26 +141,22 @@ implementable counterpart to the sealed `ReleaseUpdate`.
   `Release` matching an explicit tag/version (returns a bare `Release`, not a
   `Releases`).
 
-The async counterparts are the `pub(crate)` `AsyncFetch` trait
-(`:427-438`, `cfg(feature = "async")`), used only through generics (never as a
-trait object) so its `async fn`s need no boxing:
-`get_latest_release_async() -> Result<Releases>`,
+The async counterparts are methods on the public sealed `AsyncReleaseUpdate` trait
+(`cfg(feature = "async")`), used only through generics (never as a trait object) so its RPITIT
+`async fn`s need no boxing: `get_latest_release_async() -> Result<Releases>`,
 `get_latest_releases_async() -> Result<Releases>`, and
-`get_release_version_async(ver) -> Result<Release>`. Each returns
-`impl Future<Output = ...> + Send`, mirroring the sync method of the same name
-and the same raw-newest vs strictly-newer-filtered distinction. A public
-inherent `get_release_version_async` is also macro-generated on each backend's
-`Update` so the async-by-tag surface is callable without importing `AsyncFetch`.
+`get_release_version_async(ver) -> Result<Release>`. Each returns `impl Future<Output = ...> +
+Send`, mirroring the sync method of the same name and the same raw-newest vs
+strictly-newer-filtered distinction. The trait also carries default `update_async` /
+`update_extended_async`; callers bring it into scope to call any verb.
 
-The custom-source trait methods (`ReleaseSource`, `:351-364`) take the same
-shape but return plain `Release` / `Vec<Release>`: `get_latest_release()` is the
-single newest release; `get_latest_releases(current_version)` returns the
-candidate list newest-first (the updater discards non-newer entries, prefers the
-newest semver-compatible one, and otherwise offers the newest available flagged
-not-compatible, so the implementer need not filter); `get_release_version(ver)`
-is the release for an explicit tag. `AsyncReleaseSource` (`:401-419`) mirrors
-these with `impl Future<... > + Send` returns and the `Send` bound enforced at
-the impl site.
+The custom-source trait methods (`ReleaseSource`) take the same shape but return plain `Release` /
+`Vec<Release>`: `get_latest_release()` is the single newest release; `get_latest_releases()` returns
+the candidate list newest-first (the updater re-filters downstream, discarding non-newer entries,
+preferring the newest semver-compatible one, and otherwise offering the newest available flagged
+not-compatible, so the implementer need not filter and there is no `current_version` parameter);
+`get_release_version(ver)` is the release for an explicit tag. `AsyncReleaseSource` mirrors these
+with `impl Future<...> + Send` returns and the `Send` bound enforced at the impl site.
 
 ## Public surface
 
@@ -175,7 +171,7 @@ the impl site.
 - `pub trait ReleaseUpdate: UpdateConfig` (`get_latest_release`,
   `get_latest_releases`, `get_release_version`, `update`, `update_extended`).
 - `pub trait ReleaseSource: Send + Sync` and (async) `AsyncReleaseSource` (not
-  sealed). `pub(crate) trait AsyncFetch` and `pub(crate) mod sealed`.
+  sealed). `pub trait AsyncReleaseUpdate: UpdateConfig` (async, sealed) and `pub(crate) mod sealed`.
 
 ## Invariants and regression checklist
 

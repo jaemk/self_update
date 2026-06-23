@@ -21,7 +21,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -59,7 +59,7 @@ transport, implement [`AsyncReleaseSource`](crate::AsyncReleaseSource) and drive
 ```no_run
 # #[cfg(feature = "async")]
 # mod demo {
-use self_update::{AsyncReleaseSource, Release, ReleaseAsset, cargo_crate_version};
+use self_update::{AsyncReleaseSource, AsyncReleaseUpdate, Release, ReleaseAsset, cargo_crate_version};
 use self_update::backends::custom::AsyncUpdate;
 
 struct MyHost;
@@ -71,7 +71,7 @@ impl AsyncReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    async fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    async fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release().await?])
     }
     async fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -103,7 +103,7 @@ use self_update::backends::custom::{AsyncUpdate, Blocking};
 # struct MySyncHost;
 # impl self_update::ReleaseSource for MySyncHost {
 #     fn get_latest_release(&self) -> self_update::Result<self_update::Release> { unimplemented!() }
-#     fn get_latest_releases(&self, _: &str) -> self_update::Result<Vec<self_update::Release>> { unimplemented!() }
+#     fn get_latest_releases(&self) -> self_update::Result<Vec<self_update::Release>> { unimplemented!() }
 #     fn get_release_version(&self, _: &str) -> self_update::Result<self_update::Release> { unimplemented!() }
 # }
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -220,7 +220,7 @@ impl ReleaseUpdate for Update {
 
     fn get_latest_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.source.get_latest_releases(&current_version)?;
+        let releases = self.source.get_latest_releases()?;
         Ok(Releases::new(releases, current_version))
     }
 
@@ -321,8 +321,6 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdate<S> {
     pub fn configure() -> AsyncUpdateBuilder<S> {
         AsyncUpdateBuilder::new()
     }
-
-    impl_async_update_methods!();
 }
 
 #[cfg(feature = "async")]
@@ -332,7 +330,7 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::sealed::Sealed for Asy
 impl_update_config_accessors!(AsyncUpdate<S>, where (S: crate::update::AsyncReleaseSource));
 
 #[cfg(feature = "async")]
-impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncFetch for AsyncUpdate<S> {
+impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncReleaseUpdate for AsyncUpdate<S> {
     async fn get_latest_release_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let release = self.source.get_latest_release().await?;
@@ -340,7 +338,7 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncFetch for AsyncUp
     }
     async fn get_latest_releases_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.source.get_latest_releases(&current_version).await?;
+        let releases = self.source.get_latest_releases().await?;
         Ok(Releases::new(releases, current_version))
     }
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -384,10 +382,9 @@ impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for B
             .await
             .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
     }
-    async fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>> {
+    async fn get_latest_releases(&self) -> Result<Vec<Release>> {
         let s = self.source.clone();
-        let current_version = current_version.to_owned();
-        tokio::task::spawn_blocking(move || s.get_latest_releases(&current_version))
+        tokio::task::spawn_blocking(move || s.get_latest_releases())
             .await
             .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
     }
@@ -423,7 +420,7 @@ mod tests {
                 ))
                 .build()
         }
-        fn get_latest_releases(&self, _current: &str) -> crate::errors::Result<Vec<Release>> {
+        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
             Ok(vec![self.get_latest_release()?])
         }
         fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
@@ -593,7 +590,7 @@ mod tests {
         fn get_latest_release(&self) -> crate::errors::Result<Release> {
             self.get_release_version("9.9.9")
         }
-        fn get_latest_releases(&self, _current: &str) -> crate::errors::Result<Vec<Release>> {
+        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
             // Newest-but-incompatible, current, older, and the compatible winner — out of order.
             // The orchestrator must drop current/older and pick the newest compatible (1.4.0),
             // not 2.0.0 and not 1.0.0.
@@ -695,7 +692,9 @@ mod tests {
     #[cfg(feature = "async")]
     mod async_tests {
         use super::super::{AsyncUpdate, Blocking};
-        use crate::update::{AsyncFetch, AsyncReleaseSource, Release, ReleaseAsset, ReleaseSource};
+        use crate::update::{
+            AsyncReleaseSource, AsyncReleaseUpdate, Release, ReleaseAsset, ReleaseSource,
+        };
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -719,10 +718,7 @@ mod tests {
                     ))
                     .build()
             }
-            async fn get_latest_releases(
-                &self,
-                _current: &str,
-            ) -> crate::errors::Result<Vec<Release>> {
+            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 tokio::task::yield_now().await;
                 self.releases_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![Release::builder().version("2.0.0").build()?])
@@ -781,10 +777,12 @@ mod tests {
             assert_eq!(rel.version, "2.0.0");
             assert_eq!(rel.assets.len(), 1);
 
-            let rels = AsyncFetch::get_latest_releases_async(&upd).await.unwrap();
+            let rels = AsyncReleaseUpdate::get_latest_releases_async(&upd)
+                .await
+                .unwrap();
             assert_eq!(rels.all().len(), 1);
 
-            let tagged = AsyncFetch::get_release_version_async(&upd, "1.5.0")
+            let tagged = AsyncReleaseUpdate::get_release_version_async(&upd, "1.5.0")
                 .await
                 .unwrap();
             assert_eq!(tagged.version, "1.5.0");
@@ -805,7 +803,7 @@ mod tests {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Release::builder().version("3.0.0").build()
             }
-            fn get_latest_releases(&self, _current: &str) -> crate::errors::Result<Vec<Release>> {
+            fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![Release::builder().version("3.0.0").build()?])
             }
@@ -839,7 +837,7 @@ mod tests {
                 "3.0.0"
             );
             assert_eq!(
-                AsyncFetch::get_latest_releases_async(&upd)
+                AsyncReleaseUpdate::get_latest_releases_async(&upd)
                     .await
                     .unwrap()
                     .all()
@@ -847,7 +845,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                AsyncFetch::get_release_version_async(&upd, "9.9.9")
+                AsyncReleaseUpdate::get_release_version_async(&upd, "9.9.9")
                     .await
                     .unwrap()
                     .version,
@@ -883,10 +881,7 @@ mod tests {
             async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                 self.get_release_version("9.9.9").await
             }
-            async fn get_latest_releases(
-                &self,
-                _current: &str,
-            ) -> crate::errors::Result<Vec<Release>> {
+            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 tokio::task::yield_now().await;
                 // Newest-but-incompatible, current, older, and the compatible winner — out of
                 // order. The orchestrator must drop current/older and pick the newest compatible
@@ -914,10 +909,7 @@ mod tests {
                 async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                async fn get_latest_releases(
-                    &self,
-                    _current: &str,
-                ) -> crate::errors::Result<Vec<Release>> {
+                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     tokio::task::yield_now().await;
                     Ok(vec![
                         Release::builder().version("1.0.0").build()?,
@@ -1040,10 +1032,7 @@ mod tests {
                 async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                async fn get_latest_releases(
-                    &self,
-                    _current: &str,
-                ) -> crate::errors::Result<Vec<Release>> {
+                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Ok(vec![Release::builder().version("1.0.0").build()?])
                 }
                 async fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
@@ -1079,10 +1068,7 @@ mod tests {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Err(crate::errors::Error::Release("boom".into()))
                 }
-                fn get_latest_releases(
-                    &self,
-                    _current: &str,
-                ) -> crate::errors::Result<Vec<Release>> {
+                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Err(crate::errors::Error::HttpStatus {
                         status: 503,
                         url: "u".into(),
@@ -1099,7 +1085,7 @@ mod tests {
                 Err(crate::errors::Error::Release(_))
             ));
             assert!(matches!(
-                AsyncReleaseSource::get_latest_releases(&blk, "1.0.0").await,
+                AsyncReleaseSource::get_latest_releases(&blk).await,
                 Err(crate::errors::Error::HttpStatus { .. })
             ));
             assert!(matches!(
@@ -1119,7 +1105,7 @@ mod tests {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                fn get_latest_releases(&self, _: &str) -> crate::errors::Result<Vec<Release>> {
+                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Ok(vec![])
                 }
                 fn get_release_version(&self, v: &str) -> crate::errors::Result<Release> {
@@ -1188,6 +1174,126 @@ mod tests {
                     .is_update_available()
                     .unwrap(),
                 "2.0.0 not newer than 2.0.0 => no update"
+            );
+        }
+
+        // --- WS2 invariant 6: spawn_blocking finish tail driven to a real install ---------------
+        //
+        // No other async test drives the full async pipeline (fetch -> download -> spawn_blocking
+        // verify/extract/install) to a successful install. This one does: a loopback HTTP server
+        // serves a real tar.gz; the async source returns a release whose asset points at it; the
+        // updater downloads it asynchronously and the blocking finish tail (run off-executor on
+        // `tokio::task::spawn_blocking`) extracts `app` and installs it to a temp path. A successful
+        // `ReleaseStatus::Updated` plus the installed file on disk proves the spawn_blocking tail
+        // ran and completed.
+        #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+        #[tokio::test]
+        async fn update_extended_async_downloads_and_installs_through_the_spawn_blocking_tail() {
+            use std::io::{Read as _, Write as _};
+            use std::net::TcpListener;
+
+            // Build a tiny tar.gz in memory containing a single file named `app` (the default
+            // `bin_path_in_archive` on a unix target, EXE_SUFFIX empty).
+            let archive_bytes: Vec<u8> = {
+                let mut tar = tar::Builder::new(Vec::new());
+                let contents = b"installed-binary-payload";
+                let mut header = tar::Header::new_gnu();
+                header.set_path("app").unwrap();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                tar.append(&header, &contents[..]).unwrap();
+                let tar_bytes = tar.into_inner().unwrap();
+                let mut enc =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                enc.write_all(&tar_bytes).unwrap();
+                enc.finish().unwrap()
+            };
+
+            // Serve the archive once over loopback.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let body = archive_bytes.clone();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
+                }
+            });
+
+            // A source returning a single newer release whose asset points at the loopback archive.
+            struct ServingSource {
+                url: String,
+            }
+            impl AsyncReleaseSource for ServingSource {
+                async fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                    self.get_release_version("9.9.9").await
+                }
+                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                    tokio::task::yield_now().await;
+                    Ok(vec![
+                        Release::builder()
+                            .version("2.0.0")
+                            .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                            .build()?,
+                    ])
+                }
+                async fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+                    tokio::task::yield_now().await;
+                    Release::builder()
+                        .version(ver)
+                        .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                        .build()
+                }
+            }
+
+            let install_dir = tempfile::tempdir().unwrap();
+            let install_path = install_dir.path().join("installed-app");
+
+            let upd = AsyncUpdate::configure()
+                .source(ServingSource {
+                    url: format!("{base}/app.tar.gz"),
+                })
+                .bin_name("app")
+                .target("x86_64-unknown-linux-gnu")
+                .current_version("1.0.0")
+                .bin_install_path(&install_path)
+                .no_confirm(true)
+                .show_output(false)
+                // Pick the single served asset directly, sidestepping target-name matching.
+                .asset_matcher(|assets| assets.first().cloned())
+                .build_async()
+                .unwrap();
+
+            let status = upd.update_extended_async().await.expect(
+                "the async update must download and install through the spawn_blocking tail",
+            );
+            assert!(
+                status.is_updated(),
+                "a newer release served as a real tar.gz must install -> Updated, got {:?}",
+                status
+            );
+            assert_eq!(
+                status.updated_release().map(|r| r.version.as_str()),
+                Some("2.0.0")
+            );
+            // The blocking finish tail actually wrote the extracted binary to the install path.
+            assert!(
+                install_path.exists(),
+                "the spawn_blocking finish tail must have installed the binary to {:?}",
+                install_path
+            );
+            assert_eq!(
+                std::fs::read(&install_path).unwrap(),
+                b"installed-binary-payload",
+                "the installed file must be the binary extracted from the archive"
             );
         }
     }

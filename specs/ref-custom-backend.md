@@ -21,23 +21,23 @@ Source files: `src/update.rs` (trait definitions), `src/backends/custom.rs` (ada
 `ReleaseSource` (`update.rs:325-340`) is synchronous and has three methods, all returning the
 public `Result` type:
 
-- `get_latest_release(&self) -> Result<Release>` (`update.rs:327`)
-- `get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>` (`update.rs:336`)
-- `get_release_version(&self, ver: &str) -> Result<Release>` (`update.rs:339`)
+- `get_latest_release(&self) -> Result<Release>`
+- `get_latest_releases(&self) -> Result<Vec<Release>>`
+- `get_release_version(&self, ver: &str) -> Result<Release>`
 
-The trait requires `Send + Sync` (`update.rs:325`). It is documented as **not sealed**
-(`update.rs:303`), so downstream crates may implement it. `current_version` is advisory only:
-the updater discards releases not strictly newer than current, prefers the newest
-semver-compatible one, and otherwise offers the newest available, so the source need not
-pre-filter (`update.rs:329-335`). Releases should be returned newest-first.
+The trait requires `Send + Sync`. It is documented as **not sealed**, so downstream crates may
+implement it. `get_latest_releases` takes no `current_version` (the dead advisory parameter was
+dropped): the updater re-filters downstream, discarding releases not strictly newer than current,
+preferring the newest semver-compatible one, and otherwise offering the newest available, so the
+source need not pre-filter. Releases should be returned newest-first.
 
 `AsyncReleaseSource` (`update.rs:372-392`, gated on `feature = "async"`) is the async analog.
 It also requires `Send + Sync` and has the same three methods, but each returns a
 return-position `impl Trait` future rather than a value:
 
-- `get_latest_release(&self) -> impl Future<Output = Result<Release>> + Send + '_` (`update.rs:378`)
-- `get_latest_releases<'a>(&'a self, current_version: &'a str) -> impl Future<Output = Result<Vec<Release>>> + Send + 'a` (`update.rs:382-385`)
-- `get_release_version<'a>(&'a self, ver: &'a str) -> impl Future<Output = Result<Release>> + Send + 'a` (`update.rs:388-391`)
+- `get_latest_release(&self) -> impl Future<Output = Result<Release>> + Send + '_`
+- `get_latest_releases(&self) -> impl Future<Output = Result<Vec<Release>>> + Send + '_`
+- `get_release_version<'a>(&'a self, ver: &'a str) -> impl Future<Output = Result<Release>> + Send + 'a`
 
 The `+ Send` bound on each returned future is load-bearing. Because the trait is consumed
 through generics (the async updater is generic over its source, never `dyn AsyncReleaseSource`),
@@ -94,9 +94,10 @@ compare -> select-asset -> download -> verify -> extract -> install flow over th
 releases; the implementor never touches the low-level `Download`/`Extract`/`Move` primitives
 (`custom.rs:5-10`).
 
-`AsyncUpdate<S>` implements the internal `AsyncFetch` trait (`custom.rs:335-349`) the same way,
-plus `sealed::Sealed`, the config accessors, and `impl_async_update_methods!()`
-(`custom.rs:325-332`), so the async orchestrator drives the same flow asynchronously.
+`AsyncUpdate<S>` implements the public sealed `AsyncReleaseUpdate` trait the same way, plus
+`sealed::Sealed` and the config accessors, so the async orchestrator drives the same flow
+asynchronously. The `*_async` fetch verbs delegate to the source; `update_async` /
+`update_extended_async` are `AsyncReleaseUpdate` default methods.
 
 Transport caveats: the shared `.timeout()`, `.request_header()`, and injected-client setters
 configure only the crate-controlled **download**; `.retries()` has no effect here because the
@@ -154,6 +155,6 @@ In `src/backends/custom.rs` (`custom.rs:403-1191`):
 ## Related
 
 - `custom-backends.md` - narrative design doc for this backend.
-- `async-api.md` - the async API and `AsyncFetch`/orchestrator integration.
+- `async-api.md` - the async API and `AsyncReleaseUpdate`/orchestrator integration.
 - `custom-asset-matching.md` - asset selection over a source's releases.
 - `choose-latest-release-sort.md` - newest-compatible selection over unsorted source lists.

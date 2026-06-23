@@ -8,9 +8,9 @@ Canonical reference for the GitLab release backend in `src/backends/gitlab.rs`. 
 documents the `ReleaseList` listing builder, the `Update` / async update builders, the
 GitLab API v4 route shapes, authentication, pagination, ordering, the JSON-to-model
 mapping, and error mapping. Every claim is verified against `gitlab.rs`. Shared
-pagination/transport helpers (`send`, `collect_paginated`, `first_page_url`, `next_link`)
-live in `src/backends/mod.rs`; common builder/config plumbing lives in
-`src/backends/common.rs`.
+pagination/transport helpers (`send`, the sans-io `PageRequest`/`Page` core and its
+`run_paginated` / `run_paginated_async` drivers, `first_page_url`, `next_link`) live in
+`src/backends/mod.rs`; common builder/config plumbing lives in `src/backends/common.rs`.
 
 ## Behavior
 
@@ -94,25 +94,28 @@ download path uses the Bearer scheme rather than the trait default `token` schem
 
 ### Pagination and ordering
 
-Listing paths (`ReleaseList::fetch`, `Update::fetch_newer_releases`, and the async
-`get_latest_releases_async`) go through `fetch_all_releases` / `fetch_all_releases_async`
-(`gitlab.rs:390`, `gitlab.rs:412`). Each starts at `first_page_url(base_url)` (which
-appends `?per_page=100` when the URL has no query string) and follows GitLab's
-`Link: rel="next"` header via `collect_paginated` / `collect_paginated_async` and
-`next_link` (`gitlab.rs:395-406`, `gitlab.rs:419-437`). Pagination is bounded by
-`MAX_RELEASE_PAGES` (100) in the shared helper; a still-advertised next page past that bound
-logs a warning and stops.
+Listing paths (`ReleaseList::fetch`, `get_latest_releases`, and the async
+`get_latest_releases_async`) build a transport-free `PageRequest<Release>` via
+`releases_plan(base, auth, stop_at)` and drive it with the sans-io `run_paginated` /
+`run_paginated_async` drivers (`backends/mod.rs`). The plan starts at `first_page_url(base_url)`
+(which appends `?per_page=100` when the URL has no query string), parses each page with
+`Release::from_release_gitlab`, and follows GitLab's `Link: rel="next"` (`next_link`).
+`get_latest_releases` passes `stop_at = Some(current_version)` and the parser sets `Page::stop` on
+the first release not strictly newer than it (early-stop, relying on newest-first order), while
+`ReleaseList::fetch` passes `stop_at = None` and walks all pages. Pagination is bounded by
+`MAX_RELEASE_PAGES` (100) in the driver; a still-advertised next page past that bound logs a
+warning and stops.
 
-Single-newest ordering: `fetch_latest_release` (`gitlab.rs:311`) and
-`get_latest_release_async` (`gitlab.rs:441`) issue one un-paginated request and take
-`releases[0]`. The comment at `gitlab.rs:325-327` records that, unlike GitHub, GitLab has
-no dedicated `/releases/latest` endpoint, so "newest" relies on the list endpoint's default
-descending (newest-first) order. An empty array or a non-array payload yields
-`Error::Release` ("no releases found") (`gitlab.rs:319-324`, `gitlab.rs:452-457`).
+Single-newest ordering: `get_latest_release` / `get_latest_release_async` use `newest_plan`, which
+fetches just the first page and takes `releases[0]`. Unlike GitHub, GitLab has no dedicated
+`/releases/latest` endpoint, so "newest" relies on the list endpoint's default descending
+(newest-first) order. An empty array or a non-array payload yields `Error::Release` ("no releases
+found").
 
-Newer-than filtering happens *after* pagination: `fetch_newer_releases` and
-`get_latest_releases_async` keep releases where `bump_is_greater(current_version, version)`
-is true, preserving order (`gitlab.rs:340-344`, `gitlab.rs:471-475`).
+Newer-than filtering is folded into the plan: with `stop_at = Some(current_version)`, the parser
+keeps releases where `bump_is_greater(current_version, version)` is true and stops at the first that
+is not, preserving order. The downstream `choose_latest_release` re-sort still selects the same
+release, so early-stop and a full walk pick identically.
 
 ### JSON to model
 
@@ -146,9 +149,10 @@ deferred bad `request_header`, unparseable auth token) surface as `Error::Config
 - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, the common setters,
   `build() -> Result<Box<dyn ReleaseUpdate>>`, and (feature `async`)
   `build_async() -> Result<Update>`.
-- `Update` is `#[non_exhaustive]` (`gitlab.rs:283`), implements `ReleaseUpdate`
-  (`get_latest_release`, `get_latest_releases`, `get_release_version`) and, under `async`,
-  `AsyncFetch` plus the inherent `impl_async_update_methods!` methods.
+- `Update` is `#[non_exhaustive]`, implements `ReleaseUpdate` (`get_latest_release`,
+  `get_latest_releases`, `get_release_version`) and, under `async`, the public sealed
+  `AsyncReleaseUpdate` (the `*_async` fetch verbs plus the default `update_async` /
+  `update_extended_async`).
 - `url` carries no `#[doc(alias)]`; all builder-setter doc-aliases were dropped.
 
 ## Invariants and regression checklist
@@ -187,4 +191,4 @@ pagination; empty-array and non-array error paths; missing `tag_name` and missin
 - `transport-control.md` - per-request headers, timeout, retries, client override.
 - `error-network-vs-http-semantics.md` - non-2xx -> structured status variant vs parse -> `Error::Release`.
 - `ref-release-model.md` - the `Release` / `ReleaseAsset` model the JSON maps onto.
-- `async-api.md` - `build_async` and the `AsyncFetch` surface.
+- `async-api.md` - `build_async` and the public `AsyncReleaseUpdate` surface.

@@ -52,16 +52,15 @@ it in `api_base()` so the sync and async paths cannot drift (`github.rs:290-294`
 The `url(...)` doc comment specifies no trailing slash, e.g. `https://api.github.com`
 or `https://github.mycorp.com/api/v3` (`github.rs:90-92`, `217-219`).
 
-Routes built (all GET):
-- List releases: `{base}/repos/{owner}/{name}/releases` (`github.rs:166`, `320`,
-  `449`). Used by `ReleaseList::fetch`, `Update::fetch_newer_releases`, and
-  `get_latest_releases_async`.
-- Latest release: `{base}/repos/{owner}/{name}/releases/latest` (`github.rs:302`,
-  `430`). Used by `fetch_latest_release` / `get_latest_release_async`. This route
-  returns a single release object (not an array).
+Routes built (all GET), each via a shared URL helper (`releases_url`, `latest_url`,
+`tag_url`) so the sync and async paths cannot drift:
+- List releases: `{base}/repos/{owner}/{name}/releases`. Used by `ReleaseList::fetch`,
+  `get_latest_releases`, and `get_latest_releases_async`.
+- Latest release: `{base}/repos/{owner}/{name}/releases/latest`. Used by
+  `get_latest_release` / `get_latest_release_async`. This route returns a single release
+  object (not an array).
 - Fetch by tag: `{base}/repos/{owner}/{name}/releases/tags/{tag}` where `tag` is
-  `urlencoding::encode(ver)` (`github.rs:352-357`, `470-475`). Used by
-  `get_release_version` and `get_release_version_async`.
+  `urlencoding::encode(ver)`. Used by `get_release_version` and `get_release_version_async`.
 
 The list routes go through `first_page_url` (`common.rs:58`), which appends
 `?per_page=100` only when the base URL carries no `?` query.
@@ -82,18 +81,18 @@ download path so the same User-Agent and token scheme are used there too
 
 ### Pagination
 
-List requests follow GitHub's `Link: rel="next"` pagination via the shared
-helpers. `fetch_all_releases` (sync, `github.rs:376-393`) and
-`fetch_all_releases_async` (`github.rs:398-423`) start at `first_page_url(base)`
-and call `collect_paginated` / `collect_paginated_async` (`common.rs:82`, `218`),
-which accumulate items page by page until no `rel="next"` link is returned.
-`next_link` (`common.rs:67`) extracts the `rel="next"` URL from the response's
-`Link` header(s). Pagination is bounded by `MAX_RELEASE_PAGES = 100`
-(`common.rs:53`); when more pages are still advertised at the cap, a warning is
-logged and the walk stops with what was collected. Per-page size defaults to 100
-(`per_page=100`), but a base/next URL that already has query params is used
-verbatim, so an existing `page`/`per_page` is not clobbered (`common.rs:58-64`).
-The single-object routes (`/latest`, `/tags/{tag}`) are not paginated.
+The listing is described transport-free as a `PageRequest<Release>` via `releases_plan(base,
+auth, stop_at)`: its parser maps the JSON array with `Release::from_release`, follows GitHub's
+`Link: rel="next"` (`next_link`) into the next `PageRequest`, and sets `Page::stop` on the first
+release not strictly newer than `stop_at`. The sync `run_paginated` and async
+`run_paginated_async` drivers (`backends/mod.rs`) walk the chain, reusing the shared
+`send`/`send_async` + `retry` machinery. Pagination is bounded by `MAX_RELEASE_PAGES = 100`; when
+more pages are still advertised at the cap, a warning is logged and the walk stops with what was
+collected. Per-page size defaults to 100 (`per_page=100`), but a base/next URL that already has
+query params is used verbatim, so an existing `page`/`per_page` is not clobbered. `get_latest_releases`
+passes `stop_at = Some(current_version)` (early-stop on the first not-newer release), while
+`ReleaseList::fetch` passes `stop_at = None` and walks all pages. The single-object routes
+(`/latest`, `/tags/{tag}`) use `single_plan`, whose parser yields `next: None`.
 
 ### JSON to model
 
@@ -143,9 +142,9 @@ through the shared `send` / `send_async` helpers (`common.rs:173`, `194`).
 - `Update::configure`; `UpdateBuilder::new`, `repo_owner`, `repo_name`, `url`, the
   `impl_common_builder_setters!` surface, `build`, `build_async` (feature `async`).
 - `Update` implements `ReleaseUpdate` (`get_latest_release`, `get_latest_releases`,
-  `get_release_version`) and, under feature `async`, `AsyncFetch`
-  (`get_latest_release_async`, `get_latest_releases_async`,
-  `get_release_version_async`).
+  `get_release_version`) and, under feature `async`, the public sealed `AsyncReleaseUpdate`
+  (`get_latest_release_async`, `get_latest_releases_async`, `get_release_version_async`, plus the
+  default `update_async` / `update_extended_async`).
 
 The concrete `Update` (`github.rs:275`) carries `#[non_exhaustive]`. The `url`
 setters carry no `#[doc(alias)]` (all builder-setter doc-aliases were dropped).

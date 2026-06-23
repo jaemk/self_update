@@ -502,65 +502,6 @@ macro_rules! impl_common_builder_setters {
     };
 }
 
-/// Emit the inherent async update methods shared by every backend's `Update` (under the `async`
-/// feature). Invoked inside a `#[cfg(feature = "async")] impl Update { … }` block. The `Update`
-/// type must implement both `UpdateConfig` and the internal `AsyncFetch`.
-#[cfg(feature = "async")]
-macro_rules! impl_async_update_methods {
-    () => {
-        /// Async sibling of `update`: display release info and update the current binary to the
-        /// latest release, returning the resulting [`VersionStatus`](crate::VersionStatus).
-        ///
-        /// Requires a `tokio` runtime (provided by the caller). The release listing and the
-        /// download are async; the extract/replace step is synchronous and runs inline, briefly
-        /// blocking the executor — keep that in mind on a small single-threaded runtime.
-        pub async fn update_async(&self) -> crate::errors::Result<crate::VersionStatus> {
-            let current_version = crate::update::UpdateConfig::current_version(self).to_string();
-            self.update_extended_async()
-                .await
-                .map(|s| s.into_version_status(current_version))
-        }
-
-        /// Async sibling of `update_extended`: same as [`update_async`](Self::update_async) but
-        /// returns [`ReleaseStatus`](crate::update::ReleaseStatus).
-        pub async fn update_extended_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::ReleaseStatus> {
-            crate::update::update_extended_async(self).await
-        }
-
-        /// Async sibling of `get_latest_release`: fetch the single newest release from the
-        /// backend, as a one-element [`Releases`](crate::update::Releases). Call
-        /// `.is_update_available()` / `.latest()` on the result for a lightweight pre-check
-        /// without downloading or installing anything.
-        pub async fn get_latest_release_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::Releases> {
-            crate::update::AsyncFetch::get_latest_release_async(self).await
-        }
-
-        /// Async sibling of `get_latest_releases`: fetch the candidate releases from the backend
-        /// as a [`Releases`](crate::update::Releases) (newest-first). Call
-        /// `.is_update_available()` on the result for a lightweight "is there anything to do?"
-        /// check without downloading or installing anything.
-        pub async fn get_latest_releases_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::Releases> {
-            crate::update::AsyncFetch::get_latest_releases_async(self).await
-        }
-
-        /// Async sibling of `get_release_version`: fetch the [`Release`](crate::update::Release)
-        /// matching the given tag/version from the backend. The tag is used verbatim (including any
-        /// leading `v`); a missing tag is reported as an error.
-        pub async fn get_release_version_async(
-            &self,
-            ver: &str,
-        ) -> crate::errors::Result<crate::update::Release> {
-            crate::update::AsyncFetch::get_release_version_async(self, ver).await
-        }
-    };
-}
-
 /// Helper to `print!` and immediately `flush` `stdout`
 macro_rules! print_flush {
     ($literal:expr) => {

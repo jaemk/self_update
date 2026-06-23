@@ -298,7 +298,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -321,14 +321,18 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Async
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
-returns a concrete `Update` with async (`*_async`) verbs — `update_async()`,
-`update_extended_async()`, `get_latest_release_async()`, `get_latest_releases_async()`, and
-`get_release_version_async()` — so a `tokio` application can update
-without wrapping the blocking calls in `spawn_blocking`. The blocking API is unchanged; the async
-path is purely additive. It is **tokio-only and reqwest-only** (ureq has no async story, so `async`
-is incompatible with `ureq`). Network IO becomes async; the extract/replace step stays synchronous.
+returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
+(`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
+`get_latest_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
+update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
+scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
+**tokio-only and reqwest-only** (ureq has no async story, so `async` is incompatible with `ureq`).
+Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
+does not block the executor.
 
 ```rust
+# #[cfg(feature = "async")]
+use self_update::AsyncReleaseUpdate;
 # #[cfg(feature = "async")]
 async fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
@@ -436,7 +440,7 @@ pub use http;
 pub use reqwest;
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub use update::AsyncReleaseSource;
+pub use update::{AsyncReleaseSource, AsyncReleaseUpdate};
 pub use update::{
     Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseStatus, ReleaseUpdate, Releases,
     UpdateConfig,

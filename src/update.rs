@@ -356,9 +356,8 @@ pub trait ReleaseSource: Send + Sync {
     /// newest semver-compatible one, and otherwise offers the newest available (flagged
     /// "not compatible"). You therefore do **not** need to filter out the current or older versions
     /// (they are ignored) — but returning them is harmless, and returning the list newest-first
-    /// ensures the right release is chosen. `current_version` is passed only so you may bound the
-    /// query if it helps (e.g. stop paginating once you pass it).
-    fn get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>;
+    /// ensures the right release is chosen.
+    fn get_latest_releases(&self) -> Result<Vec<Release>>;
 
     /// Fetch the release for an explicit tag/version.
     fn get_release_version(&self, ver: &str) -> Result<Release>;
@@ -407,10 +406,9 @@ pub trait AsyncReleaseSource: Send + Sync {
 
     /// Fetch the candidate releases, **newest first**. See
     /// [`ReleaseSource::get_latest_releases`] for how the updater treats the returned list.
-    fn get_latest_releases<'a>(
-        &'a self,
-        current_version: &'a str,
-    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + 'a;
+    fn get_latest_releases(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + '_;
 
     /// Fetch the release for an explicit tag/version.
     fn get_release_version<'a>(
@@ -419,22 +417,71 @@ pub trait AsyncReleaseSource: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a;
 }
 
-/// Internal async counterpart of the three backend fetch methods, implemented by every backend's
-/// `Update` (and the custom `AsyncUpdate`) when the `async` feature is on. It is only ever used
-/// through generics (the async orchestrator is generic over `UpdateConfig + AsyncFetch`), never as
-/// a trait object, so `async fn` in the trait needs no boxing.
+/// The async counterpart of [`ReleaseUpdate`], implemented by every backend's `Update` (and the
+/// custom `AsyncUpdate`) when the `async` feature is on.
+///
+/// This trait is **sealed** (via its [`UpdateConfig`] supertrait, exactly like [`ReleaseUpdate`]):
+/// it is implemented only by this crate's backend `Update` types and the custom async updater, and
+/// cannot be implemented for types outside the crate. You consume it as the type each backend's
+/// `build_async()` returns — call `update_async()` / `update_extended_async()` /
+/// `get_latest_release_async()` on it — but you do not implement it yourself.
+///
+/// Its methods are return-position `impl Trait` in trait (RPITIT), so the futures are unboxed and
+/// the `Send` bound is enforced at the impl site. As a consequence this trait is **not**
+/// object-safe — that is expected and matches [`AsyncReleaseSource`]: it is nameable and usable as
+/// a generic bound, but never as a `dyn AsyncReleaseUpdate`.
+///
+/// The shared accessor methods live on the [`UpdateConfig`] supertrait; bring it into scope
+/// (`use self_update::UpdateConfig;`) only to call them from generic code bounded
+/// `U: AsyncReleaseUpdate`.
 #[cfg(feature = "async")]
-pub(crate) trait AsyncFetch {
+pub trait AsyncReleaseUpdate: UpdateConfig {
+    /// Async sibling of [`ReleaseUpdate::get_latest_release`]: fetch the single newest release as a
+    /// one-element [`Releases`].
     fn get_latest_release_async(
         &self,
     ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
+
+    /// Async sibling of [`ReleaseUpdate::get_latest_releases`]: fetch the candidate releases as a
+    /// [`Releases`] (newest-first, filtered to strictly-newer for the built-in backends).
     fn get_latest_releases_async(
         &self,
     ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
+
+    /// Async sibling of [`ReleaseUpdate::get_release_version`]: fetch the release matching `ver`.
     fn get_release_version_async<'a>(
         &'a self,
         ver: &'a str,
     ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a;
+
+    /// Async sibling of [`ReleaseUpdate::update`]: display release info and update the current
+    /// binary to the latest release, returning a [`VersionStatus`].
+    ///
+    /// Requires a `tokio` runtime (provided by the caller). The release listing and the download
+    /// are async; the extract/replace tail runs on [`tokio::task::spawn_blocking`] so it does not
+    /// block the executor.
+    fn update_async(&self) -> impl std::future::Future<Output = Result<VersionStatus>> + Send + '_
+    where
+        Self: Sized + Sync,
+    {
+        async move {
+            let current_version = self.current_version().to_string();
+            self.update_extended_async()
+                .await
+                .map(|s| s.into_version_status(current_version))
+        }
+    }
+
+    /// Async sibling of [`ReleaseUpdate::update_extended`]: same as
+    /// [`update_async`](Self::update_async) but returns a [`ReleaseStatus`].
+    fn update_extended_async(
+        &self,
+    ) -> impl std::future::Future<Output = Result<ReleaseStatus>> + Send + '_
+    where
+        Self: Sized + Sync,
+    {
+        update_extended_async(self)
+    }
 }
 
 /// Implementation detail used to seal [`ReleaseUpdate`].
@@ -645,7 +692,7 @@ pub trait ReleaseUpdate: UpdateConfig {
         println(show_output, "Downloading...");
         build_download(self, &target_asset)?.download_to(&mut tmp_archive)?;
 
-        finish_update(self, release, &tmp_archive_dir, &tmp_archive_path)
+        finish_update(self, release, tmp_archive_dir, &tmp_archive_path)
     }
 }
 
@@ -744,6 +791,22 @@ fn choose_latest_release(
     Ok(Some(release))
 }
 
+/// Crate-internal test hooks exposing private update-pipeline helpers to backend unit tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Expose [`choose_latest_release`] to backend tests (it is otherwise private to this module),
+    /// so selection-parity tests can compare what the orchestrator would pick from two release
+    /// lists. `show_output` is forced off.
+    pub(crate) fn choose_latest_release_for_test(
+        releases: Vec<Release>,
+        current_version: &str,
+    ) -> Result<Option<Release>> {
+        choose_latest_release(releases, current_version, false)
+    }
+}
+
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
 /// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
 fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Result<ReleaseAsset> {
@@ -804,28 +867,77 @@ fn build_download<U: UpdateConfig + ?Sized>(
     Ok(download)
 }
 
+/// The owned, `'static` fields the blocking finish tail needs, copied out of the `&U` accessors so
+/// the tail can run inside [`tokio::task::spawn_blocking`] without borrowing the updater.
+struct FinishCtx {
+    release: Release,
+    bin_install_path: std::path::PathBuf,
+    target: String,
+    bin_name: String,
+    bin_path_in_archive: String,
+    show_output: bool,
+    verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
+    #[cfg(feature = "checksums")]
+    verify_checksum: Option<crate::Checksum>,
+    #[cfg(feature = "signatures")]
+    verify_keys: Vec<crate::VerifyingKey>,
+}
+
+impl FinishCtx {
+    /// Capture the owned fields the finish tail needs from the updater and the resolved `release`.
+    fn capture<U: UpdateConfig + ?Sized>(u: &U, release: Release) -> Self {
+        Self {
+            release,
+            bin_install_path: u.bin_install_path().to_path_buf(),
+            target: u.target().to_string(),
+            bin_name: u.bin_name().to_string(),
+            bin_path_in_archive: u.bin_path_in_archive().to_string(),
+            show_output: u.show_output(),
+            verify_callback: u.verify_callback(),
+            #[cfg(feature = "checksums")]
+            verify_checksum: u.verify_checksum().cloned(),
+            #[cfg(feature = "signatures")]
+            verify_keys: u.verify_keys().to_vec(),
+        }
+    }
+}
+
 /// Verify the downloaded archive (checksum/signature), extract the binary, and install it. This is
-/// the sync tail shared verbatim by the sync and async update flows. Consumes `release` and returns
-/// the resulting status.
+/// the sync tail shared verbatim by the sync and async update flows. Builds a [`FinishCtx`] from
+/// the updater and delegates to [`finish_update_owned`] without spawning (the sync path runs it
+/// inline). Consumes `release` and returns the resulting status.
 fn finish_update<U: UpdateConfig + ?Sized>(
     u: &U,
     release: Release,
-    tmp_archive_dir: &tempfile::TempDir,
+    tmp_archive_dir: tempfile::TempDir,
     tmp_archive_path: &std::path::Path,
 ) -> Result<ReleaseStatus> {
-    let show_output = u.show_output();
+    let ctx = FinishCtx::capture(u, release);
+    finish_update_owned(ctx, tmp_archive_dir, tmp_archive_path)
+}
+
+/// The blocking finish tail over **owned** fields: verify (checksum/signature), extract, install.
+/// Takes the [`tempfile::TempDir`] by value (moved in, dropped at the end) and the owned `ctx`, so
+/// it can be run directly inside [`tokio::task::spawn_blocking`] on the async path. Returns the
+/// resulting status.
+fn finish_update_owned(
+    ctx: FinishCtx,
+    tmp_archive_dir: tempfile::TempDir,
+    tmp_archive_path: &std::path::Path,
+) -> Result<ReleaseStatus> {
+    let show_output = ctx.show_output;
 
     #[cfg(feature = "checksums")]
-    if let Some(checksum) = u.verify_checksum() {
+    if let Some(checksum) = ctx.verify_checksum.as_ref() {
         checksum.verify(tmp_archive_path)?;
     }
 
     #[cfg(feature = "signatures")]
-    verify_signature(tmp_archive_path, u.verify_keys())?;
+    verify_signature(tmp_archive_path, &ctx.verify_keys)?;
 
     print_flush(show_output, "Extracting archive... ")?;
 
-    let bin_path_str = Cow::Borrowed(u.bin_path_in_archive());
+    let bin_path_str = Cow::Borrowed(ctx.bin_path_in_archive.as_str());
 
     // Substitute the `var` variable in a string with the given `val` value.
     // Variable format: `{{ var }}`
@@ -834,9 +946,9 @@ fn finish_update<U: UpdateConfig + ?Sized>(
         Regex::new(&format).unwrap().replace_all(str, val)
     }
 
-    let bin_path_str = substitute(&bin_path_str, "version", &release.version);
-    let bin_path_str = substitute(&bin_path_str, "target", u.target());
-    let bin_path_str = substitute(&bin_path_str, "bin", u.bin_name());
+    let bin_path_str = substitute(&bin_path_str, "version", &ctx.release.version);
+    let bin_path_str = substitute(&bin_path_str, "target", &ctx.target);
+    let bin_path_str = substitute(&bin_path_str, "bin", &ctx.bin_name);
     let bin_path_str = bin_path_str.as_ref();
 
     Extract::from_source(tmp_archive_path).extract_file(tmp_archive_dir.path(), bin_path_str)?;
@@ -848,12 +960,12 @@ fn finish_update<U: UpdateConfig + ?Sized>(
 
     install_binary(
         &new_exe,
-        u.bin_install_path(),
-        u.verify_callback().as_deref(),
+        &ctx.bin_install_path,
+        ctx.verify_callback.as_deref(),
     )?;
     println(show_output, "Done");
 
-    Ok(ReleaseStatus::Updated(release))
+    Ok(ReleaseStatus::Updated(ctx.release))
 }
 
 /// Async sibling of [`ReleaseUpdate::update_extended`]: identical flow with the release listing and
@@ -862,11 +974,10 @@ fn finish_update<U: UpdateConfig + ?Sized>(
 #[cfg(feature = "async")]
 pub(crate) async fn update_extended_async<U>(u: &U) -> Result<ReleaseStatus>
 where
-    // `AsyncFetch` is never used through a trait object (the async API hands out a concrete
-    // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above. Only the
-    // accessors (`UpdateConfig`) and the async fetches are used, never the sync fetches, so the
-    // bound is narrower than `ReleaseUpdate`.
-    U: UpdateConfig + AsyncFetch,
+    // `AsyncReleaseUpdate` is never used through a trait object (the async API hands out a concrete
+    // `Update`), so `U` is always `Sized` here — unlike the shared sync helpers above. The bound is
+    // the async sealed trait; its `UpdateConfig` supertrait supplies the accessors.
+    U: AsyncReleaseUpdate + Sync,
 {
     let current_version = u.current_version();
     let show_output = u.show_output();
@@ -898,7 +1009,15 @@ where
         .download_to_async(&mut tmp_archive)
         .await?;
 
-    finish_update(u, release, &tmp_archive_dir, &tmp_archive_path)
+    // Run the blocking finish tail (verify/extract/install) off the async executor. Copy out the
+    // owned fields, MOVE the TempDir into the closure (it is dropped there), and `.await` the
+    // join handle, mapping a JoinError to an update error.
+    let ctx = FinishCtx::capture(u, release);
+    tokio::task::spawn_blocking(move || {
+        finish_update_owned(ctx, tmp_archive_dir, &tmp_archive_path)
+    })
+    .await
+    .map_err(|e| Error::Update(format!("finish-update task failed: {e}")))?
 }
 
 /// Run the post-update verification hook (if any) on the freshly-extracted binary, then install
@@ -1364,11 +1483,14 @@ mod tests {
 
     // --- F2: public async `get_release_version_async` ----------------------------------------
     //
-    // The macro-generated inherent `get_release_version_async` is the *public* async sibling of the
-    // sync `get_release_version`. These tests deliberately do NOT bring the `pub(crate)`
-    // `AsyncFetch` trait into scope, so `upd.get_release_version_async(..)` can only resolve to the
-    // inherent method emitted by `impl_async_update_methods!`. If that method were missing from the
-    // macro, these tests would fail to compile — pinning sync/async parity on the public surface.
+    // `get_release_version_async` is the *public* async sibling of the sync `get_release_version`.
+    // It is now a method on the public sealed `AsyncReleaseUpdate` trait (was previously an inherent
+    // macro-generated method backed by the `pub(crate)` `AsyncFetch` trait), so the trait must be
+    // brought into scope to call the verb. If the verb were missing from the trait, these tests
+    // would fail to compile — pinning sync/async parity on the public surface.
+
+    #[cfg(feature = "async")]
+    use crate::update::AsyncReleaseUpdate;
 
     #[cfg(feature = "async")]
     struct TaggedAsyncSource;
@@ -1378,7 +1500,7 @@ mod tests {
         async fn get_latest_release(&self) -> Result<Release> {
             Release::builder().version("2.0.0").build()
         }
-        async fn get_latest_releases(&self, _current_version: &str) -> Result<Vec<Release>> {
+        async fn get_latest_releases(&self) -> Result<Vec<Release>> {
             Ok(vec![Release::builder().version("2.0.0").build()?])
         }
         async fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -1400,10 +1522,43 @@ mod tests {
             .current_version("1.0.0")
             .build_async()
             .unwrap();
-        // Resolves to the inherent macro-generated method (AsyncFetch is intentionally not in
-        // scope), proving the public async-by-tag surface.
+        // Resolves to the `AsyncReleaseUpdate::get_release_version_async` trait method (brought into
+        // scope above), proving the public async-by-tag surface.
         let rel = upd.get_release_version_async("1.5.0").await.unwrap();
         assert_eq!(rel.version, "1.5.0");
+    }
+
+    // --- WS2 5f: `AsyncReleaseUpdate` is usable as a generic bound -----------------------------
+    //
+    // A generic fn bounded on `AsyncReleaseUpdate` must compile and drive the verbs, proving the
+    // trait is nameable/bound-able (RPITIT => not object-safe, but usable as a bound, like
+    // `AsyncReleaseSource`). If the trait stopped being a public sealed bound, this would not
+    // compile.
+    #[cfg(feature = "async")]
+    async fn fetch_latest_via_bound<U: AsyncReleaseUpdate + Sync>(u: &U) -> Result<String> {
+        let releases = u.get_latest_release_async().await?;
+        Ok(releases
+            .latest()
+            .map(|r| r.version.clone())
+            .unwrap_or_default())
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_release_update_is_usable_as_a_generic_bound() {
+        let upd = crate::backends::custom::AsyncUpdate::configure()
+            .source(TaggedAsyncSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build_async()
+            .unwrap();
+        // The generic helper drives the trait verbs through the bound.
+        let version = fetch_latest_via_bound(&upd).await.unwrap();
+        assert_eq!(
+            version, "2.0.0",
+            "the bounded generic fn drove the async verb"
+        );
     }
 
     #[cfg(feature = "async")]
@@ -1429,7 +1584,7 @@ mod tests {
         fn get_latest_release(&self) -> Result<Release> {
             Release::builder().version("1.0.0").build()
         }
-        fn get_latest_releases(&self, _c: &str) -> Result<Vec<Release>> {
+        fn get_latest_releases(&self) -> Result<Vec<Release>> {
             Ok(vec![Release::builder().version("1.0.0").build()?])
         }
         fn get_release_version(&self, v: &str) -> Result<Release> {
@@ -1516,7 +1671,7 @@ mod tests {
         let upd = update_with_checksum(crate::Checksum::Sha256("00".repeat(32)));
         let release = Release::builder().version("1.2.3").build().unwrap();
 
-        let err = super::finish_update(&*upd, release, &dir, &archive_path)
+        let err = super::finish_update(&*upd, release, dir, &archive_path)
             .expect_err("a mismatched checksum must abort the update");
         let msg = err.to_string();
         assert!(
@@ -1546,7 +1701,7 @@ mod tests {
         let upd = update_with_checksum(crate::Checksum::Sha256(digest.to_string()));
         let release = Release::builder().version("1.2.3").build().unwrap();
 
-        let err = super::finish_update(&*upd, release, &dir, &archive_path)
+        let err = super::finish_update(&*upd, release, dir, &archive_path)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(

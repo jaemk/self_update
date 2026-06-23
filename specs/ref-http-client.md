@@ -148,12 +148,11 @@ What still applies vs defers to the injected client:
 
 ### Reuse across paginated requests
 
-`fetch_all_releases` walks `Link: rel="next"` pages via `collect_paginated`
-(`backends/mod.rs:82-105`, `github.rs:368-385`), calling `send` once per page.
-Each call passes `&config.client`, so an injected client (Arc-backed) is reused
-across all pages, sharing its connection pool; a per-call client is rebuilt per
-page. Pagination is bounded by `MAX_RELEASE_PAGES`. `collect_paginated_async`
-(`backends/mod.rs:218-245`) is the async sibling.
+The listing walks pages through the sans-io `run_paginated` driver (`backends/mod.rs`), which
+calls `send` once per `PageRequest`. Each call passes `&config.client`, so an injected client
+(Arc-backed) is reused across all pages, sharing its connection pool; a per-call client is rebuilt
+per page. Pagination is bounded by `MAX_RELEASE_PAGES`. `run_paginated_async` is the async sibling,
+reusing `send_async`.
 
 ### Error mapping (Transport vs status)
 

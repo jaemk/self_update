@@ -2,7 +2,7 @@
 Amazon S3 releases
 */
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
-use crate::backends::send;
+use crate::backends::{Page, PageRequest, run_paginated};
 use crate::{
     errors::*,
     update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
@@ -14,9 +14,21 @@ use quick_xml::events::Event;
 use regex::Regex;
 use std::cmp::Ordering;
 use std::path::PathBuf;
+use std::time::Duration;
 
-/// Maximum number of items to retrieve from S3 API
-const MAX_KEYS: u8 = 100;
+/// Default number of items to retrieve per S3 listing request. The S3 ListObjectsV2 API caps a
+/// single request at 1000 keys.
+const DEFAULT_MAX_KEYS: u16 = 1000;
+
+/// Default presigned-URL expiry (SigV4 `X-Amz-Expires`), in seconds.
+#[cfg(feature = "s3-auth")]
+const DEFAULT_SIGNATURE_TTL_SECS: u64 = 300;
+
+/// Clamp a requested `max-keys` page size into the `1..=1000` range the S3 ListObjectsV2 API
+/// supports.
+fn clamp_max_keys(max_keys: u16) -> u16 {
+    max_keys.clamp(1, DEFAULT_MAX_KEYS)
+}
 
 /// Re-export the S3 [`AccessKey`] credential type at the backend module level so consumers can
 /// name it as `self_update::backends::s3::AccessKey` (e.g. to build one explicitly). Available
@@ -93,6 +105,9 @@ pub struct ReleaseListBuilder {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    max_keys: u16,
+    #[cfg(feature = "s3-auth")]
+    signature_ttl: Duration,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
     request: RequestConfig,
@@ -102,6 +117,22 @@ impl ReleaseListBuilder {
     /// Set the bucket name, used to build an S3 api url
     pub fn bucket_name(&mut self, name: impl Into<String>) -> &mut Self {
         self.bucket_name = Some(name.into());
+        self
+    }
+
+    /// Set the per-request `max-keys` page size for the bucket listing (default `1000`). Clamped
+    /// to `1..=1000` (the ListObjectsV2 cap). The listing follows continuation tokens, so a
+    /// truncated page is still fully walked across multiple requests; this only tunes the page size.
+    pub fn max_keys(&mut self, max_keys: impl Into<u16>) -> &mut Self {
+        self.max_keys = clamp_max_keys(max_keys.into());
+        self
+    }
+
+    /// Set the presigned-URL expiry applied to SigV4-signed listing and download URLs under the
+    /// `s3-auth` feature (default 300s).
+    #[cfg(feature = "s3-auth")]
+    pub fn signature_ttl(&mut self, ttl: Duration) -> &mut Self {
+        self.signature_ttl = ttl;
         self
     }
 
@@ -178,6 +209,9 @@ impl ReleaseListBuilder {
             region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
             target: self.target.clone(),
+            max_keys: self.max_keys,
+            #[cfg(feature = "s3-auth")]
+            signature_ttl: self.signature_ttl,
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
             request: self.request.clone(),
@@ -194,6 +228,9 @@ pub struct ReleaseList {
     asset_prefix: Option<String>,
     target: Option<String>,
     region: Option<String>,
+    max_keys: u16,
+    #[cfg(feature = "s3-auth")]
+    signature_ttl: Duration,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
     request: RequestConfig,
@@ -208,6 +245,9 @@ impl ReleaseList {
             asset_prefix: None,
             target: None,
             region: None,
+            max_keys: DEFAULT_MAX_KEYS,
+            #[cfg(feature = "s3-auth")]
+            signature_ttl: Duration::from_secs(DEFAULT_SIGNATURE_TTL_SECS),
             #[cfg(feature = "s3-auth")]
             access_key: None,
             request: RequestConfig::default(),
@@ -217,15 +257,18 @@ impl ReleaseList {
     /// Retrieve a list of `Release`s.
     /// If specified, filter for those containing a specified `target`
     pub fn fetch(&self) -> Result<Vec<Release>> {
-        let releases = fetch_releases_from_s3(
+        let plan = s3_listing_plan(
             &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            self.max_keys,
+            #[cfg(feature = "s3-auth")]
+            self.signature_ttl,
             #[cfg(feature = "s3-auth")]
             &self.access_key,
-            &self.request,
         )?;
+        let releases = run_paginated(plan, &self.request)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -241,16 +284,36 @@ impl ReleaseList {
 ///
 /// Configure download and installation from
 /// `https://<bucket_name>.s3.<region>.amazonaws.com/<asset filename>`
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[must_use]
 pub struct UpdateBuilder {
     end_point: EndPoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
     region: Option<String>,
+    max_keys: u16,
+    #[cfg(feature = "s3-auth")]
+    signature_ttl: Duration,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
     common: CommonBuilderConfig,
+}
+
+impl Default for UpdateBuilder {
+    fn default() -> Self {
+        Self {
+            end_point: EndPoint::default(),
+            bucket_name: None,
+            asset_prefix: None,
+            region: None,
+            max_keys: DEFAULT_MAX_KEYS,
+            #[cfg(feature = "s3-auth")]
+            signature_ttl: Duration::from_secs(DEFAULT_SIGNATURE_TTL_SECS),
+            #[cfg(feature = "s3-auth")]
+            access_key: None,
+            common: CommonBuilderConfig::default(),
+        }
+    }
 }
 
 /// Configure download and installation from bucket
@@ -258,6 +321,22 @@ impl UpdateBuilder {
     /// Initialize a new builder
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Set the per-request `max-keys` page size for the bucket listing (default `1000`). Clamped
+    /// to `1..=1000` (the ListObjectsV2 cap). The listing follows continuation tokens, so a
+    /// truncated page is still fully walked across multiple requests; this only tunes the page size.
+    pub fn max_keys(&mut self, max_keys: impl Into<u16>) -> &mut Self {
+        self.max_keys = clamp_max_keys(max_keys.into());
+        self
+    }
+
+    /// Set the presigned-URL expiry applied to SigV4-signed listing and download URLs under the
+    /// `s3-auth` feature (default 300s).
+    #[cfg(feature = "s3-auth")]
+    pub fn signature_ttl(&mut self, ttl: Duration) -> &mut Self {
+        self.signature_ttl = ttl;
+        self
     }
 
     /// Set the end point
@@ -322,6 +401,9 @@ impl UpdateBuilder {
                 bail!(Error::Config, "`bucket_name` required")
             },
             region: self.region.clone(),
+            max_keys: self.max_keys,
+            #[cfg(feature = "s3-auth")]
+            signature_ttl: self.signature_ttl,
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
             asset_prefix: self.asset_prefix.clone(),
@@ -347,11 +429,6 @@ impl UpdateBuilder {
     }
 }
 
-#[cfg(feature = "async")]
-impl Update {
-    impl_async_update_methods!();
-}
-
 /// Updates to a specified or latest release distributed via S3
 #[derive(Debug)]
 #[non_exhaustive]
@@ -360,6 +437,9 @@ pub struct Update {
     bucket_name: String,
     asset_prefix: Option<String>,
     region: Option<String>,
+    max_keys: u16,
+    #[cfg(feature = "s3-auth")]
+    signature_ttl: Duration,
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
     common: CommonConfig,
@@ -371,33 +451,31 @@ impl Update {
         UpdateBuilder::new()
     }
 
-    /// Fetch the bucket's releases (sync). Wraps the per-backend argument plumbing so the
-    /// `ReleaseUpdate` methods stay terse.
-    fn fetch_releases(&self) -> Result<Vec<Release>> {
-        fetch_releases_from_s3(
+    /// Build the sans-io [`PageRequest`] plan for the bucket listing (the first page; the parser
+    /// follows continuation tokens). Shared by the sync and async fetch paths.
+    fn listing_plan(&self) -> Result<PageRequest<Release>> {
+        s3_listing_plan(
             &self.end_point,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            self.max_keys,
+            #[cfg(feature = "s3-auth")]
+            self.signature_ttl,
             #[cfg(feature = "s3-auth")]
             &self.access_key,
-            &self.common.request,
         )
+    }
+
+    /// Fetch the bucket's releases (sync), following continuation tokens via [`run_paginated`].
+    fn fetch_releases(&self) -> Result<Vec<Release>> {
+        run_paginated(self.listing_plan()?, &self.common.request)
     }
 
     /// Async sibling of [`fetch_releases`](Self::fetch_releases).
     #[cfg(feature = "async")]
     async fn fetch_releases_async(&self) -> Result<Vec<Release>> {
-        fetch_releases_from_s3_async(
-            &self.end_point,
-            &self.bucket_name,
-            &self.region,
-            &self.asset_prefix,
-            #[cfg(feature = "s3-auth")]
-            &self.access_key,
-            &self.common.request,
-        )
-        .await
+        crate::backends::run_paginated_async(self.listing_plan()?, &self.common.request).await
     }
 }
 
@@ -479,7 +557,7 @@ impl ReleaseUpdate for Update {
 impl_update_config_accessors!(Update);
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncFetch for Update {
+impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let release = pick_latest(&self.fetch_releases_async().await?)?;
@@ -684,16 +762,26 @@ mod auth {
 }
 
 /// Build the S3 listing `api_url` and the `download_base_url` that asset URLs are formed against,
-/// signing the listing URL when `s3-auth` is enabled. Shared by the sync and async fetch paths.
+/// signing the listing URL when `s3-auth` is enabled. `continuation_token`, when present, is added
+/// as the `continuation-token=` query param (for following a truncated listing). Shared by the sync
+/// and async fetch paths.
+#[allow(clippy::too_many_arguments)]
 fn build_s3_api_url(
     end_point: &EndPoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
+    max_keys: u16,
+    continuation_token: Option<&str>,
+    #[cfg(feature = "s3-auth")] signature_ttl: Duration,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<(String, String)> {
     let prefix = match asset_prefix {
         Some(prefix) => format!("&prefix={}", prefix),
+        None => "".to_string(),
+    };
+    let continuation = match continuation_token {
+        Some(token) => format!("&continuation-token={}", urlencoding::encode(token)),
         None => "".to_string(),
     };
 
@@ -723,103 +811,136 @@ fn build_s3_api_url(
         | EndPoint::S3DualStack
         | EndPoint::DigitalOceanSpaces
         | EndPoint::Generic { .. } => format!(
-            "{}?list-type=2&max-keys={}{}",
-            download_base_url, MAX_KEYS, prefix
+            "{}?list-type=2&max-keys={}{}{}",
+            download_base_url, max_keys, prefix, continuation
         ),
-        EndPoint::GCS => format!("{}?max-keys={}{}", download_base_url, MAX_KEYS, prefix),
+        EndPoint::GCS => format!(
+            "{}?max-keys={}{}{}",
+            download_base_url, max_keys, prefix, continuation
+        ),
     };
 
     #[cfg(feature = "s3-auth")]
-    let api_url = auth::s3_signature_v4(&api_url, region, access_key, 300)?;
+    let api_url = auth::s3_signature_v4(&api_url, region, access_key, signature_ttl.as_secs())?;
 
     Ok((download_base_url, api_url))
 }
 
-/// Obtain list of releases from AWS S3 API, from bucket and region specified,
-/// filtering assets which don't match the prefix string if provided.
-///
-/// This will strip the prefix from provided file names, allowing use with subdirectories
-fn fetch_releases_from_s3(
+/// Build the sans-io [`PageRequest`] for the S3 bucket listing (the first page; the parser follows
+/// continuation tokens by emitting `Page::next` when the listing is truncated). Each continuation
+/// URL is freshly built (and, under `s3-auth`, freshly SigV4-signed) by the parser.
+#[allow(clippy::too_many_arguments)]
+fn s3_listing_plan(
     end_point: &EndPoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
+    max_keys: u16,
+    #[cfg(feature = "s3-auth")] signature_ttl: Duration,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    let (download_base_url, api_url) = build_s3_api_url(
+) -> Result<PageRequest<Release>> {
+    // Capture owned copies of everything the parser needs to (re)build a continuation request.
+    let end_point = end_point.clone();
+    let bucket_name = bucket_name.to_owned();
+    let region = region.clone();
+    let asset_prefix = asset_prefix.clone();
+    #[cfg(feature = "s3-auth")]
+    let access_key = access_key.clone();
+
+    s3_page(
         end_point,
         bucket_name,
         region,
         asset_prefix,
+        max_keys,
+        None,
         #[cfg(feature = "s3-auth")]
-        access_key,
-    )?;
-
-    debug!("using api url: {:?}", api_url);
-
-    // `send` bails on any non-2xx status before returning the response.
-    let resp = send(&api_url, Default::default(), req)?;
-    // Feed quick-xml from the streaming buffered body so the (potentially large) XML listing is not
-    // fully buffered into a `String` first (audit I7).
-    let reader = resp.body_buffered();
-    parse_s3_response(
-        reader,
-        &download_base_url,
-        #[cfg(feature = "s3-auth")]
-        region,
+        signature_ttl,
         #[cfg(feature = "s3-auth")]
         access_key,
     )
 }
 
-/// Async sibling of [`fetch_releases_from_s3`], reusing [`build_s3_api_url`] and
-/// [`parse_s3_response`] with the async transport.
-#[cfg(feature = "async")]
-async fn fetch_releases_from_s3_async(
-    end_point: &EndPoint,
-    bucket_name: &str,
-    region: &Option<String>,
-    asset_prefix: &Option<String>,
-    #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    use crate::backends::send_async;
+/// Build one S3 listing [`PageRequest`] for the given `continuation_token` (None for the first
+/// page). The parser extracts releases + the next continuation token and, when truncated, emits the
+/// next `PageRequest`.
+#[allow(clippy::too_many_arguments)]
+fn s3_page(
+    end_point: EndPoint,
+    bucket_name: String,
+    region: Option<String>,
+    asset_prefix: Option<String>,
+    max_keys: u16,
+    continuation_token: Option<String>,
+    #[cfg(feature = "s3-auth")] signature_ttl: Duration,
+    #[cfg(feature = "s3-auth")] access_key: Option<auth::AccessKey>,
+) -> Result<PageRequest<Release>> {
     let (download_base_url, api_url) = build_s3_api_url(
-        end_point,
-        bucket_name,
-        region,
-        asset_prefix,
+        &end_point,
+        &bucket_name,
+        &region,
+        &asset_prefix,
+        max_keys,
+        continuation_token.as_deref(),
         #[cfg(feature = "s3-auth")]
-        access_key,
+        signature_ttl,
+        #[cfg(feature = "s3-auth")]
+        &access_key,
     )?;
-
     debug!("using api url: {:?}", api_url);
 
-    let resp = send_async(&api_url, Default::default(), req).await?;
-    let body = resp.text().await?;
-    // The async response trait yields the body as text (no streaming reader), so wrap it in an
-    // in-memory `BufRead` to feed the same reader-based XML parser as the sync path.
-    parse_s3_response(
-        std::io::Cursor::new(body.into_bytes()),
-        &download_base_url,
-        #[cfg(feature = "s3-auth")]
-        region,
-        #[cfg(feature = "s3-auth")]
-        access_key,
-    )
+    Ok(PageRequest {
+        url: api_url,
+        headers: Default::default(),
+        parse: Box::new(move |body, _resp_headers| {
+            let (items, next_token) = parse_s3_response(
+                body,
+                &download_base_url,
+                #[cfg(feature = "s3-auth")]
+                &region,
+                #[cfg(feature = "s3-auth")]
+                signature_ttl,
+                #[cfg(feature = "s3-auth")]
+                &access_key,
+            )?;
+            // When the listing is truncated, follow the continuation token with a fresh (freshly
+            // signed, under s3-auth) listing request for the next page.
+            let next = match next_token {
+                Some(token) => Some(s3_page(
+                    end_point,
+                    bucket_name,
+                    region,
+                    asset_prefix,
+                    max_keys,
+                    Some(token),
+                    #[cfg(feature = "s3-auth")]
+                    signature_ttl,
+                    #[cfg(feature = "s3-auth")]
+                    access_key,
+                )?),
+                None => None,
+            };
+            Ok(Page {
+                items,
+                next,
+                stop: false,
+            })
+        }),
+    })
 }
 
-/// Parse an S3 `ListBucketResult` XML body into releases, forming (and, under `s3-auth`, signing)
-/// each asset's download URL against `download_base_url`. Pure when `s3-auth` is off; under
-/// `s3-auth` it signs each URL with a timestamped SigV4 signature and is therefore time-dependent.
-/// Shared by both fetch paths.
+/// Parse an S3 `ListBucketResult` XML body into releases plus the `NextContinuationToken` (present
+/// only when `<IsTruncated>true</IsTruncated>`). Forms (and, under `s3-auth`, signs) each asset's
+/// download URL against `download_base_url`. Pure when `s3-auth` is off; under `s3-auth` it signs
+/// each URL with a timestamped SigV4 signature and is therefore time-dependent. Shared by both
+/// fetch paths.
 fn parse_s3_response<R: std::io::BufRead>(
     body: R,
     download_base_url: &str,
     #[cfg(feature = "s3-auth")] region: &Option<String>,
+    #[cfg(feature = "s3-auth")] signature_ttl: Duration,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
-) -> Result<Vec<Release>> {
+) -> Result<(Vec<Release>, Option<String>)> {
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(true);
 
@@ -828,11 +949,15 @@ fn parse_s3_response<R: std::io::BufRead>(
         Contents,
         Key,
         LastModified,
+        IsTruncated,
+        NextContinuationToken,
         Other,
     }
 
     let mut current_tag = Tag::Other;
     let mut current_release: Option<Release> = None;
+    let mut is_truncated = false;
+    let mut next_continuation_token: Option<String> = None;
     let regex =
         Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
             .map_err(|err| {
@@ -857,6 +982,8 @@ fn parse_s3_response<R: std::io::BufRead>(
                 }
                 b"Key" => current_tag = Tag::Key,
                 b"LastModified" => current_tag = Tag::LastModified,
+                b"IsTruncated" => current_tag = Tag::IsTruncated,
+                b"NextContinuationToken" => current_tag = Tag::NextContinuationToken,
                 _ => current_tag = Tag::Other,
             },
             Ok(Event::Text(e)) => {
@@ -878,8 +1005,12 @@ fn parse_s3_response<R: std::io::BufRead>(
                                 let download_url = format!("{}{}", download_base_url, txt);
 
                                 #[cfg(feature = "s3-auth")]
-                                let download_url =
-                                    auth::s3_signature_v4(&download_url, region, access_key, 300)?;
+                                let download_url = auth::s3_signature_v4(
+                                    &download_url,
+                                    region,
+                                    access_key,
+                                    signature_ttl.as_secs(),
+                                )?;
 
                                 release.assets = vec![ReleaseAsset {
                                     name: exe_name.to_string(),
@@ -893,6 +1024,12 @@ fn parse_s3_response<R: std::io::BufRead>(
                         Tag::LastModified => {
                             let release = current_release.get_or_insert(Release::default());
                             release.date = txt;
+                        }
+                        Tag::IsTruncated => {
+                            is_truncated = txt.eq_ignore_ascii_case("true");
+                        }
+                        Tag::NextContinuationToken => {
+                            next_continuation_token = Some(txt);
                         }
                         _ => (),
                     }
@@ -916,7 +1053,13 @@ fn parse_s3_response<R: std::io::BufRead>(
         buf.clear();
     }
 
-    Ok(releases)
+    // Only follow a continuation token when the listing actually flagged itself truncated.
+    let next_token = if is_truncated {
+        next_continuation_token
+    } else {
+        None
+    };
+    Ok((releases, next_token))
 }
 
 // Add a release to the list if it's doesn't exist yet, or merge its asset/s
@@ -941,10 +1084,36 @@ fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
 mod tests {
     use super::Update;
     use crate::update::{Release, ReleaseUpdate};
+    use std::time::Duration;
+
+    #[cfg(feature = "async")]
+    use crate::update::AsyncReleaseUpdate;
 
     // ---------------------------------------------------------------------------
     // Helpers shared between sync XML-parse tests and async stub tests
     // ---------------------------------------------------------------------------
+
+    /// Test wrapper over `super::parse_s3_response`: drives the parser with the supplied
+    /// `s3-auth`-gated args (threading the default signature TTL) and returns just the releases vec,
+    /// dropping the continuation token. The continuation-token return is exercised separately.
+    fn parse_s3_response<R: std::io::BufRead>(
+        body: R,
+        download_base_url: &str,
+        #[cfg(feature = "s3-auth")] region: &Option<String>,
+        #[cfg(feature = "s3-auth")] access_key: &Option<super::auth::AccessKey>,
+    ) -> crate::errors::Result<Vec<Release>> {
+        super::parse_s3_response(
+            body,
+            download_base_url,
+            #[cfg(feature = "s3-auth")]
+            region,
+            #[cfg(feature = "s3-auth")]
+            Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS),
+            #[cfg(feature = "s3-auth")]
+            access_key,
+        )
+        .map(|(releases, _next)| releases)
+    }
 
     /// Build a minimal `ListBucketResult` XML body with the given `<Key>` entries.
     fn list_bucket_xml(keys: &[&str]) -> String {
@@ -963,6 +1132,25 @@ mod tests {
         )
     }
 
+    /// Build a `ListBucketResult` XML body that flags itself truncated, carrying a
+    /// `NextContinuationToken` so the driver follows it to the next page.
+    fn truncated_list_bucket_xml(keys: &[&str], next_token: &str) -> String {
+        let contents: String = keys
+            .iter()
+            .map(|k| {
+                format!(
+                    "<Contents><Key>{k}</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents>"
+                )
+            })
+            .collect();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Name>my-bucket</Name><IsTruncated>true</IsTruncated>\
+             <NextContinuationToken>{next_token}</NextContinuationToken>{contents}</ListBucketResult>"
+        )
+    }
+
     // ---------------------------------------------------------------------------
     // parse_s3_response / add_to_releases_list unit tests (no network)
     // ---------------------------------------------------------------------------
@@ -972,7 +1160,7 @@ mod tests {
         // One <Contents> entry that matches the version regex: name="myapp", version="1.2.3",
         // suffix "-x86_64-linux". The trailing Eof flush emits that release.
         let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket.s3.us-east-1.amazonaws.com/",
             #[cfg(feature = "s3-auth")]
@@ -1001,7 +1189,7 @@ mod tests {
         // A `v`-prefixed version tag (e.g. "myapp-v2.0.0-arm-linux") must have the `v` stripped
         // in the parsed release's `version` field, matching the regex's `[v]{0,1}` handling.
         let xml = list_bucket_xml(&["myapp-v2.0.0-arm-linux"]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1021,7 +1209,7 @@ mod tests {
         // The Eof flush handles the last entry, and the interim flush (on the second <Contents>
         // start) handles the first.
         let xml = list_bucket_xml(&["myapp-3.0.0-x86_64-linux", "myapp-3.0.0-aarch64-linux"]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1056,7 +1244,7 @@ mod tests {
             "myapp-2.0.0-x86_64-linux",
             "otherapp-1.5.0-x86_64-linux",
         ]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1081,7 +1269,7 @@ mod tests {
             "myapp-1.0.0-x86_64-linux",
             "some/random/path/no-version",
         ]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1099,7 +1287,7 @@ mod tests {
         // When the <Key> contains a directory prefix (e.g. "releases/myapp-1.0.0-linux"),
         // the asset `name` must be just the filename component, not the full path.
         let xml = list_bucket_xml(&["releases/myapp-1.0.0-x86_64-linux"]);
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1119,7 +1307,7 @@ mod tests {
     fn parse_s3_response_malformed_xml_errors() {
         // A body that is not valid XML must surface as an `Err`, not panic.
         let bad_xml = "this is not xml at all <<<";
-        let result = super::parse_s3_response(
+        let result = parse_s3_response(
             bad_xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1135,7 +1323,7 @@ mod tests {
         // An empty/minimal XML document with no <Contents> produces an empty releases list (not
         // an error), since there is simply nothing to parse.
         let xml = "<?xml version=\"1.0\"?><ListBucketResult></ListBucketResult>";
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             xml.as_bytes(),
             "https://bucket/",
             #[cfg(feature = "s3-auth")]
@@ -1181,7 +1369,7 @@ mod tests {
             body: xml.into_bytes(),
         });
         let reader = resp.body_buffered();
-        let releases = super::parse_s3_response(
+        let releases = parse_s3_response(
             reader,
             "https://bucket.s3.us-east-1.amazonaws.com/",
             #[cfg(feature = "s3-auth")]
@@ -1283,6 +1471,305 @@ mod tests {
             .current_version(current_version)
             .build()
             .unwrap()
+    }
+
+    /// Like [`stub`], but records each incoming request line so tests can assert on the query the
+    /// client sent (e.g. the continuation token on the second request).
+    fn stub_capturing(
+        responses: Vec<Resp>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                sink.lock()
+                    .unwrap()
+                    .push(req.lines().next().unwrap_or("").to_string());
+                let out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    r.status,
+                    r.body.len(),
+                    r.body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    // --- WS2 B2/I3: s3 continuation across a truncated (>100-key) listing ---------------------
+
+    #[test]
+    fn s3_listing_follows_continuation_token_across_two_responses() {
+        // Response 1 is flagged truncated with a NextContinuationToken; response 2 is the final
+        // page. The driver must follow the token (sending it in the `continuation-token=` query of
+        // the second request) and accumulate releases from BOTH responses.
+        let page1 = truncated_list_bucket_xml(
+            &["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"],
+            "TOKEN-PAGE-2",
+        );
+        let page2 = list_bucket_xml(&["myapp-3.0.0-x86_64-linux"]);
+        let (base, captured) = stub_capturing(vec![
+            Resp {
+                status: "200 OK",
+                body: page1,
+            },
+            Resp {
+                status: "200 OK",
+                body: page2,
+            },
+        ]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        let releases = upd.get_latest_releases().unwrap();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        versions.sort_unstable();
+        assert_eq!(
+            versions,
+            vec!["1.0.0", "2.0.0", "3.0.0"],
+            "releases from both the truncated page and the continuation page must be accumulated"
+        );
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the truncated listing must be followed");
+        assert!(
+            !requests[0].contains("continuation-token="),
+            "the first request must not carry a continuation token"
+        );
+        assert!(
+            requests[1].contains("continuation-token=TOKEN-PAGE-2"),
+            "the second request must carry the NextContinuationToken in its query, got: {}",
+            requests[1]
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn s3_listing_follows_continuation_token_across_two_responses_async() {
+        // Async sibling of the sync continuation test: the async driver must follow the
+        // NextContinuationToken (carrying it in the second request's `continuation-token=` query)
+        // and accumulate releases from BOTH the truncated page and the continuation page.
+        let page1 = truncated_list_bucket_xml(
+            &["myapp-1.0.0-x86_64-linux", "myapp-2.0.0-x86_64-linux"],
+            "TOKEN-PAGE-2",
+        );
+        let page2 = list_bucket_xml(&["myapp-3.0.0-x86_64-linux"]);
+        let (base, captured) = stub_capturing(vec![
+            Resp {
+                status: "200 OK",
+                body: page1,
+            },
+            Resp {
+                status: "200 OK",
+                body: page2,
+            },
+        ]);
+        let upd = s3_update(&base, "0.1.0");
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        versions.sort_unstable();
+        assert_eq!(
+            versions,
+            vec!["1.0.0", "2.0.0", "3.0.0"],
+            "async continuation must accumulate releases from both pages"
+        );
+        let requests = captured.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the truncated listing must be followed over the async transport"
+        );
+        assert!(
+            !requests[0].contains("continuation-token="),
+            "the first async request must not carry a continuation token"
+        );
+        assert!(
+            requests[1].contains("continuation-token=TOKEN-PAGE-2"),
+            "the second async request must carry the NextContinuationToken, got: {}",
+            requests[1]
+        );
+    }
+
+    // --- WS2 I3: continuation under s3-auth — each continuation URL is FRESHLY SigV4-signed -----
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn s3_continuation_signs_each_page_freshly_not_reusing_the_first_signature() {
+        // Under s3-auth, the continuation page must be its OWN freshly-signed listing request: it
+        // carries the continuation token AND a valid SigV4 signature, and that signature must NOT
+        // be the first request's signature reused (the canonical request differs — the second URL
+        // includes `continuation-token=` — so the signature must differ too).
+        let page1 = truncated_list_bucket_xml(&["myapp-1.0.0-x86_64-linux"], "TOKEN-PAGE-2");
+        let page2 = list_bucket_xml(&["myapp-2.0.0-x86_64-linux"]);
+        let (base, captured) = stub_capturing(vec![
+            Resp {
+                status: "200 OK",
+                body: page1,
+            },
+            Resp {
+                status: "200 OK",
+                body: page2,
+            },
+        ]);
+        // A `Generic` endpoint pointed at the loopback stub, but WITH an access key + region so the
+        // listing URLs are signed.
+        let upd = Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base.clone(),
+            })
+            .bucket_name("test-bucket")
+            .region("us-east-1")
+            .bin_name("myapp")
+            .current_version("0.1.0")
+            .access_key(("AKIA", "secret"))
+            .build()
+            .unwrap();
+        let releases = upd.get_latest_releases().unwrap();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        versions.sort_unstable();
+        assert_eq!(versions, vec!["1.0.0", "2.0.0"]);
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the signed listing must be continued");
+
+        // Both request lines must carry a SigV4 signature.
+        assert!(
+            requests[0].contains("X-Amz-Signature="),
+            "first signed listing request missing a signature, got: {}",
+            requests[0]
+        );
+        assert!(
+            requests[1].contains("X-Amz-Signature="),
+            "the continuation request must be freshly signed (a valid signature), got: {}",
+            requests[1]
+        );
+        assert!(
+            requests[1].contains("continuation-token="),
+            "the continuation request must carry the token, got: {}",
+            requests[1]
+        );
+
+        // Extract the two signatures from the request lines and prove they differ — the second is
+        // a genuine re-sign over the continuation URL, not the first signature copied over.
+        let sig = |line: &str| -> String {
+            line.split("X-Amz-Signature=")
+                .nth(1)
+                .unwrap_or("")
+                .split(['&', ' '])
+                .next()
+                .unwrap_or("")
+                .to_string()
+        };
+        let sig0 = sig(&requests[0]);
+        let sig1 = sig(&requests[1]);
+        assert!(
+            !sig0.is_empty() && !sig1.is_empty(),
+            "both signatures present"
+        );
+        assert_ne!(
+            sig0, sig1,
+            "the continuation signature must be freshly computed for the continuation URL, \
+             not the first request's signature reused"
+        );
+    }
+
+    #[test]
+    fn s3_listing_stops_when_not_truncated() {
+        // A response with a NextContinuationToken but NO `<IsTruncated>true</IsTruncated>` must NOT
+        // be followed — only `is_truncated` gates continuation.
+        let body = "<?xml version=\"1.0\"?><ListBucketResult><Name>b</Name>\
+             <NextContinuationToken>SHOULD-NOT-FOLLOW</NextContinuationToken>\
+             <Contents><Key>myapp-1.0.0-x86_64-linux</Key>\
+             <LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents></ListBucketResult>"
+            .to_string();
+        let (base, captured) = stub_capturing(vec![Resp {
+            status: "200 OK",
+            body,
+        }]);
+        let upd = s3_update_sync(&base, "0.1.0");
+        let releases = upd.get_latest_releases().unwrap();
+        assert_eq!(releases.all().len(), 1);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "a token without IsTruncated=true must not be followed"
+        );
+    }
+
+    // --- WS2: s3 max_keys clamp + query threading --------------------------------------------
+
+    #[test]
+    fn max_keys_clamps_to_one_to_one_thousand() {
+        assert_eq!(super::clamp_max_keys(0), 1, "0 clamps up to the 1 floor");
+        assert_eq!(super::clamp_max_keys(1), 1);
+        assert_eq!(super::clamp_max_keys(500), 500, "in-range passes through");
+        assert_eq!(super::clamp_max_keys(1000), 1000);
+        assert_eq!(
+            super::clamp_max_keys(5000),
+            1000,
+            "above 1000 clamps to the 1000 ceiling"
+        );
+        assert_eq!(super::clamp_max_keys(u16::MAX), 1000);
+    }
+
+    #[test]
+    fn max_keys_setter_threads_into_the_listing_query() {
+        // A configured `max_keys` (clamped) must appear as the `max-keys=` query param on the wire.
+        let (base, captured) = stub_capturing(vec![Resp {
+            status: "200 OK",
+            body: list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]),
+        }]);
+        let upd = Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base.clone(),
+            })
+            .bucket_name("test-bucket")
+            .bin_name("myapp")
+            .current_version("0.1.0")
+            .max_keys(250u16)
+            .build()
+            .unwrap();
+        let _ = upd.get_latest_releases().unwrap();
+        let request = captured.lock().unwrap()[0].clone();
+        assert!(
+            request.contains("max-keys=250"),
+            "the configured max_keys must appear in the listing query, got: {}",
+            request
+        );
+    }
+
+    #[test]
+    fn max_keys_setter_clamps_in_the_query() {
+        // An out-of-range request (5000) must be clamped to 1000 in the on-the-wire query.
+        let (base, captured) = stub_capturing(vec![Resp {
+            status: "200 OK",
+            body: list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]),
+        }]);
+        let upd = Update::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base.clone(),
+            })
+            .bucket_name("test-bucket")
+            .bin_name("myapp")
+            .current_version("0.1.0")
+            .max_keys(5000u16)
+            .build()
+            .unwrap();
+        let _ = upd.get_latest_releases().unwrap();
+        let request = captured.lock().unwrap()[0].clone();
+        assert!(
+            request.contains("max-keys=1000") && !request.contains("max-keys=5000"),
+            "an over-cap max_keys must clamp to 1000 in the query, got: {}",
+            request
+        );
     }
 
     // --- Sync `Releases`-returning fetch coverage (gap #1) ------------------------------------
@@ -1807,7 +2294,8 @@ mod tests {
 
     /// Call `build_s3_api_url`, threading the `s3-auth`-only `access_key` argument behind the
     /// feature gate so the same call site compiles with and without `s3-auth`. With no access key
-    /// the returned `api_url` is unsigned, so the tests below can assert on the raw URL shape.
+    /// the returned `api_url` is unsigned, so the tests below can assert on the raw URL shape. Uses
+    /// the default `max-keys` page size and no continuation token.
     fn api_url(
         end_point: super::EndPoint,
         bucket: &str,
@@ -1819,6 +2307,10 @@ mod tests {
             bucket,
             &region.map(str::to_owned),
             &prefix.map(str::to_owned),
+            super::DEFAULT_MAX_KEYS,
+            None,
+            #[cfg(feature = "s3-auth")]
+            Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS),
             #[cfg(feature = "s3-auth")]
             &None,
         )
@@ -1833,7 +2325,7 @@ mod tests {
         assert_eq!(base, "https://my-bucket.s3.eu-west-1.amazonaws.com/");
         assert_eq!(
             url,
-            "https://my-bucket.s3.eu-west-1.amazonaws.com/?list-type=2&max-keys=100"
+            "https://my-bucket.s3.eu-west-1.amazonaws.com/?list-type=2&max-keys=1000"
         );
     }
 
@@ -1866,7 +2358,7 @@ mod tests {
         // its listing query is `max-keys` only (no `list-type=2`, which is S3-specific).
         let (base, url) = api_url(super::EndPoint::GCS, "gbucket", None, None).unwrap();
         assert_eq!(base, "https://storage.googleapis.com/gbucket/");
-        assert_eq!(url, "https://storage.googleapis.com/gbucket/?max-keys=100");
+        assert_eq!(url, "https://storage.googleapis.com/gbucket/?max-keys=1000");
         assert!(
             !url.contains("list-type=2"),
             "GCS listing must not use the S3-only list-type=2 param"
@@ -1889,7 +2381,7 @@ mod tests {
         assert_eq!(base, "https://s3.example.com/bucket/");
         assert_eq!(
             url,
-            "https://s3.example.com/bucket/?list-type=2&max-keys=100"
+            "https://s3.example.com/bucket/?list-type=2&max-keys=1000"
         );
     }
 
@@ -2117,6 +2609,63 @@ mod tests {
         );
     }
 
+    // --- WS2 5e: signature_ttl is threaded into the SigV4 X-Amz-Expires of signed URLs --------
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn signature_ttl_appears_as_the_expiry_in_signed_urls() {
+        // The configured `signature_ttl` must drive the `X-Amz-Expires=` query param of the signed
+        // listing URL, replacing the previously hardcoded 300s. Drive `build_s3_api_url` with a
+        // non-default TTL and assert the expiry matches.
+        let key: super::AccessKey = ("AKIA", "secret").into();
+        let region = Some("us-east-1".to_owned());
+        let (_base, signed) = super::build_s3_api_url(
+            &super::EndPoint::S3,
+            "b",
+            &region,
+            &None,
+            super::DEFAULT_MAX_KEYS,
+            None,
+            Duration::from_secs(7200),
+            &Some(key),
+        )
+        .unwrap();
+        assert!(
+            signed.contains("X-Amz-Expires=7200"),
+            "the configured signature_ttl must appear as X-Amz-Expires, got: {}",
+            signed
+        );
+        assert!(
+            !signed.contains("X-Amz-Expires=300"),
+            "the default 300s must be overridden by the configured TTL"
+        );
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn signature_ttl_setter_threads_into_the_built_update() {
+        // End-to-end: the `signature_ttl` builder setter must reach the signed listing URL. Build
+        // an `Update` with a 600s TTL and a Generic endpoint (no region needed), then sign its
+        // listing plan's URL and check the expiry. (We assert via the plan's URL since the listing
+        // plan signs the listing URL at construction.)
+        let upd = Update::configure()
+            .end_point(super::EndPoint::S3)
+            .bucket_name("b")
+            .region("us-east-1")
+            .bin_name("myapp")
+            .current_version("0.1.0")
+            .access_key(("AKIA", "secret"))
+            .signature_ttl(Duration::from_secs(600))
+            .build_update()
+            .unwrap();
+        let plan = upd.listing_plan().unwrap();
+        assert!(
+            plan.url.contains("X-Amz-Expires=600"),
+            "the configured signature_ttl must thread into the signed listing URL, got: {}",
+            plan.url
+        );
+    }
+
     #[cfg(feature = "s3-auth")]
     #[test]
     fn build_s3_api_url_signs_listing_url_when_access_key_present() {
@@ -2125,8 +2674,18 @@ mod tests {
         // just the bare signer), preserving the existing `list-type=2` query under signing.
         let key: super::AccessKey = ("AKIA", "secret").into();
         let region = Some("us-east-1".to_owned());
-        let (_base, signed) =
-            super::build_s3_api_url(&super::EndPoint::S3, "b", &region, &None, &Some(key)).unwrap();
+        let ttl = Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS);
+        let (_base, signed) = super::build_s3_api_url(
+            &super::EndPoint::S3,
+            "b",
+            &region,
+            &None,
+            super::DEFAULT_MAX_KEYS,
+            None,
+            ttl,
+            &Some(key),
+        )
+        .unwrap();
         assert!(signed.contains("X-Amz-Signature="));
         assert!(signed.contains("X-Amz-Credential="));
         assert!(
@@ -2134,8 +2693,17 @@ mod tests {
             "the original listing query must survive signing"
         );
 
-        let (_base, unsigned) =
-            super::build_s3_api_url(&super::EndPoint::S3, "b", &region, &None, &None).unwrap();
+        let (_base, unsigned) = super::build_s3_api_url(
+            &super::EndPoint::S3,
+            "b",
+            &region,
+            &None,
+            super::DEFAULT_MAX_KEYS,
+            None,
+            ttl,
+            &None,
+        )
+        .unwrap();
         assert!(
             !unsigned.contains("X-Amz-Signature="),
             "no access key => unsigned listing url"
@@ -2152,7 +2720,7 @@ mod tests {
         let region = Some("us-east-1".to_owned());
 
         let key: super::AccessKey = ("AKIA", "secret").into();
-        let signed = super::parse_s3_response(
+        let signed = parse_s3_response(
             xml.as_bytes(),
             "https://b.s3.us-east-1.amazonaws.com/",
             &region,
@@ -2166,7 +2734,7 @@ mod tests {
             signed_url
         );
 
-        let unsigned = super::parse_s3_response(
+        let unsigned = parse_s3_response(
             xml.as_bytes(),
             "https://b.s3.us-east-1.amazonaws.com/",
             &region,

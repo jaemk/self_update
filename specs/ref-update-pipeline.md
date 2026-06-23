@@ -6,22 +6,32 @@ Status: implemented
 
 Files: `src/update.rs` (the `ReleaseUpdate::update` / `update_extended` flow and the
 shared helpers `choose_latest_release`, `resolve_and_confirm`, `build_download`,
-`finish_update`, `install_binary`, `verify_signature`, plus the async sibling
-`update_extended_async`) and `src/lib.rs` (the `Download`, `Extract`, `ArchiveKind`,
-`Compression`, `Move`, and `MoveAll` install primitives). This subsystem is the end-to-end
-install pipeline: how a built updater turns "there is a newer release" into a replaced
-on-disk binary.
+`finish_update` / `finish_update_owned`, `install_binary`, `verify_signature`, plus the async
+sibling `update_extended_async` and the public sealed `AsyncReleaseUpdate` trait) and
+`src/lib.rs` (the `Download`, `Extract`, `ArchiveKind`, `Compression`, `Move`, and `MoveAll`
+install primitives). This subsystem is the end-to-end install pipeline: how a built updater turns
+"there is a newer release" into a replaced on-disk binary.
 
 ## Behavior
 
 ### Entry points
 
 `update()` calls `update_extended()` and maps its result through
-`ReleaseStatus::into_version_status(current_version)` (`update.rs:607`-`611`). `update_extended()`
-(`update.rs:614`) is the sync flow; `update_extended_async()` (`update.rs:851`) is the async
-flow, which differs only in that the release listing and the download are awaited. Both share
-the same helpers; the verify/extract/replace tail (`finish_update`) is fully synchronous in
-both paths.
+`ReleaseStatus::into_version_status(current_version)`. `update_extended()` is the sync flow; the
+free `update::update_extended_async()` is the async flow, which differs in that the release listing
+and the download are awaited and the verify/extract/replace tail runs on
+`tokio::task::spawn_blocking`. The sync and async paths share the same selection/asset/download
+helpers and the same verify/extract/replace tail (`finish_update_owned`).
+
+The verify/extract/replace tail is `finish_update_owned(ctx, dir: TempDir, archive: &Path)`, which
+takes a `FinishCtx` of **owned** fields (install path, target, bin name, in-archive path,
+show_output, the verify callback, and under the features the owned checksum and verifying keys) and
+the `TempDir` moved in by value. The sync `finish_update(&U, release, dir, archive)` builds the ctx
+from the updater and calls the owned twin inline (no spawn). The async path builds the same ctx,
+moves the `TempDir` into the closure, and runs `finish_update_owned` inside
+`tokio::task::spawn_blocking(move || ...)`, awaiting the join handle and mapping a `JoinError` to
+`Error::Update`. So the async update never blocks the executor on the verify/extract/replace work,
+and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` parser is `+ Send`).
 
 ### Fetch and select
 
@@ -144,6 +154,13 @@ via `into_version_status`.
   `update_extended(&self) -> Result<ReleaseStatus>`, plus `get_latest_release`,
   `get_latest_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
   supertrait.
+- `update::AsyncReleaseUpdate` (sealed via `UpdateConfig: sealed::Sealed`, feature `async`): the
+  async counterpart of `ReleaseUpdate`. Fetch verbs `get_latest_release_async`,
+  `get_latest_releases_async`, `get_release_version_async`, plus default-bodied `update_async` (->
+  `VersionStatus`) and `update_extended_async` (-> `ReleaseStatus`) that route to the free
+  `update::update_extended_async`. Its methods are RPITIT (`impl Future<Output = ...> + Send`), so
+  the trait is not object-safe (nameable and usable as a generic bound, like `AsyncReleaseSource`,
+  but never `dyn`). Bring it into scope to call the verbs.
 - `update::ReleaseStatus` (`#[non_exhaustive]`): `into_version_status`, `is_up_to_date`, `is_updated`.
 - `VersionStatus` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
 - `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
@@ -155,8 +172,9 @@ via `into_version_status`.
 - `Move<'a>`: `from_source`, `replace_using_temp`, `to_dest`.
 - `MoveAll<'a>` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
 
-Async `update_async` / `update_extended_async` verbs are generated on each backend's `Update`
-under feature `async`; `update_extended_async` (`update.rs:851`) is `pub(crate)`.
+Async `update_async` / `update_extended_async` are default methods on the public sealed
+`AsyncReleaseUpdate` trait, implemented by each backend's `Update` (and the custom `AsyncUpdate`)
+under feature `async`; the free `update::update_extended_async` they route to is `pub(crate)`.
 
 ## Invariants and regression checklist
 
@@ -177,6 +195,11 @@ under feature `async`; `update_extended_async` (`update.rs:851`) is `pub(crate)`
   headers on the download.
 - `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).
+- The async path never blocks the executor on the finish tail: `finish_update_owned` runs inside
+  `tokio::task::spawn_blocking` over owned fields, with the `TempDir` moved into the closure. The
+  sync and async paths share the same owned finish tail, so verify/extract/replace behavior is
+  identical (sync/async parity). `update_extended_async`'s future is `Send` (the page parsers are
+  `+ Send`).
 
 ## Tests
 

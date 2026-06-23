@@ -76,21 +76,20 @@ Both delegate to the private `build_update()` helper (see below).
 
 ### Pagination and ordering
 
-- Listing follows Gitea's `Link: rel="next"` pagination. `fetch_all_releases`
-  (`gitea.rs:394-411`) and its async sibling `fetch_all_releases_async`
-  (`gitea.rs:416-441`) drive `collect_paginated` / `collect_paginated_async` starting
-  from `first_page_url(base)` (which appends `?per_page=100` when no query is present).
-  Each page is parsed and the next URL comes from `next_link(headers)`. Pagination is
-  bounded by `MAX_RELEASE_PAGES` (100) in the shared helper.
-- "Single newest" is `releases[0]` of the first page; the code relies on the list
-  endpoint's default descending (newest-first) order rather than sorting
-  (`gitea.rs:326-344` sync `fetch_latest_release`, `gitea.rs:445-464` async
-  `get_latest_release_async`). The latest path does not paginate; it reads only the
-  first response.
-- The newer-releases paths fetch the full paginated list, then filter to releases
-  strictly newer than `current_version` using `bump_is_greater(...).unwrap_or(false)`,
-  preserving source order (`gitea.rs:348-359` sync, `gitea.rs:466-480` async).
-  Filtering happens after pagination, so a newer release on a later page is retained.
+- Listing follows Gitea's `Link: rel="next"` pagination via the sans-io core: `releases_plan(base,
+  auth, stop_at)` builds a `PageRequest<Release>` whose parser maps each page with
+  `Release::from_release_gitea` and follows `next_link(headers)`, driven by `run_paginated` /
+  `run_paginated_async` (`backends/mod.rs`) starting from `first_page_url(base)` (which appends
+  `?per_page=100` when no query is present). Pagination is bounded by `MAX_RELEASE_PAGES` (100) in
+  the driver.
+- "Single newest" is `releases[0]` of the first page via `newest_plan`; the code relies on the
+  list endpoint's default descending (newest-first) order rather than sorting. The latest path does
+  not paginate; it reads only the first response.
+- The newer-releases paths fold the strictly-newer filter into the plan: with `stop_at =
+  Some(current_version)`, the parser keeps releases where `bump_is_greater(current, version)` is
+  true and sets `Page::stop` at the first that is not (early-stop, relying on newest-first order),
+  preserving source order. `ReleaseList::fetch` passes `stop_at = None` and walks all pages. The
+  downstream `choose_latest_release` re-sort still selects the same release as a full walk.
 
 ### JSON to model
 
@@ -142,9 +141,10 @@ validate identically and cannot drift.
   - `Update::configure() -> UpdateBuilder`
   - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, common setters,
     `build`, `build_async` (feature `async`)
-  - `Update` implements `ReleaseUpdate` (sync) and `AsyncFetch` (feature `async`)
-- Free `api_headers` and the `fetch_all_releases[_async]` helpers are private to the
-  module.
+  - `Update` implements `ReleaseUpdate` (sync) and the public sealed `AsyncReleaseUpdate`
+    (feature `async`)
+- Free `api_headers` and the `releases_plan` / `newest_plan` / `single_plan` plan builders are
+  private to the module.
 
 `Update` is `#[non_exhaustive]` (`gitea.rs:300`) so its fields stay private and future
 fields do not break downstream code; it is constructed only through the builder.

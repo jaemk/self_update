@@ -131,25 +131,26 @@ Three invocation forms: bare `($t)` (`macros.rs:109`) for the default
 override into the same `impl` (github/gitlab/gitea); and `($t, where ( ... ))`
 (`macros.rs:116`) for the generic custom `AsyncUpdate<S>`.
 
-### Async-methods macro: impl_async_update_methods!
+### Async verbs
 
-`impl_async_update_methods!` (`macros.rs:469-522`, `#[cfg(feature = "async")]`)
-is invoked inside each backend's async `impl Update` block (`github.rs:262`) and
-emits exactly five inherent async verbs that mirror the blocking API:
+The async verbs are methods on the public sealed `AsyncReleaseUpdate` trait (in `update.rs`),
+implemented by each backend's `Update` (and the custom `AsyncUpdate`) under `#[cfg(feature =
+"async")]`. There is no async-methods macro: each backend writes a small `impl AsyncReleaseUpdate`
+with the three fetch verbs, and `update_async` / `update_extended_async` are trait default methods.
+The five verbs mirror the blocking API:
 
-- `update_async()` (`macros.rs:477`) - delegates to `update_extended_async` then
-  `into_version_status` (`macros.rs:481`).
-- `update_extended_async()` (`macros.rs:486`) - calls
-  `update::update_extended_async(self)`.
-- `get_latest_release_async()` (`macros.rs:496`) - single newest release.
-- `get_latest_releases_async()` (`macros.rs:506`) - candidate releases.
-- `get_release_version_async(ver: &str)` (`macros.rs:515`) - release by tag.
+- `update_async()` - delegates to `update_extended_async` then `into_version_status` (default).
+- `update_extended_async()` - calls the free `update::update_extended_async(self)` (default).
+- `get_latest_release_async()` - single newest release.
+- `get_latest_releases_async()` - candidate releases.
+- `get_release_version_async(ver: &str)` - release by tag.
 
 ## Public surface
 
-The builder setters and the five async verbs are `pub` and reach users.
-`CommonBuilderConfig`, `CommonConfig`, and `RequestConfig` are `pub(crate)`;
-the `UpdateConfig` accessor methods are largely `#[doc(hidden)]` plumbing.
+The builder setters and the five async verbs are `pub` and reach users (the async verbs via the
+public sealed `AsyncReleaseUpdate` trait, which callers bring into scope). `CommonBuilderConfig`,
+`CommonConfig`, and `RequestConfig` are `pub(crate)`; the `UpdateConfig` accessor methods are
+largely `#[doc(hidden)]` plumbing.
 
 ## Invariants and regression checklist
 
@@ -157,8 +158,9 @@ the `UpdateConfig` accessor methods are largely `#[doc(hidden)]` plumbing.
   shared setter is added there and reaches every backend builder.
 - Accessors borrow through `self.common`, never own: `&str` / `Option<&str>` /
   `&Path`, no clones.
-- The five async verbs stay at parity with their blocking siblings; adding or
-  renaming one happens in `impl_async_update_methods!`.
+- The five async verbs stay at parity with their blocking siblings; they live on the public sealed
+  `AsyncReleaseUpdate` trait (the fetch verbs implemented per backend, `update_async` /
+  `update_extended_async` as defaults).
 - `bin_name` (re-)derives `bin_path_in_archive` when that path is unset or was
   auto-derived (tracked by `bin_path_in_archive_auto`); an explicitly set
   `bin_path_in_archive` is sticky and survives later `bin_name` calls.

@@ -1,23 +1,27 @@
 # Configurable s3 max-keys
 
-Status: not implemented
+Status: implemented
 
 ## Problem
 
-The s3 listing requests `MAX_KEYS = 100` keys per request (`src/backends/s3.rs`) with
-no builder setter to change it. A bucket with more than 100 matching objects is
-truncated per page with no way for a caller to widen the page size.
+The s3 listing requested a fixed `MAX_KEYS = 100` keys per request with no builder setter to
+change it, and a truncated listing was not followed, so a bucket with more than 100 matching
+objects was silently truncated.
 
-## What it would take
+## Decision
 
-An additive builder setter on the s3 `Update` / `ReleaseList` builders (for example
-`max_keys(u16)`) threaded into the request URL where `MAX_KEYS` is currently a
-constant. The S3 ListObjects API caps a single request at 1000 keys, so the setter
-should clamp or document that bound. Following the existing list paths through all
-matching objects would be the more complete fix, but is a larger change.
+The s3 `UpdateBuilder` and `ReleaseListBuilder` gain a `max_keys(impl Into<u16>)` setter, threaded
+into the `max-keys=` query of the listing URL. The const widened from `u8` to a `u16` field on the
+builders / `Update` / `ReleaseList` (default 1000, the ListObjectsV2 cap). The setter clamps to
+`1..=1000` via `clamp_max_keys`.
 
-## Why deferred
+The listing now also follows the continuation token: the parser reads `<IsTruncated>true</...>` and
+`<NextContinuationToken>`, and when truncated returns `Page::next` as a fresh `PageRequest` with
+`continuation-token=<token>` in the query, which the same sans-io driver follows. Under `s3-auth`
+each continuation URL is freshly SigV4-signed. So a >1000-key bucket is now walked across multiple
+requests, not silently truncated.
 
-An additive setter is possible post-1.0 with no break, so it is not a freeze blocker.
-At minimum the per-request cap should be documented in the s3 module docs so the
-truncation is not silent.
+A `signature_ttl(Duration)` setter (default 300s) replaces the two hardcoded `300`s, threaded into
+the SigV4 signer as the `X-Amz-Expires` of signed listing and download URLs.
+
+See `src/backends/s3.rs` and the CHANGELOG.
