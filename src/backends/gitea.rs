@@ -16,12 +16,15 @@ impl ReleaseAsset {
     /// Errors:
     ///     * Missing required name & download-url keys
     fn from_asset_gitea(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["browser_download_url"]
-            .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `browser_download_url`"))?;
+        let download_url =
+            asset["browser_download_url"]
+                .as_str()
+                .ok_or(Error::MissingAssetField {
+                    field: "browser_download_url",
+                })?;
         let name = asset["name"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
+            .ok_or(Error::MissingAssetField { field: "name" })?;
         Ok(ReleaseAsset {
             download_url: download_url.to_owned(),
             name: name.to_owned(),
@@ -33,14 +36,16 @@ impl Release {
     fn from_release_gitea(release: &serde_json::Value) -> Result<Release> {
         let tag = release["tag_name"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
+            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
         let date = release["created_at"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
+            .ok_or(Error::MissingAssetField {
+                field: "created_at",
+            })?;
         let name = release["name"].as_str().unwrap_or(tag);
         let assets = release["assets"]
             .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
+            .ok_or(Error::MissingAssetField { field: "assets" })?;
         let body = release["body"].as_str().map(String::from);
         let assets = assets
             .iter()
@@ -124,26 +129,19 @@ impl ReleaseListBuilder {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`url` required (gitea has no default host; call `.url(...)`)"
-                )
+                return Err(Error::MissingField { field: "url" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
@@ -251,26 +249,19 @@ impl UpdateBuilder {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`url` required (gitea has no default host; call `.url(...)`)"
-                )
+                return Err(Error::MissingField { field: "url" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
             common: self.common.build()?,
         })
@@ -337,7 +328,7 @@ impl ReleaseUpdate for Update {
         let release = releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
@@ -362,7 +353,7 @@ impl ReleaseUpdate for Update {
         releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
 
@@ -404,7 +395,7 @@ fn release_array_page(
             let json: serde_json::Value = serde_json::from_slice(body)?;
             let array = json
                 .as_array()
-                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
             let mut stop = false;
             for value in array {
@@ -445,10 +436,10 @@ fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<R
             let json: serde_json::Value = serde_json::from_slice(body)?;
             let array = json
                 .as_array()
-                .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
+                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
             let first = array
                 .first()
-                .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
+                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
             Ok(Page::last(vec![Release::from_release_gitea(first)?]))
         }),
     })
@@ -480,7 +471,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         let release = releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
@@ -509,7 +500,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
 
@@ -526,8 +517,10 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
         headers.insert(
             header::AUTHORIZATION,
             format!("token {}", token)
-                .parse()
-                .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
+                .parse::<header::HeaderValue>()
+                .map_err(|err| Error::InvalidAuthToken {
+                    source: Box::new(err),
+                })?,
         );
     };
 
@@ -967,7 +960,10 @@ mod tests {
             .repo_owner("o")
             .repo_name("r")
             .build();
-        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::MissingField { field: "url" })
+        ));
     }
 
     #[test]
@@ -1014,8 +1010,8 @@ mod tests {
             .request_header("inva lid", "ok")
             .build();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "invalid header must surface as Error::Config from gitea ReleaseList build()"
+            matches!(res, Err(crate::errors::Error::InvalidHeader { .. })),
+            "invalid header must surface as Error::InvalidHeader from gitea ReleaseList build()"
         );
     }
 
@@ -1030,7 +1026,10 @@ mod tests {
             .current_version("0.1.0")
             .request_header("inva lid", "ok")
             .build();
-        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::InvalidHeader { .. })
+        ));
     }
 
     #[test]
@@ -1259,10 +1258,72 @@ mod tests {
         let upd = gitea_update(&base, "0.1.0");
         let res = upd.get_release_version_async("v1.0.0").await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "missing tag_name must surface as Error::Release, got {:?}",
             res
         );
+    }
+
+    // WS3 variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
+    // `MissingAssetField { field: "tag_name" }` -- not `NoReleaseFound`. The sibling test above
+    // accepts either via an `A | B` match; this pins the precise variant *and* the field name so a
+    // regression that routes a payload-shape failure to the empty-listing variant (or names the
+    // wrong field) is caught.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn missing_tag_name_routes_to_missing_asset_field_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"{"created_at":"2020-01-01T00:00:00Z","assets":[]}"#.to_string(),
+            }]
+        });
+        let upd = gitea_update(&base, "0.1.0");
+        let res = upd.get_release_version_async("v1.0.0").await;
+        match res {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(
+                    field, "tag_name",
+                    "must name the absent payload field exactly"
+                );
+            }
+            other => panic!(
+                "missing tag_name must be Error::MissingAssetField {{ field: \"tag_name\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // WS3 variant-routing (exact): an empty top-level releases array yields zero parsed releases,
+    // so the latest-release lookup finds nothing and must surface as EXACTLY
+    // `NoReleaseFound { target: None }` -- the clean empty-listing negative, NOT a payload-field
+    // failure. Pins the other side of the `NoReleaseFound | MissingAssetField` split.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn empty_array_routes_to_no_release_found_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gitea_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        match res {
+            Err(crate::errors::Error::NoReleaseFound { target }) => {
+                assert_eq!(target, None, "empty listing carries no asset target");
+            }
+            other => panic!(
+                "empty releases array must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                other
+            ),
+        }
     }
 
     #[cfg(feature = "async")]
@@ -1355,7 +1416,11 @@ mod tests {
         let upd = gitea_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "empty releases array must surface as Error::Release, got {:?}",
             res
         );
@@ -1375,7 +1440,11 @@ mod tests {
         let upd = gitea_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "non-array payload must surface as Error::Release, got {:?}",
             res
         );

@@ -19,10 +19,10 @@ impl ReleaseAsset {
     fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
         let download_url = asset["url"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `url`"))?;
+            .ok_or(Error::MissingAssetField { field: "url" })?;
         let name = asset["name"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
+            .ok_or(Error::MissingAssetField { field: "name" })?;
         Ok(ReleaseAsset {
             download_url: download_url.to_owned(),
             name: name.to_owned(),
@@ -34,14 +34,16 @@ impl Release {
     fn from_release(release: &serde_json::Value) -> Result<Release> {
         let tag = release["tag_name"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
+            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
         let date = release["created_at"]
             .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
+            .ok_or(Error::MissingAssetField {
+                field: "created_at",
+            })?;
         let name = release["name"].as_str().unwrap_or(tag);
         let assets = release["assets"]
             .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
+            .ok_or(Error::MissingAssetField { field: "assets" })?;
         let body = release["body"].as_str().map(String::from);
         let assets = assets
             .iter()
@@ -115,18 +117,14 @@ impl ReleaseListBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
@@ -233,18 +231,14 @@ impl UpdateBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
             custom_url: self.custom_url.clone(),
             common: self.common.build()?,
@@ -338,7 +332,7 @@ impl ReleaseUpdate for Update {
         let release = releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "No release was found"))?;
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
@@ -363,7 +357,7 @@ impl ReleaseUpdate for Update {
         releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "No release was found"))
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
 
@@ -410,7 +404,7 @@ fn release_array_page(
             let json: serde_json::Value = serde_json::from_slice(body)?;
             let array = json
                 .as_array()
-                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?;
+                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
             let mut stop = false;
             for value in array {
@@ -477,7 +471,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         let release = releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "No release was found"))?;
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
@@ -506,7 +500,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         releases
             .into_iter()
             .next()
-            .ok_or_else(|| format_err!(Error::Release, "No release was found"))
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
 
@@ -523,8 +517,10 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
         headers.insert(
             header::AUTHORIZATION,
             format!("token {}", token)
-                .parse()
-                .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
+                .parse::<header::HeaderValue>()
+                .map_err(|err| Error::InvalidAuthToken {
+                    source: Box::new(err),
+                })?,
         );
     };
 
@@ -1106,7 +1102,11 @@ mod tests {
             None,
             &crate::backends::common::RequestConfig::default(),
         );
-        assert!(matches!(res, Err(crate::errors::Error::Release(_))));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::NoReleaseFound { .. }
+                | crate::errors::Error::MissingAssetField { .. })
+        ));
     }
 
     /// Like [`stub`], but also captures each incoming raw request so tests can assert on what
@@ -1261,6 +1261,26 @@ mod tests {
         );
     }
 
+    // E1/E6: an auth token that cannot be encoded as a header value surfaces as
+    // `Error::InvalidAuthToken` and chains the underlying header-parse error through `source()`
+    // (previously the parse error was stringified and dropped, so `source()` was `None`).
+    #[test]
+    fn api_headers_invalid_auth_token_chains_source() {
+        use std::error::Error as _;
+        // A newline is not valid in a header value, so the `token <...>` parse fails.
+        let err = super::api_headers(Some("bad\nvalue"))
+            .expect_err("an unencodable auth token must error");
+        assert!(
+            matches!(err, crate::errors::Error::InvalidAuthToken { .. }),
+            "expected Error::InvalidAuthToken, got {:?}",
+            err
+        );
+        assert!(
+            err.source().is_some(),
+            "InvalidAuthToken must chain a non-None source()"
+        );
+    }
+
     #[test]
     fn request_header_surfaces_invalid_header_at_build() {
         // A header name that is not a valid HTTP token must fail at `build()` with `Error::Config`,
@@ -1273,8 +1293,8 @@ mod tests {
             .request_header("inva lid name", "ok")
             .build();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "invalid header name should surface as Error::Config from build()"
+            matches!(res, Err(crate::errors::Error::InvalidHeader { .. })),
+            "invalid header name should surface as Error::InvalidHeader from build()"
         );
     }
 

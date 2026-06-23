@@ -200,7 +200,7 @@ impl ReleaseBuilder {
         let version = self
             .version
             .clone()
-            .ok_or_else(|| Error::Config("`version` required".to_string()))?;
+            .ok_or(Error::MissingField { field: "version" })?;
         Ok(Release {
             name: self.name.clone().unwrap_or_else(|| version.clone()),
             version,
@@ -345,8 +345,9 @@ impl<'a> IntoIterator for &'a Releases {
 /// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
 /// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
 /// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
-/// failures use `Error::Release("…".into())`, and for configuration errors
-/// `Error::Config("…".into())`.
+/// failures use `Error::NoReleaseFound { target }` (no release / no matching asset) or
+/// `Error::MissingAssetField { field }` (a missing field in a release/asset payload), and for
+/// configuration errors `Error::MissingField { field }`.
 pub trait ReleaseSource: Send + Sync {
     /// Fetch the single newest release.
     fn get_latest_release(&self) -> Result<Release>;
@@ -393,8 +394,9 @@ pub trait ReleaseSource: Send + Sync {
 /// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
 /// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
 /// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
-/// failures use `Error::Release("…".into())`, and for configuration errors
-/// `Error::Config("…".into())`.
+/// failures use `Error::NoReleaseFound { target }` (no release / no matching asset) or
+/// `Error::MissingAssetField { field }` (a missing field in a release/asset payload), and for
+/// configuration errors `Error::MissingField { field }`.
 #[cfg(feature = "async")]
 pub trait AsyncReleaseSource: Send + Sync {
     /// Fetch the single newest release.
@@ -599,13 +601,11 @@ pub trait UpdateConfig: sealed::Sealed {
         let mut headers = header::HeaderMap::new();
 
         if let Some(token) = auth_token {
-            let value = format!("token {}", token).parse().map_err(|_| {
-                Error::Config(
-                    "the auth token contains characters that are not valid in an HTTP \
-                     header value"
-                        .to_string(),
-                )
-            })?;
+            let value = format!("token {}", token)
+                .parse::<header::HeaderValue>()
+                .map_err(|err| Error::InvalidAuthToken {
+                    source: Box::new(err),
+                })?;
             headers.insert(header::AUTHORIZATION, value);
         };
 
@@ -815,7 +815,9 @@ fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Re
         Some(matcher) => matcher(&release.assets),
         None => release.asset_for(target, u.asset_identifier()),
     }
-    .ok_or_else(|| format_err!(Error::Release, "No asset found for target: `{}`", target))?;
+    .ok_or_else(|| Error::NoReleaseFound {
+        target: Some(target.to_string()),
+    })?;
 
     let prompt_confirmation = !u.no_confirm();
     if u.show_output() || prompt_confirmation {
@@ -1017,7 +1019,10 @@ where
         finish_update_owned(ctx, tmp_archive_dir, &tmp_archive_path)
     })
     .await
-    .map_err(|e| Error::Update(format!("finish-update task failed: {e}")))?
+    .map_err(|e| Error::Internal {
+        message: "finish-update task failed".to_string(),
+        source: Some(Box::new(e)),
+    })?
 }
 
 /// Run the post-update verification hook (if any) on the freshly-extracted binary, then install
@@ -1030,10 +1035,7 @@ fn install_binary(
 ) -> Result<()> {
     if let Some(verify) = verify {
         if !verify(new_exe) {
-            bail!(
-                Error::Update,
-                "post-update verification rejected the new binary"
-            )
+            return Err(Error::VerificationRejected { reason: None });
         }
     }
     let current_exe = std::env::current_exe()?;
@@ -1505,7 +1507,7 @@ mod tests {
         }
         async fn get_release_version(&self, ver: &str) -> Result<Release> {
             if ver == "9.9.9" {
-                Err(crate::errors::Error::Release("no such tag".into()))
+                Err(crate::errors::Error::NoReleaseFound { target: None })
             } else {
                 Release::builder().version(ver).build()
             }
@@ -1573,8 +1575,8 @@ mod tests {
             .unwrap();
         let res = upd.get_release_version_async("9.9.9").await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
-            "a missing tag must propagate as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::NoReleaseFound { .. })),
+            "a missing tag must propagate as Error::NoReleaseFound, got {:?}",
             res
         );
     }
@@ -1619,7 +1621,14 @@ mod tests {
 
         let reject: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| false);
         let res = install_binary(&new_exe, &dest, Some(&*reject));
-        assert!(res.is_err(), "verify=false must abort the install");
+        // E3: a rejecting verify callback surfaces the dedicated `VerificationRejected` variant
+        // (was previously the catch-all `Error::Update`).
+        let err = res.expect_err("verify=false must abort the install");
+        assert!(
+            matches!(err, crate::errors::Error::VerificationRejected { .. }),
+            "verify=false must surface as Error::VerificationRejected, got {:?}",
+            err
+        );
         assert!(
             !dest.exists(),
             "nothing is installed when verification fails"
@@ -1709,6 +1718,58 @@ mod tests {
             "a matching checksum must pass the gate; the failure should come from extraction, \
              got: {}",
             msg
+        );
+    }
+
+    // WS3 variant-routing: the async finish tail (`finish_update_async`, ~update.rs:1022) runs the
+    // verify/extract/install tail under `tokio::task::spawn_blocking` and maps a `JoinError` (e.g.
+    // a panic in that tail) to `Error::Internal { source: Some(Box::new(join_err)) }`. That site is
+    // only reachable through the full async update flow (network download of a real asset, then a
+    // panic in the private `finish_update_owned` tail), so it cannot be driven from a unit test
+    // without breaking the install flow. What we pin here is the exact `map_err` mapping that site
+    // performs: a real `JoinError` from a panicking `spawn_blocking` must route to `Error::Internal`
+    // with a NON-None, chained `source()` — distinguishing it from the genuine-invariant
+    // `Internal { source: None }` extractor sites. This mirrors `custom.rs`'s
+    // `blocking_adapter_join_failure_chains_source`, which covers the structurally-identical
+    // `Blocking` adapter mapping; together they pin both async JoinError->Internal sites.
+    #[cfg(feature = "async")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_finish_join_failure_maps_to_internal_with_source() {
+        use std::error::Error as _;
+
+        // Reproduce the production mapping verbatim: a panicking blocking task fails the join, and
+        // the join error is wrapped the same way the finish tail wraps it.
+        let mapped: Result<()> = tokio::task::spawn_blocking(|| {
+            panic!("boom in the finish tail");
+        })
+        .await
+        .map_err(|e| crate::errors::Error::Internal {
+            message: "finish-update task failed".to_string(),
+            source: Some(Box::new(e)),
+        });
+
+        let err = mapped.expect_err("a panicking finish tail must fail the join");
+        match err {
+            crate::errors::Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert_eq!(message, "finish-update task failed");
+                assert!(
+                    source.is_some(),
+                    "Internal from a JoinError must carry a non-None source"
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
+        }
+        assert!(
+            err.source().is_some(),
+            "the JoinError must chain through source()"
+        );
+        assert_eq!(
+            err.to_string(),
+            "InternalError: finish-update task failed",
+            "Display must render the message without panicking"
         );
     }
 }

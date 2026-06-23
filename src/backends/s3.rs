@@ -88,10 +88,7 @@ fn endpoint_requires_region(end_point: &EndPoint) -> bool {
 /// `build()` (like every other required field) rather than at the first network call.
 fn check_endpoint_region(end_point: &EndPoint, region: &Option<String>) -> Result<()> {
     if endpoint_requires_region(end_point) && region.is_none() {
-        bail!(
-            Error::Config,
-            "`region` required for the S3, S3DualStack, and DigitalOceanSpaces endpoints; call `.region(...)`"
-        );
+        return Err(Error::MissingField { field: "region" });
     }
     Ok(())
 }
@@ -204,7 +201,9 @@ impl ReleaseListBuilder {
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`bucket_name` required")
+                return Err(Error::MissingField {
+                    field: "bucket_name",
+                });
             },
             region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
@@ -398,7 +397,9 @@ impl UpdateBuilder {
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
-                bail!(Error::Config, "`bucket_name` required")
+                return Err(Error::MissingField {
+                    field: "bucket_name",
+                });
             },
             region: self.region.clone(),
             max_keys: self.max_keys,
@@ -496,7 +497,7 @@ fn pick_latest(releases: &[Release]) -> Result<Release> {
         });
     match rel {
         Some(r) => Ok(r.clone()),
-        None => bail!(Error::Release, "No release was found"),
+        None => Err(Error::NoReleaseFound { target: None }),
     }
 }
 
@@ -526,11 +527,7 @@ fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
 fn find_version(releases: &[Release], ver: &str) -> Result<Release> {
     match releases.iter().find(|x| x.version == ver) {
         Some(r) => Ok(r.clone()),
-        None => bail!(
-            Error::Release,
-            "No release with version '{}' was found",
-            ver
-        ),
+        None => Err(Error::NoReleaseFound { target: None }),
     }
 }
 
@@ -787,7 +784,7 @@ fn build_s3_api_url(
 
     let region_result = region
         .as_ref()
-        .ok_or_else(|| Error::Config("`region` required".to_string()));
+        .ok_or(Error::MissingField { field: "region" });
 
     let download_base_url = match end_point {
         EndPoint::S3 => format!(
@@ -960,11 +957,8 @@ fn parse_s3_response<R: std::io::BufRead>(
     let mut next_continuation_token: Option<String> = None;
     let regex =
         Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
-            .map_err(|err| {
-                Error::Release(format!(
-                    "Failed constructing regex to parse S3 filenames: {}",
-                    err
-                ))
+            .map_err(|err| Error::InvalidResponse {
+                source: Box::new(err),
             })?;
 
     // inspecting each XML element we populate our releases list
@@ -1041,12 +1035,11 @@ fn parse_s3_response<R: std::io::BufRead>(
                 }
                 break; // exits the loop when reaching end of file
             }
-            Err(e) => bail!(
-                Error::Release,
-                "Failed when parsing S3 XML response at position {}: {:?}",
-                reader.buffer_position(),
-                e
-            ),
+            Err(e) => {
+                return Err(Error::InvalidResponse {
+                    source: Box::new(e),
+                });
+            }
             _ => (), // There are several other `Event`s we ignore here
         }
 
@@ -1305,6 +1298,7 @@ mod tests {
 
     #[test]
     fn parse_s3_response_malformed_xml_errors() {
+        use std::error::Error as _;
         // A body that is not valid XML must surface as an `Err`, not panic.
         let bad_xml = "this is not xml at all <<<";
         let result = parse_s3_response(
@@ -1315,7 +1309,18 @@ mod tests {
             #[cfg(feature = "s3-auth")]
             &None,
         );
-        assert!(result.is_err(), "malformed XML must return Err");
+        let err = result.expect_err("malformed XML must return Err");
+        // E2/E6: the XML parse failure surfaces as `InvalidResponse` and chains the underlying
+        // quick-xml error through `source()` (previously the source was stringified and dropped).
+        assert!(
+            matches!(err, crate::errors::Error::InvalidResponse { .. }),
+            "malformed XML must surface as Error::InvalidResponse, got {:?}",
+            err
+        );
+        assert!(
+            err.source().is_some(),
+            "InvalidResponse from XML parse must chain a non-None source()"
+        );
     }
 
     #[test]
@@ -1993,9 +1998,9 @@ mod tests {
         assert!(
             matches!(
                 upd.get_release_version("9.9.9"),
-                Err(crate::errors::Error::Release(_))
+                Err(crate::errors::Error::NoReleaseFound { .. })
             ),
-            "missing version must surface as Error::Release"
+            "missing version must surface as Error::NoReleaseFound"
         );
     }
 
@@ -2069,8 +2074,8 @@ mod tests {
         let upd = s3_update(&base, "0.1.0");
         let res = upd.get_release_version_async("9.9.9").await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
-            "missing version must surface as Error::Release"
+            matches!(res, Err(crate::errors::Error::NoReleaseFound { .. })),
+            "missing version must surface as Error::NoReleaseFound"
         );
     }
 
@@ -2231,8 +2236,8 @@ mod tests {
             .request_header("inva lid", "ok")
             .build();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "invalid header must surface as Error::Config from ReleaseList build()"
+            matches!(res, Err(crate::errors::Error::InvalidHeader { .. })),
+            "invalid header must surface as Error::InvalidHeader from ReleaseList build()"
         );
     }
 
@@ -2420,8 +2425,11 @@ mod tests {
         ] {
             let res = api_url(ep, "b", None, None);
             assert!(
-                matches!(res, Err(crate::errors::Error::Config(_))),
-                "region-requiring endpoint without region must error with Error::Config"
+                matches!(
+                    res,
+                    Err(crate::errors::Error::MissingField { field: "region" })
+                ),
+                "region-requiring endpoint without region must error with Error::MissingField"
             );
         }
     }
@@ -2456,8 +2464,11 @@ mod tests {
             .current_version("0.1.0")
             .build();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "S3 endpoint without region must fail at build() with Error::Config"
+            matches!(
+                res,
+                Err(crate::errors::Error::MissingField { field: "region" })
+            ),
+            "S3 endpoint without region must fail at build() with Error::MissingField"
         );
 
         let list = super::ReleaseList::configure()
@@ -2465,7 +2476,10 @@ mod tests {
             .bucket_name("bucket")
             .build();
         assert!(
-            matches!(list, Err(crate::errors::Error::Config(_))),
+            matches!(
+                list,
+                Err(crate::errors::Error::MissingField { field: "region" })
+            ),
             "ReleaseList build() must also enforce the region requirement"
         );
     }
@@ -2484,8 +2498,11 @@ mod tests {
             .current_version("0.1.0")
             .build_async();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "S3 endpoint without region must fail at build_async() with Error::Config, got {:?}",
+            matches!(
+                res,
+                Err(crate::errors::Error::MissingField { field: "region" })
+            ),
+            "S3 endpoint without region must fail at build_async() with Error::MissingField, got {:?}",
             res.map(|_| "Ok")
         );
     }
@@ -2592,6 +2609,70 @@ mod tests {
         );
         // The base path is preserved ahead of the query string.
         assert!(out.starts_with("https://b.s3.us-east-1.amazonaws.com/path/to/key?"));
+    }
+
+    // WS3 variant-routing: the regex-build `InvalidResponse` branch in `parse_s3_response`
+    // (~line 960) maps a `regex::Error` into `Error::InvalidResponse { source: Box::new(err) }`.
+    // The pattern compiled there is a fixed string literal that always builds, so that exact branch
+    // is statically unreachable from any test input (no interpolation, no runtime data). What IS
+    // verifiable is the error-routing the branch performs: a real `regex::Error` boxed the same way
+    // must produce `Error::InvalidResponse` whose `source()` chains the regex error. Only the
+    // XML-parse `InvalidResponse` branch (~line 1038) is exercised end-to-end; this pins the
+    // regex-build mapping by type so a regression that routed regex build failures elsewhere (or
+    // dropped the `source`) is caught.
+    #[test]
+    fn regex_build_error_maps_to_invalid_response_with_source() {
+        use std::error::Error as _;
+        // An intentionally-malformed pattern produces a genuine `regex::Error`. The pattern is
+        // assembled at runtime (not a literal) so the clippy `invalid_regex` lint -- which only
+        // validates literal patterns -- does not reject this deliberately-broken input.
+        let bad_pattern = String::from("(");
+        let err =
+            super::Regex::new(&bad_pattern).expect_err("an unbalanced group must fail to compile");
+        let inner_shown = err.to_string();
+        let mapped = crate::errors::Error::InvalidResponse {
+            source: Box::new(err),
+        };
+        assert!(
+            matches!(mapped, crate::errors::Error::InvalidResponse { .. }),
+            "a regex build failure must route to Error::InvalidResponse, got {:?}",
+            mapped
+        );
+        let chained = mapped
+            .source()
+            .expect("InvalidResponse from a regex error must chain a source()");
+        assert!(
+            chained.to_string().contains(&inner_shown),
+            "source() must surface the underlying regex error, got: {}",
+            chained
+        );
+    }
+
+    // WS3 variant-routing: the residual `Config(String)` site is the SigV4 host-extraction failure
+    // in `s3_signature_v4` (~line 699). A URL that parses but has no authority/host (a non-special
+    // scheme such as `mailto:`) reaches `url.host_str() == None` and must route to EXACTLY
+    // `Error::Config`, with the offending URL embedded in the message. This is the only `Config`
+    // producer left after WS3, and it had no variant-identity test.
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn s3_signature_v4_hostless_url_routes_to_config() {
+        let key: super::AccessKey = ("AKIA", "secret").into();
+        // `mailto:` parses (so we get past `Url::parse`) but has no host, so `host_str()` is None
+        // and the `ok_or_else` fires the `Config` branch.
+        let res = super::auth::s3_signature_v4("mailto:nobody@example.com", &None, &Some(key), 300);
+        match res {
+            Err(crate::errors::Error::Config(msg)) => {
+                assert!(
+                    msg.contains("mailto:nobody@example.com"),
+                    "Config message must embed the offending URL, got: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "a hostless signed URL must route to Error::Config, got {:?}",
+                other
+            ),
+        }
     }
 
     #[cfg(feature = "s3-auth")]

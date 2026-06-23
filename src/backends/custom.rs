@@ -176,7 +176,7 @@ impl UpdateBuilder {
         let source = self
             .source
             .clone()
-            .ok_or_else(|| Error::Config("`source` required".to_string()))?;
+            .ok_or(Error::MissingField { field: "source" })?;
         Ok(Box::new(Update {
             source,
             common: self.common.build()?,
@@ -286,7 +286,7 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdateBuilder<S> {
         let source = self
             .source
             .clone()
-            .ok_or_else(|| Error::Config("`source` required".to_string()))?;
+            .ok_or(Error::MissingField { field: "source" })?;
         Ok(AsyncUpdate {
             source,
             common: self.common.build()?,
@@ -380,20 +380,29 @@ impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for B
         let s = self.source.clone();
         tokio::task::spawn_blocking(move || s.get_latest_release())
             .await
-            .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
+            .map_err(|e| Error::Internal {
+                message: "blocking task failed".to_string(),
+                source: Some(Box::new(e)),
+            })?
     }
     async fn get_latest_releases(&self) -> Result<Vec<Release>> {
         let s = self.source.clone();
         tokio::task::spawn_blocking(move || s.get_latest_releases())
             .await
-            .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
+            .map_err(|e| Error::Internal {
+                message: "blocking task failed".to_string(),
+                source: Some(Box::new(e)),
+            })?
     }
     async fn get_release_version(&self, ver: &str) -> Result<Release> {
         let s = self.source.clone();
         let ver = ver.to_owned();
         tokio::task::spawn_blocking(move || s.get_release_version(&ver))
             .await
-            .map_err(|e| Error::Update(format!("blocking task failed: {e}")))?
+            .map_err(|e| Error::Internal {
+                message: "blocking task failed".to_string(),
+                source: Some(Box::new(e)),
+            })?
     }
 }
 
@@ -637,7 +646,7 @@ mod tests {
             .update_extended()
             .expect_err("matcher returning None must fail the update");
         assert!(
-            matches!(err, crate::errors::Error::Release(_)),
+            matches!(err, crate::errors::Error::NoReleaseFound { .. }),
             "explicit-tag path still runs asset selection, got {:?}",
             err
         );
@@ -678,8 +687,8 @@ mod tests {
             .update_extended()
             .expect_err("matcher returning None must fail the update");
         assert!(
-            matches!(err, crate::errors::Error::Release(_)),
-            "no asset selected -> Error::Release, got {:?}",
+            matches!(err, crate::errors::Error::NoReleaseFound { .. }),
+            "no asset selected -> Error::NoReleaseFound, got {:?}",
             err
         );
         assert_eq!(
@@ -968,8 +977,8 @@ mod tests {
                 .await
                 .expect_err("matcher returning None must fail the update");
             assert!(
-                matches!(err, crate::errors::Error::Release(_)),
-                "no asset selected -> Error::Release, got {:?}",
+                matches!(err, crate::errors::Error::NoReleaseFound { .. }),
+                "no asset selected -> Error::NoReleaseFound, got {:?}",
                 err
             );
             assert_eq!(
@@ -1007,7 +1016,7 @@ mod tests {
                 .await
                 .expect_err("matcher returning None must fail the update");
             assert!(
-                matches!(err, crate::errors::Error::Release(_)),
+                matches!(err, crate::errors::Error::NoReleaseFound { .. }),
                 "explicit-tag path still runs asset selection, got {:?}",
                 err
             );
@@ -1066,7 +1075,7 @@ mod tests {
             struct FailingSource;
             impl ReleaseSource for FailingSource {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
-                    Err(crate::errors::Error::Release("boom".into()))
+                    Err(crate::errors::Error::NoReleaseFound { target: None })
                 }
                 fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Err(crate::errors::Error::HttpStatus {
@@ -1075,14 +1084,14 @@ mod tests {
                     })
                 }
                 fn get_release_version(&self, _ver: &str) -> crate::errors::Result<Release> {
-                    Err(crate::errors::Error::Config("cfg".into()))
+                    Err(crate::errors::Error::MissingField { field: "cfg" })
                 }
             }
 
             let blk = Blocking::new(FailingSource);
             assert!(matches!(
                 AsyncReleaseSource::get_latest_release(&blk).await,
-                Err(crate::errors::Error::Release(_))
+                Err(crate::errors::Error::NoReleaseFound { .. })
             ));
             assert!(matches!(
                 AsyncReleaseSource::get_latest_releases(&blk).await,
@@ -1090,8 +1099,43 @@ mod tests {
             ));
             assert!(matches!(
                 AsyncReleaseSource::get_release_version(&blk, "1.0.0").await,
-                Err(crate::errors::Error::Config(_))
+                Err(crate::errors::Error::MissingField { .. })
             ));
+        }
+
+        // E3/E6: a panic inside the spawned blocking task fails the join, which the adapter maps to
+        // `Error::Internal` carrying the tokio `JoinError` as a boxed `source()` (previously the
+        // `JoinError` was stringified and dropped, so `source()` returned `None`).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn blocking_adapter_join_failure_chains_source() {
+            use std::error::Error as _;
+            #[derive(Clone)]
+            struct PanickingSource;
+            impl ReleaseSource for PanickingSource {
+                fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                    panic!("boom in blocking task");
+                }
+                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                    unreachable!()
+                }
+                fn get_release_version(&self, _ver: &str) -> crate::errors::Result<Release> {
+                    unreachable!()
+                }
+            }
+
+            let blk = Blocking::new(PanickingSource);
+            let err = AsyncReleaseSource::get_latest_release(&blk)
+                .await
+                .expect_err("a panicking blocking task must fail the join");
+            assert!(
+                matches!(err, crate::errors::Error::Internal { .. }),
+                "join failure must surface as Error::Internal, got {:?}",
+                err
+            );
+            assert!(
+                err.source().is_some(),
+                "Internal from a JoinError must chain a non-None source()"
+            );
         }
 
         // B7a: `Blocking`'s inner source field is private; the only ways to construct/inspect it

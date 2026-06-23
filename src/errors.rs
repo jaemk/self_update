@@ -20,8 +20,30 @@ use zipsign_api::ZipsignError;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Used as a catch-most for when the program fails to update.
-    Update(String),
+    /// An internal invariant of the update pipeline was violated, or an internal task failed.
+    ///
+    /// This signals a bug or an unexpected condition (the extractor source has no file name, a
+    /// required path was not found in an archive, an archive path was not valid UTF-8, or a
+    /// blocking task failed to join), not a normal failure mode a caller can act on. When the
+    /// failure wraps an underlying error (e.g. a tokio `JoinError`), it is carried as `source`
+    /// and surfaced via [`std::error::Error::source`].
+    #[non_exhaustive]
+    Internal {
+        /// Human-readable description of the violated invariant / failed task.
+        message: String,
+        /// The underlying error, when this wraps one (e.g. a tokio `JoinError`); else `None`.
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+    /// A post-update verification callback (`verify_with`) rejected the freshly-extracted binary.
+    ///
+    /// This is a user-controlled rejection: the caller's `verify_with` closure returned `false`,
+    /// so nothing was installed. `reason` is reserved for a future caller-supplied message and is
+    /// currently always `None`.
+    #[non_exhaustive]
+    VerificationRejected {
+        /// Optional reason the verification was rejected. Currently always `None`.
+        reason: Option<String>,
+    },
     /// The downloaded artifact's checksum did not match the expected digest.
     ///
     /// `expected` is the configured digest; `computed` is the one actually produced from the
@@ -62,12 +84,62 @@ pub enum Error {
         /// The URL whose response was this status.
         url: String,
     },
-    /// If there is an issue with the most recent release (such as no
-    /// binary for the current platform), this error is returned.
-    Release(String),
-    /// Used when a there is an error with setting up the configuration
-    /// for a repository archive. An example would be failing to provide the username a
-    /// repository archive is under.
+    /// No release (or no release asset matching the requested target) was found.
+    ///
+    /// This is the clean negative outcome of a release lookup: the remote listing had no release,
+    /// no release matched the requested tag/version, or the resolved release had no asset for
+    /// `target`. `target` is the requested target triple when the lookup was asset-scoped, else
+    /// `None`.
+    #[non_exhaustive]
+    NoReleaseFound {
+        /// The requested target triple, when the lookup failed to find a matching asset; else `None`.
+        target: Option<String>,
+    },
+    /// A release or asset payload from the backend was missing a required field.
+    ///
+    /// `field` is the name of the absent field (e.g. `"tag_name"`, `"browser_download_url"`).
+    #[non_exhaustive]
+    MissingAssetField {
+        /// The name of the missing field in the release/asset payload.
+        field: &'static str,
+    },
+    /// A backend response could not be parsed.
+    ///
+    /// Wraps the underlying parse error (e.g. an S3 XML reader error or a regex build failure),
+    /// surfaced via [`std::error::Error::source`].
+    #[non_exhaustive]
+    InvalidResponse {
+        /// The underlying parse error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// A required builder/configuration field was not set.
+    ///
+    /// `field` names the missing field (e.g. `"repo_owner"`, `"bin_name"`, `"region"`).
+    #[non_exhaustive]
+    MissingField {
+        /// The name of the missing required field.
+        field: &'static str,
+    },
+    /// An HTTP header supplied to the builder (`request_header` / `header`) was not valid.
+    ///
+    /// Wraps the underlying header-conversion error, surfaced via [`std::error::Error::source`].
+    #[non_exhaustive]
+    InvalidHeader {
+        /// The underlying header-conversion error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// An auth token could not be encoded as an HTTP `Authorization` header value.
+    ///
+    /// Wraps the underlying header-conversion error, surfaced via [`std::error::Error::source`].
+    #[non_exhaustive]
+    InvalidAuthToken {
+        /// The underlying header-conversion error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// A configuration error that does not fit a more specific variant.
+    ///
+    /// Currently produced only by the S3 backend when a host cannot be extracted from a signed
+    /// URL (`s3-auth`).
     Config(String),
     /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
@@ -149,7 +221,18 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use Error::*;
         match self {
-            Update(s) => write!(f, "UpdateError: {}", s),
+            Internal { message, .. } => write!(f, "InternalError: {}", message),
+            VerificationRejected { reason } => match reason {
+                Some(reason) => write!(
+                    f,
+                    "VerificationRejectedError: post-update verification rejected the new binary: {}",
+                    reason
+                ),
+                None => write!(
+                    f,
+                    "VerificationRejectedError: post-update verification rejected the new binary"
+                ),
+            },
             ChecksumMismatch { expected, computed } => write!(
                 f,
                 "ChecksumMismatchError: checksum mismatch (expected {}, computed {})",
@@ -167,7 +250,23 @@ impl std::fmt::Display for Error {
                 "HttpStatusError: request to {} failed with status {}",
                 url, status
             ),
-            Release(s) => write!(f, "ReleaseError: {}", s),
+            NoReleaseFound { target } => match target {
+                Some(target) => write!(
+                    f,
+                    "ReleaseError: no release found with an asset for target `{}`",
+                    target
+                ),
+                None => write!(f, "ReleaseError: no release was found"),
+            },
+            MissingAssetField { field } => {
+                write!(f, "ReleaseError: release/asset payload missing `{}`", field)
+            }
+            InvalidResponse { source } => write!(f, "ReleaseError: invalid response: {}", source),
+            MissingField { field } => write!(f, "ConfigError: `{}` required", field),
+            InvalidHeader { source } => write!(f, "ConfigError: invalid HTTP header: {}", source),
+            InvalidAuthToken { source } => {
+                write!(f, "ConfigError: failed to parse auth token: {}", source)
+            }
             Config(s) => write!(f, "ConfigError: {}", s),
             Io(e) => write!(f, "IoError: {}", e),
             Json(e) => write!(f, "JsonError: {}", e),
@@ -205,6 +304,13 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match *self {
+            Error::Internal {
+                source: Some(ref e),
+                ..
+            } => &**e,
+            Error::InvalidResponse { ref source } => &**source,
+            Error::InvalidHeader { ref source } => &**source,
+            Error::InvalidAuthToken { ref source } => &**source,
             Error::Io(ref e) => e,
             Error::Json(ref e) => &**e,
             Error::Transport(ref e) => &**e,
@@ -219,6 +325,21 @@ impl std::error::Error for Error {
         })
     }
 }
+
+/// A minimal owned error carrying just a message, used as the boxed `source` for the
+/// builder header-validation path where the underlying `TryInto` conversion error is not
+/// nameable through the generic bound. Lets `Error::InvalidHeader` still expose a non-`None`
+/// `source()` that renders the original validation message.
+#[derive(Debug)]
+pub(crate) struct MessageError(pub(crate) String);
+
+impl std::fmt::Display for MessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MessageError {}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {
@@ -315,7 +436,7 @@ pub(crate) fn status_to_error(status: u16, url: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{Error, MessageError};
     use std::error::Error as _;
 
     /// Produce a real `serde_json::Error` by parsing malformed JSON.
@@ -642,9 +763,16 @@ mod tests {
     // http_status() returns None for non-HTTP variants
     #[test]
     fn http_status_helper_returns_none_for_non_http_variants() {
-        assert_eq!(Error::Update("x".into()).http_status(), None);
-        assert_eq!(Error::Release("x".into()).http_status(), None);
-        assert_eq!(Error::Config("x".into()).http_status(), None);
+        assert_eq!(
+            Error::Internal {
+                message: "x".into(),
+                source: None
+            }
+            .http_status(),
+            None
+        );
+        assert_eq!(Error::NoReleaseFound { target: None }.http_status(), None);
+        assert_eq!(Error::MissingField { field: "x" }.http_status(), None);
         assert_eq!(Error::Io(std::io::Error::other("x")).http_status(), None);
         assert_eq!(Error::Json(Box::new(json_error())).http_status(), None);
         assert_eq!(
@@ -805,9 +933,16 @@ mod tests {
 
     #[test]
     fn url_helper_returns_none_for_non_http_variants() {
-        assert_eq!(Error::Update("x".into()).url(), None);
-        assert_eq!(Error::Release("x".into()).url(), None);
-        assert_eq!(Error::Config("x".into()).url(), None);
+        assert_eq!(
+            Error::Internal {
+                message: "x".into(),
+                source: None
+            }
+            .url(),
+            None
+        );
+        assert_eq!(Error::NoReleaseFound { target: None }.url(), None);
+        assert_eq!(Error::MissingField { field: "x" }.url(), None);
         assert_eq!(Error::Aborted.url(), None);
         assert_eq!(
             Error::ChecksumMismatch {
@@ -848,5 +983,288 @@ mod tests {
             "SignatureNonUTF8 Display must start with 'SignatureError: ', got: {}",
             shown
         );
+    }
+
+    // --- WS3 structured-variant unit tests ----------------------------------------------------
+
+    // `MissingField` Display: "ConfigError: `<field>` required".
+    #[test]
+    fn missing_field_display_and_no_source() {
+        let err = Error::MissingField {
+            field: "current_version",
+        };
+        assert_eq!(err.to_string(), "ConfigError: `current_version` required");
+        assert!(
+            err.source().is_none(),
+            "MissingField carries no source, got {:?}",
+            err.source()
+        );
+        assert_eq!(err.http_status(), None);
+        assert_eq!(err.url(), None);
+    }
+
+    // `NoReleaseFound` Display differs with/without a target, and never has a source.
+    #[test]
+    fn no_release_found_display_variants() {
+        assert_eq!(
+            Error::NoReleaseFound { target: None }.to_string(),
+            "ReleaseError: no release was found"
+        );
+        assert_eq!(
+            Error::NoReleaseFound {
+                target: Some("x86_64-unknown-linux-gnu".into())
+            }
+            .to_string(),
+            "ReleaseError: no release found with an asset for target `x86_64-unknown-linux-gnu`"
+        );
+        assert!(Error::NoReleaseFound { target: None }.source().is_none());
+    }
+
+    // `MissingAssetField` Display names the absent payload field.
+    #[test]
+    fn missing_asset_field_display() {
+        let err = Error::MissingAssetField { field: "tag_name" };
+        assert_eq!(
+            err.to_string(),
+            "ReleaseError: release/asset payload missing `tag_name`"
+        );
+        assert!(err.source().is_none());
+    }
+
+    // `VerificationRejected` Display, with and without a reason.
+    #[test]
+    fn verification_rejected_display_variants() {
+        assert_eq!(
+            Error::VerificationRejected { reason: None }.to_string(),
+            "VerificationRejectedError: post-update verification rejected the new binary"
+        );
+        assert_eq!(
+            Error::VerificationRejected {
+                reason: Some("bad signature".into())
+            }
+            .to_string(),
+            "VerificationRejectedError: post-update verification rejected the new binary: bad signature"
+        );
+        assert_eq!(
+            Error::VerificationRejected { reason: None }.http_status(),
+            None
+        );
+        assert!(
+            Error::VerificationRejected { reason: None }
+                .source()
+                .is_none()
+        );
+    }
+
+    // E6: `InvalidResponse` carries a boxed source and chains it through `source()`.
+    #[test]
+    fn invalid_response_chains_source() {
+        let inner = json_error();
+        let inner_shown = inner.to_string();
+        let err = Error::InvalidResponse {
+            source: Box::new(inner),
+        };
+        let chained = err
+            .source()
+            .expect("InvalidResponse must expose its source()");
+        assert!(
+            chained.to_string().contains(&inner_shown),
+            "source() must surface the inner error, got: {}",
+            chained
+        );
+        assert!(
+            err.to_string()
+                .starts_with("ReleaseError: invalid response: ")
+        );
+    }
+
+    // E1/E6: `InvalidHeader` carries a boxed source and chains it through `source()`.
+    #[test]
+    fn invalid_header_chains_source() {
+        let err = Error::InvalidHeader {
+            source: Box::new(MessageError("bad header".into())),
+        };
+        assert_eq!(
+            err.source().map(|s| s.to_string()).as_deref(),
+            Some("bad header")
+        );
+        assert!(
+            err.to_string()
+                .starts_with("ConfigError: invalid HTTP header: ")
+        );
+    }
+
+    // E1/E6: `InvalidAuthToken` carries a boxed source and chains it through `source()`.
+    #[test]
+    fn invalid_auth_token_chains_source() {
+        // A control char produces a real header-value parse error.
+        let inner = "bad\nvalue".parse::<crate::http_client::header::HeaderValue>();
+        let inner = inner.expect_err("control char must fail header parse");
+        let inner_shown = inner.to_string();
+        let err = Error::InvalidAuthToken {
+            source: Box::new(inner),
+        };
+        let chained = err
+            .source()
+            .expect("InvalidAuthToken must expose its source()");
+        assert!(chained.to_string().contains(&inner_shown));
+        assert!(
+            err.to_string()
+                .starts_with("ConfigError: failed to parse auth token: ")
+        );
+    }
+
+    // E3/E6: `Internal` with a source chains it; without a source returns None.
+    #[test]
+    fn internal_source_chaining() {
+        let with = Error::Internal {
+            message: "boom".into(),
+            source: Some(Box::new(MessageError("inner".into()))),
+        };
+        assert_eq!(with.to_string(), "InternalError: boom");
+        assert_eq!(
+            with.source().map(|s| s.to_string()).as_deref(),
+            Some("inner")
+        );
+
+        let without = Error::Internal {
+            message: "boom".into(),
+            source: None,
+        };
+        assert!(
+            without.source().is_none(),
+            "Internal without a source must return None"
+        );
+    }
+
+    // E4: `Io` still carries the concrete `std::io::Error` (not boxed), exposing `ErrorKind`.
+    #[test]
+    fn io_error_exposes_error_kind() {
+        let err = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "nope",
+        ));
+        match err {
+            Error::Io(ref io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected Error::Io, got {:?}", other),
+        }
+    }
+
+    // E4: `Error` is `#[non_exhaustive]`, so a downstream-style `match` with a wildcard arm
+    // compiles and the new struct variants stay non-breaking to add to.
+    #[test]
+    fn non_exhaustive_match_with_wildcard_compiles() {
+        fn classify(err: &Error) -> &'static str {
+            match err {
+                Error::MissingField { .. } => "missing-field",
+                Error::NoReleaseFound { .. } => "no-release",
+                Error::VerificationRejected { .. } => "verify-rejected",
+                Error::Internal { .. } => "internal",
+                // The mandatory wildcard arm: required because `Error` is `#[non_exhaustive]`.
+                _ => "other",
+            }
+        }
+        assert_eq!(
+            classify(&Error::MissingField { field: "x" }),
+            "missing-field"
+        );
+        assert_eq!(
+            classify(&Error::NoReleaseFound { target: None }),
+            "no-release"
+        );
+        assert_eq!(classify(&Error::Aborted), "other");
+    }
+
+    // E4/WS3: the `#[non_exhaustive]` struct variants require a trailing `..` to destructure from a
+    // downstream perspective (adding a field stays non-breaking). A destructure that binds the
+    // current fields plus `..` must compile and read them. This pins the struct-level
+    // non_exhaustive contract that the enum-level wildcard test above does not exercise.
+    #[test]
+    fn non_exhaustive_struct_variants_destructure_with_rest() {
+        // `Internal` carries `message` + `source`; bind `message`, ignore the rest via `..`.
+        let internal = Error::Internal {
+            message: "boom".into(),
+            source: None,
+        };
+        if let Error::Internal { message, .. } = &internal {
+            assert_eq!(message, "boom");
+        } else {
+            panic!("expected Internal");
+        }
+
+        // `NoReleaseFound` carries `target`; bind it with `..` for forward-compatibility.
+        let nrf = Error::NoReleaseFound {
+            target: Some("t".into()),
+        };
+        if let Error::NoReleaseFound { target, .. } = &nrf {
+            assert_eq!(target.as_deref(), Some("t"));
+        } else {
+            panic!("expected NoReleaseFound");
+        }
+
+        // `Unauthorized` is `#[non_exhaustive]` too; `..` lets us read just `status`.
+        let unauth = Error::Unauthorized {
+            status: 401,
+            url: "u".into(),
+        };
+        if let Error::Unauthorized { status, .. } = &unauth {
+            assert_eq!(*status, 401);
+        } else {
+            panic!("expected Unauthorized");
+        }
+    }
+
+    // WS3 Display: every restructured/new variant has a non-panicking Display that keeps a sensible
+    // prefix and embeds its data. The per-variant tests above cover the exact strings; this is a
+    // belt-and-suspenders sweep that no new variant lost its message or panics on Display.
+    #[test]
+    fn all_new_variants_display_without_panicking() {
+        let cases: Vec<(Error, &str)> = vec![
+            (
+                Error::Internal {
+                    message: "m".into(),
+                    source: None,
+                },
+                "InternalError:",
+            ),
+            (
+                Error::VerificationRejected { reason: None },
+                "VerificationRejectedError:",
+            ),
+            (Error::NoReleaseFound { target: None }, "ReleaseError:"),
+            (Error::MissingAssetField { field: "f" }, "ReleaseError:"),
+            (
+                Error::InvalidResponse {
+                    source: Box::new(MessageError("x".into())),
+                },
+                "ReleaseError:",
+            ),
+            (Error::MissingField { field: "f" }, "ConfigError:"),
+            (
+                Error::InvalidHeader {
+                    source: Box::new(MessageError("x".into())),
+                },
+                "ConfigError:",
+            ),
+            (
+                Error::InvalidAuthToken {
+                    source: Box::new(MessageError("x".into())),
+                },
+                "ConfigError:",
+            ),
+        ];
+        for (err, prefix) in cases {
+            let shown = err.to_string();
+            assert!(
+                shown.starts_with(prefix),
+                "{:?} Display must start with `{}`, got: {}",
+                err,
+                prefix,
+                shown
+            );
+            assert!(!shown.is_empty(), "Display must not be empty");
+        }
     }
 }

@@ -26,7 +26,7 @@ macro_rules! request_config_setters {
         /// Accepts anything that converts into a header name/value, so both typed values and plain
         /// strings work: `.request_header("X-Foo", "bar")` or
         /// `.request_header(self_update::http::header::ACCEPT, "application/json")`. A name or value
-        /// that is not a valid HTTP header is reported as an `Error::Config` from
+        /// that is not a valid HTTP header is reported as an `Error::InvalidHeader` from
         /// [`build()`](Self::build) rather than panicking here.
         pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
         where
@@ -512,24 +512,4 @@ macro_rules! print_flush {
         print!($literal, $($arg),*);
         ::std::io::Write::flush(&mut ::std::io::stdout())?;
     }
-}
-
-/// Helper for formatting `errors::Error`s
-macro_rules! format_err {
-    ($e_type:expr, $literal:expr) => {
-        $e_type(format!($literal))
-    };
-    ($e_type:expr, $literal:expr, $($arg:expr),*) => {
-        $e_type(format!($literal, $($arg),*))
-    };
-}
-
-/// Helper for formatting `errors::Error`s and returning early
-macro_rules! bail {
-    ($e_type:expr, $literal:expr) => {
-        return Err(format_err!($e_type, $literal))
-    };
-    ($e_type:expr, $literal:expr, $($arg:expr),*) => {
-        return Err(format_err!($e_type, $literal, $($arg),*))
-    };
 }

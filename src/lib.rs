@@ -758,10 +758,10 @@ impl<'a> Extract<'a> {
                             }
                         }
                     }
-                    let file_name = self
-                        .source
-                        .file_name()
-                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let file_name = self.source.file_name().ok_or_else(|| Error::Internal {
+                        message: "Extractor source has no file-name".to_string(),
+                        source: None,
+                    })?;
                     let mut out_path = into_dir.join(file_name);
                     out_path.set_extension("");
                     let mut out_file = fs::File::create(&out_path)?;
@@ -849,9 +849,10 @@ impl<'a> Extract<'a> {
                             }
                         }
                     }
-                    let file_name = file_to_extract
-                        .file_name()
-                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let file_name = file_to_extract.file_name().ok_or_else(|| Error::Internal {
+                        message: "Extractor source has no file-name".to_string(),
+                        source: None,
+                    })?;
                     let out_path = into_dir.join(file_name);
                     let mut out_file = fs::File::create(out_path)?;
                     io::copy(&mut reader, &mut out_file)?;
@@ -869,11 +870,12 @@ impl<'a> Extract<'a> {
                             debug!("Archive path: {:?}", p);
                             p.ok().filter(|p| p == file_to_extract).is_some()
                         })
-                        .ok_or_else(|| {
-                            Error::Update(format!(
+                        .ok_or_else(|| Error::Internal {
+                            message: format!(
                                 "Could not find the required path in the archive: {:?}",
                                 file_to_extract
-                            ))
+                            ),
+                            source: None,
                         })?;
                     entry.unpack_in(into_dir)?;
                 }
@@ -898,11 +900,12 @@ impl<'a> Extract<'a> {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
-                let file_name = file_to_extract.to_str().ok_or_else(|| {
-                    Error::Update(format!(
+                let file_name = file_to_extract.to_str().ok_or_else(|| Error::Internal {
+                    message: format!(
                         "cannot extract file with a non-UTF-8 path: {:?}",
                         file_to_extract
-                    ))
+                    ),
+                    source: None,
                 })?;
                 let mut file = archive.by_name(file_name)?;
 
@@ -1372,18 +1375,22 @@ impl Download {
     /// Accepts anything that converts into a header name/value, so both typed values and plain
     /// strings work: `.header("X-Foo", "bar")?` or
     /// `.header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or value
-    /// that is not a valid HTTP header returns an [`Error::Config`](errors::Error::Config) rather
-    /// than panicking. Mirrors the builders' `request_header`.
+    /// that is not a valid HTTP header returns an [`Error::InvalidHeader`](errors::Error::InvalidHeader)
+    /// rather than panicking. Mirrors the builders' `request_header`.
     pub fn header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
     where
         N: ::core::convert::TryInto<http_client::header::HeaderName>,
         V: ::core::convert::TryInto<http_client::header::HeaderValue>,
     {
-        let name = name.try_into().map_err(|_| {
-            Error::Config("invalid HTTP header name passed to `header`".to_string())
+        let name = name.try_into().map_err(|_| Error::InvalidHeader {
+            source: Box::new(errors::MessageError(
+                "invalid HTTP header name passed to `header`".to_string(),
+            )),
         })?;
-        let value = value.try_into().map_err(|_| {
-            Error::Config("invalid HTTP header value passed to `header`".to_string())
+        let value = value.try_into().map_err(|_| Error::InvalidHeader {
+            source: Box::new(errors::MessageError(
+                "invalid HTTP header value passed to `header`".to_string(),
+            )),
         })?;
         self.headers.insert(name, value);
         Ok(self)
@@ -1701,8 +1708,8 @@ mod tests {
             .header("x-ok", "bad\nvalue")
             .expect_err("invalid header value must be rejected");
         assert!(
-            matches!(err, Error::Config(_)),
-            "expected Error::Config, got {:?}",
+            matches!(err, Error::InvalidHeader { .. }),
+            "expected Error::InvalidHeader, got {:?}",
             err
         );
         // The bad header must not have been inserted.
@@ -1716,7 +1723,7 @@ mod tests {
         let err = dl
             .header("inva lid", "ok")
             .expect_err("invalid header name must be rejected");
-        assert!(matches!(err, Error::Config(_)));
+        assert!(matches!(err, Error::InvalidHeader { .. }));
         // The invalid name is rejected before any value insertion, so the map stays empty: no
         // partial entry is left behind (the value "ok" must not leak in under some other key).
         assert!(
@@ -2515,6 +2522,141 @@ mod tests {
             _ => {
                 unimplemented!("{:?} not handled", archive_kind);
             }
+        }
+    }
+
+    // --- WS3 extractor `Internal { source: None }` variant-routing -----------------------------
+    //
+    // These pin the invariant-violation sites in `extract_file`/`extract_into` to EXACTLY
+    // `Error::Internal` carrying NO source (the genuine-invariant residue, distinct from the
+    // JoinError `Internal { source: Some(..) }`). None of these had a direct variant-routing test
+    // before WS3.
+
+    // `extract_file` on a Plain source where the *requested* `file_to_extract` has no file name
+    // (e.g. `..`) must route to `Error::Internal { source: None }` ("Extractor source has no
+    // file-name"), not an Io error. `file_to_extract` is caller-supplied and need not exist, so
+    // this is reachable without a real hostless-path file. (~lib.rs:852)
+    #[test]
+    fn extract_file_plain_no_file_name_routes_to_internal_without_source() {
+        use std::error::Error as _;
+        let src_dir = tempfile::tempdir().expect("tempdir");
+        let src = src_dir.path().join("payload.bin");
+        fs::write(&src, b"hello").expect("write source");
+
+        let out_dir = tempfile::tempdir().expect("out tempdir");
+
+        // `..` has no `file_name()`, firing the invariant branch.
+        let err = Extract::from_source(&src)
+            .archive(ArchiveKind::Plain(None))
+            .extract_file(out_dir.path(), "..")
+            .expect_err("a file_to_extract with no file name must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the no-file-name invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("file-name"),
+                    "message must describe the missing file name, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
+        }
+        // Defensive: confirm the variant truly chains no source via the trait too.
+        let err = Extract::from_source(&src)
+            .archive(ArchiveKind::Plain(None))
+            .extract_file(out_dir.path(), "..")
+            .unwrap_err();
+        assert!(err.source().is_none());
+    }
+
+    // `extract_file` on a Tar source where the requested path is not present in the archive must
+    // route to `Error::Internal { source: None }` ("Could not find the required path in the
+    // archive"), naming the missing path. (~lib.rs:873)
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn extract_file_tar_missing_path_routes_to_internal_without_source() {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_ws3_tar_missing_src")
+            .tempdir()
+            .expect("tempdir");
+        let archive_file_path = tmp_dir.path().join("archive.tar.gz");
+        let archive_file = File::create(&archive_file_path).expect("create archive");
+        build_test_archive(
+            archive_file,
+            &archive_file_path,
+            ArchiveKind::Tar(Some(Compression::Gz)),
+        );
+
+        let out_tmp = tempfile::tempdir().expect("out tempdir");
+        let err = Extract::from_source(&archive_file_path)
+            .extract_file(out_tmp.path(), "does/not/exist.txt")
+            .expect_err("a path absent from the tar must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the path-not-found invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("Could not find the required path"),
+                    "message must describe the missing archive path, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
+        }
+    }
+
+    // `extract_file` on a Zip source where the requested path is not valid UTF-8 must route to
+    // `Error::Internal { source: None }` ("cannot extract file with a non-UTF-8 path"). Reachable
+    // on Unix by building an `OsStr` from raw non-UTF-8 bytes. (~lib.rs:903)
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_file_zip_non_utf8_path_routes_to_internal_without_source() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_ws3_zip_nonutf8_src")
+            .tempdir()
+            .expect("tempdir");
+        let archive_file_path = tmp_dir.path().join("archive.zip");
+        let archive_file = File::create(&archive_file_path).expect("create archive");
+        build_test_archive(archive_file, &archive_file_path, ArchiveKind::Zip);
+
+        let out_tmp = tempfile::tempdir().expect("out tempdir");
+        // 0xFF is never valid UTF-8.
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xFFname");
+        let err = Extract::from_source(&archive_file_path)
+            .extract_file(out_tmp.path(), bad)
+            .expect_err("a non-UTF-8 zip path must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the non-UTF-8-path invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("non-UTF-8 path"),
+                    "message must describe the non-UTF-8 path, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
         }
     }
 }

@@ -15,16 +15,26 @@ pipeline, and the checksum module.
 `Error` is declared `#[derive(Debug)] #[non_exhaustive] pub enum` at `errors.rs`. Every variant,
 what produces it, and its feature gate:
 
+Struct-form variants added after 1.0 are marked `#[non_exhaustive]` (in addition to the
+enum-level `#[non_exhaustive]`) so fields can be added without a breaking change. Variants
+considered shape-final (`NotFound`, `ChecksumMismatch`) are not.
+
 | Variant | Produced by | Feature gate | Opaque/boxed? |
 | --- | --- | --- | --- |
-| `Update(String)` | Genuine internal update failures: extractor source has no file name (`lib.rs`); extract failures (path not in archive, non-UTF-8 archive path); blocking-task join failure (`custom.rs`); post-update verify callback rejected the binary (`update.rs`). | none | no (String) |
+| `Internal { message: String, source: Option<Box<dyn Error + Send + Sync>> }` | Genuine internal invariants / task failures: extractor source has no file name (`lib.rs`), path not in archive, non-UTF-8 archive path (`lib.rs`), and blocking-task join failure (`custom.rs`, `update.rs`). The join sites carry the tokio `JoinError` as `source`; the invariant sites set `source: None`. `#[non_exhaustive]`. | none | source boxed when present |
+| `VerificationRejected { reason: Option<String> }` | The post-update `verify_with` callback returned `false`, so nothing was installed (`update.rs`). `reason` is reserved for a future caller-supplied message and is currently always `None`. `#[non_exhaustive]`. | none | no (struct fields) |
 | `ChecksumMismatch { expected: String, computed: String }` | The downloaded artifact's digest did not match the configured `Checksum` (`checksum.rs`). Both fields are lowercase hex-encoded digests. | `checksums` | no (struct fields) |
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. | none | no (struct fields) |
-| `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. | none | no (struct fields) |
-| `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. | none | no (struct fields) |
-| `Release(String)` | Problem with the resolved release: no asset for target (`update.rs`), missing asset/release fields in each backend's `from_value` (`github.rs`, `gitlab.rs`, `gitea.rs`), no releases found, empty/non-array payloads, missing tag (`gitlab.rs`, `gitea.rs`, `s3.rs`), S3 XML/regex parse failure (`s3.rs`). | none | no (String) |
-| `Config(String)` | Builder/configuration error: missing required field (`update.rs`, `backends/common.rs`, `custom.rs`), missing `repo_owner`/`repo_name`/`bucket_name`/`region` (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), invalid HTTP header name/value (`lib.rs`, surfaced from `build()` via `common.rs`), auth-token parse failure, host-extraction failure (`s3.rs`). | none | no (String) |
+| `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
+| `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
+| `NoReleaseFound { target: Option<String> }` | The clean negative of a release lookup: no release / no matching release for a tag/version (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), or the resolved release had no asset for the requested target (`update.rs`, with `target: Some(...)`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `MissingAssetField { field: &'static str }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's `from_value` (`github.rs`, `gitlab.rs`, `gitea.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `InvalidResponse { source: Box<dyn Error + Send + Sync> }` | A backend response could not be parsed: the S3 listing regex build failure and the S3 XML parse failure (`s3.rs`). The underlying error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
+| `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name`/`url` (`github.rs`, `gitlab.rs`, `gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A builder request header (`request_header`) or the `Download::header` argument was not a valid HTTP header. Surfaced from `build()` via `common.rs` and directly from `Download::header` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
+| `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
+| `Config(String)` | Residual configuration error that does not fit a more specific variant. Currently produced only by the S3 SigV4 host-extraction site when a host cannot be extracted from a signed URL (`s3.rs`). | `s3-auth` (only producer) | no (String) |
 | `Io(std::io::Error)` | Wraps a `std::io::Error`. Constructed directly and via `From<std::io::Error>`. | none | no (concrete `std::io::Error`) |
 | `Json(Box<dyn Error + Send + Sync>)` | `serde_json` failure, only via `From<serde_json::Error>`. | none | yes (boxed) |
 | `Transport(Box<dyn Error + Send + Sync>)` | The request could not be completed (connection/TLS/timeout/transport failure). Only via `From<reqwest::Error>` (`reqwest` feature) or `From<ureq::Error>` (`ureq` feature). A bare `?` on a client call lands here only when the error is not a status-code error. | none for the variant; the `From` impls are gated on `reqwest` / `ureq` | yes (boxed) |
@@ -38,21 +48,47 @@ what produces it, and its feature gate:
 
 ### Reclassification of construction sites
 
-`Error::Update(String)` was previously overloaded to cover three unrelated outcomes. The sites have
-been reclassified as follows:
+The 1.0 status work split the HTTP-status variants. The three remaining stringly-typed catch-alls
+(`Update(String)`, `Release(String)`, `Config(String)`) were then structured, and the
+construction sites that stringified-and-discarded a real underlying error now carry a boxed
+`source`.
 
-- **`checksum.rs` verify()** (digest mismatch) -- was `Error::Update("... checksum mismatch ...")`
-  -- now `Error::ChecksumMismatch { expected, computed }`. The actual expected and computed hex
-  digests are carried as fields.
-- **`lib.rs` `confirm()`** (user answered "no") -- was `bail!(Error::Update, "Update aborted")`
-  -- now `Err(Error::Aborted)`.
-- **`backends/custom.rs` `Blocking`** (tokio blocking-task join failure) -- stays `Error::Update`.
-  These are internal programming failures (the spawned task panicked or was cancelled), not
-  user-visible outcomes.
-- **`update.rs` `install_binary()`** (verify callback rejected the binary) -- stays `Error::Update`.
-  The callback returning `false` is a genuine internal abort, not a user prompt decline.
-- **`lib.rs` extractor / extract helpers** (no file-name, path not found, non-UTF-8 path) -- stays
-  `Error::Update`. These are internal / invariant failures in the extraction pipeline.
+`Update(String)` was split:
+
+- **`update.rs` `install_binary()`** (verify callback returned `false`) -> `VerificationRejected
+  { reason }`. A user-controlled rejection, not an internal failure.
+- **`lib.rs` extractor / extract helpers** (no file-name, path not in archive, non-UTF-8 path) ->
+  `Internal { message, source: None }`. Internal invariants.
+- **`backends/custom.rs` `Blocking`** and **`update.rs` finish-update** (tokio join failure) ->
+  `Internal { message, source: Some(JoinError) }`. The `JoinError` is now carried as `source`
+  (was previously stringified and discarded).
+
+`Release(String)` was split:
+
+- **`update.rs` `resolve_and_confirm()`** (no asset for target) -> `NoReleaseFound { target:
+  Some(...) }`.
+- **`github.rs` / `gitlab.rs` / `gitea.rs` / `s3.rs`** (no release / no matching tag / empty or
+  non-array listing) -> `NoReleaseFound { target: None }`.
+- **`github.rs` / `gitlab.rs` / `gitea.rs` `from_value`** (missing payload field) ->
+  `MissingAssetField { field }`.
+- **`s3.rs`** (listing regex build failure, XML parse failure) -> `InvalidResponse { source }`.
+  The underlying error is now carried as `source` (was previously stringified and discarded).
+
+`Config(String)` was split:
+
+- **`common.rs` / `update.rs` / `custom.rs` / `github.rs` / `gitlab.rs` / `gitea.rs` / `s3.rs`**
+  (required field unset) -> `MissingField { field }`.
+- **`common.rs` `check()` and `lib.rs` `Download::header`** (invalid request header) ->
+  `InvalidHeader { source }`.
+- **`github.rs` / `gitlab.rs` / `gitea.rs` / `update.rs` `api_headers`** (auth token not a valid
+  header value) -> `InvalidAuthToken { source }`. The header-parse error is now carried as
+  `source` (was previously stringified and discarded).
+- **`s3.rs` SigV4 host extraction** (`s3-auth`) -> residual `Config(String)`. The only remaining
+  `Config(String)` producer; it does not fit a more specific variant.
+
+Other (unchanged) reclassifications from the status work: a checksum mismatch is
+`ChecksumMismatch { expected, computed }` (`checksum.rs`), and a declined confirmation prompt is
+`Aborted` (`lib.rs` `confirm()`).
 
 ### Display strings
 
@@ -62,13 +98,19 @@ output.
 
 Each variant renders with a specific Display string:
 
-- `Update(s)` -> `"UpdateError: {s}"`
+- `Internal { message, .. }` -> `"InternalError: {message}"`
+- `VerificationRejected { reason: None }` -> `"VerificationRejectedError: post-update verification rejected the new binary"`; with `Some(r)` it appends `": {r}"`
 - `ChecksumMismatch { expected, computed }` -> `"ChecksumMismatchError: checksum mismatch (expected {expected}, computed {computed})"`
 - `Aborted` -> `"AbortedError: the update was not confirmed"`
 - `NotFound { url }` -> `"NotFoundError: no resource found at {url} (HTTP 404)"`
 - `Unauthorized { status, url }` -> `"UnauthorizedError: request to {url} was not authorized (HTTP {status})"`
 - `HttpStatus { status, url }` -> `"HttpStatusError: request to {url} failed with status {status}"`
-- `Release(s)` -> `"ReleaseError: {s}"`
+- `NoReleaseFound { target: None }` -> `"ReleaseError: no release was found"`; with `Some(t)` -> `"ReleaseError: no release found with an asset for target \`{t}\`"`
+- `MissingAssetField { field }` -> `"ReleaseError: release/asset payload missing \`{field}\`"`
+- `InvalidResponse { source }` -> `"ReleaseError: invalid response: {source}"`
+- `MissingField { field }` -> `"ConfigError: \`{field}\` required"`
+- `InvalidHeader { source }` -> `"ConfigError: invalid HTTP header: {source}"`
+- `InvalidAuthToken { source }` -> `"ConfigError: failed to parse auth token: {source}"`
 - `Config(s)` -> `"ConfigError: {s}"`
 - `Io(e)` -> `"IoError: {e}"`
 - `Json(e)` -> `"JsonError: {e}"` (dereferences the box)
@@ -87,13 +129,20 @@ every other variant using a `<Name>Error:` prefix.
 
 ### source() and downcast
 
-`source()` returns the inner error for the wrapping variants: `Io` (the concrete io error), and the
-boxed `Json`, `Transport`, `SemVer`, `Zip` (gated), `Signature` (gated), `S3Auth` (gated) -- each
-via `&**e` to deref the box. All other variants (`Update`, `ChecksumMismatch`, `Aborted`,
-`NotFound`, `Unauthorized`, `HttpStatus`, `Release`, `Config`, `ArchiveNotEnabled`, `NoSignatures`,
-`SignatureNonUTF8`) return `None`. The concrete inner error of a boxed variant is reachable at
-runtime through `source()` and `downcast_ref::<ConcreteType>()` (e.g.
-`err.source().and_then(|s| s.downcast_ref::<reqwest::Error>())`).
+`source()` returns the inner error for the wrapping variants: `Io` (the concrete io error); the
+boxed `Json`, `Transport`, `SemVer`, `Zip` (gated), `Signature` (gated), `S3Auth` (gated); the
+new boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`; and `Internal`
+when its `source` is `Some` -- each via deref of the box. The `Internal { source: None }` form and
+all field-only variants (`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`,
+`Unauthorized`, `HttpStatus`, `NoReleaseFound`, `MissingAssetField`, `MissingField`, `Config`,
+`ArchiveNotEnabled`, `NoSignatures`, `SignatureNonUTF8`) return `None`. The concrete inner error of
+a boxed variant is reachable at runtime through `source()` and `downcast_ref::<ConcreteType>()`
+(e.g. `err.source().and_then(|s| s.downcast_ref::<reqwest::Error>())`).
+
+`InvalidHeader`'s `source` is a crate-internal `MessageError` (a small owned message error), not a
+dependency type, because the builder header path discards the unnameable generic `TryInto`
+conversion error. The `InvalidAuthToken` and `InvalidResponse` sources are the real underlying
+errors (a header-value parse error, a quick-xml reader error, or a regex build error).
 
 ### http_status() helper
 
@@ -136,11 +185,13 @@ For ureq specifically (`http_client/ureq.rs`):
 
 ### Why boxed
 
-`Transport`, `S3Auth`, `Zip`, `Signature`, `Json`, `SemVer` wrap `Box<dyn std::error::Error + Send +
-Sync>` so no dependency type appears in the public API. The inner type can change (reqwest vs ureq
-selection, a `zip`/`serde_json`/`semver` major bump, the signing implementation) without altering
-the public surface. Inspection is still possible via `source()` + downcast. (`Io` is the exception:
-it carries the std type directly, since `std::io::Error` is stable std.)
+`Transport`, `S3Auth`, `Zip`, `Signature`, `Json`, `SemVer`, and the structured-source variants
+`InvalidResponse` / `InvalidHeader` / `InvalidAuthToken` (and `Internal`'s optional `source`) wrap
+`Box<dyn std::error::Error + Send + Sync>` so no dependency type appears in the public API. The
+inner type can change (reqwest vs ureq selection, a `zip`/`serde_json`/`semver` major bump, the
+signing implementation, the XML/regex/header dependency) without altering the public surface.
+Inspection is still possible via `source()` + downcast. (`Io` is the exception: it carries the std
+type directly, since `std::io::Error` is stable std.)
 
 ## Public surface
 
@@ -153,9 +204,11 @@ it carries the std type directly, since `std::io::Error` is stable std.)
   (`reqwest`), `ureq::Error` (`ureq`), `ZipError` (`archive-zip`), `ZipsignError` (`signatures`);
   and for `s3-auth`: `SystemTimeError`, `hmac::digest::InvalidLength`, `url::ParseError`,
   `time::error::ComponentRange`.
-- The `bail!` / `format_err!` macros (`macros.rs`) build the String-carrying variants.
 - `pub(crate) fn status_to_error(status: u16, url: &str) -> Error` (`errors.rs`) maps a status
   code to `NotFound` / `Unauthorized` / `HttpStatus`.
+- `pub(crate) struct MessageError(String)` (`errors.rs`): a minimal owned message error used as the
+  boxed `source` of `InvalidHeader` where the underlying `TryInto` conversion error is not
+  nameable. Crate-internal, not part of the public surface.
 
 ## Invariants and regression checklist
 
@@ -177,11 +230,21 @@ it carries the std type directly, since `std::io::Error` is stable std.)
   all other variants.
 - `url()` returns `Some(&str)` for `NotFound`/`Unauthorized`/`HttpStatus`; `None` for all other
   variants.
-- A checksum digest mismatch produces `Error::ChecksumMismatch { expected, computed }` (not
-  `Error::Update`). Both fields are lowercase hex-encoded digests.
-- A user-declined confirmation prompt produces `Error::Aborted` (not `Error::Update`).
-- `Error::Update` is reserved for genuine internal/programming failures: extractor invariants,
-  archive-path failures, tokio blocking-task panics, verify-callback aborts.
+- A checksum digest mismatch produces `Error::ChecksumMismatch { expected, computed }`. Both
+  fields are lowercase hex-encoded digests.
+- A user-declined confirmation prompt produces `Error::Aborted`.
+- The struct-form variants added after 1.0 are `#[non_exhaustive]` (`Unauthorized`, `HttpStatus`,
+  `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`, `InvalidResponse`,
+  `MissingField`, `InvalidHeader`, `InvalidAuthToken`); shape-final variants (`NotFound`,
+  `ChecksumMismatch`) are not.
+- `Error::Internal` is reserved for genuine internal/invariant failures: extractor invariants,
+  archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
+  `source`).
+- A rejecting `verify_with` callback produces `Error::VerificationRejected { reason: None }`.
+- The sites that previously stringified-and-discarded a source now chain it via `source()`: the
+  S3 XML/regex parse (`InvalidResponse`), the auth-token header-value parse (`InvalidAuthToken`),
+  and the tokio `JoinError` sites (`Internal`).
+- The only remaining `Config(String)` producer is the `s3-auth` SigV4 host-extraction site.
 - The signatures-gated unit variant is named `SignatureNonUTF8`; its Display is
   `"SignatureError: cannot verify signature of a file with a non-UTF-8 name"`.
 - `ArchiveNotEnabled` Display starts with `"ArchiveNotEnabledError: "`.

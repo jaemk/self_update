@@ -43,7 +43,7 @@ pub(crate) struct RequestConfig {
     pub(crate) async_client: Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>>,
     /// First error produced converting a `request_header(name, value)` argument that wasn't a
     /// valid HTTP header. Stored here so the builder setter can stay infallible (`-> &mut Self`)
-    /// and the failure is surfaced from `build()` as an `Error::Config` instead of panicking.
+    /// and the failure is surfaced from `build()` as an `Error::InvalidHeader` instead of panicking.
     pub(crate) header_error: Option<String>,
 }
 
@@ -95,10 +95,12 @@ impl RequestConfig {
         self.headers.insert(name, value);
     }
 
-    /// Return the stored `request_header` conversion error, if any, as an `Error::Config`.
+    /// Return the stored `request_header` conversion error, if any, as an `Error::InvalidHeader`.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.header_error {
-            Some(msg) => Err(Error::Config(msg.clone())),
+            Some(msg) => Err(Error::InvalidHeader {
+                source: Box::new(crate::errors::MessageError(msg.clone())),
+            }),
             None => Ok(()),
         }
     }
@@ -183,15 +185,14 @@ impl CommonBuilderConfig {
                 .clone()
                 .unwrap_or_else(|| get_target().to_owned()),
             asset_identifier: self.asset_identifier.clone(),
-            current_version: self
-                .current_version
-                .clone()
-                .ok_or_else(|| Error::Config("`current_version` required (call `.current_version(...)`)" .to_string()))?,
+            current_version: self.current_version.clone().ok_or(Error::MissingField {
+                field: "current_version",
+            })?,
             release_tag: self.release_tag.clone(),
             bin_name: self
                 .bin_name
                 .clone()
-                .ok_or_else(|| Error::Config("`bin_name` required (call `.bin_name(...)`)" .to_string()))?,
+                .ok_or(Error::MissingField { field: "bin_name" })?,
             bin_install_path: match &self.bin_install_path {
                 Some(p) => p.clone(),
                 None => std::env::current_exe()?,
@@ -199,7 +200,9 @@ impl CommonBuilderConfig {
             bin_path_in_archive: self
                 .bin_path_in_archive
                 .clone()
-                .ok_or_else(|| Error::Config("`bin_path_in_archive` required (call `.bin_name(...)` or `.bin_path_in_archive(...)`)" .to_string()))?,
+                .ok_or(Error::MissingField {
+                    field: "bin_path_in_archive",
+                })?,
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
@@ -254,8 +257,8 @@ mod tests {
     #[test]
     fn insert_header_records_invalid_value_error() {
         // The setter is infallible; an invalid *value* (control char) is deferred to `check()`
-        // as an `Error::Config` and the header is not inserted. (Only the invalid-*name* path was
-        // tested at the backend level before; this covers the value branch directly.)
+        // as an `Error::InvalidHeader` and the header is not inserted. (Only the invalid-*name* path
+        // was tested at the backend level before; this covers the value branch directly.)
         let mut req = RequestConfig::default();
         req.insert_header("x-ok", "bad\nvalue");
         assert!(
@@ -266,14 +269,14 @@ mod tests {
             .check()
             .expect_err("invalid value must surface from check()");
         match err {
-            crate::errors::Error::Config(msg) => {
+            crate::errors::Error::InvalidHeader { source } => {
                 assert!(
-                    msg.contains("value"),
+                    source.to_string().contains("value"),
                     "value-conversion error should mention the value, got: {}",
-                    msg
+                    source
                 );
             }
-            other => panic!("expected Error::Config, got {:?}", other),
+            other => panic!("expected Error::InvalidHeader, got {:?}", other),
         }
     }
 
@@ -286,8 +289,10 @@ mod tests {
             .check()
             .expect_err("invalid name must surface from check()")
         {
-            crate::errors::Error::Config(msg) => assert!(msg.contains("name")),
-            other => panic!("expected Error::Config, got {:?}", other),
+            crate::errors::Error::InvalidHeader { source } => {
+                assert!(source.to_string().contains("name"))
+            }
+            other => panic!("expected Error::InvalidHeader, got {:?}", other),
         }
     }
 
@@ -299,12 +304,12 @@ mod tests {
         req.insert_header("bad name", "ok"); // invalid name -> records "name" error
         req.insert_header("x-ok", "bad\nvalue"); // invalid value -> must NOT overwrite
         match req.check().expect_err("an error is recorded") {
-            crate::errors::Error::Config(msg) => assert!(
-                msg.contains("name"),
+            crate::errors::Error::InvalidHeader { source } => assert!(
+                source.to_string().contains("name"),
                 "the first (name) error must win, got: {}",
-                msg
+                source
             ),
-            other => panic!("expected Error::Config, got {:?}", other),
+            other => panic!("expected Error::InvalidHeader, got {:?}", other),
         }
     }
 
@@ -379,14 +384,14 @@ mod tests {
     fn build_error_message_names_the_setter_for_current_version() {
         let err = CommonBuilderConfig::default().build().unwrap_err();
         match err {
-            crate::errors::Error::Config(msg) => {
-                assert!(
-                    msg.contains("current_version") && msg.contains("current_version("),
-                    "error message must name the setter, got: {}",
-                    msg
+            crate::errors::Error::MissingField { field } => {
+                assert_eq!(
+                    field, "current_version",
+                    "the missing-field error must name `current_version`, got: {}",
+                    field
                 );
             }
-            other => panic!("expected Error::Config, got {:?}", other),
+            other => panic!("expected Error::MissingField, got {:?}", other),
         }
     }
 
@@ -399,14 +404,14 @@ mod tests {
         .build()
         .unwrap_err();
         match err {
-            crate::errors::Error::Config(msg) => {
-                assert!(
-                    msg.contains("bin_name") && msg.contains("bin_name("),
-                    "error message must name the setter, got: {}",
-                    msg
+            crate::errors::Error::MissingField { field } => {
+                assert_eq!(
+                    field, "bin_name",
+                    "the missing-field error must name `bin_name`, got: {}",
+                    field
                 );
             }
-            other => panic!("expected Error::Config, got {:?}", other),
+            other => panic!("expected Error::MissingField, got {:?}", other),
         }
     }
 }
