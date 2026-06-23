@@ -2,16 +2,21 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::env::consts::{ARCH, OS};
 use std::fs;
+use std::sync::Arc;
 
 use crate::http_client::{self, header};
 use crate::{Download, Extract, Move, VersionStatus, confirm, errors::*, version};
 
-/// Release asset information
+/// Release asset information.
+///
+/// The fields are encapsulated (`pub(crate)`, backed by `Arc<str>` to keep clones cheap) and read
+/// through the [`name`](ReleaseAsset::name) / [`download_url`](ReleaseAsset::download_url) getters,
+/// which return borrows. Build one with [`ReleaseAsset::new`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct ReleaseAsset {
-    pub name: String,
-    pub download_url: String,
+    pub(crate) name: Arc<str>,
+    pub(crate) download_url: Arc<str>,
 }
 
 impl ReleaseAsset {
@@ -22,9 +27,19 @@ impl ReleaseAsset {
     /// `#[non_exhaustive]`, so it can't be built with a struct literal from outside the crate.
     pub fn new(name: impl Into<String>, download_url: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            download_url: download_url.into(),
+            name: Arc::from(name.into()),
+            download_url: Arc::from(download_url.into()),
         }
+    }
+
+    /// The asset's file name (e.g. `app-x86_64-unknown-linux-gnu.tar.gz`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The asset's download URL.
+    pub fn download_url(&self) -> &str {
+        &self.download_url
     }
 }
 
@@ -50,7 +65,9 @@ impl ReleaseStatus {
     pub fn into_version_status(self, current_version: String) -> VersionStatus {
         match self {
             ReleaseStatus::UpToDate => VersionStatus::UpToDate(current_version),
-            ReleaseStatus::Updated(release) => VersionStatus::Updated(release.version),
+            ReleaseStatus::Updated(release) => {
+                VersionStatus::Updated(release.version().to_string())
+            }
         }
     }
 
@@ -82,20 +99,61 @@ impl ReleaseStatus {
             ReleaseStatus::UpToDate => None,
         }
     }
+
+    /// The installed release's version, or `None` when already up to date.
+    ///
+    /// Mirrors [`VersionStatus::version`](crate::VersionStatus::version), but returns `None` on the
+    /// `UpToDate` arm (which, unlike `VersionStatus::UpToDate`, carries no version string).
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            ReleaseStatus::Updated(release) => Some(release.version()),
+            ReleaseStatus::UpToDate => None,
+        }
+    }
 }
 
-/// Release information
+/// Release information.
+///
+/// The fields are encapsulated (`pub(crate)`, with the string fields backed by `Arc<str>` to keep
+/// clones cheap) and read through the [`name`](Release::name) / [`version`](Release::version) /
+/// [`date`](Release::date) / [`body`](Release::body) / [`assets`](Release::assets) getters, which
+/// return borrows. Build one with [`Release::builder`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Release {
-    pub name: String,
-    pub version: String,
-    pub date: String,
-    pub body: Option<String>,
-    pub assets: Vec<ReleaseAsset>,
+    pub(crate) name: Arc<str>,
+    pub(crate) version: Arc<str>,
+    pub(crate) date: Arc<str>,
+    pub(crate) body: Option<Arc<str>>,
+    pub(crate) assets: Vec<ReleaseAsset>,
 }
 
 impl Release {
+    /// The release name/title.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The release version (a bare semver string, no leading `v`), used for the version comparison.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The release date string (may be empty).
+    pub fn date(&self) -> &str {
+        &self.date
+    }
+
+    /// The release body / notes, if any.
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
+
+    /// The release's downloadable assets.
+    pub fn assets(&self) -> &[ReleaseAsset] {
+        &self.assets
+    }
+
     /// Check if release has an asset who's name contains the specified `target`
     pub fn has_target_asset(&self, target: &str) -> bool {
         self.assets.iter().any(|asset| asset.name.contains(target))
@@ -202,10 +260,10 @@ impl ReleaseBuilder {
             .clone()
             .ok_or(Error::MissingField { field: "version" })?;
         Ok(Release {
-            name: self.name.clone().unwrap_or_else(|| version.clone()),
-            version,
-            date: self.date.clone().unwrap_or_default(),
-            body: self.body.clone(),
+            name: Arc::from(self.name.clone().unwrap_or_else(|| version.clone())),
+            version: Arc::from(version),
+            date: Arc::from(self.date.clone().unwrap_or_default()),
+            body: self.body.clone().map(Arc::from),
             assets: self.assets.clone(),
         })
     }
@@ -224,7 +282,10 @@ impl ReleaseBuilder {
 #[non_exhaustive]
 pub struct Releases {
     releases: Vec<Release>,
-    current_version: String,
+    /// The version the releases were compared against. `None` for a bare listing
+    /// ([`ReleaseList::fetch`](crate::backends)) that has no associated current version; `Some` on
+    /// the updater path, where `is_update_available` / `current_version` are meaningful.
+    current_version: Option<String>,
 }
 
 impl Releases {
@@ -233,7 +294,32 @@ impl Releases {
     pub(crate) fn new(releases: Vec<Release>, current_version: String) -> Self {
         Self {
             releases,
-            current_version,
+            current_version: Some(current_version),
+        }
+    }
+
+    /// Construct a `Releases` from a fetched (newest-first) release list with no associated current
+    /// version, as returned by the backends' `ReleaseList::fetch`. `current_version()` is `None` and
+    /// `is_update_available()` errors with [`Error::MissingField`], since there is nothing to
+    /// compare against.
+    pub(crate) fn from_listing(releases: Vec<Release>) -> Self {
+        Self {
+            releases,
+            current_version: None,
+        }
+    }
+
+    /// Construct a `Releases` from a release list and a current version.
+    ///
+    /// `Releases` is `#[non_exhaustive]` with a crate-private constructor, so downstream code cannot
+    /// build one with a struct literal. This is the public constructor — primarily for building a
+    /// `Releases` in your own tests (e.g. a helper that takes a `Releases` and inspects `latest()` /
+    /// `is_update_available()`). The releases are taken as-is; the built-in backends order them
+    /// newest-first, but no ordering is validated or imposed here.
+    pub fn from_releases(releases: Vec<Release>, current_version: impl Into<String>) -> Self {
+        Self {
+            releases,
+            current_version: Some(current_version.into()),
         }
     }
 
@@ -252,9 +338,11 @@ impl Releases {
         self.releases.is_empty()
     }
 
-    /// The version the releases were compared against (the updater's configured current version).
-    pub fn current_version(&self) -> &str {
-        &self.current_version
+    /// The version the releases were compared against (the updater's configured current version),
+    /// or `None` for a bare listing ([`ReleaseList::fetch`](crate::backends)) with no associated
+    /// current version.
+    pub fn current_version(&self) -> Option<&str> {
+        self.current_version.as_deref()
     }
 
     /// The first release in the list, or `None` when the list is empty.
@@ -284,11 +372,15 @@ impl Releases {
     /// that propagates its error.
     ///
     /// This consults only the already-fetched releases — no further request is made, so the only
-    /// `Err` this can return is a version-parse failure ([`Error::SemVer`]); it never surfaces a
-    /// transport or HTTP error.
+    /// `Err` this can return is a version-parse failure ([`Error::SemVer`]) or, when no current
+    /// version is known (a bare listing), [`Error::MissingField`]; it never surfaces a transport or
+    /// HTTP error.
     pub fn is_update_available(&self) -> Result<bool> {
+        let current_version = self.current_version.as_deref().ok_or(Error::MissingField {
+            field: "current_version",
+        })?;
         for r in &self.releases {
-            if version::bump_is_greater(&self.current_version, &r.version)? {
+            if version::bump_is_greater(current_version, r.version())? {
                 return Ok(true);
             }
         }
@@ -686,7 +778,7 @@ pub trait ReleaseUpdate: UpdateConfig {
         let target_asset = resolve_and_confirm(self, &release)?;
 
         let tmp_archive_dir = tempfile::TempDir::new()?;
-        let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
+        let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
         println(show_output, "Downloading...");
@@ -719,7 +811,7 @@ fn choose_latest_release(
     // below would treat the current version as an available "update" and re-install it.
     let mut releases = releases
         .into_iter()
-        .filter(|r| version::bump_is_greater(current_version, &r.version).unwrap_or(false))
+        .filter(|r| version::bump_is_greater(current_version, r.version()).unwrap_or(false))
         .collect::<Vec<_>>();
 
     // Sort the candidates semver-descending (newest first) so the selection below does not depend
@@ -727,7 +819,7 @@ fn choose_latest_release(
     // but `backends::custom`'s `ReleaseSource` may hand back releases in any order. Mirrors the
     // descending comparator in `backends::s3::sort_newer`.
     releases.sort_by(
-        |x, y| match version::bump_is_greater(&y.version, &x.version) {
+        |x, y| match version::bump_is_greater(y.version(), x.version()) {
             Ok(is_greater) => {
                 if is_greater {
                     std::cmp::Ordering::Less
@@ -743,7 +835,7 @@ fn choose_latest_release(
     // Filter to versions compatible with the current one.
     let compatible_releases = releases
         .iter()
-        .filter(|r| version::bump_is_compatible(current_version, &r.version).unwrap_or(false))
+        .filter(|r| version::bump_is_compatible(current_version, r.version()).unwrap_or(false))
         .collect::<Vec<_>>();
 
     let release = if let Some(release) = compatible_releases.first() {
@@ -751,7 +843,7 @@ fn choose_latest_release(
             show_output,
             &format!(
                 "v{} ({} versions compatible)",
-                release.version,
+                release.version(),
                 compatible_releases.len()
             ),
         );
@@ -761,7 +853,7 @@ fn choose_latest_release(
             show_output,
             &format!(
                 "v{} ({} versions available)",
-                release.version,
+                release.version(),
                 releases.len()
             ),
         );
@@ -775,10 +867,11 @@ fn choose_latest_release(
         show_output,
         &format!(
             "New release found! v{} --> v{}",
-            current_version, release.version
+            current_version,
+            release.version()
         ),
     );
-    let qualifier = if version::bump_is_compatible(current_version, &release.version)? {
+    let qualifier = if version::bump_is_compatible(current_version, release.version())? {
         ""
     } else {
         "*NOT* "
@@ -824,7 +917,10 @@ fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Re
         println!("\n{} release status:", u.bin_name());
         println!("  * Current exe: {:?}", u.bin_install_path());
         println!("  * New exe release: {:?}", target_asset.name);
-        println!("  * New exe download url: {:?}", target_asset.download_url);
+        println!(
+            "  * New exe download url: {:?}",
+            target_asset.download_url()
+        );
         println!(
             "\nThe new release will be downloaded/extracted and the existing binary will be replaced."
         );
@@ -842,7 +938,7 @@ fn build_download<U: UpdateConfig + ?Sized>(
     u: &U,
     target_asset: &ReleaseAsset,
 ) -> Result<Download> {
-    let mut download = Download::from_url(&target_asset.download_url);
+    let mut download = Download::from_url(target_asset.download_url());
     let mut headers = u.api_headers(u.auth_token())?;
     headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
     // Apply the user's extra request headers to the download too. This runs after the ACCEPT and
@@ -948,7 +1044,7 @@ fn finish_update_owned(
         Regex::new(&format).unwrap().replace_all(str, val)
     }
 
-    let bin_path_str = substitute(&bin_path_str, "version", &ctx.release.version);
+    let bin_path_str = substitute(&bin_path_str, "version", ctx.release.version());
     let bin_path_str = substitute(&bin_path_str, "target", &ctx.target);
     let bin_path_str = substitute(&bin_path_str, "bin", &ctx.bin_name);
     let bin_path_str = bin_path_str.as_ref();
@@ -1003,7 +1099,7 @@ where
     let target_asset = resolve_and_confirm(u, &release)?;
 
     let tmp_archive_dir = tempfile::TempDir::new()?;
-    let tmp_archive_path = tmp_archive_dir.path().join(&target_asset.name);
+    let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
     let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
 
     println(show_output, "Downloading...");
@@ -1185,12 +1281,16 @@ mod tests {
             "1.0.0".to_string(),
         );
         // latest() is the first (newest) element.
-        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.0.0");
         // all() returns the whole slice, newest-first.
-        let all: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let all: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(all, vec!["2.0.0", "1.5.0", "1.0.0"]);
         // into_vec() consumes and yields the same order.
-        let v: Vec<String> = releases.into_vec().into_iter().map(|r| r.version).collect();
+        let v: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
         assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
     }
 
@@ -1215,7 +1315,7 @@ mod tests {
     #[test]
     fn releases_current_version_accessor() {
         let releases = Releases::new(vec![rel("2.0.0")], "1.2.3".to_string());
-        assert_eq!(releases.current_version(), "1.2.3");
+        assert_eq!(releases.current_version(), Some("1.2.3"));
     }
 
     #[test]
@@ -1225,7 +1325,10 @@ mod tests {
             "1.0.0".to_string(),
         );
         // Owned IntoIterator consumes the Releases and yields Release by value, newest-first.
-        let v: Vec<String> = releases.into_iter().map(|r| r.version).collect();
+        let v: Vec<String> = releases
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
         assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
     }
 
@@ -1236,10 +1339,7 @@ mod tests {
             "1.0.0".to_string(),
         );
         // Borrowed IntoIterator yields &Release without consuming.
-        let v: Vec<&str> = (&releases)
-            .into_iter()
-            .map(|r| r.version.as_str())
-            .collect();
+        let v: Vec<&str> = (&releases).into_iter().map(|r| r.version()).collect();
         assert_eq!(v, vec!["2.0.0", "1.5.0", "1.0.0"]);
         // Still usable afterwards (not consumed).
         assert_eq!(releases.len(), 3);
@@ -1264,10 +1364,20 @@ mod tests {
             vec![rel("3.0.0"), rel("2.1.0"), rel("2.0.0"), rel("1.0.0")],
             "1.0.0".to_string(),
         );
-        let expected: Vec<String> = releases.all().iter().map(|r| r.version.clone()).collect();
-        let borrowed: Vec<String> = (&releases).into_iter().map(|r| r.version.clone()).collect();
+        let expected: Vec<String> = releases
+            .all()
+            .iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        let borrowed: Vec<String> = (&releases)
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
         assert_eq!(borrowed, expected, "&Releases iteration == all() order");
-        let owned: Vec<String> = releases.into_iter().map(|r| r.version).collect();
+        let owned: Vec<String> = releases
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
         assert_eq!(owned, expected, "owned iteration == all() order");
     }
 
@@ -1316,12 +1426,14 @@ mod tests {
     fn release_status_release_accessors() {
         let updated = super::ReleaseStatus::Updated(rel("1.2.3"));
         assert_eq!(
-            updated.updated_release().map(|r| r.version.as_str()),
+            updated.updated_release().map(|r| r.version()),
             Some("1.2.3"),
             "updated_release() borrows the installed release"
         );
         assert_eq!(
-            updated.into_updated_release().map(|r| r.version),
+            updated
+                .into_updated_release()
+                .map(|r| r.version().to_string()),
             Some("1.2.3".to_string()),
             "into_updated_release() yields the installed release"
         );
@@ -1342,8 +1454,139 @@ mod tests {
     #[test]
     fn release_asset_new_argument_order() {
         let asset = super::ReleaseAsset::new("my-bin-x86_64.tar.gz", "https://host/dl");
-        assert_eq!(asset.name, "my-bin-x86_64.tar.gz");
-        assert_eq!(asset.download_url, "https://host/dl");
+        assert_eq!(asset.name(), "my-bin-x86_64.tar.gz");
+        assert_eq!(asset.download_url(), "https://host/dl");
+    }
+
+    // --- WS4 4a: getters return exactly the builder-set values --------------------------------
+
+    #[test]
+    fn release_getters_return_builder_set_values() {
+        // Every getter must surface exactly what the builder was given (and `body()` is `Some` only
+        // when set). Pins the field-encapsulation read surface: `name`, `version`, `date`, `body`,
+        // `assets` are reachable only through the getters now (fields are `pub(crate)`).
+        let release = super::Release::builder()
+            .name("My App 1.2.3")
+            .version("1.2.3")
+            .date("2024-05-06T00:00:00Z")
+            .body("release notes here")
+            .asset(super::ReleaseAsset::new(
+                "app.tar.gz",
+                "https://host/app.tar.gz",
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(release.name(), "My App 1.2.3");
+        assert_eq!(release.version(), "1.2.3");
+        assert_eq!(release.date(), "2024-05-06T00:00:00Z");
+        assert_eq!(release.body(), Some("release notes here"));
+        assert_eq!(release.assets().len(), 1);
+        assert_eq!(release.assets()[0].name(), "app.tar.gz");
+        assert_eq!(
+            release.assets()[0].download_url(),
+            "https://host/app.tar.gz"
+        );
+    }
+
+    #[test]
+    fn release_builder_defaults_name_to_version_and_body_to_none() {
+        // When only `version` is set: `name` defaults to the version, `date` to empty, `body` to
+        // `None`, `assets` to empty — read through the getters.
+        let release = super::Release::builder().version("9.9.9").build().unwrap();
+        assert_eq!(release.version(), "9.9.9");
+        assert_eq!(release.name(), "9.9.9", "name defaults to version");
+        assert_eq!(release.date(), "", "date defaults to empty");
+        assert_eq!(release.body(), None, "body defaults to None");
+        assert!(release.assets().is_empty());
+    }
+
+    // --- WS4 4f: Arc<str> backing — Clone is cheap and shares the backing allocation ----------
+
+    #[test]
+    fn release_clone_shares_arc_backing() {
+        // The string fields are `Arc<str>`, so cloning a `Release` bumps the refcount rather than
+        // reallocating the strings. Assert the cloned release shares the SAME backing allocation as
+        // the original by comparing the data pointers of the `version` `Arc<str>` (easy to check,
+        // no behavioral assumption — just that the clone is a shared-backing Arc clone).
+        let original = super::Release::builder()
+            .version("1.2.3")
+            .asset(super::ReleaseAsset::new(
+                "app.tar.gz",
+                "https://host/app.tar.gz",
+            ))
+            .build()
+            .unwrap();
+        let cloned = original.clone();
+        // Same logical value...
+        assert_eq!(original.version(), cloned.version());
+        // ...and the same backing bytes (Arc clone shares the allocation; pointer identity holds).
+        assert!(
+            std::ptr::eq(original.version().as_ptr(), cloned.version().as_ptr()),
+            "cloning a Release must share the Arc<str> backing, not reallocate"
+        );
+        // The asset's Arc<str> backing is shared too.
+        assert!(std::ptr::eq(
+            original.assets()[0].download_url().as_ptr(),
+            cloned.assets()[0].download_url().as_ptr()
+        ));
+    }
+
+    // --- WS4 4b: `Releases::from_releases` builds a usable `Releases` --------------------------
+
+    #[test]
+    fn releases_from_releases_builds_a_usable_collection() {
+        // The public test constructor must produce a `Releases` whose `latest()` /
+        // `is_update_available()` / `current_version()` work, exactly like the crate-internal
+        // `new`. Build one with a newer-than-current release and assert the queries.
+        let releases = super::Releases::from_releases(vec![rel("2.0.0"), rel("1.0.0")], "1.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.0.0");
+        assert_eq!(releases.current_version(), Some("1.0.0"));
+        assert!(
+            releases.is_update_available().unwrap(),
+            "2.0.0 > 1.0.0 via from_releases-built Releases"
+        );
+
+        // And the not-available case agrees.
+        let up_to_date = super::Releases::from_releases(vec![rel("1.0.0")], "1.0.0");
+        assert!(!up_to_date.is_update_available().unwrap());
+    }
+
+    // --- WS4 4e: `ReleaseStatus::version()` -----------------------------------------------------
+
+    #[test]
+    fn release_status_version_returns_installed_version_or_none() {
+        // `version()` mirrors `VersionStatus::version` but is `Some` only on the `Updated` arm; the
+        // `UpToDate` arm (which carries no version) yields `None`.
+        let updated = super::ReleaseStatus::Updated(rel("3.1.4"));
+        assert_eq!(updated.version(), Some("3.1.4"));
+
+        let up_to_date = super::ReleaseStatus::UpToDate;
+        assert_eq!(
+            up_to_date.version(),
+            None,
+            "UpToDate carries no version => None"
+        );
+    }
+
+    // --- WS4 4b boundary: a listing-built `Releases` has no current version --------------------
+
+    #[test]
+    fn releases_from_listing_has_no_current_version_and_precheck_errors() {
+        // The `ReleaseList::fetch` path builds a `Releases` with no current version, so
+        // `current_version()` is `None` and `is_update_available()` errors (there is nothing to
+        // compare against) rather than silently answering false.
+        let listing = super::Releases::from_listing(vec![rel("2.0.0"), rel("1.0.0")]);
+        assert_eq!(listing.current_version(), None);
+        assert_eq!(listing.latest().unwrap().version(), "2.0.0");
+        assert!(
+            matches!(
+                listing.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "a listing with no current version must error on is_update_available()"
+        );
     }
 
     #[test]
@@ -1374,7 +1617,7 @@ mod tests {
         )
         .unwrap()
         .expect("a compatible newer release is chosen");
-        assert_eq!(chosen.version, "1.2.0");
+        assert_eq!(chosen.version(), "1.2.0");
     }
 
     #[test]
@@ -1388,7 +1631,7 @@ mod tests {
         )
         .unwrap()
         .expect("the newest compatible release is chosen regardless of input order");
-        assert_eq!(chosen.version, "1.4.2");
+        assert_eq!(chosen.version(), "1.4.2");
 
         // Same set, reversed — the choice must be identical.
         let chosen = choose_latest_release(
@@ -1398,7 +1641,7 @@ mod tests {
         )
         .unwrap()
         .expect("the newest compatible release is chosen regardless of input order");
-        assert_eq!(chosen.version, "1.4.2");
+        assert_eq!(chosen.version(), "1.4.2");
     }
 
     #[test]
@@ -1418,7 +1661,7 @@ mod tests {
         )
         .unwrap()
         .expect("the newest parseable compatible release is chosen");
-        assert_eq!(chosen.version, "1.2.0");
+        assert_eq!(chosen.version(), "1.2.0");
 
         // Only junk versions -> nothing selectable -> up-to-date.
         assert!(
@@ -1435,7 +1678,7 @@ mod tests {
         let chosen = choose_latest_release(vec![rel("2.0.0")], "1.0.0", false)
             .unwrap()
             .expect("an incompatible-but-newer release is still offered");
-        assert_eq!(chosen.version, "2.0.0");
+        assert_eq!(chosen.version(), "2.0.0");
     }
 
     // --- Bound-narrowing compile locks (gap #3) -----------------------------------------------
@@ -1527,7 +1770,7 @@ mod tests {
         // Resolves to the `AsyncReleaseUpdate::get_release_version_async` trait method (brought into
         // scope above), proving the public async-by-tag surface.
         let rel = upd.get_release_version_async("1.5.0").await.unwrap();
-        assert_eq!(rel.version, "1.5.0");
+        assert_eq!(rel.version(), "1.5.0");
     }
 
     // --- WS2 5f: `AsyncReleaseUpdate` is usable as a generic bound -----------------------------
@@ -1541,7 +1784,7 @@ mod tests {
         let releases = u.get_latest_release_async().await?;
         Ok(releases
             .latest()
-            .map(|r| r.version.clone())
+            .map(|r| r.version().to_string())
             .unwrap_or_default())
     }
 

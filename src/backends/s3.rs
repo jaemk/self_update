@@ -253,9 +253,13 @@ impl ReleaseList {
         }
     }
 
-    /// Retrieve a list of `Release`s.
-    /// If specified, filter for those containing a specified `target`
-    pub fn fetch(&self) -> Result<Vec<Release>> {
+    /// Retrieve the available `Release`s as a [`Releases`].
+    ///
+    /// If a `filter_target` is set, only releases carrying an asset whose name contains it are
+    /// returned. The result carries no current version (it is a bare listing), so
+    /// [`Releases::current_version`] is `None`; use [`Releases::into_vec`] to recover the raw
+    /// `Vec<Release>`.
+    pub fn fetch(&self) -> Result<Releases> {
         let plan = s3_listing_plan(
             &self.end_point,
             &self.bucket_name,
@@ -275,7 +279,7 @@ impl ReleaseList {
                 .filter(|r| r.has_target_asset(target))
                 .collect::<Vec<_>>(),
         };
-        Ok(releases)
+        Ok(Releases::from_listing(releases))
     }
 }
 
@@ -484,7 +488,7 @@ impl Update {
 fn pick_latest(releases: &[Release]) -> Result<Release> {
     let rel = releases
         .iter()
-        .max_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+        .max_by(|x, y| match bump_is_greater(y.version(), x.version()) {
             Ok(is_greater) => {
                 if is_greater {
                     Ordering::Greater
@@ -506,10 +510,10 @@ fn pick_latest(releases: &[Release]) -> Result<Release> {
 fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
     let mut releases = releases
         .into_iter()
-        .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
+        .filter(|r| bump_is_greater(current_version, r.version()).unwrap_or(false))
         .collect::<Vec<_>>();
     // Descending order (latest first), since the update code takes `.first()`.
-    releases.sort_by(|x, y| match bump_is_greater(&y.version, &x.version) {
+    releases.sort_by(|x, y| match bump_is_greater(y.version(), x.version()) {
         Ok(is_greater) => {
             if is_greater {
                 Ordering::Less
@@ -525,7 +529,7 @@ fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
 
 /// Find the release matching an explicit version. Shared by the sync and async paths.
 fn find_version(releases: &[Release], ver: &str) -> Result<Release> {
-    match releases.iter().find(|x| x.version == ver) {
+    match releases.iter().find(|x| x.version() == ver) {
         Some(r) => Ok(r.clone()),
         None => Err(Error::NoReleaseFound { target: None }),
     }
@@ -993,9 +997,10 @@ fn parse_s3_response<R: std::io::BufRead>(
 
                             if let Some(captures) = regex.captures(&txt) {
                                 let release = current_release.get_or_insert(Release::default());
-                                release.name = captures["name"].to_string();
-                                release.version =
-                                    captures["version"].trim_start_matches('v').to_string();
+                                release.name = std::sync::Arc::from(captures["name"].to_string());
+                                release.version = std::sync::Arc::from(
+                                    captures["version"].trim_start_matches('v').to_string(),
+                                );
                                 let download_url = format!("{}{}", download_base_url, txt);
 
                                 #[cfg(feature = "s3-auth")]
@@ -1006,10 +1011,7 @@ fn parse_s3_response<R: std::io::BufRead>(
                                     signature_ttl.as_secs(),
                                 )?;
 
-                                release.assets = vec![ReleaseAsset {
-                                    name: exe_name.to_string(),
-                                    download_url,
-                                }];
+                                release.assets = vec![ReleaseAsset::new(exe_name, download_url)];
                                 debug!("Matched release: {:?}", release);
                             } else {
                                 debug!("Regex mismatch: {:?}", &txt);
@@ -1017,7 +1019,7 @@ fn parse_s3_response<R: std::io::BufRead>(
                         }
                         Tag::LastModified => {
                             let release = current_release.get_or_insert(Release::default());
-                            release.date = txt;
+                            release.date = std::sync::Arc::from(txt);
                         }
                         Tag::IsTruncated => {
                             is_truncated = txt.eq_ignore_ascii_case("true");
@@ -1058,10 +1060,10 @@ fn parse_s3_response<R: std::io::BufRead>(
 // Add a release to the list if it's doesn't exist yet, or merge its asset/s
 // details into the release item already existing in the list
 fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
-    if !rel.version.is_empty() && !rel.name.is_empty() {
+    if !rel.version().is_empty() && !rel.name.is_empty() {
         match releases
             .iter()
-            .position(|curr| curr.name == rel.name && curr.version == rel.version)
+            .position(|curr| curr.name == rel.name && curr.version() == rel.version())
         {
             Some(index) => {
                 rel.assets.append(&mut releases[index].assets);
@@ -1164,17 +1166,17 @@ mod tests {
         .unwrap();
         assert_eq!(releases.len(), 1, "one release parsed");
         let rel = &releases[0];
-        assert_eq!(rel.name, "myapp");
-        assert_eq!(rel.version, "1.2.3");
+        assert_eq!(rel.name(), "myapp");
+        assert_eq!(rel.version(), "1.2.3");
         assert_eq!(rel.assets.len(), 1);
-        assert_eq!(rel.assets[0].name, "myapp-1.2.3-x86_64-linux");
+        assert_eq!(rel.assets[0].name(), "myapp-1.2.3-x86_64-linux");
         assert!(
             rel.assets[0]
-                .download_url
+                .download_url()
                 .starts_with("https://bucket.s3.us-east-1.amazonaws.com/"),
             "download URL uses the supplied base"
         );
-        assert_eq!(rel.date, "2024-01-01T00:00:00.000Z");
+        assert_eq!(rel.date(), "2024-01-01T00:00:00.000Z");
     }
 
     #[test]
@@ -1192,7 +1194,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "2.0.0", "v-prefix must be stripped");
+        assert_eq!(releases[0].version(), "2.0.0", "v-prefix must be stripped");
     }
 
     #[test]
@@ -1217,7 +1219,7 @@ mod tests {
             2,
             "both assets present after merge"
         );
-        let asset_names: Vec<&str> = releases[0].assets.iter().map(|a| a.name.as_str()).collect();
+        let asset_names: Vec<&str> = releases[0].assets.iter().map(|a| a.name()).collect();
         assert!(
             asset_names.contains(&"myapp-3.0.0-x86_64-linux"),
             "x86_64 asset present"
@@ -1247,7 +1249,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(releases.len(), 3, "three distinct releases");
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
         assert!(versions.contains(&"1.0.0"));
         assert!(versions.contains(&"2.0.0"));
         assert!(versions.contains(&"1.5.0"));
@@ -1272,7 +1274,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(releases.len(), 1, "only matching key produces a release");
-        assert_eq!(releases[0].version, "1.0.0");
+        assert_eq!(releases[0].version(), "1.0.0");
     }
 
     #[test]
@@ -1291,7 +1293,8 @@ mod tests {
         .unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(
-            releases[0].assets[0].name, "myapp-1.0.0-x86_64-linux",
+            releases[0].assets[0].name(),
+            "myapp-1.0.0-x86_64-linux",
             "asset name is the filename, not the full key path"
         );
     }
@@ -1384,14 +1387,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(releases.len(), 1, "one release parsed from the stream");
-        assert_eq!(releases[0].version, "1.2.3");
-        assert_eq!(releases[0].assets[0].name, "myapp-1.2.3-x86_64-linux");
+        assert_eq!(releases[0].version(), "1.2.3");
+        assert_eq!(releases[0].assets[0].name(), "myapp-1.2.3-x86_64-linux");
     }
 
     #[test]
     fn add_to_releases_list_skips_entries_with_empty_name_or_version() {
         // `add_to_releases_list` must silently drop a release whose name or version is empty,
-        // matching the `if !rel.version.is_empty() && !rel.name.is_empty()` guard.
+        // matching the `if !rel.version().is_empty() && !rel.name.is_empty()` guard.
         let mut releases = Vec::new();
         let empty_name = Release::builder()
             .name("")
@@ -1536,7 +1539,7 @@ mod tests {
         ]);
         let upd = s3_update_sync(&base, "0.1.0");
         let releases = upd.get_latest_releases().unwrap();
-        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(
             versions,
@@ -1579,7 +1582,7 @@ mod tests {
         ]);
         let upd = s3_update(&base, "0.1.0");
         let releases = upd.get_latest_releases_async().await.unwrap();
-        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(
             versions,
@@ -1638,7 +1641,7 @@ mod tests {
             .build()
             .unwrap();
         let releases = upd.get_latest_releases().unwrap();
-        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(versions, vec!["1.0.0", "2.0.0"]);
 
@@ -1805,7 +1808,7 @@ mod tests {
             1,
             "get_latest_release yields a one-element Releases"
         );
-        assert_eq!(releases.latest().unwrap().version, "2.1.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.1.0");
         assert!(
             releases.is_update_available().unwrap(),
             "2.1.0 > 1.0.0 via the one-element Releases pre-check"
@@ -1828,14 +1831,61 @@ mod tests {
         }]);
         let upd = s3_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
             "only releases strictly newer than current, newest-first"
         );
-        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.0.0");
         assert!(releases.is_update_available().unwrap());
+    }
+
+    // --- WS4 #2 (s3): `ReleaseList::fetch` returns a listing `Releases` with NO current version,
+    // so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
+    // `MissingField { field: "current_version" }`. `into_vec()` recovers the parsed release vec.
+    #[test]
+    fn release_list_fetch_returns_listing_releases_without_current_version() {
+        let xml = list_bucket_xml(&["myapp-2.0.0-x86_64-linux", "myapp-1.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let releases = super::ReleaseList::configure()
+            .end_point(super::EndPoint::Generic {
+                end_point: base.clone(),
+            })
+            .bucket_name("test-bucket")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare s3 listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on an s3 listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let mut versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        versions.sort();
+        assert_eq!(
+            versions,
+            vec!["1.0.0".to_string(), "2.0.0".to_string()],
+            "into_vec() recovers the parsed releases"
+        );
     }
 
     #[test]
@@ -1857,7 +1907,7 @@ mod tests {
         }]);
         let upd = s3_update_sync(&base, "2.0.0");
         let single = upd.get_latest_release().unwrap();
-        assert_eq!(single.latest().unwrap().version, "2.0.0");
+        assert_eq!(single.latest().unwrap().version(), "2.0.0");
         assert!(
             !single.is_update_available().unwrap(),
             "get_latest_release: newest (2.0.0) == current => not available"
@@ -1987,7 +2037,7 @@ mod tests {
         }]);
         let upd = s3_update_sync(&base, "0.1.0");
         let rel = upd.get_release_version("1.0.0").unwrap();
-        assert_eq!(rel.version, "1.0.0");
+        assert_eq!(rel.version(), "1.0.0");
 
         let xml = list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]);
         let base = stub(vec![Resp {
@@ -2017,8 +2067,8 @@ mod tests {
         let upd = s3_update(&base, "0.1.0");
         let releases = upd.get_latest_release_async().await.unwrap();
         let rel = releases.latest().expect("one-element Releases");
-        assert_eq!(rel.version, "2.1.0");
-        assert_eq!(rel.name, "myapp");
+        assert_eq!(rel.version(), "2.1.0");
+        assert_eq!(rel.name(), "myapp");
     }
 
     #[cfg(feature = "async")]
@@ -2038,7 +2088,7 @@ mod tests {
         }]);
         let upd = s3_update(&base, "1.0.0");
         let releases = upd.get_latest_releases_async().await.unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -2058,7 +2108,7 @@ mod tests {
         }]);
         let upd = s3_update(&base, "0.1.0");
         let rel = upd.get_release_version_async("1.0.0").await.unwrap();
-        assert_eq!(rel.version, "1.0.0");
+        assert_eq!(rel.version(), "1.0.0");
     }
 
     #[cfg(feature = "async")]
@@ -2129,7 +2179,7 @@ mod tests {
         let upd = s3_update(&base, "0.1.0");
         let releases = upd.get_latest_release_async().await.unwrap();
         let rel = releases.latest().expect("one-element Releases");
-        assert_eq!(rel.version, "3.0.0");
+        assert_eq!(rel.version(), "3.0.0");
         assert_eq!(
             rel.assets.len(),
             2,
@@ -2144,7 +2194,7 @@ mod tests {
     #[test]
     fn pick_latest_returns_highest_version() {
         let releases = [rel("1.0.0"), rel("2.3.1"), rel("2.0.0"), rel("1.9.9")];
-        assert_eq!(super::pick_latest(&releases).unwrap().version, "2.3.1");
+        assert_eq!(super::pick_latest(&releases).unwrap().version(), "2.3.1");
     }
 
     #[test]
@@ -2159,11 +2209,11 @@ mod tests {
         // and the highest parseable version still chosen. (`choose_latest_release`/`sort_newer`
         // pre-filter unparseable versions, so their comparator `Err(_)` arm is unreachable.)
         let releases = [rel("1.0.0"), rel("not-a-version"), rel("2.1.0")];
-        assert_eq!(super::pick_latest(&releases).unwrap().version, "2.1.0");
+        assert_eq!(super::pick_latest(&releases).unwrap().version(), "2.1.0");
 
         // Even when the unparseable one is first/last, it never wins.
         let releases = [rel("bogus"), rel("1.5.0")];
-        assert_eq!(super::pick_latest(&releases).unwrap().version, "1.5.0");
+        assert_eq!(super::pick_latest(&releases).unwrap().version(), "1.5.0");
     }
 
     #[test]
@@ -2172,7 +2222,7 @@ mod tests {
         // newer versions survive, newest-first.
         let releases = vec![rel("garbage"), rel("2.0.0"), rel("1.5.0"), rel("1.0.0")];
         let newer = super::sort_newer(releases, "1.0.0");
-        let versions: Vec<_> = newer.iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<_> = newer.iter().map(|r| r.version()).collect();
         assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
     }
 
@@ -2246,7 +2296,7 @@ mod tests {
         let releases = vec![rel("0.9.0"), rel("1.5.0"), rel("1.0.0"), rel("2.0.0")];
         let newer = super::sort_newer(releases, "1.0.0");
         // 0.9.0 and 1.0.0 are not strictly newer than 1.0.0; the rest are, newest-first.
-        let versions: Vec<_> = newer.iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<_> = newer.iter().map(|r| r.version()).collect();
         assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
     }
 
@@ -2254,7 +2304,7 @@ mod tests {
     fn find_version_matches_exact() {
         let releases = [rel("1.0.0"), rel("1.2.3"), rel("2.0.0")];
         assert_eq!(
-            super::find_version(&releases, "1.2.3").unwrap().version,
+            super::find_version(&releases, "1.2.3").unwrap().version(),
             "1.2.3"
         );
         assert!(super::find_version(&releases, "9.9.9").is_err());
@@ -2808,7 +2858,7 @@ mod tests {
             &Some(key),
         )
         .unwrap();
-        let signed_url = &signed[0].assets[0].download_url;
+        let signed_url = signed[0].assets[0].download_url();
         assert!(
             signed_url.contains("X-Amz-Signature=") && signed_url.contains("X-Amz-Credential="),
             "signed asset download url must carry SigV4 params: {}",
@@ -2822,7 +2872,7 @@ mod tests {
             &None,
         )
         .unwrap();
-        let unsigned_url = &unsigned[0].assets[0].download_url;
+        let unsigned_url = unsigned[0].assets[0].download_url();
         assert!(
             !unsigned_url.contains("X-Amz-Signature="),
             "no access key => unsigned asset download url: {}",

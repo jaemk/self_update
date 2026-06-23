@@ -136,7 +136,8 @@ validate identically and cannot drift.
   - `ReleaseList::configure() -> ReleaseListBuilder`
   - `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`,
     `auth_token`, the `request_config_setters!` setters, `build`
-  - `ReleaseList::fetch() -> Result<Vec<Release>>` (filters by `target` when set)
+  - `ReleaseList::fetch() -> Result<Releases>` (filters by `target` when set; a bare listing whose
+    `current_version()` is `None`, recover the `Vec<Release>` with `into_vec()`)
 - `gitea::Update` (`#[non_exhaustive]`), `gitea::UpdateBuilder`
   - `Update::configure() -> UpdateBuilder`
   - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, common setters,

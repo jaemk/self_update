@@ -481,7 +481,7 @@ mod tests {
 
         let latest = upd.get_latest_release().unwrap();
         let rel = latest.latest().expect("one-element Releases");
-        assert_eq!(rel.version, "2.0.0");
+        assert_eq!(rel.version(), "2.0.0");
         assert_eq!(rel.assets.len(), 1);
         assert_eq!(
             latest.all().len(),
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(rels.all().len(), 1);
 
         let tagged = upd.get_release_version("1.5.0").unwrap();
-        assert_eq!(tagged.version, "1.5.0");
+        assert_eq!(tagged.version(), "1.5.0");
 
         // get_latest_release once + once inside get_latest_releases = 2.
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -568,7 +568,7 @@ mod tests {
         let asset = rel
             .asset_for("x86_64-unknown-linux-gnu", None)
             .expect("asset matches the target");
-        assert_eq!(asset.download_url, "https://example/app-2.0.0.tar.gz");
+        assert_eq!(asset.download_url(), "https://example/app-2.0.0.tar.gz");
     }
 
     // --- Sync end-to-end path tests (analogue of the async OrchestratedSource tests) -----------
@@ -636,7 +636,7 @@ mod tests {
             .asset_matcher(move |assets| {
                 let mut s = seen_cb.lock().unwrap();
                 for a in assets {
-                    s.push(a.name.clone());
+                    s.push(a.name().to_string());
                 }
                 None
             })
@@ -677,7 +677,7 @@ mod tests {
             .asset_matcher(move |assets| {
                 let mut s = seen_cb.lock().unwrap();
                 for a in assets {
-                    s.push(a.name.clone());
+                    s.push(a.name().to_string());
                 }
                 None
             })
@@ -783,7 +783,7 @@ mod tests {
 
             let latest_releases = upd.get_latest_release_async().await.unwrap();
             let rel = latest_releases.latest().expect("one-element Releases");
-            assert_eq!(rel.version, "2.0.0");
+            assert_eq!(rel.version(), "2.0.0");
             assert_eq!(rel.assets.len(), 1);
 
             let rels = AsyncReleaseUpdate::get_latest_releases_async(&upd)
@@ -794,7 +794,7 @@ mod tests {
             let tagged = AsyncReleaseUpdate::get_release_version_async(&upd, "1.5.0")
                 .await
                 .unwrap();
-            assert_eq!(tagged.version, "1.5.0");
+            assert_eq!(tagged.version(), "1.5.0");
 
             assert_eq!(latest.load(Ordering::SeqCst), 1);
             assert_eq!(releases.load(Ordering::SeqCst), 1);
@@ -842,7 +842,7 @@ mod tests {
                     .unwrap()
                     .latest()
                     .unwrap()
-                    .version,
+                    .version(),
                 "3.0.0"
             );
             assert_eq!(
@@ -857,7 +857,7 @@ mod tests {
                 AsyncReleaseUpdate::get_release_version_async(&upd, "9.9.9")
                     .await
                     .unwrap()
-                    .version,
+                    .version(),
                 "9.9.9"
             );
 
@@ -965,7 +965,7 @@ mod tests {
                 .asset_matcher(move |assets| {
                     let mut s = seen_cb.lock().unwrap();
                     for a in assets {
-                        s.push(a.name.clone());
+                        s.push(a.name().to_string());
                     }
                     None
                 })
@@ -1006,7 +1006,7 @@ mod tests {
                 .asset_matcher(move |assets| {
                     let mut s = seen_cb.lock().unwrap();
                     for a in assets {
-                        s.push(a.name.clone());
+                        s.push(a.name().to_string());
                     }
                     None
                 });
@@ -1180,7 +1180,7 @@ mod tests {
             };
             assert_fetch_future_is_send(&src);
             // And it still resolves correctly when awaited.
-            assert_eq!(src.get_latest_release().await.unwrap().version, "2.0.0");
+            assert_eq!(src.get_latest_release().await.unwrap().version(), "2.0.0");
         }
 
         #[tokio::test]
@@ -1324,10 +1324,7 @@ mod tests {
                 "a newer release served as a real tar.gz must install -> Updated, got {:?}",
                 status
             );
-            assert_eq!(
-                status.updated_release().map(|r| r.version.as_str()),
-                Some("2.0.0")
-            );
+            assert_eq!(status.updated_release().map(|r| r.version()), Some("2.0.0"));
             // The blocking finish tail actually wrote the extracted binary to the install path.
             assert!(
                 install_path.exists(),

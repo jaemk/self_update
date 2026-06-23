@@ -19,7 +19,8 @@ canonical reference; it does not propose changes.
 Two builders, each reached through a `configure()` entry point:
 
 - `ReleaseList` / `ReleaseListBuilder` (`s3.rs:91`, `s3.rs:151`): queries a bucket
-  and returns a `Vec<Release>` via `ReleaseList::fetch` (`s3.rs:220`).
+  and returns a `Releases` via `ReleaseList::fetch` (`s3.rs:220`). The result is a bare listing
+  (`current_version()` is `None`); recover the `Vec<Release>` with `into_vec()`.
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
   `asset_prefix`, `region`, `end_point`, `filter_target`, `max_keys`, and (under `s3-auth`)
   `access_key` and `signature_ttl`; plus the shared `request_config_setters!(request)`.

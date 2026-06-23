@@ -131,18 +131,19 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    // get the first available release
-    let asset = releases[0]
+    // get the first available release (`fetch` returns a `Releases`; `latest()` is the first entry)
+    let latest = releases.latest().unwrap();
+    let asset = latest
         .asset_for(&self_update::get_target(), None)
         .unwrap();
 
     let tmp_dir = tempfile::Builder::new()
             .prefix("self_update")
             .tempdir_in(::std::env::current_dir()?)?;
-    let tmp_tarball_path = tmp_dir.path().join(&asset.name);
+    let tmp_tarball_path = tmp_dir.path().join(asset.name());
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
-    self_update::Download::from_url(&asset.download_url)
+    self_update::Download::from_url(asset.download_url())
         .header(self_update::http::header::ACCEPT, "application/octet-stream")?
         .download_to(&tmp_tarball)?;
 
@@ -242,7 +243,7 @@ fn check() -> Result<(), Box<dyn std::error::Error>> {
 
     if releases.is_update_available()? {
         if let Some(latest) = releases.latest() {
-            println!("update available: {}", latest.version);
+            println!("update available: {}", latest.version());
         }
     } else {
         println!("already up to date");

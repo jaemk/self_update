@@ -142,7 +142,8 @@ deferred bad `request_header`, unparseable auth token) surface as `Error::Config
 
 ## Public surface
 
-- `ReleaseList::configure() -> ReleaseListBuilder`; `ReleaseList::fetch() -> Result<Vec<Release>>`.
+- `ReleaseList::configure() -> ReleaseListBuilder`; `ReleaseList::fetch() -> Result<Releases>` (a
+  bare listing: `current_version()` is `None`; recover the `Vec<Release>` with `into_vec()`).
 - `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`,
   the `request_config_setters!` setters, `build() -> Result<ReleaseList>`.
 - `Update::configure() -> UpdateBuilder`.

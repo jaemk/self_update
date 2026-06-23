@@ -10,52 +10,64 @@ use crate::{
     errors::*,
     update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
+use serde::Deserialize;
 
-impl ReleaseAsset {
-    /// Parse a release-asset json object
-    ///
-    /// Errors:
-    ///     * Missing required name & download-url keys
-    fn from_asset(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["url"]
-            .as_str()
-            .ok_or(Error::MissingAssetField { field: "url" })?;
-        let name = asset["name"]
-            .as_str()
+/// GitHub release-asset JSON shape. Private DTO deserialized directly from the response bytes, then
+/// converted into the public [`ReleaseAsset`]. Keeping it private means `Deserialize` is never part
+/// of the public `ReleaseAsset` API.
+#[derive(Deserialize)]
+struct AssetDto {
+    name: Option<String>,
+    url: Option<String>,
+}
+
+impl AssetDto {
+    fn into_asset(self) -> Result<ReleaseAsset> {
+        let download_url = self.url.ok_or(Error::MissingAssetField { field: "url" })?;
+        let name = self
+            .name
             .ok_or(Error::MissingAssetField { field: "name" })?;
-        Ok(ReleaseAsset {
-            download_url: download_url.to_owned(),
-            name: name.to_owned(),
-        })
+        Ok(ReleaseAsset::new(name, download_url))
     }
 }
 
-impl Release {
-    fn from_release(release: &serde_json::Value) -> Result<Release> {
-        let tag = release["tag_name"]
-            .as_str()
+/// GitHub release JSON shape. Private DTO deserialized directly from the response bytes (replacing
+/// the old `serde_json::Value` walk), then converted into the public [`Release`].
+#[derive(Deserialize)]
+struct ReleaseDto {
+    tag_name: Option<String>,
+    created_at: Option<String>,
+    name: Option<String>,
+    body: Option<String>,
+    assets: Option<Vec<AssetDto>>,
+}
+
+impl ReleaseDto {
+    fn into_release(self) -> Result<Release> {
+        let tag = self
+            .tag_name
             .ok_or(Error::MissingAssetField { field: "tag_name" })?;
-        let date = release["created_at"]
-            .as_str()
-            .ok_or(Error::MissingAssetField {
-                field: "created_at",
-            })?;
-        let name = release["name"].as_str().unwrap_or(tag);
-        let assets = release["assets"]
-            .as_array()
+        let date = self.created_at.ok_or(Error::MissingAssetField {
+            field: "created_at",
+        })?;
+        let assets = self
+            .assets
             .ok_or(Error::MissingAssetField { field: "assets" })?;
-        let body = release["body"].as_str().map(String::from);
+        let name = self.name.unwrap_or_else(|| tag.clone());
         let assets = assets
-            .iter()
-            .map(ReleaseAsset::from_asset)
+            .into_iter()
+            .map(AssetDto::into_asset)
             .collect::<Result<Vec<ReleaseAsset>>>()?;
-        Ok(Release {
-            name: name.to_owned(),
-            version: tag.trim_start_matches('v').to_owned(),
-            date: date.to_owned(),
-            body,
-            assets,
-        })
+        let mut builder = Release::builder();
+        builder
+            .name(name)
+            .version(tag.trim_start_matches('v').to_owned())
+            .date(date)
+            .assets(assets);
+        if let Some(body) = self.body {
+            builder.body(body);
+        }
+        builder.build()
     }
 }
 
@@ -158,9 +170,13 @@ impl ReleaseList {
         }
     }
 
-    /// Retrieve a list of `Release`s.
-    /// If specified, filter for those containing a specified `target`
-    pub fn fetch(&self) -> Result<Vec<Release>> {
+    /// Retrieve the available `Release`s as a [`Releases`].
+    ///
+    /// If a `filter_target` is set, only releases carrying an asset whose name contains it are
+    /// returned. The result carries no current version (it is a bare listing), so
+    /// [`Releases::current_version`] is `None`; use [`Releases::into_vec`] to recover the raw
+    /// `Vec<Release>`.
+    pub fn fetch(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.custom_url
@@ -181,7 +197,7 @@ impl ReleaseList {
                 .filter(|r| r.has_target_asset(target))
                 .collect::<Vec<_>>(),
         };
-        Ok(releases)
+        Ok(Releases::from_listing(releases))
     }
 }
 
@@ -368,7 +384,7 @@ impl_update_config_accessors!(Update, {
 });
 
 /// Transport-free plan to fetch the paginated `releases` array, parsing each page with
-/// [`Release::from_release`] and following GitHub's `Link: rel="next"` pagination.
+/// the private `ReleaseDto` and following GitHub's `Link: rel="next"` pagination.
 ///
 /// `stop_at` bounds the walk: when `Some(current_version)` the list is filtered to releases
 /// strictly newer than it, and the parser sets `Page::stop` as soon as it sees a release NOT
@@ -401,18 +417,18 @@ fn release_array_page(
         url,
         headers,
         parse: Box::new(move |body, resp_headers| {
-            let json: serde_json::Value = serde_json::from_slice(body)?;
-            let array = json
-                .as_array()
-                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
+            // Deserialize the page directly into the private DTO vec (no intermediate
+            // `serde_json::Value` tree), then convert each into a public `Release`.
+            let dtos: Vec<ReleaseDto> =
+                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
             let mut stop = false;
-            for value in array {
-                let release = Release::from_release(value)?;
+            for dto in dtos {
+                let release = dto.into_release()?;
                 if let Some(ref current) = stop_at {
                     // Early-stop on the first release not strictly newer than `current` (rely on
                     // newest-first order); still-newer items already pushed are kept.
-                    if !bump_is_greater(current, &release.version).unwrap_or(false) {
+                    if !bump_is_greater(current, release.version()).unwrap_or(false) {
                         stop = true;
                         break;
                     }
@@ -437,15 +453,17 @@ fn release_array_page(
 }
 
 /// Transport-free plan to fetch a single release *object* (the `/releases/latest` and
-/// `/releases/tags/{ver}` endpoints), parsed with [`Release::from_release`] into a one-item page.
+/// `/releases/tags/{ver}` endpoints), parsed via the private `ReleaseDto` into a one-item page.
 fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
     let headers = api_headers(auth_token)?;
     Ok(PageRequest {
         url,
         headers,
         parse: Box::new(|body, _resp_headers| {
-            let json: serde_json::Value = serde_json::from_slice(body)?;
-            Ok(Page::last(vec![Release::from_release(&json)?]))
+            // The single-release endpoints return a bare release object; deserialize it directly
+            // into the DTO and convert.
+            let dto: ReleaseDto = serde_json::from_slice(body)?;
+            Ok(Page::last(vec![dto.into_release()?]))
         }),
     })
 }
@@ -649,7 +667,7 @@ mod tests {
         });
         let upd = github_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         // Only the strictly-newer items from page 1, in order; v1.0.0/v0.9.0 dropped by the filter,
         // and v3.0.0 (page 2) never fetched.
         assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
@@ -714,8 +732,8 @@ mod tests {
         let full_choice =
             crate::update::testing::choose_latest_release_for_test(full, "1.0.0").unwrap();
         assert_eq!(
-            early_choice.map(|r| r.version),
-            full_choice.map(|r| r.version),
+            early_choice.map(|r| r.version().to_string()),
+            full_choice.map(|r| r.version().to_string()),
             "early-stop must select the same release as a full walk"
         );
     }
@@ -747,7 +765,10 @@ mod tests {
             .unwrap()
             .fetch()
             .unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+        // `ReleaseList::fetch` now returns a `Releases` (with no current version); recover the raw
+        // vec via `into_vec()`.
+        let releases = releases.into_vec();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "0.5.0", "0.1.0"],
@@ -758,6 +779,83 @@ mod tests {
             2,
             "both pages must be requested for the unfiltered listing"
         );
+    }
+
+    // --- WS4 4c: `ReleaseList::fetch` returns a `Releases`; `into_vec()` recovers the releases --
+
+    #[test]
+    fn release_list_fetch_returns_releases_and_into_vec_recovers_them() {
+        // `ReleaseList::fetch` now returns a `Releases` (A11/T3.3). It carries NO current version
+        // (a bare listing), so `current_version()` is `None` and `is_update_available()` errors;
+        // `into_vec()` recovers the underlying `Vec<Release>` in listing order.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_array_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            releases.is_update_available().is_err(),
+            "a listing with no current version cannot answer is_update_available()"
+        );
+        let recovered = releases.into_vec();
+        let versions: Vec<&str> = recovered.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["2.0.0", "1.0.0"]);
+    }
+
+    // --- WS4 4d: the github DTO parses a sample payload into a correct `Release` ----------------
+
+    #[test]
+    fn github_dto_parses_sample_payload_through_getters() {
+        // A realistic github release object (tag, name, created_at, body, one asset) must parse via
+        // the private `ReleaseDto` into a public `Release` whose getters return the expected values:
+        // the leading `v` is stripped from the version, the asset `url`/`name` map across, and the
+        // body is carried.
+        let body = r#"{
+            "tag_name": "v4.5.6",
+            "name": "Release 4.5.6",
+            "created_at": "2024-01-02T03:04:05Z",
+            "body": "the release notes",
+            "assets": [
+                { "name": "app-x86_64-unknown-linux-gnu.tar.gz", "url": "https://api/asset/1" }
+            ]
+        }"#;
+        let base = stub(move |_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: body.to_string(),
+            }]
+        });
+        // `get_latest_release` hits `/releases/latest`, which returns a bare release OBJECT parsed
+        // by the single-object DTO path.
+        let upd = github_update_sync(&base, "1.0.0");
+        let releases = upd.get_latest_release().unwrap();
+        let rel = releases.latest().expect("one-element Releases");
+        assert_eq!(rel.version(), "4.5.6", "leading v stripped");
+        assert_eq!(rel.name(), "Release 4.5.6");
+        assert_eq!(rel.date(), "2024-01-02T03:04:05Z");
+        assert_eq!(rel.body(), Some("the release notes"));
+        assert_eq!(rel.assets().len(), 1);
+        assert_eq!(
+            rel.assets()[0].name(),
+            "app-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(rel.assets()[0].download_url(), "https://api/asset/1");
     }
 
     // --- WS2 invariant 1: sync/async fetch parity (same plans + parsers) ----------------------
@@ -786,7 +884,7 @@ mod tests {
                 .unwrap()
                 .all()
                 .iter()
-                .map(|r| r.version.clone())
+                .map(|r| r.version().to_string())
                 .collect()
         })
         .await
@@ -813,7 +911,7 @@ mod tests {
             .unwrap()
             .all()
             .iter()
-            .map(|r| r.version.clone())
+            .map(|r| r.version().to_string())
             .collect();
 
         assert_eq!(
@@ -856,8 +954,8 @@ mod tests {
             2,
             "both pages accumulated over async transport"
         );
-        assert_eq!(releases[0].version, "1.0.0");
-        assert_eq!(releases[1].version, "0.9.0");
+        assert_eq!(releases[0].version(), "1.0.0");
+        assert_eq!(releases[1].version(), "0.9.0");
     }
 
     #[cfg(feature = "async")]
@@ -880,7 +978,7 @@ mod tests {
             .unwrap();
         let releases = upd.get_latest_release_async().await.unwrap();
         let rel = releases.latest().expect("one-element Releases");
-        assert_eq!(rel.version, "3.1.0");
+        assert_eq!(rel.version(), "3.1.0");
     }
 
     #[cfg(feature = "async")]
@@ -930,9 +1028,9 @@ mod tests {
             .build()
             .unwrap();
         let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(versions, vec!["2.0.0"], "only strictly-newer releases kept");
-        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.0.0");
         assert!(
             releases.is_update_available().unwrap(),
             "2.0.0 > 1.0.0 via the returned Releases"
@@ -973,7 +1071,7 @@ mod tests {
             1,
             "get_latest_release yields a one-element Releases"
         );
-        assert_eq!(releases.latest().unwrap().version, "3.1.0");
+        assert_eq!(releases.latest().unwrap().version(), "3.1.0");
         assert!(
             releases.is_update_available().unwrap(),
             "3.1.0 > 1.0.0 via the one-element Releases pre-check"
@@ -994,7 +1092,7 @@ mod tests {
         });
         let upd = github_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_release().unwrap();
-        assert_eq!(releases.latest().unwrap().version, "1.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "1.0.0");
         assert!(
             !releases.is_update_available().unwrap(),
             "newest (1.0.0) == current => not available on the one-element path"
@@ -1060,8 +1158,8 @@ mod tests {
             2,
             "releases from both pages are accumulated"
         );
-        assert_eq!(releases[0].version, "1.0.0");
-        assert_eq!(releases[1].version, "0.9.0");
+        assert_eq!(releases[0].version(), "1.0.0");
+        assert_eq!(releases[1].version(), "0.9.0");
     }
 
     #[test]
@@ -1170,7 +1268,7 @@ mod tests {
             .build()
             .unwrap();
         let rel = upd.get_release_version("v1.0.0+build.5").unwrap();
-        assert_eq!(rel.version, "1.0.0+build.5");
+        assert_eq!(rel.version(), "1.0.0+build.5");
         let request = &captured.lock().unwrap()[0];
         let request_line = request.lines().next().unwrap_or_default();
         assert!(
@@ -1357,19 +1455,14 @@ mod tests {
         use crate::update::{Release, ReleaseAsset};
 
         // Asset names the built-in target/OS/ARCH substring heuristic can't pick.
-        let release = Release {
-            assets: vec![
-                ReleaseAsset {
-                    name: "app-stable.bin".into(),
-                    download_url: "https://example/stable".into(),
-                },
-                ReleaseAsset {
-                    name: "app-nightly.bin".into(),
-                    download_url: "https://example/nightly".into(),
-                },
-            ],
-            ..Default::default()
-        };
+        let release = Release::builder()
+            .version("1.0.0")
+            .assets([
+                ReleaseAsset::new("app-stable.bin", "https://example/stable"),
+                ReleaseAsset::new("app-nightly.bin", "https://example/nightly"),
+            ])
+            .build()
+            .unwrap();
 
         // Default selection finds nothing (no asset contains the target triple / OS+ARCH).
         assert!(release.asset_for("some-unmatchable-target", None).is_none());
@@ -1384,9 +1477,9 @@ mod tests {
             .build()
             .unwrap();
         let matcher = upd.asset_matcher().expect("matcher stored");
-        let chosen = matcher(&release.assets).expect("matcher selects an asset");
-        assert_eq!(chosen.name, "app-nightly.bin");
-        assert_eq!(chosen.download_url, "https://example/nightly");
+        let chosen = matcher(release.assets()).expect("matcher selects an asset");
+        assert_eq!(chosen.name(), "app-nightly.bin");
+        assert_eq!(chosen.download_url(), "https://example/nightly");
     }
 
     #[cfg(feature = "reqwest")]
@@ -1443,7 +1536,7 @@ mod tests {
         };
         let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "1.2.3");
+        assert_eq!(releases[0].version(), "1.2.3");
         let request = captured.lock().unwrap()[0].to_lowercase();
         assert!(
             request.contains("x-injected-client: marker"),
@@ -1491,7 +1584,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "2.0.0");
+        assert_eq!(releases[0].version(), "2.0.0");
         let request = captured.lock().unwrap()[0].to_lowercase();
         assert!(
             request.contains("x-injected-client: marker"),
@@ -1531,7 +1624,7 @@ mod tests {
         };
         let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "3.0.0");
+        assert_eq!(releases[0].version(), "3.0.0");
     }
 
     // --- WS1: trait-seam injection (client-agnostic, no reqwest/ureq) ------------------------
@@ -1601,7 +1694,8 @@ mod tests {
             fetch_all_releases("https://example.test/repos/o/r/releases", None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(
-            releases[0].version, "4.5.6",
+            releases[0].version(),
+            "4.5.6",
             "the backend parsed the fake client's canned body through the trait"
         );
         let urls = requested.lock().unwrap();
@@ -1719,7 +1813,7 @@ mod tests {
         };
         let releases = fetch_all_releases(&format!("{base}/releases"), None, &cfg).unwrap();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "1.0.0");
+        assert_eq!(releases[0].version(), "1.0.0");
     }
 
     #[test]
@@ -1773,9 +1867,10 @@ mod tests {
             .build()
             .unwrap()
             .fetch()
-            .unwrap();
+            .unwrap()
+            .into_vec();
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].version, "2.0.0");
+        assert_eq!(releases[0].version(), "2.0.0");
     }
 
     // --- Item 3: unattended() convenience ---------------------------------------------------

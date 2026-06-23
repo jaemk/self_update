@@ -9,55 +9,66 @@ use crate::{
     errors::*,
     update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
+use serde::Deserialize;
 
-impl ReleaseAsset {
-    /// Parse a release-asset json object
-    ///
-    /// Errors:
-    ///     * Missing required name & download-url keys
-    fn from_asset_gitea(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url =
-            asset["browser_download_url"]
-                .as_str()
-                .ok_or(Error::MissingAssetField {
-                    field: "browser_download_url",
-                })?;
-        let name = asset["name"]
-            .as_str()
+/// Gitea release-asset JSON shape (download URL is `browser_download_url`). Private DTO converted
+/// into the public [`ReleaseAsset`]; keeping it private keeps `Deserialize` out of `ReleaseAsset`'s
+/// public API.
+#[derive(Deserialize)]
+struct AssetDto {
+    name: Option<String>,
+    browser_download_url: Option<String>,
+}
+
+impl AssetDto {
+    fn into_asset(self) -> Result<ReleaseAsset> {
+        let download_url = self.browser_download_url.ok_or(Error::MissingAssetField {
+            field: "browser_download_url",
+        })?;
+        let name = self
+            .name
             .ok_or(Error::MissingAssetField { field: "name" })?;
-        Ok(ReleaseAsset {
-            download_url: download_url.to_owned(),
-            name: name.to_owned(),
-        })
+        Ok(ReleaseAsset::new(name, download_url))
     }
 }
 
-impl Release {
-    fn from_release_gitea(release: &serde_json::Value) -> Result<Release> {
-        let tag = release["tag_name"]
-            .as_str()
+/// Gitea release JSON shape. Private DTO deserialized directly from the response bytes, then
+/// converted into the public [`Release`].
+#[derive(Deserialize)]
+struct ReleaseDto {
+    tag_name: Option<String>,
+    created_at: Option<String>,
+    name: Option<String>,
+    body: Option<String>,
+    assets: Option<Vec<AssetDto>>,
+}
+
+impl ReleaseDto {
+    fn into_release(self) -> Result<Release> {
+        let tag = self
+            .tag_name
             .ok_or(Error::MissingAssetField { field: "tag_name" })?;
-        let date = release["created_at"]
-            .as_str()
-            .ok_or(Error::MissingAssetField {
-                field: "created_at",
-            })?;
-        let name = release["name"].as_str().unwrap_or(tag);
-        let assets = release["assets"]
-            .as_array()
+        let date = self.created_at.ok_or(Error::MissingAssetField {
+            field: "created_at",
+        })?;
+        let assets = self
+            .assets
             .ok_or(Error::MissingAssetField { field: "assets" })?;
-        let body = release["body"].as_str().map(String::from);
+        let name = self.name.unwrap_or_else(|| tag.clone());
         let assets = assets
-            .iter()
-            .map(ReleaseAsset::from_asset_gitea)
+            .into_iter()
+            .map(AssetDto::into_asset)
             .collect::<Result<Vec<ReleaseAsset>>>()?;
-        Ok(Release {
-            name: name.to_owned(),
-            version: tag.trim_start_matches('v').to_owned(),
-            date: date.to_owned(),
-            body,
-            assets,
-        })
+        let mut builder = Release::builder();
+        builder
+            .name(name)
+            .version(tag.trim_start_matches('v').to_owned())
+            .date(date)
+            .assets(assets);
+        if let Some(body) = self.body {
+            builder.body(body);
+        }
+        builder.build()
     }
 }
 
@@ -174,9 +185,13 @@ impl ReleaseList {
         }
     }
 
-    /// Retrieve a list of `Release`s.
-    /// If specified, filter for those containing a specified `target`
-    pub fn fetch(&self) -> Result<Vec<Release>> {
+    /// Retrieve the available `Release`s as a [`Releases`].
+    ///
+    /// If a `filter_target` is set, only releases carrying an asset whose name contains it are
+    /// returned. The result carries no current version (it is a bare listing), so
+    /// [`Releases::current_version`] is `None`; use [`Releases::into_vec`] to recover the raw
+    /// `Vec<Release>`.
+    pub fn fetch(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
             self.host, self.repo_owner, self.repo_name
@@ -194,7 +209,7 @@ impl ReleaseList {
                 .filter(|r| r.has_target_asset(target))
                 .collect::<Vec<_>>(),
         };
-        Ok(releases)
+        Ok(Releases::from_listing(releases))
     }
 }
 
@@ -364,7 +379,7 @@ impl_update_config_accessors!(Update, {
 });
 
 /// Transport-free plan to fetch the paginated `releases` array (Gitea format), parsing each page
-/// with [`Release::from_release_gitea`] and following `Link: rel="next"`. See github's
+/// via the private `ReleaseDto` and following `Link: rel="next"`. See github's
 /// `releases_plan` for the `stop_at` early-stop contract.
 fn releases_plan(
     base_url: &str,
@@ -392,16 +407,16 @@ fn release_array_page(
         url,
         headers,
         parse: Box::new(move |body, resp_headers| {
-            let json: serde_json::Value = serde_json::from_slice(body)?;
-            let array = json
-                .as_array()
-                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
+            // Deserialize the page directly into the private DTO vec (no intermediate
+            // `serde_json::Value` tree), then convert each into a public `Release`.
+            let dtos: Vec<ReleaseDto> =
+                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
             let mut stop = false;
-            for value in array {
-                let release = Release::from_release_gitea(value)?;
+            for dto in dtos {
+                let release = dto.into_release()?;
                 if let Some(ref current) = stop_at {
-                    if !bump_is_greater(current, &release.version).unwrap_or(false) {
+                    if !bump_is_greater(current, release.version()).unwrap_or(false) {
                         stop = true;
                         break;
                     }
@@ -433,14 +448,13 @@ fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<R
         url: first_page_url(base_url),
         headers,
         parse: Box::new(|body, _resp_headers| {
-            let json: serde_json::Value = serde_json::from_slice(body)?;
-            let array = json
-                .as_array()
+            let dtos: Vec<ReleaseDto> =
+                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+            let first = dtos
+                .into_iter()
+                .next()
                 .ok_or_else(|| Error::NoReleaseFound { target: None })?;
-            let first = array
-                .first()
-                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
-            Ok(Page::last(vec![Release::from_release_gitea(first)?]))
+            Ok(Page::last(vec![first.into_release()?]))
         }),
     })
 }
@@ -452,8 +466,8 @@ fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Rele
         url,
         headers,
         parse: Box::new(|body, _resp_headers| {
-            let json: serde_json::Value = serde_json::from_slice(body)?;
-            Ok(Page::last(vec![Release::from_release_gitea(&json)?]))
+            let dto: ReleaseDto = serde_json::from_slice(body)?;
+            Ok(Page::last(vec![dto.into_release()?]))
         }),
     })
 }
@@ -671,7 +685,7 @@ mod tests {
             1,
             "get_latest_release yields a one-element Releases"
         );
-        assert_eq!(releases.latest().unwrap().version, "2.5.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.5.0");
         assert!(
             releases.is_update_available().unwrap(),
             "2.5.0 > 1.0.0 via the one-element Releases pre-check"
@@ -692,13 +706,13 @@ mod tests {
         });
         let upd = gitea_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
             "only releases strictly newer than the current version are kept, in order"
         );
-        assert_eq!(releases.latest().unwrap().version, "2.0.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.0.0");
         assert!(
             releases.is_update_available().unwrap(),
             "the list path reports an update available when something newer exists"
@@ -745,7 +759,7 @@ mod tests {
         });
         let upd = gitea_update_sync(&base, "1.0.0");
         let single = upd.get_latest_release().unwrap();
-        assert_eq!(single.latest().unwrap().version, "1.0.0");
+        assert_eq!(single.latest().unwrap().version(), "1.0.0");
         assert!(
             !single.is_update_available().unwrap(),
             "get_latest_release: newest (1.0.0) == current => not available"
@@ -847,7 +861,7 @@ mod tests {
         });
         let upd = gitea_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -895,8 +909,8 @@ mod tests {
         let full_choice =
             crate::update::testing::choose_latest_release_for_test(full, "1.0.0").unwrap();
         assert_eq!(
-            early_choice.map(|r| r.version),
-            full_choice.map(|r| r.version),
+            early_choice.map(|r| r.version().to_string()),
+            full_choice.map(|r| r.version().to_string()),
             "early-stop must select the same release as a full walk"
         );
     }
@@ -926,8 +940,9 @@ mod tests {
             .build()
             .unwrap()
             .fetch()
-            .unwrap();
-        let versions: Vec<&str> = releases.iter().map(|r| r.version.as_str()).collect();
+            .unwrap()
+            .into_vec();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "0.5.0", "0.1.0"],
@@ -938,6 +953,139 @@ mod tests {
             2,
             "both pages must be requested for the unfiltered listing"
         );
+    }
+
+    // --- WS4 #5 (gitea): a realistic populated payload parses through the DTO into a `Release`
+    // whose getters surface every field. The other gitea parse tests use empty `assets` and a
+    // null `body`; this pins the populated mapping with gitea's distinct shapes (bare `assets`
+    // array, download URL in `browser_download_url`, body in `body`).
+    #[test]
+    fn dto_parse_maps_populated_payload_through_getters() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v3.4.5","created_at":"2021-07-08T09:10:11Z","name":"My App 3.4.5","body":"the notes","assets":[{"name":"app-x86_64-linux.tar.gz","browser_download_url":"https://gitea.example/app-x86_64-linux.tar.gz"},{"name":"app-aarch64-linux.tar.gz","browser_download_url":"https://gitea.example/app-aarch64-linux.tar.gz"}]}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        let releases = upd.get_latest_release().unwrap();
+        let rel = releases.latest().unwrap();
+        assert_eq!(rel.version(), "3.4.5", "leading `v` stripped from tag_name");
+        assert_eq!(rel.name(), "My App 3.4.5", "name surfaces from `name`");
+        assert_eq!(rel.date(), "2021-07-08T09:10:11Z", "date from `created_at`");
+        assert_eq!(
+            rel.body(),
+            Some("the notes"),
+            "body surfaces from gitea's `body` field"
+        );
+        assert_eq!(rel.assets().len(), 2, "both `assets` entries parsed");
+        assert_eq!(rel.assets()[0].name(), "app-x86_64-linux.tar.gz");
+        assert_eq!(
+            rel.assets()[0].download_url(),
+            "https://gitea.example/app-x86_64-linux.tar.gz",
+            "asset download_url comes from `browser_download_url`"
+        );
+        assert_eq!(rel.assets()[1].name(), "app-aarch64-linux.tar.gz");
+    }
+
+    // --- WS4 #2 (gitea): the listing `Releases` from `ReleaseList::fetch` carries NO current
+    // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
+    // `MissingField { field: "current_version" }`. `into_vec()` recovers the release vec.
+    #[test]
+    fn release_list_fetch_returns_listing_releases_without_current_version() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on a listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.0.0"],
+            "into_vec() recovers the parsed releases, newest-first"
+        );
+    }
+
+    // --- WS4 #1 (gitea, sync lane): exact-variant routing on the sync transport. The sibling
+    // exact-variant tests are `#[cfg(feature = "async")]` only, so the ureq lane never pins the
+    // precise variant. A release object missing `tag_name` must surface as EXACTLY
+    // `MissingAssetField { field: "tag_name" }`.
+    #[test]
+    fn sync_missing_tag_name_routes_to_missing_asset_field_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"{"created_at":"2020-01-01T00:00:00Z","name":"x","assets":[]}"#.to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_release_version("v1.0.0") {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(
+                    field, "tag_name",
+                    "must name the absent payload field exactly"
+                );
+            }
+            other => panic!(
+                "missing tag_name must be Error::MissingAssetField {{ field: \"tag_name\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // --- WS4 #1 (gitea, sync lane): the other side of the split — an empty top-level releases
+    // array surfaces as EXACTLY `NoReleaseFound { target: None }`.
+    #[test]
+    fn sync_empty_array_routes_to_no_release_found_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::NoReleaseFound { target }) => {
+                assert_eq!(target, None, "empty listing carries no asset target");
+            }
+            other => panic!(
+                "empty releases array must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
@@ -1189,7 +1337,7 @@ mod tests {
             .build_async()
             .unwrap();
         let releases = upd.get_latest_release_async().await.unwrap();
-        assert_eq!(releases.latest().unwrap().version, "2.5.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.5.0");
     }
 
     #[cfg(feature = "async")]
@@ -1223,8 +1371,8 @@ mod tests {
             2,
             "both pages accumulated over async transport"
         );
-        assert_eq!(releases[0].version, "1.0.0");
-        assert_eq!(releases[1].version, "0.9.0");
+        assert_eq!(releases[0].version(), "1.0.0");
+        assert_eq!(releases[1].version(), "0.9.0");
     }
 
     #[cfg(feature = "async")]
@@ -1241,7 +1389,7 @@ mod tests {
         });
         let upd = gitea_update(&base, "0.1.0");
         let rel = upd.get_release_version_async("v4.2.1").await.unwrap();
-        assert_eq!(rel.version, "4.2.1");
+        assert_eq!(rel.version(), "4.2.1");
     }
 
     #[cfg(feature = "async")]
@@ -1341,7 +1489,7 @@ mod tests {
         });
         let upd = gitea_update(&base, "1.0.0");
         let releases = upd.get_latest_releases_async().await.unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -1394,7 +1542,7 @@ mod tests {
         });
         let upd = gitea_update(&base, "1.0.0");
         let releases = upd.get_latest_releases_async().await.unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["3.0.0", "2.0.0"],
