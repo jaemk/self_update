@@ -483,7 +483,7 @@ pub mod backends;
 #[cfg(feature = "checksums")]
 mod checksum;
 pub mod errors;
-mod http_client;
+pub mod http_client;
 pub mod update;
 pub mod version;
 
