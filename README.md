@@ -55,7 +55,7 @@ exclusive -- enabling both, or neither, is a compile error):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
-* `default-tls` (default): native TLS for the selected client;
+* `native-tls` (default): native TLS for the selected client;
 * `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
 
 The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
@@ -63,7 +63,7 @@ are _disabled_ by default; activate the one(s) your release files need:
 
 * `archive-tar`: Support for _tar_ archive format;
 * `archive-zip`: Support for _zip_ archive format;
-* `compression-flate2`: Support for _gzip_ compression;
+* `compression-tar-gz`: Support for _gzip_ compression;
 * `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
 * `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
@@ -77,11 +77,11 @@ The S3 backend needs **no feature** -- it is always compiled. Only private-bucke
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example github --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example gitlab --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -114,8 +114,8 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example extracts a `.tar.gz`, which
-_requires_ both the `archive-tar` and `compression-flate2` features -- `archive-tar` reads the tar
-archive and `compression-flate2` decodes the gzip layer; see the [features](#features) section
+_requires_ both the `archive-tar` and `compression-tar-gz` features -- `archive-tar` reads the tar
+archive and `compression-tar-gz` decodes the gzip layer; see the [features](#features) section
 above). It downloads, extracts, and replaces the running binary
 by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
 and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
@@ -170,7 +170,7 @@ filesystems), the source files, every destination, and the temp dir must all be 
 filesystem.
 
 **NOTE**: this example extracts a `.tar.gz`, which requires both the `archive-tar` and
-`compression-flate2` features.
+`compression-tar-gz` features.
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {
@@ -383,7 +383,7 @@ When using cross compilation tools such as cross if you want to use rustls and n
 self_update = { version = "1", features = ["rustls"], default-features = false }
 ```
 
-**TLS certificate errors on Linux (`default-tls` / OpenSSL).** With the native-TLS backend,
+**TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
 it can't (some containers, `musl` static builds, or a non-standard cert layout) a request may fail
 with a certificate-verification error. Point OpenSSL at the bundle by exporting `SSL_CERT_FILE`

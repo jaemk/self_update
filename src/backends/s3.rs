@@ -10,8 +10,8 @@ use crate::{
     version::bump_is_greater,
 };
 use log::debug;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use regex::Regex;
 use std::cmp::Ordering;
 use std::path::PathBuf;
@@ -503,7 +503,7 @@ impl crate::update::AsyncFetch for Update {
 mod auth {
     use crate::errors::*;
     use hmac::{Hmac, Mac};
-    use percent_encoding::{utf8_percent_encode, AsciiSet, PercentEncode, NON_ALPHANUMERIC};
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_encode};
     use sha2::{Digest, Sha256};
     use std::{
         borrow::Cow,
@@ -716,7 +716,7 @@ fn build_s3_api_url(
             bucket_name, region_result?
         ),
         EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
-        EndPoint::Generic { ref end_point } => end_point.clone(),
+        EndPoint::Generic { end_point } => end_point.clone(),
     };
 
     let api_url = match end_point {
@@ -1888,15 +1888,17 @@ mod tests {
         // Generic and GCS never read the region, so both must build successfully when region is
         // absent (the region-requiring endpoints are covered by the error test above).
         assert!(api_url(super::EndPoint::GCS, "b", None, None).is_ok());
-        assert!(api_url(
-            super::EndPoint::Generic {
-                end_point: "https://s3.example.com/".to_owned()
-            },
-            "b",
-            None,
-            None
-        )
-        .is_ok());
+        assert!(
+            api_url(
+                super::EndPoint::Generic {
+                    end_point: "https://s3.example.com/".to_owned()
+                },
+                "b",
+                None,
+                None
+            )
+            .is_ok()
+        );
     }
 
     // The endpoint/region pairing is now validated at `build()` time (not deferred to the first
@@ -1974,22 +1976,26 @@ mod tests {
 
     #[test]
     fn build_succeeds_without_region_for_generic_and_gcs() {
-        assert!(Update::configure()
-            .end_point(super::EndPoint::GCS)
-            .bucket_name("bucket")
-            .bin_name("bin")
-            .current_version("0.1.0")
-            .build()
-            .is_ok());
-        assert!(Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: "https://s3.example.com/".to_owned()
-            })
-            .bucket_name("bucket")
-            .bin_name("bin")
-            .current_version("0.1.0")
-            .build()
-            .is_ok());
+        assert!(
+            Update::configure()
+                .end_point(super::EndPoint::GCS)
+                .bucket_name("bucket")
+                .bin_name("bin")
+                .current_version("0.1.0")
+                .build()
+                .is_ok()
+        );
+        assert!(
+            Update::configure()
+                .end_point(super::EndPoint::Generic {
+                    end_point: "https://s3.example.com/".to_owned()
+                })
+                .bucket_name("bucket")
+                .bin_name("bin")
+                .current_version("0.1.0")
+                .build()
+                .is_ok()
+        );
     }
 
     // ---------------------------------------------------------------------------

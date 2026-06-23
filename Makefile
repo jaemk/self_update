@@ -14,18 +14,18 @@
 # signatures + checksums + s3 auth):
 ARCHIVE_FEATURES = archive-tar \
                    archive-zip \
-                   compression-flate2 \
+                   compression-tar-gz \
                    compression-zip-deflate \
                    compression-zip-bzip2 \
                    signatures \
                    checksums \
                    s3-auth
 # Full feature set for the default `reqwest` client:
-REQWEST_FEATURES = $(ARCHIVE_FEATURES)
+REQWEST_FEATURES = github gitlab gitea s3 $(ARCHIVE_FEATURES)
 # Full feature set for the `ureq` client (needs `--no-default-features`):
-UREQ_FEATURES    = ureq default-tls $(ARCHIVE_FEATURES)
+UREQ_FEATURES    = ureq native-tls github gitlab gitea s3 $(ARCHIVE_FEATURES)
 # Full reqwest feature set plus the async API (reqwest-only):
-ASYNC_FEATURES   = async $(ARCHIVE_FEATURES)
+ASYNC_FEATURES   = async github gitlab gitea s3 $(ARCHIVE_FEATURES)
 
 # The backends, one runnable example each. NOTE: unlike a typical example,
 # running one performs a REAL self-update (network + replaces the binary), so

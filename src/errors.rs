@@ -149,7 +149,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use Error::*;
         match self {
-            Update(ref s) => write!(f, "UpdateError: {}", s),
+            Update(s) => write!(f, "UpdateError: {}", s),
             ChecksumMismatch { expected, computed } => write!(
                 f,
                 "ChecksumMismatchError: checksum mismatch (expected {}, computed {})",
@@ -167,15 +167,19 @@ impl std::fmt::Display for Error {
                 "HttpStatusError: request to {} failed with status {}",
                 url, status
             ),
-            Release(ref s) => write!(f, "ReleaseError: {}", s),
-            Config(ref s) => write!(f, "ConfigError: {}", s),
-            Io(ref e) => write!(f, "IoError: {}", e),
-            Json(ref e) => write!(f, "JsonError: {}", e),
-            Transport(ref e) => write!(f, "TransportError: {}", e),
-            SemVer(ref e) => write!(f, "SemVerError: {}", e),
+            Release(s) => write!(f, "ReleaseError: {}", s),
+            Config(s) => write!(f, "ConfigError: {}", s),
+            Io(e) => write!(f, "IoError: {}", e),
+            Json(e) => write!(f, "JsonError: {}", e),
+            Transport(e) => write!(f, "TransportError: {}", e),
+            SemVer(e) => write!(f, "SemVerError: {}", e),
             #[cfg(feature = "archive-zip")]
-            Zip(ref e) => write!(f, "ZipError: {}", e),
-            ArchiveNotEnabled(ref s) => write!(f, "ArchiveNotEnabledError: Archive extension '{}' not supported, please enable 'archive-{}' feature!", s, s),
+            Zip(e) => write!(f, "ZipError: {}", e),
+            ArchiveNotEnabled(s) => write!(
+                f,
+                "ArchiveNotEnabledError: Archive extension '{}' not supported, please enable 'archive-{}' feature!",
+                s, s
+            ),
             #[cfg(feature = "signatures")]
             NoSignatures(kind) => write!(
                 f,
@@ -184,13 +188,16 @@ impl std::fmt::Display for Error {
                 kind
             ),
             #[cfg(feature = "signatures")]
-            Signature(ref e) => write!(f, "SignatureError: {}", e),
+            Signature(e) => write!(f, "SignatureError: {}", e),
             #[cfg(feature = "signatures")]
             SignatureNonUTF8 => {
-                write!(f, "SignatureError: cannot verify signature of a file with a non-UTF-8 name")
+                write!(
+                    f,
+                    "SignatureError: cannot verify signature of a file with a non-UTF-8 name"
+                )
             }
             #[cfg(feature = "s3-auth")]
-            S3Auth(ref e) => write!(f, "S3AuthError: {}", e),
+            S3Auth(e) => write!(f, "S3AuthError: {}", e),
         }
     }
 }

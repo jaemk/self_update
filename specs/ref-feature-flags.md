@@ -8,10 +8,10 @@ Documents every Cargo feature of the `self_update` crate, the dependencies and
 public API surface each feature gates, the feature-to-feature implication graph,
 and the compile-time mutual-exclusion guards that enforce exactly one HTTP
 client and exactly one TLS backend. Source of truth: the `[features]` table in
-`Cargo.toml` (lines 67-91), the `compile_error!` guards in `src/lib.rs`
+`Cargo.toml` (lines 67-92), the `compile_error!` guards in `src/lib.rs`
 (lines 414-437), and the `#[cfg(feature = ...)]` sites across `src/`. The S3
-backend is always compiled and gates on no feature; there is no `s3` alias
-feature (only `s3-auth`, for private-bucket request signing).
+backend is gated behind the `s3` feature; `s3-auth` (private-bucket request
+signing) implies `s3`.
 
 ## Behavior
 
@@ -19,26 +19,31 @@ All features and their wiring (`Cargo.toml:67-91`):
 
 | Feature | Enables (deps / sub-features) | Implies | Notes |
 |---------|------------------------------|---------|-------|
-| `default` | `reqwest`, `default-tls` | client + TLS | the default client/TLS pair (`Cargo.toml:68`) |
+| `default` | `reqwest`, `rustls`, `progress-bar`, `github` | client + TLS + progress + backend | the default feature set (`Cargo.toml:68`) |
 | `reqwest` | `dep:reqwest` (blocking, json, http2) | one HTTP client | mutually exclusive with `ureq` (`Cargo.toml:86`) |
 | `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | one HTTP client | requires `--no-default-features` to avoid pulling `reqwest` (`Cargo.toml:87`) |
-| `default-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | one TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
-| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | one TLS backend | mutually exclusive with `default-tls` (`Cargo.toml:84`) |
+| `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | one TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
+| `rustls` | `reqwest?/rustls`, `ureq?/rustls` | one TLS backend | mutually exclusive with `native-tls` (`Cargo.toml:84`) |
 | `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | reqwest-only; incompatible with `ureq` (`Cargo.toml:80`) |
 | `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
 | `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
 | `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:71`) |
 | `compression-zip-deflate` | `zip/deflate` | `archive-zip` | deflate inside zip (`Cargo.toml:72`) |
-| `compression-flate2` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:74`, `lib.rs:665-668`) |
+| `compression-tar-gz` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:74`, `lib.rs:665-668`) |
+| `progress-bar` | `dep:indicatif` | - | terminal progress bar in `Download`; the `progress_callback` byte hook is always-on and not gated (`Cargo.toml:77`) |
 | `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:75`) |
 | `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:76`) |
-| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | - | SigV4 request signing for private buckets; the s3 backend itself is always compiled and needs no feature (`Cargo.toml:91`) |
+| `github` | `dep:...` (github backend module) | - | gates the GitHub backend; default-on (`Cargo.toml:88`) |
+| `gitlab` | `dep:...` (gitlab backend module) | - | gates the GitLab backend; off by default (`Cargo.toml:89`) |
+| `gitea` | `dep:...` (gitea backend module) | - | gates the Gitea backend; off by default (`Cargo.toml:90`) |
+| `s3` | `dep:quick-xml` (s3 backend module) | - | gates the S3 backend and the `quick-xml` dependency; off by default (`Cargo.toml:91`) |
+| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | `s3` | SigV4 request signing for private buckets; implies `s3` (`Cargo.toml:92`) |
 
 Implication notes:
 
 - `archive-zip` implies `zip`; the `compression-zip-*` features imply
   `archive-zip` and add a codec to the `zip` dep.
-- `archive-tar` implies `tar`; `compression-flate2` implies `archive-tar` and
+- `archive-tar` implies `tar`; `compression-tar-gz` implies `archive-tar` and
   adds `flate2` + `either` (gzip is the only `Compression` variant,
   `lib.rs:582-586`).
 - `signatures` only pulls `zipsign-api` (`dep:zipsign-api`). The actual
@@ -58,20 +63,21 @@ Mutual-exclusion guards (`src/lib.rs`), each a `compile_error!`:
 - neither `reqwest` nor `ureq` -> error (`lib.rs:419-422`):
   "no HTTP client selected - enable exactly one of the `reqwest` (default) or
   `ureq` features".
-- `default-tls` AND `rustls` both on -> error (`lib.rs:426-430`):
-  "features `default-tls` and `rustls` are mutually exclusive - to use
+- `native-tls` AND `rustls` both on -> error (`lib.rs:426-430`):
+  "features `native-tls` and `rustls` are mutually exclusive - to use
   `rustls`, set `default-features = false`".
 - `async` AND `ureq` both on -> error (`lib.rs:433-437`):
   "feature `async` requires the `reqwest` client and is incompatible with
   `ureq` - `ureq` has no async API".
 
-MSRV / edition: `rust-version = "1.85"`, `edition = "2018"` (`Cargo.toml:12-13`).
+MSRV / edition: `rust-version = "1.85"`, `edition = "2024"` (`Cargo.toml:12-13`).
 
-docs.rs feature set (`Cargo.toml:17-29`): `reqwest`, `default-tls`,
+docs.rs feature set (`Cargo.toml:17-29`): `reqwest`, `rustls`,
 `archive-zip`, `compression-zip-bzip2`, `compression-zip-deflate`,
-`archive-tar`, `compression-flate2`, `signatures`, `checksums`, `s3-auth`,
-`async`. This is a single client (`reqwest`) + single TLS (`default-tls`) set
-because `--all-features` does not build (see invariants). The same
+`archive-tar`, `compression-tar-gz`, `progress-bar`, `signatures`, `checksums`,
+`github`, `gitlab`, `gitea`, `s3`, `s3-auth`, `async`. This is a single client
+(`reqwest`) + single TLS (`rustls`) set because `--all-features` does not build
+(see invariants). The same
 `[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
 (`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
 `doc_cfg` feature (`lib.rs:410`) and the gated public re-exports carry
@@ -102,9 +108,9 @@ Feature-gated public items:
   feature-gate badge on each (`lib.rs:443,446,453,461,469,499`).
 - `archive-tar`: `ArchiveKind::Tar` enum variant (`lib.rs:589-591`).
 - `archive-zip`: `ArchiveKind::Zip` enum variant (`lib.rs:595-597`).
+- `s3`: gates the S3 backend module (`backends/s3.rs`); also pulled in by `s3-auth`.
 - `s3-auth`: the SigV4 signing path and credential/region builder surface in
-  `backends/s3.rs` (e.g. `s3.rs:25,76,120,...`). The s3 backend type itself is
-  always compiled regardless of feature.
+  `backends/s3.rs` (e.g. `s3.rs:25,76,120,...`); implies `s3`.
 
 `ArchiveKind` and `Extract` are public unconditionally, but `ArchiveKind` is
 `#[non_exhaustive]` and its `Tar`/`Zip` variants only exist under their archive
@@ -119,30 +125,30 @@ message uses it instead of the `Debug` form. `detect_archive` returns
 - Exactly one HTTP client is enforced at compile time: enabling both `reqwest`
   and `ureq`, or neither, is a `compile_error!` (`lib.rs:414-422`).
 - Exactly one TLS backend is enforced at compile time: enabling both
-  `default-tls` and `rustls` is a `compile_error!` (`lib.rs:426-430`).
+  `native-tls` and `rustls` is a `compile_error!` (`lib.rs:426-430`).
 - `async` excludes `ureq`: enabling both is a `compile_error!`
   (`lib.rs:433-437`); `async` also force-enables `reqwest` (`Cargo.toml:79`).
 - `cargo build --all-features` MUST NOT build: it would turn on `reqwest` +
-  `ureq` (and `default-tls` + `rustls`) simultaneously, tripping the guards.
+  `ureq` (and `native-tls` + `rustls`) simultaneously, tripping the guards.
   Every build/test/clippy lane therefore selects exactly one client explicitly
   (`Makefile` header comment; `Cargo.toml:15`).
-- The s3 backend is always compiled and gates on no feature; there is no `s3`
-  alias feature. Only private-bucket request signing needs `s3-auth`
-  (`Cargo.toml:89-91`).
+- The s3 backend is gated behind the `s3` feature; `s3-auth` implies `s3` so
+  enabling `s3-auth` is sufficient for private-bucket request signing
+  (`Cargo.toml:91-92`).
 - A signed archive of a given kind verifies only when both `signatures` and the
   matching `archive-*` feature are enabled (the `verify-*` sub-feature rides on
   the archive feature, `Cargo.toml:69,72,74`).
-- MSRV is 1.85; do not use APIs newer than that. Edition stays 2018.
+- MSRV is 1.85; do not use APIs newer than that. Edition is 2024.
 
 ## Tests
 
 CI (`.github/workflows/build.yml`) runs `make tests`, which builds and tests
 four single-client feature sets (`Makefile` `tests` target):
 
-- `tests/default`: `cargo test` (default = reqwest + default-tls).
+- `tests/default`: `cargo test` (default = reqwest + rustls + progress-bar + github).
 - `tests/reqwest`: full optional set on reqwest (`REQWEST_FEATURES` =
   archives + compression + signatures + checksums + s3-auth).
-- `tests/ureq`: `--no-default-features --features "ureq default-tls
+- `tests/ureq`: `--no-default-features --features "ureq native-tls
   <archive set>"`.
 - `tests/async`: `async` + the full reqwest optional set.
 

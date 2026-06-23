@@ -93,19 +93,19 @@ Exactly **one** http client must be enabled:
 - `ureq` (`default-features = false, features = ["ureq", ...]`)
 
 Enabling both, or neither, is a hard compile error with an explicit `compile_error!`
-diagnostic (in `src/lib.rs`). TLS is selected with `default-tls` (default, native/OpenSSL)
-**or** `rustls`; enabling both is likewise a `compile_error!`. To use `ureq` or `rustls`, set
-`default-features = false` and pick one client + one TLS backend.
+diagnostic (in `src/lib.rs`). TLS is selected with `rustls` (default) **or** `native-tls`
+(native/OpenSSL); enabling both is likewise a `compile_error!`. To use `ureq` or `native-tls`,
+set `default-features = false` and pick one client + one TLS backend.
 
 ---
 
 ## Build
 ```bash
-cargo build                                   # default: reqwest + default-tls
+cargo build                                   # default: reqwest + rustls
 # full optional feature set (reqwest):
-cargo build --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo build --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 # the ureq client:
-cargo build --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo build --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 Note: `--all-features` does **not** build (it enables both `reqwest` and `ureq`). Always pick one client.
 
@@ -117,15 +117,15 @@ cargo fmt --check      # verify only
 
 ## Lint
 ```bash
-cargo clippy --all-targets --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-cargo clippy --all-targets --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo clippy --all-targets --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo clippy --all-targets --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## Test
 Tests are in-module (`#[cfg(test)] mod tests` in `src/…`, including the backend modules) plus doctests in `src/lib.rs` and the backend modules. No external services are required.
 ```bash
-cargo test --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-cargo test --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo test --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## README Sync
@@ -180,11 +180,16 @@ Claude sub-agent definitions used by these skills live in `.claude/agents/`
 |---|---|
 | `reqwest` (default) | reqwest http client backend |
 | `ureq` | ureq http client backend (mutually exclusive with `reqwest`) |
-| `default-tls` (default) | native TLS for the selected client |
-| `rustls` | rustls TLS for the selected client |
+| `rustls` (default) | rustls TLS for the selected client |
+| `native-tls` | native/OpenSSL TLS for the selected client |
+| `progress-bar` (default) | indicatif terminal progress bar |
+| `github` (default) | gate the GitHub release backend |
+| `gitlab` | gate the GitLab release backend |
+| `gitea` | gate the Gitea release backend |
+| `s3` | gate the S3 release backend (`s3-auth` implies this) |
 | `archive-tar` | tar archive support |
 | `archive-zip` | zip archive support |
-| `compression-flate2` | gzip compression (tar.gz) |
+| `compression-tar-gz` | gzip compression (tar.gz) |
 | `compression-zip-deflate` | zip deflate compression |
 | `compression-zip-bzip2` | zip bzip2 compression |
 | `signatures` | verify `.zip`/`.tar.gz` artifacts via zipsign |

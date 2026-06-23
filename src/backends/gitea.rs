@@ -3,7 +3,7 @@ gitea releases
 */
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::{collect_paginated, first_page_url, next_link, send};
-use crate::http_client::{header, HttpResponse};
+use crate::http_client::{HttpResponse, header};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,

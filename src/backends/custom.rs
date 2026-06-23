@@ -404,8 +404,8 @@ impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for B
 mod tests {
     use super::Update;
     use crate::update::{Release, ReleaseAsset, ReleaseSource, ReleaseUpdate};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A canned source that records how many times each method was called.
     struct FakeSource {
@@ -696,8 +696,8 @@ mod tests {
     mod async_tests {
         use super::super::{AsyncUpdate, Blocking};
         use crate::update::{AsyncFetch, AsyncReleaseSource, Release, ReleaseAsset, ReleaseSource};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         /// A natively-async source recording how many times each async method ran.
         struct NativeAsyncSource {

@@ -1,7 +1,7 @@
 /*!
 Gitlab releases
 */
-use crate::http_client::{header, HttpResponse};
+use crate::http_client::{HttpResponse, header};
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::{collect_paginated, first_page_url, next_link, send};
@@ -999,7 +999,10 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::HttpStatus { status: 500, .. })),
+            matches!(
+                res,
+                Err(crate::errors::Error::HttpStatus { status: 500, .. })
+            ),
             "non-2xx 500 on get_latest_release_async must surface as Error::HttpStatus(500), got {:?}",
             res
         );
@@ -1045,7 +1048,10 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(res, Err(crate::errors::Error::HttpStatus { status: 503, .. })),
+            matches!(
+                res,
+                Err(crate::errors::Error::HttpStatus { status: 503, .. })
+            ),
             "non-2xx 503 on fetch_all_releases_async must surface as Error::HttpStatus(503), got {:?}",
             res
         );

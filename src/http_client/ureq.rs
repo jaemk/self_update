@@ -1,10 +1,10 @@
 #![cfg(feature = "ureq")]
 
 use ureq::tls::TlsProvider;
-use ureq::{http::Response, Agent, Body};
+use ureq::{Agent, Body, http::Response};
 
 use super::{ClientOverride, HeaderMap, HttpResponse};
-use crate::{errors::status_to_error, Error, Result};
+use crate::{Error, Result, errors::status_to_error};
 
 pub fn get(
     url: &str,

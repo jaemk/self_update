@@ -7,9 +7,13 @@ use crate::http_client;
 
 pub(crate) mod common;
 pub mod custom;
+#[cfg(feature = "gitea")]
 pub mod gitea;
+#[cfg(feature = "github")]
 pub mod github;
+#[cfg(feature = "gitlab")]
 pub mod gitlab;
+#[cfg(feature = "s3")]
 pub mod s3;
 
 /// Search for the first "rel" link-header uri in a full link header string.
@@ -300,7 +304,7 @@ mod test {
 
     #[test]
     fn collect_paginated_is_bounded_by_max_pages() {
-        use crate::backends::{collect_paginated, MAX_RELEASE_PAGES};
+        use crate::backends::{MAX_RELEASE_PAGES, collect_paginated};
 
         // A server that always advertises a next page must not loop forever.
         let mut calls = 0usize;

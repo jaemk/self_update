@@ -2,8 +2,8 @@ use http::HeaderValue;
 use serde::de::DeserializeOwned;
 
 use crate::Result;
-pub use http::header;
 pub use http::HeaderMap;
+pub use http::header;
 
 mod reqwest;
 mod ureq;

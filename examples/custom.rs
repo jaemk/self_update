@@ -12,10 +12,10 @@ over your source.
 With the `async` feature, implement `AsyncReleaseSource` (or wrap a `Clone` sync source in
 `Blocking`) and drive the update through `custom::AsyncUpdate`.
 
-`cargo build --example custom --features "async archive-tar archive-zip compression-flate2 compression-zip-deflate"`
+`cargo build --example custom --features "async archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 */
 
-use self_update::{cargo_crate_version, Release, ReleaseAsset, ReleaseSource};
+use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
 
 // ---------------------------------------------------------------------------
 // Minimal `ReleaseSource` implementation

@@ -40,13 +40,13 @@ types without a separate dependency.
 
 ### Client and TLS selection
 
-`reqwest` and `ureq` are mutually exclusive. `reqwest` (plus `default-tls`) is
+`reqwest` and `ureq` are mutually exclusive. `reqwest` (plus `native-tls`) is
 the default feature set; selecting `ureq` requires `default-features = false`
 (`Cargo.toml:67,82-86`). Enabling both, or neither, is a hard
 `compile_error!` (`lib.rs:414-421`). The `async` feature is reqwest-only and is
 a `compile_error!` when combined with `ureq` (`lib.rs:433-436`).
 
-TLS is chosen by feature, not at runtime. `default-tls` maps to each client's
+TLS is chosen by feature, not at runtime. `native-tls` maps to each client's
 native-TLS backend and `rustls` maps to each client's rustls backend
 (`Cargo.toml:82-83`). For reqwest the rustls path calls `use_rustls_tls()` on
 the per-call builder under `#[cfg(feature = "rustls")]`
@@ -162,7 +162,7 @@ status variants.
 
 - Exactly one HTTP client is compiled: both-or-neither is a `compile_error!`;
   `async` requires reqwest.
-- TLS is feature-selected (`default-tls` native, `rustls`), never runtime.
+- TLS is feature-selected (`native-tls` native, `rustls`), never runtime.
 - `retries == 0` means exactly one attempt; the exhaustion boundary is
   `attempts >= retries` (one retry => two attempts).
 - Backoff sequence is 100/200/400/800/1600/3200 ms, capped at 3200 from attempt

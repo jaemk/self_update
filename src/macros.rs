@@ -153,9 +153,11 @@ macro_rules! impl_update_config_accessors {
         fn no_confirm(&self) -> bool {
             self.common.no_confirm
         }
+        #[cfg(feature = "progress-bar")]
         fn progress_template(&self) -> &str {
             &self.common.progress_template
         }
+        #[cfg(feature = "progress-bar")]
         fn progress_chars(&self) -> &str {
             &self.common.progress_chars
         }
@@ -339,6 +341,7 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Set download progress style.
+        #[cfg(feature = "progress-bar")]
         pub fn progress_style(
             &mut self,
             progress_template: impl Into<String>,

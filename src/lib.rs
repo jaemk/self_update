@@ -54,7 +54,7 @@ exclusive -- enabling both, or neither, is a compile error):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
-* `default-tls` (default): native TLS for the selected client;
+* `native-tls` (default): native TLS for the selected client;
 * `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
 
 The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
@@ -62,7 +62,7 @@ are _disabled_ by default; activate the one(s) your release files need:
 
 * `archive-tar`: Support for _tar_ archive format;
 * `archive-zip`: Support for _zip_ archive format;
-* `compression-flate2`: Support for _gzip_ compression;
+* `compression-tar-gz`: Support for _gzip_ compression;
 * `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
 * `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
@@ -76,11 +76,11 @@ The S3 backend needs **no feature** -- it is always compiled. Only private-bucke
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example github --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example gitlab --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -90,6 +90,8 @@ Leading directories will be stripped from the file name allowing the use of subd
 and any file not matching the format, or not matching the provided prefix string, will be ignored.
 
 ```rust
+# #[cfg(feature = "s3")]
+# mod s3_example {
 use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<dyn ::std::error::Error>> {
@@ -110,11 +112,12 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     println!("S3 Update status: `{}`!", status.version());
     Ok(())
 }
+# }
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example extracts a `.tar.gz`, which
-_requires_ both the `archive-tar` and `compression-flate2` features -- `archive-tar` reads the tar
-archive and `compression-flate2` decodes the gzip layer; see the [features](#features) section
+_requires_ both the `archive-tar` and `compression-tar-gz` features -- `archive-tar` reads the tar
+archive and `compression-tar-gz` decodes the gzip layer; see the [features](#features) section
 above). It downloads, extracts, and replaces the running binary
 by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
 and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
@@ -170,10 +173,10 @@ filesystems), the source files, every destination, and the temp dir must all be 
 filesystem.
 
 **NOTE**: this example extracts a `.tar.gz`, which requires both the `archive-tar` and
-`compression-flate2` features.
+`compression-tar-gz` features.
 
 ```rust
-# #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+# #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
 fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = tempfile::TempDir::new()?;
     let tarball_path = tmp_dir.path().join("release.tar.gz");
@@ -387,7 +390,7 @@ When using cross compilation tools such as cross if you want to use rustls and n
 self_update = { version = "1", features = ["rustls"], default-features = false }
 ```
 
-**TLS certificate errors on Linux (`default-tls` / OpenSSL).** With the native-TLS backend,
+**TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
 it can't (some containers, `musl` static builds, or a non-standard cert layout) a request may fail
 with a certificate-verification error. Point OpenSSL at the bundle by exporting `SSL_CERT_FILE`
@@ -423,9 +426,9 @@ compile_error!(
 
 // The TLS backend is also a single choice; enabling both forwards conflicting TLS features to
 // the selected client.
-#[cfg(all(feature = "default-tls", feature = "rustls"))]
+#[cfg(all(feature = "native-tls", feature = "rustls"))]
 compile_error!(
-    "features `default-tls` and `rustls` are mutually exclusive - to use `rustls`, set \
+    "features `native-tls` and `rustls` are mutually exclusive - to use `rustls`, set \
      `default-features = false`"
 );
 
@@ -469,10 +472,12 @@ pub use zipsign_api;
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 
-#[cfg(feature = "compression-flate2")]
+#[cfg(feature = "compression-tar-gz")]
 use either::Either;
+#[cfg(feature = "progress-bar")]
 use indicatif::{ProgressBar, ProgressStyle};
 use log::debug;
+#[cfg(feature = "progress-bar")]
 use std::cmp::min;
 use std::fs;
 use std::io;
@@ -499,10 +504,12 @@ pub use errors::{Error, Result};
 #[cfg_attr(docsrs, doc(cfg(feature = "checksums")))]
 pub use checksum::Checksum;
 
-use http_client::{header, HttpResponse};
+use http_client::{HttpResponse, header};
 
+#[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
+#[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_CHARS: &str = "=>-";
 
 /// Get the current target triple.
@@ -617,7 +624,7 @@ impl std::fmt::Display for ArchiveKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Compression {
-    /// gzip (`.gz`); decoding the stream requires the `compression-flate2` feature.
+    /// gzip (`.gz`); decoding the stream requires the `compression-tar-gz` feature.
     Gz,
 }
 
@@ -698,9 +705,9 @@ pub struct Extract<'a> {
     source: &'a path::Path,
     archive: Option<ArchiveKind>,
 }
-#[cfg(feature = "compression-flate2")]
+#[cfg(feature = "compression-tar-gz")]
 type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
-#[cfg(not(feature = "compression-flate2"))]
+#[cfg(not(feature = "compression-tar-gz"))]
 type GetArchiveReaderResult = fs::File;
 
 impl<'a> Extract<'a> {
@@ -724,12 +731,12 @@ impl<'a> Extract<'a> {
         source: fs::File,
         compression: Option<Compression>,
     ) -> GetArchiveReaderResult {
-        #[cfg(feature = "compression-flate2")]
+        #[cfg(feature = "compression-tar-gz")]
         match compression {
             Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
             None => Either::Left(source),
         }
-        #[cfg(not(feature = "compression-flate2"))]
+        #[cfg(not(feature = "compression-tar-gz"))]
         source
     }
 
@@ -1190,7 +1197,9 @@ pub struct Download {
     show_progress: bool,
     url: String,
     headers: http_client::header::HeaderMap,
+    #[cfg(feature = "progress-bar")]
     progress_template: String,
+    #[cfg(feature = "progress-bar")]
     progress_chars: String,
     timeout: Option<std::time::Duration>,
     on_progress: Option<ProgressCallback>,
@@ -1203,7 +1212,9 @@ impl Download {
             show_progress: false,
             url: url.to_owned(),
             headers: http_client::header::HeaderMap::new(),
+            #[cfg(feature = "progress-bar")]
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            #[cfg(feature = "progress-bar")]
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             timeout: None,
             on_progress: None,
@@ -1249,6 +1260,7 @@ impl Download {
     }
 
     /// Set the progress style
+    #[cfg(feature = "progress-bar")]
     pub fn progress_style(
         &mut self,
         progress_template: impl Into<String>,
@@ -1356,10 +1368,12 @@ impl Download {
             .unwrap_or(0);
         // `http_client::get` already errored on a non-success status (see `download_to_async`).
         let total = if size == 0 { None } else { Some(size) };
+        #[cfg(feature = "progress-bar")]
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp.body());
         let mut downloaded: u64 = 0;
+        #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
             pb.set_style(
@@ -1385,6 +1399,7 @@ impl Download {
             src.consume(n);
             downloaded += n as u64;
 
+            #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
                 bar.set_position(min(downloaded, size));
             }
@@ -1392,6 +1407,7 @@ impl Download {
                 (cb.0)(downloaded, total);
             }
         }
+        #[cfg(feature = "progress-bar")]
         if let Some(ref mut bar) = bar {
             bar.finish_with_message("Done");
         }
@@ -1427,9 +1443,11 @@ impl Download {
             .unwrap_or(0);
         // `get_async` already errored on a non-success status.
         let total = if size == 0 { None } else { Some(size) };
+        #[cfg(feature = "progress-bar")]
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut downloaded: u64 = 0;
+        #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
             pb.set_style(
@@ -1449,6 +1467,7 @@ impl Download {
             dest.write_all(&chunk)?;
             downloaded += chunk.len() as u64;
 
+            #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
                 bar.set_position(min(downloaded, size));
             }
@@ -1456,6 +1475,7 @@ impl Download {
                 (cb.0)(downloaded, total);
             }
         }
+        #[cfg(feature = "progress-bar")]
         if let Some(ref mut bar) = bar {
             bar.finish_with_message("Done");
         }
@@ -1469,7 +1489,7 @@ mod tests {
     // #![warn(unused_mut)]
 
     use super::*;
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     use flate2::{self, write::GzEncoder};
     #[allow(unused_imports)]
     use std::{
@@ -1798,6 +1818,61 @@ mod tests {
         assert_eq!(calls.last().unwrap().0, 20_000);
     }
 
+    // Regression: `progress_callback` (the byte-level hook) must still fire even when the
+    // `progress-bar` feature is disabled. The terminal `indicatif` bar and the callback are
+    // orthogonal; disabling the former must not silence the latter.
+    #[cfg(not(feature = "progress-bar"))]
+    #[test]
+    fn progress_callback_fires_without_progress_bar_feature() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let body = "y".repeat(8_000);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = body.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                served.len(),
+                served
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        let calls = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+        let sink = calls.clone();
+        let mut out = Vec::new();
+        Download::from_url(&format!("http://{addr}/file"))
+            // `show_download_progress(true)` is intentionally set: with progress-bar OFF it
+            // must be a no-op, while the callback below must still fire.
+            .show_download_progress(true)
+            .progress_callback(move |downloaded, total| {
+                sink.lock().unwrap().push((downloaded, total));
+            })
+            .download_to(&mut out)
+            .unwrap();
+
+        assert_eq!(out.len(), 8_000);
+        let calls = calls.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "progress_callback must fire even with progress-bar feature disabled"
+        );
+        assert!(
+            calls.iter().all(|(_, total)| *total == Some(8_000)),
+            "total should reflect Content-Length"
+        );
+        assert_eq!(
+            calls.last().unwrap().0,
+            8_000,
+            "final byte count should equal body length"
+        );
+    }
+
     #[test]
     fn detect_plain_gz() {
         assert_eq!(
@@ -1859,13 +1934,13 @@ mod tests {
         assert!(s == content);
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_plain_gzip() {
         let tmp_dir = tempfile::Builder::new()
@@ -1891,13 +1966,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip_double_ext() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_plain_gzip_double_ext() {
         let tmp_dir = tempfile::Builder::new()
@@ -1923,13 +1998,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-tar-gz")))]
     #[test]
     #[ignore]
     fn unpack_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
+        println!("WARNING: Please enable 'archive-tar compression-tar-gz' features!");
     }
-    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn unpack_tar_gzip() {
         test_extract_into(
@@ -1939,13 +2014,13 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_file_plain_gzip() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_file_plain_gzip() {
         let tmp_dir = tempfile::Builder::new()
@@ -1971,13 +2046,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-tar-gz")))]
     #[test]
     #[ignore]
     fn unpack_file_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
+        println!("WARNING: Please enable 'archive-tar compression-tar-gz' features!");
     }
-    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn unpack_file_tar_gzip() {
         test_extract_file(
@@ -2091,7 +2166,7 @@ mod tests {
         let archive_file_path = archive_file_path.as_ref();
 
         match archive_kind {
-            #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
             ArchiveKind::Tar(Some(Compression::Gz)) => {
                 let tmp_tar_path = archive_file_path
                     .parent()

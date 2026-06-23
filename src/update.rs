@@ -4,7 +4,7 @@ use std::env::consts::{ARCH, OS};
 use std::fs;
 
 use crate::http_client::{self, header};
-use crate::{confirm, errors::*, version, Download, Extract, Move, VersionStatus};
+use crate::{Download, Extract, Move, VersionStatus, confirm, errors::*, version};
 
 /// Release asset information
 #[derive(Clone, Debug, Default)]
@@ -494,9 +494,11 @@ pub trait UpdateConfig: sealed::Sealed {
     fn no_confirm(&self) -> bool;
 
     /// Message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    #[cfg(feature = "progress-bar")]
     fn progress_template(&self) -> &str;
 
     /// Progress characters to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
+    #[cfg(feature = "progress-bar")]
     fn progress_chars(&self) -> &str;
 
     /// Authorisation token for communicating with backend
@@ -752,7 +754,9 @@ fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Re
         println!("  * Current exe: {:?}", u.bin_install_path());
         println!("  * New exe release: {:?}", target_asset.name);
         println!("  * New exe download url: {:?}", target_asset.download_url);
-        println!("\nThe new release will be downloaded/extracted and the existing binary will be replaced.");
+        println!(
+            "\nThe new release will be downloaded/extracted and the existing binary will be replaced."
+        );
     }
     if prompt_confirmation {
         confirm("Do you want to continue? [Y/n] ")?;
@@ -785,6 +789,7 @@ fn build_download<U: UpdateConfig + ?Sized>(
         download.set_progress_callback_arc(callback);
     }
     download.show_download_progress(u.show_download_progress());
+    #[cfg(feature = "progress-bar")]
     download.progress_style(u.progress_template(), u.progress_chars());
     Ok(download)
 }
@@ -973,10 +978,10 @@ fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_latest_release, install_binary, Releases};
+    use super::{Releases, choose_latest_release, install_binary};
+    use crate::DynVerifyFn;
     use crate::errors::Result;
     use crate::update::Release;
-    use crate::DynVerifyFn;
 
     fn rel(version: &str) -> Release {
         Release::builder().version(version).build().unwrap()
@@ -1213,9 +1218,11 @@ mod tests {
     #[test]
     fn choose_latest_release_up_to_date_when_nothing_newer() {
         // No releases at all.
-        assert!(choose_latest_release(vec![], "1.0.0", false)
-            .unwrap()
-            .is_none());
+        assert!(
+            choose_latest_release(vec![], "1.0.0", false)
+                .unwrap()
+                .is_none()
+        );
 
         // A source (e.g. a custom backend) that returns the current and older versions must be
         // treated as up-to-date — not re-install the current version. (Regression test.)
@@ -1516,7 +1523,7 @@ mod tests {
     #[cfg(all(
         feature = "checksums",
         feature = "archive-tar",
-        feature = "compression-flate2"
+        feature = "compression-tar-gz"
     ))]
     #[test]
     fn finish_update_passes_a_matching_checksum_then_proceeds() {

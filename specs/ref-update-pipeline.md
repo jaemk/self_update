@@ -64,7 +64,7 @@ is detected from the file extension by `detect_archive` (`lib.rs:588`) unless ov
 whose feature is not enabled yields `Error::ArchiveNotEnabled` (`lib.rs:602`). `ArchiveKind`
 (`lib.rs:574`) and `Compression` (`lib.rs:584`, only `Gz`) are `#[non_exhaustive]`; the `Tar`
 and `Zip` variants are feature-gated on `archive-tar` / `archive-zip`. `Plain` files are
-copied (gz-decoded if `compression-flate2`), `Tar` is unpacked via the `tar` crate, `Zip` via
+copied (gz-decoded if `compression-tar-gz`), `Tar` is unpacked via the `tar` crate, `Zip` via
 the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
 (`update.rs:803`).
 

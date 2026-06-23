@@ -18,8 +18,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::errors::*;
+use crate::get_target;
 use crate::http_client::HeaderMap;
-use crate::{get_target, DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
+#[cfg(feature = "progress-bar")]
+use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 
 /// Per-request transport options shared by all of a backend's HTTP requests.
 ///
@@ -98,7 +100,9 @@ pub(crate) struct CommonBuilderConfig {
     pub no_confirm: bool,
     pub current_version: Option<String>,
     pub release_tag: Option<String>,
+    #[cfg(feature = "progress-bar")]
     pub progress_template: String,
+    #[cfg(feature = "progress-bar")]
     pub progress_chars: String,
     pub auth_token: Option<String>,
     pub progress_callback: Option<crate::ProgressCallback>,
@@ -125,7 +129,9 @@ impl Default for CommonBuilderConfig {
             no_confirm: false,
             current_version: None,
             release_tag: None,
+            #[cfg(feature = "progress-bar")]
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            #[cfg(feature = "progress-bar")]
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
             progress_callback: None,
@@ -175,7 +181,9 @@ impl CommonBuilderConfig {
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
+            #[cfg(feature = "progress-bar")]
             progress_template: self.progress_template.clone(),
+            #[cfg(feature = "progress-bar")]
             progress_chars: self.progress_chars.clone(),
             auth_token: self.auth_token.clone(),
             progress_callback: self.progress_callback.clone(),
@@ -203,7 +211,9 @@ pub(crate) struct CommonConfig {
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
+    #[cfg(feature = "progress-bar")]
     pub progress_template: String,
+    #[cfg(feature = "progress-bar")]
     pub progress_chars: String,
     pub auth_token: Option<String>,
     pub progress_callback: Option<crate::ProgressCallback>,

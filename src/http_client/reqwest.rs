@@ -102,8 +102,8 @@ impl HttpResponse for Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http_client::ClientOverride;
     use crate::Error;
+    use crate::http_client::ClientOverride;
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 

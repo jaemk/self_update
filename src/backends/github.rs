@@ -1,7 +1,7 @@
 /*!
 GitHub releases
 */
-use crate::http_client::{header, HeaderMap, HttpResponse};
+use crate::http_client::{HeaderMap, HttpResponse, header};
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
 use crate::backends::{collect_paginated, first_page_url, next_link, send};
