@@ -41,14 +41,15 @@ let status = self_update::backends::custom::Update::configure()
 ```
 
 The source owns its own listing transport (HTTP client, auth, pagination). Of the shared transport
-knobs, `.timeout()` and `.request_header()` apply to the crate-controlled **download**; if the
-download itself needs an auth header, set it scheme-agnostically with
+knobs, `.timeout()`, `.request_header()`, and `.retries()` apply to the crate-controlled
+**download**; if the download itself needs an auth header, set it scheme-agnostically with
 `.request_header(self_update::http::header::AUTHORIZATION, "Bearer …".parse()?)` (there is no
-`auth_token` on this backend — its `token <…>` scheme is github-specific). `.retries()` has **no
-effect** here: it only ever retried the built-in release-listing requests, and on this backend the
-listing is entirely the source's responsibility. An injected client (`reqwest_client`,
-`reqwest_async_client`, or `ureq_agent`) is also honored for the download — `build_download`
-forwards the override, so the same client you supplied controls the actual file transfer.
+`auth_token` on this backend — its `token <…>` scheme is github-specific). `.retries()` retries the
+download's request-establishment phase (with `.retry_backoff()` backoff) — this is the one transport
+the crate controls on this backend; the *listing* is entirely the source's responsibility, so
+retry it inside your source. An injected client (`reqwest_client`, `reqwest_async_client`, or
+`ureq_agent`) is also honored for the download — `build_download` forwards the override, so the same
+client you supplied controls the actual file transfer.
 
 # Async
 
@@ -132,10 +133,10 @@ use crate::update::{Release, ReleaseSource, ReleaseUpdate, Releases};
 /// **Transport knobs and release listing:** the shared `.timeout()`, `.request_header()`, and
 /// `.retries()` setters configure only the crate-controlled **download** on this backend, never
 /// the release listing — the listing is performed entirely by your [`ReleaseSource`], which owns
-/// its own HTTP client, auth, and pagination. In particular `.retries()` has **no effect at all**
-/// here (it only ever retried the built-in listing requests), and `.timeout()` /
-/// `.request_header()` apply to the download but not to your source's requests. Configure listing
-/// transport inside your `ReleaseSource` implementation instead. An injected client
+/// its own HTTP client, auth, and pagination. `.retries()` (with `.retry_backoff()`) retries the
+/// download's request-establishment phase — the one transport the crate controls here — while the
+/// listing's retry policy is your source's responsibility. `.timeout()` / `.request_header()`
+/// likewise apply to the download but not to your source's requests. An injected client
 /// (`reqwest_client`, `reqwest_async_client`, or `ureq_agent`) is also honored for the download
 /// — `build_download` forwards the override to the crate-controlled file transfer.
 #[must_use]

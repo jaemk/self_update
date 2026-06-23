@@ -20,6 +20,36 @@ use std::time::Duration;
 use crate::errors::*;
 use crate::get_target;
 use crate::http_client::HeaderMap;
+use crate::http_client::header;
+
+/// The HTTP authorization scheme a backend uses to present its auth token.
+///
+/// The token is rendered into the `Authorization` header as `"<scheme> <token>"`: `token <token>`
+/// for [`Token`](AuthScheme::Token) (github/gitea) and `Bearer <token>` for
+/// [`Bearer`](AuthScheme::Bearer) (gitlab). The scheme is a per-backend default carried in
+/// [`RequestConfig`]; it is applied by the shared header-derivation
+/// ([`RequestConfig::auth_header`]) on both the listing and the download paths, and is overridden
+/// when the user sets their own `Authorization` via `request_header`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AuthScheme {
+    /// `Authorization: token <token>` (github, gitea).
+    #[default]
+    Token,
+    /// `Authorization: Bearer <token>` (gitlab). Only constructed when the `gitlab` backend is
+    /// enabled; the `allow(dead_code)` keeps it from warning in builds without that backend.
+    #[cfg_attr(not(feature = "gitlab"), allow(dead_code))]
+    Bearer,
+}
+
+impl AuthScheme {
+    /// The header-value prefix this scheme renders before the token (`"token"` / `"Bearer"`).
+    fn prefix(self) -> &'static str {
+        match self {
+            AuthScheme::Token => "token",
+            AuthScheme::Bearer => "Bearer",
+        }
+    }
+}
 #[cfg(feature = "progress-bar")]
 use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 
@@ -27,12 +57,23 @@ use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 ///
 /// `headers` are extra headers merged into every request (on top of the backend's own auth /
 /// user-agent headers); `timeout` bounds each request.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct RequestConfig {
     pub(crate) timeout: Option<Duration>,
     pub(crate) headers: HeaderMap,
     /// Number of times to retry a failed API request (with exponential backoff).
     pub(crate) retries: u32,
+    /// Base delay (attempt 0) for the exponential retry backoff. The delay doubles each attempt up
+    /// to [`retry_max_delay`](Self::retry_max_delay). Defaults to 100ms.
+    pub(crate) retry_base_delay: Duration,
+    /// Cap on the exponential retry backoff delay. Defaults to ~3.2s (100ms << 5).
+    pub(crate) retry_max_delay: Duration,
+    /// The backend's authorization scheme for rendering [`auth_token`](Self::auth_token) into the
+    /// `Authorization` header. Per-backend default (github/gitea `Token`, gitlab `Bearer`).
+    pub(crate) auth_scheme: AuthScheme,
+    /// The backend auth token, if any, rendered via [`auth_scheme`](Self::auth_scheme). A user
+    /// `request_header(AUTHORIZATION, ..)` override in [`headers`](Self::headers) takes precedence.
+    pub(crate) auth_token: Option<String>,
     /// Optional user-supplied HTTP client to use through the [`HttpClient`](crate::http_client::HttpClient)
     /// trait instead of the per-call one the crate builds. `Arc`-backed so cloning a `RequestConfig`
     /// shares the client (and its connection pool).
@@ -47,12 +88,39 @@ pub(crate) struct RequestConfig {
     pub(crate) header_error: Option<String>,
 }
 
+/// Default base delay for the exponential retry backoff (attempt 0).
+pub(crate) const DEFAULT_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+/// Default cap on the exponential retry backoff (100ms << 5 == 3200ms).
+pub(crate) const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_millis(3200);
+
+impl Default for RequestConfig {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            headers: HeaderMap::new(),
+            retries: 0,
+            retry_base_delay: DEFAULT_RETRY_BASE_DELAY,
+            retry_max_delay: DEFAULT_RETRY_MAX_DELAY,
+            auth_scheme: AuthScheme::default(),
+            auth_token: None,
+            client: None,
+            #[cfg(feature = "async")]
+            async_client: None,
+            header_error: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for RequestConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("RequestConfig");
         s.field("timeout", &self.timeout)
             .field("headers", &self.headers)
             .field("retries", &self.retries)
+            .field("retry_base_delay", &self.retry_base_delay)
+            .field("retry_max_delay", &self.retry_max_delay)
+            .field("auth_scheme", &self.auth_scheme)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
             .field("client", &self.client.as_ref().map(|_| "<http_client>"));
         #[cfg(feature = "async")]
         s.field(
@@ -95,6 +163,36 @@ impl RequestConfig {
         self.headers.insert(name, value);
     }
 
+    /// Apply this config's derived authorization to `headers`, honoring a user override.
+    ///
+    /// This is the single header-derivation used by **both** the listing path
+    /// ([`send`](crate::backends::send) / `send_async`) and the download path
+    /// ([`build_download`](crate::update)). Precedence:
+    ///
+    /// 1. If the user supplied their own `Authorization` via `request_header` (present in
+    ///    [`headers`](Self::headers)), it wins and the backend scheme/token are not applied.
+    /// 2. Otherwise, if an [`auth_token`](Self::auth_token) is set, it is rendered as
+    ///    `"<scheme> <token>"` per [`auth_scheme`](Self::auth_scheme) and inserted.
+    /// 3. Otherwise nothing is inserted.
+    ///
+    /// A token that does not encode as a header value surfaces as
+    /// [`Error::InvalidAuthToken`](crate::errors::Error::InvalidAuthToken).
+    pub(crate) fn apply_auth(&self, headers: &mut HeaderMap) -> Result<()> {
+        // A user-supplied Authorization header (via `request_header`) always wins.
+        if self.headers.contains_key(header::AUTHORIZATION) {
+            return Ok(());
+        }
+        if let Some(token) = self.auth_token.as_deref() {
+            let value = format!("{} {}", self.auth_scheme.prefix(), token)
+                .parse::<header::HeaderValue>()
+                .map_err(|err| Error::InvalidAuthToken {
+                    source: Box::new(err),
+                })?;
+            headers.insert(header::AUTHORIZATION, value);
+        }
+        Ok(())
+    }
+
     /// Return the stored `request_header` conversion error, if any, as an `Error::InvalidHeader`.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.header_error {
@@ -129,6 +227,9 @@ pub(crate) struct CommonBuilderConfig {
     #[cfg(feature = "progress-bar")]
     pub progress_chars: String,
     pub auth_token: Option<String>,
+    /// The backend's authorization scheme. Defaults to [`AuthScheme::Token`] (github/gitea); gitlab
+    /// sets [`AuthScheme::Bearer`]. Threaded into the resolved [`RequestConfig::auth_scheme`].
+    pub auth_scheme: AuthScheme,
     pub progress_callback: Option<crate::ProgressCallback>,
     pub verify: Option<crate::VerifyCallback>,
     pub asset_matcher: Option<crate::AssetMatcher>,
@@ -158,6 +259,7 @@ impl Default for CommonBuilderConfig {
             #[cfg(feature = "progress-bar")]
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
+            auth_scheme: AuthScheme::default(),
             progress_callback: None,
             verify: None,
             asset_matcher: None,
@@ -178,8 +280,13 @@ impl CommonBuilderConfig {
     pub(crate) fn build(&self) -> Result<CommonConfig> {
         // Surface any deferred `request_header` conversion error as a config error.
         self.request.check()?;
+        // Resolve the auth scheme/token into the request config so the shared header-derivation
+        // (`apply_auth`) can apply it on both the listing and download paths.
+        let mut request = self.request.clone();
+        request.auth_scheme = self.auth_scheme;
+        request.auth_token = self.auth_token.clone();
         Ok(CommonConfig {
-            request: self.request.clone(),
+            request,
             target: self
                 .target
                 .clone()

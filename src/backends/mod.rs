@@ -204,10 +204,20 @@ pub(crate) fn next_link(headers: &http_client::HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Exponential backoff in milliseconds before retry `attempt` (0-based): 100, 200, 400, … capped
-/// at ~3.2s (attempt 5 and beyond).
-pub(crate) fn retry_backoff_ms(attempt: u32) -> u64 {
-    100u64 << attempt.min(5)
+/// Exponential backoff in milliseconds before retry `attempt` (0-based): `base`, `base*2`,
+/// `base*4`, … doubling each attempt, clamped to never exceed `max`. With the defaults
+/// (`base = 100ms`, `max = 3200ms`) this is the historical 100, 200, 400, … capped at ~3.2s
+/// (attempt 5 and beyond).
+pub(crate) fn retry_backoff_ms(
+    attempt: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
+) -> u64 {
+    let base_ms = base.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    // `base << attempt` can overflow for large attempts; saturate, then clamp to `max`.
+    let scaled = base_ms.checked_shl(attempt).unwrap_or(u64::MAX);
+    scaled.min(max_ms)
 }
 
 /// Run `attempt` until it succeeds or the retry budget is spent, invoking `on_retry(err, backoff)`
@@ -216,6 +226,8 @@ pub(crate) fn retry_backoff_ms(attempt: u32) -> u64 {
 /// unit-tested without real requests or real delays.
 pub(crate) fn retry<R>(
     retries: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
     mut attempt: impl FnMut() -> Result<R>,
     mut on_retry: impl FnMut(&Error, u64),
 ) -> Result<R> {
@@ -227,7 +239,7 @@ pub(crate) fn retry<R>(
                 if attempts >= retries {
                     return Err(e);
                 }
-                on_retry(&e, retry_backoff_ms(attempts));
+                on_retry(&e, retry_backoff_ms(attempts, base, max));
                 attempts += 1;
             }
         }
@@ -240,6 +252,8 @@ pub(crate) fn retry<R>(
 #[cfg(feature = "async")]
 pub(crate) async fn retry_async<R, A, Fut, S, SFut>(
     retries: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
     mut attempt: A,
     mut log_retry: impl FnMut(&Error, u64),
     mut sleep: S,
@@ -258,7 +272,7 @@ where
                 if attempts >= retries {
                     return Err(e);
                 }
-                let backoff = retry_backoff_ms(attempts);
+                let backoff = retry_backoff_ms(attempts, base, max);
                 log_retry(&e, backoff);
                 sleep(backoff).await;
                 attempts += 1;
@@ -275,6 +289,9 @@ pub(crate) fn send(
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
 ) -> Result<Box<dyn http_client::HttpResponse>> {
+    // Apply the backend's derived Authorization first (scheme + token), unless the user set their
+    // own Authorization via `request_header` (honored below when `config.headers` is merged).
+    config.apply_auth(&mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
@@ -289,6 +306,8 @@ pub(crate) fn send(
     };
     retry(
         config.retries,
+        config.retry_base_delay,
+        config.retry_max_delay,
         || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
@@ -305,6 +324,7 @@ pub(crate) async fn send_async(
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
 ) -> Result<Box<dyn http_client::AsyncHttpResponse>> {
+    config.apply_auth(&mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
@@ -318,6 +338,8 @@ pub(crate) async fn send_async(
     };
     retry_async(
         config.retries,
+        config.retry_base_delay,
+        config.retry_max_delay,
         || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
@@ -705,6 +727,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             3,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Ok(7)
@@ -725,6 +749,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             0,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -748,6 +774,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             2,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -772,6 +800,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 if calls.get() < 3 {
@@ -792,16 +822,48 @@ mod test {
 
     #[test]
     fn retry_backoff_is_exponential_and_capped() {
+        use crate::backends::common::{DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY};
         use crate::backends::retry_backoff_ms;
-        assert_eq!(retry_backoff_ms(0), 100);
-        assert_eq!(retry_backoff_ms(1), 200);
-        assert_eq!(retry_backoff_ms(2), 400);
-        assert_eq!(retry_backoff_ms(3), 800);
-        assert_eq!(retry_backoff_ms(4), 1600);
-        assert_eq!(retry_backoff_ms(5), 3200);
+        // The default base/cap reproduce the historical 100, 200, 400, … capped at 3200ms.
+        let ms =
+            |attempt| retry_backoff_ms(attempt, DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY);
+        assert_eq!(ms(0), 100);
+        assert_eq!(ms(1), 200);
+        assert_eq!(ms(2), 400);
+        assert_eq!(ms(3), 800);
+        assert_eq!(ms(4), 1600);
+        assert_eq!(ms(5), 3200);
         // capped from attempt 5 onward
-        assert_eq!(retry_backoff_ms(6), 3200);
-        assert_eq!(retry_backoff_ms(100), 3200);
+        assert_eq!(ms(6), 3200);
+        assert_eq!(ms(100), 3200);
+    }
+
+    #[test]
+    fn retry_backoff_honors_a_configured_base_and_cap() {
+        use crate::backends::retry_backoff_ms;
+        use std::time::Duration;
+        // I4: a configured base/cap drives the backoff. base = 250ms doubles each attempt and is
+        // clamped at the 1000ms cap.
+        let base = Duration::from_millis(250);
+        let max = Duration::from_millis(1000);
+        assert_eq!(retry_backoff_ms(0, base, max), 250);
+        assert_eq!(retry_backoff_ms(1, base, max), 500);
+        assert_eq!(retry_backoff_ms(2, base, max), 1000);
+        // clamped at the cap from here on (would be 2000, 4000, …).
+        assert_eq!(retry_backoff_ms(3, base, max), 1000);
+        assert_eq!(retry_backoff_ms(10, base, max), 1000);
+        // A very large attempt index must saturate, not overflow/panic.
+        assert_eq!(retry_backoff_ms(100, base, max), 1000);
+    }
+
+    #[test]
+    fn retry_backoff_uses_the_request_config_defaults() {
+        use crate::backends::common::RequestConfig;
+        use std::time::Duration;
+        // The defaults wired into RequestConfig match the historical 100ms base / 3.2s cap.
+        let cfg = RequestConfig::default();
+        assert_eq!(cfg.retry_base_delay, Duration::from_millis(100));
+        assert_eq!(cfg.retry_max_delay, Duration::from_millis(3200));
     }
 
     #[test]
@@ -813,6 +875,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             1,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -840,6 +904,8 @@ mod test {
         // feeds the rising attempt index into `retry_backoff_ms`, not just index 0/1.
         let res: crate::errors::Result<i32> = retry(
             6,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -864,6 +930,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry_async(
             2,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 async {
@@ -892,6 +960,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry_async(
             5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 let done = calls.get() >= 3;
@@ -913,6 +983,107 @@ mod test {
         assert_eq!(res.unwrap(), 42);
         assert_eq!(calls.get(), 3);
         assert_eq!(*backoffs.borrow(), vec![100, 200]);
+    }
+
+    // -----------------------------------------------------------------------
+    // send: the listing path applies the derived auth header AND honors a user
+    // AUTHORIZATION override (B5), captured off a loopback TCP stub.
+    // -----------------------------------------------------------------------
+
+    /// Bind a loopback stub that accepts one request, captures its raw header lines, and replies
+    /// with an empty 200. Returns the base URL and the captured-request handle.
+    fn auth_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let lines: Vec<String> = req.lines().map(|l| l.to_string()).collect();
+                *sink.lock().unwrap() = lines;
+                let body = "";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    /// Extract the `Authorization` header value the stub received, if any.
+    fn captured_authorization(lines: &[String]) -> Option<String> {
+        lines.iter().find_map(|l| {
+            l.strip_prefix("Authorization: ")
+                .or_else(|| l.strip_prefix("authorization: "))
+                .map(|v| v.to_string())
+        })
+    }
+
+    #[test]
+    fn send_applies_derived_token_auth_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        let (base, captured) = auth_capture_stub();
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Token,
+            auth_token: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("token secret".to_string()),
+            "the listing path must send the derived `token` auth header"
+        );
+    }
+
+    #[test]
+    fn send_applies_derived_bearer_auth_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        let (base, captured) = auth_capture_stub();
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Bearer,
+            auth_token: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("Bearer secret".to_string()),
+            "the listing path must send the derived `Bearer` auth header"
+        );
+    }
+
+    #[test]
+    fn send_honors_user_authorization_override_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        use crate::http_client::header::AUTHORIZATION;
+        // A backend token is configured AND the user supplies their own Authorization via
+        // `request_header` (i.e. config.headers). The user override must win on the listing path.
+        let (base, captured) = auth_capture_stub();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer user-override".parse().unwrap());
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Token,
+            auth_token: Some("secret".to_string()),
+            headers,
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("Bearer user-override".to_string()),
+            "a user AUTHORIZATION override must win over the backend token on the listing path"
+        );
     }
 
     #[test]

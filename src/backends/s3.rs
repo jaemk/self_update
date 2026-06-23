@@ -12,7 +12,6 @@ use log::debug;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use regex::Regex;
-use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -36,12 +35,12 @@ fn clamp_max_keys(max_keys: u16) -> u16 {
 #[cfg(feature = "s3-auth")]
 pub use auth::AccessKey;
 
-/// The service end point.
+/// The service endpoint.
 ///
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub enum EndPoint {
+pub enum Endpoint {
     /// Short for `https://<bucket>.s3.<region>.amazonaws.com/`
     #[default]
     S3,
@@ -51,43 +50,36 @@ pub enum EndPoint {
     GCS,
     /// Short for `https://<bucket>.<region>.digitaloceanspaces.com/`
     DigitalOceanSpaces,
-    /// Generic, for other s3 compatible providers
-    Generic {
-        /// The full URL of the end point. For example:
-        ///
-        /// - `https://bucket.s3.example.com/`
-        /// - `https://s3.example.com/bucket/`
-        end_point: String,
-    },
+    /// Generic, for other s3 compatible providers. Holds the full URL of the endpoint, e.g.
+    /// `https://bucket.s3.example.com/` or `https://s3.example.com/bucket/`.
+    Generic(String),
 }
 
-impl From<&str> for EndPoint {
+impl From<&str> for Endpoint {
     fn from(value: &str) -> Self {
-        Self::Generic {
-            end_point: value.to_owned(),
-        }
+        Self::Generic(value.to_owned())
     }
 }
 
-impl From<String> for EndPoint {
+impl From<String> for Endpoint {
     fn from(value: String) -> Self {
-        Self::Generic { end_point: value }
+        Self::Generic(value)
     }
 }
 
-/// Whether `end_point` needs a `region` to form its URL. The AWS-family endpoints embed the region
+/// Whether `endpoint` needs a `region` to form its URL. The AWS-family endpoints embed the region
 /// in the host; `GCS` and `Generic` do not use it.
-fn endpoint_requires_region(end_point: &EndPoint) -> bool {
+fn endpoint_requires_region(endpoint: &Endpoint) -> bool {
     matches!(
-        end_point,
-        EndPoint::S3 | EndPoint::S3DualStack | EndPoint::DigitalOceanSpaces
+        endpoint,
+        Endpoint::S3 | Endpoint::S3DualStack | Endpoint::DigitalOceanSpaces
     )
 }
 
 /// Validate the endpoint/region pairing at build time so a missing `region` is reported from
 /// `build()` (like every other required field) rather than at the first network call.
-fn check_endpoint_region(end_point: &EndPoint, region: &Option<String>) -> Result<()> {
-    if endpoint_requires_region(end_point) && region.is_none() {
+fn check_endpoint_region(endpoint: &Endpoint, region: &Option<String>) -> Result<()> {
+    if endpoint_requires_region(endpoint) && region.is_none() {
         return Err(Error::MissingField { field: "region" });
     }
     Ok(())
@@ -97,7 +89,7 @@ fn check_endpoint_region(end_point: &EndPoint, region: &Option<String>) -> Resul
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct ReleaseListBuilder {
-    end_point: EndPoint,
+    endpoint: Endpoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
     target: Option<String>,
@@ -156,8 +148,8 @@ impl ReleaseListBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
-        self.end_point = end_point.into();
+    pub fn endpoint(&mut self, endpoint: impl Into<Endpoint>) -> &mut Self {
+        self.endpoint = endpoint.into();
         self
     }
 
@@ -180,24 +172,14 @@ impl ReleaseListBuilder {
         self
     }
 
-    /// S3 does not authenticate via bearer tokens; use `.access_key((id, secret))` under the
-    /// `s3-auth` feature instead. This is a no-op shim so that code ported from a git backend
-    /// gets a helpful deprecation hint rather than a bare "no method" error.
-    #[deprecated(
-        note = "s3 authenticates via `.access_key((id, secret))` under the `s3-auth` feature, not auth tokens"
-    )]
-    pub fn auth_token(&mut self, _token: impl Into<String>) -> &mut Self {
-        self
-    }
-
     request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
-        check_endpoint_region(&self.end_point, &self.region)?;
+        check_endpoint_region(&self.endpoint, &self.region)?;
         Ok(ReleaseList {
-            end_point: self.end_point.clone(),
+            endpoint: self.endpoint.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -222,7 +204,7 @@ impl ReleaseListBuilder {
 /// returning a `Vec` of available `Release`s
 #[derive(Clone, Debug)]
 pub struct ReleaseList {
-    end_point: EndPoint,
+    endpoint: Endpoint,
     bucket_name: String,
     asset_prefix: Option<String>,
     target: Option<String>,
@@ -239,7 +221,7 @@ impl ReleaseList {
     /// Initialize a ReleaseListBuilder
     pub fn configure() -> ReleaseListBuilder {
         ReleaseListBuilder {
-            end_point: EndPoint::default(),
+            endpoint: Endpoint::default(),
             bucket_name: None,
             asset_prefix: None,
             target: None,
@@ -261,7 +243,7 @@ impl ReleaseList {
     /// `Vec<Release>`.
     pub fn fetch(&self) -> Result<Releases> {
         let plan = s3_listing_plan(
-            &self.end_point,
+            &self.endpoint,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -290,7 +272,7 @@ impl ReleaseList {
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct UpdateBuilder {
-    end_point: EndPoint,
+    endpoint: Endpoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
     region: Option<String>,
@@ -305,7 +287,7 @@ pub struct UpdateBuilder {
 impl Default for UpdateBuilder {
     fn default() -> Self {
         Self {
-            end_point: EndPoint::default(),
+            endpoint: Endpoint::default(),
             bucket_name: None,
             asset_prefix: None,
             region: None,
@@ -343,8 +325,8 @@ impl UpdateBuilder {
     }
 
     /// Set the end point
-    pub fn end_point(&mut self, end_point: impl Into<EndPoint>) -> &mut Self {
-        self.end_point = end_point.into();
+    pub fn endpoint(&mut self, endpoint: impl Into<Endpoint>) -> &mut Self {
+        self.endpoint = endpoint.into();
         self
     }
 
@@ -382,22 +364,12 @@ impl UpdateBuilder {
         self
     }
 
-    /// S3 does not authenticate via bearer tokens; use `.access_key((id, secret))` under the
-    /// `s3-auth` feature instead. This is a no-op shim so that code ported from a git backend
-    /// gets a helpful deprecation hint rather than a bare "no method" error.
-    #[deprecated(
-        note = "s3 authenticates via `.access_key((id, secret))` under the `s3-auth` feature, not auth tokens"
-    )]
-    pub fn auth_token(&mut self, _token: impl Into<String>) -> &mut Self {
-        self
-    }
-
     impl_common_builder_setters!(no_auth_token);
 
     fn build_update(&self) -> Result<Update> {
-        check_endpoint_region(&self.end_point, &self.region)?;
+        check_endpoint_region(&self.endpoint, &self.region)?;
         Ok(Update {
-            end_point: self.end_point.clone(),
+            endpoint: self.endpoint.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
                 name.to_owned()
             } else {
@@ -438,7 +410,7 @@ impl UpdateBuilder {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Update {
-    end_point: EndPoint,
+    endpoint: Endpoint,
     bucket_name: String,
     asset_prefix: Option<String>,
     region: Option<String>,
@@ -460,7 +432,7 @@ impl Update {
     /// follows continuation tokens). Shared by the sync and async fetch paths.
     fn listing_plan(&self) -> Result<PageRequest<Release>> {
         s3_listing_plan(
-            &self.end_point,
+            &self.endpoint,
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
@@ -486,19 +458,12 @@ impl Update {
 
 /// Pick the single highest-version release. Shared by the sync and async paths.
 fn pick_latest(releases: &[Release]) -> Result<Release> {
-    let rel = releases
-        .iter()
-        .max_by(|x, y| match bump_is_greater(y.version(), x.version()) {
-            Ok(is_greater) => {
-                if is_greater {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
-            }
-            // Ignoring release due to an unexpected failure in parsing its version string
-            Err(_) => Ordering::Less,
-        });
+    // `max_by` keeps the greatest under the comparator. `cmp_releases_newest_first` orders
+    // newest-first (an unparseable version sorts last); reverse it so "greatest" is the newest and
+    // an unparseable version can never win.
+    let rel = releases.iter().max_by(|x, y| {
+        crate::version::cmp_releases_newest_first(x.version(), y.version()).reverse()
+    });
     match rel {
         Some(r) => Ok(r.clone()),
         None => Err(Error::NoReleaseFound { target: None }),
@@ -512,18 +477,8 @@ fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
         .into_iter()
         .filter(|r| bump_is_greater(current_version, r.version()).unwrap_or(false))
         .collect::<Vec<_>>();
-    // Descending order (latest first), since the update code takes `.first()`.
-    releases.sort_by(|x, y| match bump_is_greater(y.version(), x.version()) {
-        Ok(is_greater) => {
-            if is_greater {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            }
-        }
-        // Ignoring release due to an unexpected failure in parsing its version string
-        Err(_) => Ordering::Greater,
-    });
+    // Descending order (latest first), since the update code takes `.first()`. Shared comparator.
+    releases.sort_by(|x, y| crate::version::cmp_releases_newest_first(x.version(), y.version()));
     releases
 }
 
@@ -768,7 +723,7 @@ mod auth {
 /// and async fetch paths.
 #[allow(clippy::too_many_arguments)]
 fn build_s3_api_url(
-    end_point: &EndPoint,
+    endpoint: &Endpoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
@@ -790,32 +745,32 @@ fn build_s3_api_url(
         .as_ref()
         .ok_or(Error::MissingField { field: "region" });
 
-    let download_base_url = match end_point {
-        EndPoint::S3 => format!(
+    let download_base_url = match endpoint {
+        Endpoint::S3 => format!(
             "https://{}.s3.{}.amazonaws.com/",
             bucket_name, region_result?
         ),
-        EndPoint::S3DualStack => format!(
+        Endpoint::S3DualStack => format!(
             "https://{}.s3.dualstack.{}.amazonaws.com/",
             bucket_name, region_result?
         ),
-        EndPoint::DigitalOceanSpaces => format!(
+        Endpoint::DigitalOceanSpaces => format!(
             "https://{}.{}.digitaloceanspaces.com/",
             bucket_name, region_result?
         ),
-        EndPoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
-        EndPoint::Generic { end_point } => end_point.clone(),
+        Endpoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
+        Endpoint::Generic(endpoint) => endpoint.clone(),
     };
 
-    let api_url = match end_point {
-        EndPoint::S3
-        | EndPoint::S3DualStack
-        | EndPoint::DigitalOceanSpaces
-        | EndPoint::Generic { .. } => format!(
+    let api_url = match endpoint {
+        Endpoint::S3
+        | Endpoint::S3DualStack
+        | Endpoint::DigitalOceanSpaces
+        | Endpoint::Generic(..) => format!(
             "{}?list-type=2&max-keys={}{}{}",
             download_base_url, max_keys, prefix, continuation
         ),
-        EndPoint::GCS => format!(
+        Endpoint::GCS => format!(
             "{}?max-keys={}{}{}",
             download_base_url, max_keys, prefix, continuation
         ),
@@ -832,7 +787,7 @@ fn build_s3_api_url(
 /// URL is freshly built (and, under `s3-auth`, freshly SigV4-signed) by the parser.
 #[allow(clippy::too_many_arguments)]
 fn s3_listing_plan(
-    end_point: &EndPoint,
+    endpoint: &Endpoint,
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
@@ -841,7 +796,7 @@ fn s3_listing_plan(
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<PageRequest<Release>> {
     // Capture owned copies of everything the parser needs to (re)build a continuation request.
-    let end_point = end_point.clone();
+    let endpoint = endpoint.clone();
     let bucket_name = bucket_name.to_owned();
     let region = region.clone();
     let asset_prefix = asset_prefix.clone();
@@ -849,7 +804,7 @@ fn s3_listing_plan(
     let access_key = access_key.clone();
 
     s3_page(
-        end_point,
+        endpoint,
         bucket_name,
         region,
         asset_prefix,
@@ -867,7 +822,7 @@ fn s3_listing_plan(
 /// next `PageRequest`.
 #[allow(clippy::too_many_arguments)]
 fn s3_page(
-    end_point: EndPoint,
+    endpoint: Endpoint,
     bucket_name: String,
     region: Option<String>,
     asset_prefix: Option<String>,
@@ -877,7 +832,7 @@ fn s3_page(
     #[cfg(feature = "s3-auth")] access_key: Option<auth::AccessKey>,
 ) -> Result<PageRequest<Release>> {
     let (download_base_url, api_url) = build_s3_api_url(
-        &end_point,
+        &endpoint,
         &bucket_name,
         &region,
         &asset_prefix,
@@ -908,7 +863,7 @@ fn s3_page(
             // signed, under s3-auth) listing request for the next page.
             let next = match next_token {
                 Some(token) => Some(s3_page(
-                    end_point,
+                    endpoint,
                     bucket_name,
                     region,
                     asset_prefix,
@@ -1452,14 +1407,12 @@ mod tests {
         base
     }
 
-    /// Build a `fetch_releases_from_s3_async`-ready `Update` whose `EndPoint::Generic` points at
+    /// Build a `fetch_releases_from_s3_async`-ready `Update` whose `Endpoint::Generic` points at
     /// the stub base URL. The Generic endpoint does not require a region.
     #[cfg(feature = "async")]
     fn s3_update(base_url: &str, current_version: &str) -> Update {
         Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base_url.to_owned(),
-            })
+            .endpoint(super::Endpoint::Generic(base_url.to_owned()))
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version(current_version)
@@ -1471,9 +1424,7 @@ mod tests {
     /// `Generic` endpoint (no region required).
     fn s3_update_sync(base_url: &str, current_version: &str) -> Box<dyn ReleaseUpdate> {
         Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base_url.to_owned(),
-            })
+            .endpoint(super::Endpoint::Generic(base_url.to_owned()))
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version(current_version)
@@ -1630,9 +1581,7 @@ mod tests {
         // A `Generic` endpoint pointed at the loopback stub, but WITH an access key + region so the
         // listing URLs are signed.
         let upd = Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base.clone(),
-            })
+            .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
             .region("us-east-1")
             .bin_name("myapp")
@@ -1736,9 +1685,7 @@ mod tests {
             body: list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]),
         }]);
         let upd = Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base.clone(),
-            })
+            .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version("0.1.0")
@@ -1762,9 +1709,7 @@ mod tests {
             body: list_bucket_xml(&["myapp-1.0.0-x86_64-linux"]),
         }]);
         let upd = Update::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base.clone(),
-            })
+            .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version("0.1.0")
@@ -1852,9 +1797,7 @@ mod tests {
             body: xml,
         }]);
         let releases = super::ReleaseList::configure()
-            .end_point(super::EndPoint::Generic {
-                end_point: base.clone(),
-            })
+            .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
             .build()
             .unwrap()
@@ -2202,6 +2145,47 @@ mod tests {
         assert!(super::pick_latest(&[]).is_err());
     }
 
+    // I1: selection parity between the s3 `pick_latest`/`sort_newer` paths and the orchestrator's
+    // `choose_latest_release`, all now built on the shared `cmp_releases_newest_first` comparator.
+    // For a set with a newest compatible release, every path must agree on the same release
+    // regardless of input order.
+    #[test]
+    fn selection_parity_pick_latest_sort_newer_and_choose_latest_release() {
+        // Unordered candidate list, all strictly newer than 1.0.0 and mutually compatible.
+        let make = || {
+            vec![
+                rel("1.3.0"),
+                rel("1.1.0"),
+                rel("1.4.2"),
+                rel("1.0.5"),
+                rel("1.2.0"),
+            ]
+        };
+
+        // s3 `pick_latest` selects the highest version overall.
+        assert_eq!(super::pick_latest(&make()).unwrap().version(), "1.4.2");
+
+        // s3 `sort_newer` (newest-first) puts the same release first.
+        let sorted = super::sort_newer(make(), "1.0.0");
+        assert_eq!(sorted.first().unwrap().version(), "1.4.2");
+
+        // The orchestrator's `choose_latest_release` picks the newest compatible release — the same
+        // one — regardless of the input order.
+        let chosen = crate::update::testing::choose_latest_release_for_test(make(), "1.0.0")
+            .unwrap()
+            .expect("a newer compatible release is chosen");
+        assert_eq!(chosen.version(), "1.4.2");
+
+        // And the reversed input must not change any of them.
+        let mut reversed = make();
+        reversed.reverse();
+        assert_eq!(super::pick_latest(&reversed).unwrap().version(), "1.4.2");
+        let chosen_rev = crate::update::testing::choose_latest_release_for_test(reversed, "1.0.0")
+            .unwrap()
+            .expect("a newer compatible release is chosen");
+        assert_eq!(chosen_rev.version(), "1.4.2");
+    }
+
     #[test]
     fn pick_latest_ignores_unparseable_versions() {
         // `pick_latest` does NOT pre-filter, so its comparator's `Err(_)` branch (unparseable
@@ -2333,14 +2317,15 @@ mod tests {
     }
 
     #[test]
-    fn default_api_headers_rejects_invalid_token_without_panicking() {
+    fn default_api_headers_is_a_noop() {
+        // B5: the `UpdateConfig::api_headers` trait default is now a no-op (empty header map) — the
+        // authorization scheme lives in the per-backend `RequestConfig`, not baked here. s3 passes
+        // no `{api_headers}` override, so it gets the default: no headers, never an error (even for
+        // a token that would not encode as a header value).
         let upd = configured();
-        // A token containing a newline is not a valid HTTP header value. The default
-        // `api_headers` impl must surface an error rather than panic (it previously
-        // `unwrap()`ed the parse).
-        assert!(upd.api_headers(Some("bad\ntoken")).is_err());
-        // A well-formed token still succeeds.
-        assert!(upd.api_headers(Some("good-token")).is_ok());
+        assert!(upd.api_headers(Some("bad\ntoken")).unwrap().is_empty());
+        assert!(upd.api_headers(Some("good-token")).unwrap().is_empty());
+        assert!(upd.api_headers(None).unwrap().is_empty());
     }
 
     // ---------------------------------------------------------------------------
@@ -2352,13 +2337,13 @@ mod tests {
     /// the returned `api_url` is unsigned, so the tests below can assert on the raw URL shape. Uses
     /// the default `max-keys` page size and no continuation token.
     fn api_url(
-        end_point: super::EndPoint,
+        endpoint: super::Endpoint,
         bucket: &str,
         region: Option<&str>,
         prefix: Option<&str>,
     ) -> crate::errors::Result<(String, String)> {
         super::build_s3_api_url(
-            &end_point,
+            &endpoint,
             bucket,
             &region.map(str::to_owned),
             &prefix.map(str::to_owned),
@@ -2373,10 +2358,10 @@ mod tests {
 
     #[test]
     fn build_s3_api_url_s3_endpoint_shape() {
-        // EndPoint::S3 forms `https://<bucket>.s3.<region>.amazonaws.com/` as the download base,
+        // Endpoint::S3 forms `https://<bucket>.s3.<region>.amazonaws.com/` as the download base,
         // and the listing url appends the v2 `list-type=2&max-keys=...` query.
         let (base, url) =
-            api_url(super::EndPoint::S3, "my-bucket", Some("eu-west-1"), None).unwrap();
+            api_url(super::Endpoint::S3, "my-bucket", Some("eu-west-1"), None).unwrap();
         assert_eq!(base, "https://my-bucket.s3.eu-west-1.amazonaws.com/");
         assert_eq!(
             url,
@@ -2386,18 +2371,18 @@ mod tests {
 
     #[test]
     fn build_s3_api_url_dualstack_endpoint_shape() {
-        // EndPoint::S3DualStack injects the `dualstack` infix into the host.
+        // Endpoint::S3DualStack injects the `dualstack` infix into the host.
         let (base, url) =
-            api_url(super::EndPoint::S3DualStack, "b", Some("us-east-2"), None).unwrap();
+            api_url(super::Endpoint::S3DualStack, "b", Some("us-east-2"), None).unwrap();
         assert_eq!(base, "https://b.s3.dualstack.us-east-2.amazonaws.com/");
         assert!(url.starts_with("https://b.s3.dualstack.us-east-2.amazonaws.com/?list-type=2"));
     }
 
     #[test]
     fn build_s3_api_url_digitalocean_endpoint_shape() {
-        // EndPoint::DigitalOceanSpaces uses `<bucket>.<region>.digitaloceanspaces.com`.
+        // Endpoint::DigitalOceanSpaces uses `<bucket>.<region>.digitaloceanspaces.com`.
         let (base, url) = api_url(
-            super::EndPoint::DigitalOceanSpaces,
+            super::Endpoint::DigitalOceanSpaces,
             "space",
             Some("nyc3"),
             None,
@@ -2409,9 +2394,9 @@ mod tests {
 
     #[test]
     fn build_s3_api_url_gcs_ignores_region_and_uses_maxkeys_only() {
-        // EndPoint::GCS targets `storage.googleapis.com/<bucket>/`, does NOT embed a region, and
+        // Endpoint::GCS targets `storage.googleapis.com/<bucket>/`, does NOT embed a region, and
         // its listing query is `max-keys` only (no `list-type=2`, which is S3-specific).
-        let (base, url) = api_url(super::EndPoint::GCS, "gbucket", None, None).unwrap();
+        let (base, url) = api_url(super::Endpoint::GCS, "gbucket", None, None).unwrap();
         assert_eq!(base, "https://storage.googleapis.com/gbucket/");
         assert_eq!(url, "https://storage.googleapis.com/gbucket/?max-keys=1000");
         assert!(
@@ -2422,12 +2407,10 @@ mod tests {
 
     #[test]
     fn build_s3_api_url_generic_passes_endpoint_through() {
-        // EndPoint::Generic uses the supplied URL verbatim as the download base (region is not
+        // Endpoint::Generic uses the supplied URL verbatim as the download base (region is not
         // consumed) and appends the v2 `list-type=2` listing query.
         let (base, url) = api_url(
-            super::EndPoint::Generic {
-                end_point: "https://s3.example.com/bucket/".to_owned(),
-            },
+            super::Endpoint::Generic("https://s3.example.com/bucket/".to_owned()),
             "ignored-bucket",
             None,
             None,
@@ -2445,7 +2428,7 @@ mod tests {
         // A configured asset_prefix is appended as `&prefix=<value>` to the listing query; with
         // no prefix the segment is absent.
         let (_base, with_prefix) = api_url(
-            super::EndPoint::S3,
+            super::Endpoint::S3,
             "b",
             Some("us-east-1"),
             Some("releases/"),
@@ -2457,7 +2440,7 @@ mod tests {
             with_prefix
         );
         let (_base, no_prefix) =
-            api_url(super::EndPoint::S3, "b", Some("us-east-1"), None).unwrap();
+            api_url(super::Endpoint::S3, "b", Some("us-east-1"), None).unwrap();
         assert!(
             !no_prefix.contains("prefix="),
             "no prefix segment when asset_prefix is None"
@@ -2469,9 +2452,9 @@ mod tests {
         // S3, S3DualStack and DigitalOceanSpaces all interpolate the region into the host, so a
         // missing region must surface as `Error::Config` (not a panic or a malformed URL).
         for ep in [
-            super::EndPoint::S3,
-            super::EndPoint::S3DualStack,
-            super::EndPoint::DigitalOceanSpaces,
+            super::Endpoint::S3,
+            super::Endpoint::S3DualStack,
+            super::Endpoint::DigitalOceanSpaces,
         ] {
             let res = api_url(ep, "b", None, None);
             assert!(
@@ -2488,12 +2471,10 @@ mod tests {
     fn build_s3_api_url_generic_and_gcs_succeed_without_region() {
         // Generic and GCS never read the region, so both must build successfully when region is
         // absent (the region-requiring endpoints are covered by the error test above).
-        assert!(api_url(super::EndPoint::GCS, "b", None, None).is_ok());
+        assert!(api_url(super::Endpoint::GCS, "b", None, None).is_ok());
         assert!(
             api_url(
-                super::EndPoint::Generic {
-                    end_point: "https://s3.example.com/".to_owned()
-                },
+                super::Endpoint::Generic("https://s3.example.com/".to_owned()),
                 "b",
                 None,
                 None
@@ -2508,7 +2489,7 @@ mod tests {
     #[test]
     fn build_errors_without_region_for_region_endpoints() {
         let res = Update::configure()
-            .end_point(super::EndPoint::S3)
+            .endpoint(super::Endpoint::S3)
             .bucket_name("bucket")
             .bin_name("bin")
             .current_version("0.1.0")
@@ -2522,7 +2503,7 @@ mod tests {
         );
 
         let list = super::ReleaseList::configure()
-            .end_point(super::EndPoint::DigitalOceanSpaces)
+            .endpoint(super::Endpoint::DigitalOceanSpaces)
             .bucket_name("bucket")
             .build();
         assert!(
@@ -2542,7 +2523,7 @@ mod tests {
     #[test]
     fn build_async_errors_without_region_for_region_endpoints() {
         let res = Update::configure()
-            .end_point(super::EndPoint::S3)
+            .endpoint(super::Endpoint::S3)
             .bucket_name("b")
             .bin_name("x")
             .current_version("0.1.0")
@@ -2562,7 +2543,7 @@ mod tests {
     fn build_async_succeeds_without_region_for_generic_and_gcs() {
         assert!(
             Update::configure()
-                .end_point(super::EndPoint::GCS)
+                .endpoint(super::Endpoint::GCS)
                 .bucket_name("b")
                 .bin_name("x")
                 .current_version("0.1.0")
@@ -2572,9 +2553,9 @@ mod tests {
         );
         assert!(
             Update::configure()
-                .end_point(super::EndPoint::Generic {
-                    end_point: "https://s3.example.com/".to_owned()
-                })
+                .endpoint(super::Endpoint::Generic(
+                    "https://s3.example.com/".to_owned()
+                ))
                 .bucket_name("b")
                 .bin_name("x")
                 .current_version("0.1.0")
@@ -2588,7 +2569,7 @@ mod tests {
     fn build_succeeds_without_region_for_generic_and_gcs() {
         assert!(
             Update::configure()
-                .end_point(super::EndPoint::GCS)
+                .endpoint(super::Endpoint::GCS)
                 .bucket_name("bucket")
                 .bin_name("bin")
                 .current_version("0.1.0")
@@ -2597,9 +2578,9 @@ mod tests {
         );
         assert!(
             Update::configure()
-                .end_point(super::EndPoint::Generic {
-                    end_point: "https://s3.example.com/".to_owned()
-                })
+                .endpoint(super::Endpoint::Generic(
+                    "https://s3.example.com/".to_owned()
+                ))
                 .bucket_name("bucket")
                 .bin_name("bin")
                 .current_version("0.1.0")
@@ -2751,7 +2732,7 @@ mod tests {
         let key: super::AccessKey = ("AKIA", "secret").into();
         let region = Some("us-east-1".to_owned());
         let (_base, signed) = super::build_s3_api_url(
-            &super::EndPoint::S3,
+            &super::Endpoint::S3,
             "b",
             &region,
             &None,
@@ -2780,7 +2761,7 @@ mod tests {
         // listing plan's URL and check the expiry. (We assert via the plan's URL since the listing
         // plan signs the listing URL at construction.)
         let upd = Update::configure()
-            .end_point(super::EndPoint::S3)
+            .endpoint(super::Endpoint::S3)
             .bucket_name("b")
             .region("us-east-1")
             .bin_name("myapp")
@@ -2807,7 +2788,7 @@ mod tests {
         let region = Some("us-east-1".to_owned());
         let ttl = Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS);
         let (_base, signed) = super::build_s3_api_url(
-            &super::EndPoint::S3,
+            &super::Endpoint::S3,
             "b",
             &region,
             &None,
@@ -2825,7 +2806,7 @@ mod tests {
         );
 
         let (_base, unsigned) = super::build_s3_api_url(
-            &super::EndPoint::S3,
+            &super::Endpoint::S3,
             "b",
             &region,
             &None,
@@ -2886,9 +2867,9 @@ mod tests {
 
     #[test]
     fn api_headers_uses_the_trait_default_no_override() {
-        // s3 passes NO `{api_headers}` override to `impl_update_config_accessors!`, so it must get
-        // the `UpdateConfig` trait default: a single `token` Authorization header and, crucially,
-        // *no* User-Agent (unlike github/gitlab/gitea which override with one).
+        // s3 passes NO `{api_headers}` override to `impl_update_config_accessors!`, so it gets the
+        // `UpdateConfig` trait default. After B5 that default is a no-op (no User-Agent, no
+        // Authorization): s3 authenticates via SigV4 on the URL, not via this header path.
         let upd = configured();
         let headers = upd.api_headers(Some("secret")).unwrap();
         assert!(
@@ -2897,45 +2878,58 @@ mod tests {
                 .is_none(),
             "the default api_headers (no override) must not set a User-Agent"
         );
-        assert_eq!(
+        assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "token secret"
+                .is_none(),
+            "the default api_headers is a no-op; s3 signs the URL instead of setting an auth header"
         );
     }
 
-    // --- Item 6: auth_token deprecated shim ------------------------------------------------
+    // A9/B6: the deprecated s3 `auth_token` shims have been removed. s3 authenticates via
+    // `.access_key((id, secret))` under the `s3-auth` feature; there is no `auth_token` setter on
+    // either s3 builder. (A compile-fail test would require trybuild; the removal is covered by the
+    // shim methods no longer existing.)
 
+    // WS5 item 7 (A10): the `endpoint(impl Into<Endpoint>)` setter must resolve a bare `&str` and a
+    // `String` through the `From` impls into `Endpoint::Generic`, so callers can pass a URL string
+    // directly without naming the enum. Pins both `From<&str>` and `From<String>`.
     #[test]
-    #[allow(deprecated)]
-    fn release_list_builder_auth_token_is_a_noop() {
-        // The deprecated `auth_token` shim must compile, accept a token, and have no visible
-        // effect: the bucket/key path required for a real build is still the deciding factor.
-        let result = crate::backends::s3::ReleaseList::configure()
-            .bucket_name("my-bucket")
-            .asset_prefix("myapp")
-            .region("us-east-1")
-            .auth_token("any-token")
-            .build();
-        // Build must succeed regardless of the shim token value.
-        assert!(result.is_ok(), "auth_token shim must not break the build");
+    fn endpoint_from_str_and_string_resolve_to_generic() {
+        // From<&str>
+        let from_str: super::Endpoint = "https://minio.example.com/bucket/".into();
+        assert!(
+            matches!(&from_str, super::Endpoint::Generic(u) if u == "https://minio.example.com/bucket/"),
+            "a &str must resolve to Endpoint::Generic with the URL verbatim, got {from_str:?}"
+        );
+        // From<String>
+        let owned = String::from("https://gcs.example.com/bucket/");
+        let from_string: super::Endpoint = owned.into();
+        assert!(
+            matches!(&from_string, super::Endpoint::Generic(u) if u == "https://gcs.example.com/bucket/"),
+            "a String must resolve to Endpoint::Generic with the URL verbatim, got {from_string:?}"
+        );
     }
 
+    // The setter accepts `Into<Endpoint>` so a `&str` reaches the build path and is used as the
+    // download base verbatim (Generic passes the endpoint through). This proves the setter's
+    // `impl Into<Endpoint>` bound actually resolves a string at a real call site, not just the
+    // `From` impl in isolation.
     #[test]
-    #[allow(deprecated)]
-    fn update_builder_auth_token_is_a_noop() {
-        // Same for the UpdateBuilder shim.
-        let result = Update::configure()
-            .bucket_name("my-bucket")
-            .asset_prefix("myapp")
-            .region("us-east-1")
-            .bin_name("myapp")
+    fn endpoint_setter_accepts_a_bare_str() {
+        let upd = super::Update::configure()
+            .bucket_name("b")
+            .asset_prefix("p")
+            .endpoint("https://generic.example.com/bucket/")
+            .bin_name("app")
             .current_version("0.1.0")
-            .auth_token("any-token")
             .build();
-        assert!(result.is_ok(), "auth_token shim must not break the build");
+        // The Generic endpoint needs no region, so the build must succeed and carry the string
+        // through (region-requiring endpoints would error without a region).
+        assert!(
+            upd.is_ok(),
+            "the endpoint(&str) setter must resolve to a Generic endpoint and build, got {:?}",
+            upd.err()
+        );
     }
 }

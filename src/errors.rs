@@ -34,14 +34,14 @@ pub enum Error {
         /// The underlying error, when this wraps one (e.g. a tokio `JoinError`); else `None`.
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-    /// A post-update verification callback (`verify_with`) rejected the freshly-extracted binary.
+    /// A post-update verification callback (`verify_binary`) rejected the freshly-extracted binary.
     ///
-    /// This is a user-controlled rejection: the caller's `verify_with` closure returned `false`,
-    /// so nothing was installed. `reason` is reserved for a future caller-supplied message and is
-    /// currently always `None`.
+    /// This is a user-controlled rejection: the caller's `verify_binary` closure returned `Err(..)`
+    /// (an explicit rejection or a hook IO error), so nothing was installed. `reason` carries the
+    /// hook error's message when one was returned (else `None`).
     #[non_exhaustive]
     VerificationRejected {
-        /// Optional reason the verification was rejected. Currently always `None`.
+        /// The reason the verification was rejected — the hook error's message, if any.
         reason: Option<String>,
     },
     /// The downloaded artifact's checksum did not match the expected digest.

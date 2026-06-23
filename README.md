@@ -144,7 +144,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(asset.download_url())
-        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")?
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");

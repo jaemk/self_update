@@ -147,7 +147,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(asset.download_url())
-        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")?
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -469,7 +469,7 @@ pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 #[cfg(feature = "compression-tar-gz")]
 use either::Either;
 #[cfg(feature = "progress-bar")]
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle as IndicatifProgressStyle};
 use log::debug;
 #[cfg(feature = "progress-bar")]
 use std::cmp::min;
@@ -505,6 +505,44 @@ pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
 #[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_CHARS: &str = "=>-";
+
+/// The download progress-bar style: an `indicatif` `template` plus the `chars` it renders the bar
+/// with. Requires the `progress-bar` feature.
+///
+/// This is a typed pair so the two strings can't be transposed at a call site (the previous setter
+/// took two `impl Into<String>` args in template-then-chars order, which were easy to swap). Build
+/// one with [`ProgressStyle::new`] and pass it to the `Update` builder's `progress_style` or
+/// [`Download::progress_style`].
+///
+/// ```
+/// # #[cfg(feature = "progress-bar")] {
+/// let style = self_update::ProgressStyle::new(
+///     "[{bar:40}] {bytes}/{total_bytes}",
+///     "=>-",
+/// );
+/// # let _ = style;
+/// # }
+/// ```
+#[cfg(feature = "progress-bar")]
+#[cfg_attr(docsrs, doc(cfg(feature = "progress-bar")))]
+#[derive(Clone, Debug)]
+pub struct ProgressStyle {
+    /// The `indicatif` progress-bar template (see `indicatif::ProgressStyle::template`).
+    pub template: String,
+    /// The characters used to render the bar (see `indicatif::ProgressStyle::progress_chars`).
+    pub chars: String,
+}
+
+#[cfg(feature = "progress-bar")]
+impl ProgressStyle {
+    /// Construct a `ProgressStyle` from a `template` and its progress `chars`.
+    pub fn new(template: impl Into<String>, chars: impl Into<String>) -> Self {
+        Self {
+            template: template.into(),
+            chars: chars.into(),
+        }
+    }
+}
 
 /// Get the current target triple.
 ///
@@ -695,8 +733,8 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
 ///     * Io - archive unpacking
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Extract<'a> {
-    source: &'a path::Path,
+pub struct Extract {
+    source: path::PathBuf,
     archive: Option<ArchiveKind>,
 }
 #[cfg(feature = "compression-tar-gz")]
@@ -704,11 +742,12 @@ type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>
 #[cfg(not(feature = "compression-tar-gz"))]
 type GetArchiveReaderResult = fs::File;
 
-impl<'a> Extract<'a> {
-    /// Create an `Extract`or from a source path
-    pub fn from_source(source: &'a path::Path) -> Extract<'a> {
+impl Extract {
+    /// Create an `Extract`or from a source path. Accepts anything path-like (`&Path`, `PathBuf`,
+    /// `&str`, …), storing an owned [`PathBuf`](std::path::PathBuf).
+    pub fn from_source(source: impl AsRef<path::Path>) -> Extract {
         Self {
-            source,
+            source: source.as_ref().to_path_buf(),
             archive: None,
         }
     }
@@ -738,10 +777,10 @@ impl<'a> Extract<'a> {
     /// file and not an archive, it will be extracted into a file with the same name inside of
     /// `into_dir`.
     pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
-        let source = fs::File::open(self.source)?;
+        let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(self.source)?,
+            None => detect_archive(&self.source)?,
         };
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
@@ -823,10 +862,10 @@ impl<'a> Extract<'a> {
         file_to_extract: T,
     ) -> Result<()> {
         let file_to_extract = file_to_extract.as_ref();
-        let source = fs::File::open(self.source)?;
+        let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(self.source)?,
+            None => detect_archive(&self.source)?,
         };
 
         debug!(
@@ -940,14 +979,18 @@ impl<'a> Extract<'a> {
 ///     * Io - copying / renaming
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Move<'a> {
-    source: &'a path::Path,
-    temp: Option<&'a path::Path>,
+pub struct Move {
+    source: path::PathBuf,
+    temp: Option<path::PathBuf>,
 }
-impl<'a> Move<'a> {
-    /// Specify source file
-    pub fn from_source(source: &'a path::Path) -> Move<'a> {
-        Self { source, temp: None }
+impl Move {
+    /// Specify source file. Accepts anything path-like, storing an owned
+    /// [`PathBuf`](std::path::PathBuf).
+    pub fn from_source(source: impl AsRef<path::Path>) -> Move {
+        Self {
+            source: source.as_ref().to_path_buf(),
+            temp: None,
+        }
     }
 
     /// If specified and the destination file already exists, the "destination"
@@ -959,27 +1002,28 @@ impl<'a> Move<'a> {
     ///
     /// The `temp` dir must be explicitly provided since `rename` operations require
     /// files to live on the same filesystem.
-    pub fn replace_using_temp(&mut self, temp: &'a path::Path) -> &mut Self {
-        self.temp = Some(temp);
+    pub fn replace_using_temp(&mut self, temp: impl AsRef<path::Path>) -> &mut Self {
+        self.temp = Some(temp.as_ref().to_path_buf());
         self
     }
 
     /// Move source file to specified destination
-    pub fn to_dest(&self, dest: &path::Path) -> Result<()> {
-        match self.temp {
+    pub fn to_dest(&self, dest: impl AsRef<path::Path>) -> Result<()> {
+        let dest = dest.as_ref();
+        match self.temp.as_deref() {
             // Move the existing dest to a temp location so we can move it back if
             // there's an error. If the existing `dest` file is a long running program,
             // this may prevent the temp dir from being cleaned up.
             Some(temp) if dest.exists() => {
                 fs::rename(dest, temp)?;
-                if let Err(e) = fs::rename(self.source, dest) {
+                if let Err(e) = fs::rename(&self.source, dest) {
                     fs::rename(temp, dest)?;
                     return Err(Error::from(e));
                 }
             }
             // No temp set, or nothing to preserve at `dest`: just move source into place.
             _ => {
-                fs::rename(self.source, dest)?;
+                fs::rename(&self.source, dest)?;
             }
         };
         Ok(())
@@ -1025,17 +1069,18 @@ impl<'a> Move<'a> {
 #[derive(Debug)]
 #[must_use = "queued moves are only applied when `.commit()` is called"]
 #[non_exhaustive]
-pub struct MoveAll<'a> {
-    temp: &'a path::Path,
+pub struct MoveAll {
+    temp: path::PathBuf,
     moves: Vec<(path::PathBuf, path::PathBuf)>,
 }
 
-impl<'a> MoveAll<'a> {
+impl MoveAll {
     /// Start a transactional install, stashing displaced destinations under `temp` so they can be
     /// restored if a later move fails. `temp` must be on the same filesystem as every destination.
-    pub fn from_temp(temp: &'a path::Path) -> Self {
+    /// Accepts anything path-like, storing an owned [`PathBuf`](std::path::PathBuf).
+    pub fn from_temp(temp: impl AsRef<path::Path>) -> Self {
         Self {
-            temp,
+            temp: temp.as_ref().to_path_buf(),
             moves: Vec::new(),
         }
     }
@@ -1157,9 +1202,11 @@ impl std::fmt::Debug for ProgressCallback {
     }
 }
 
-/// A post-update verification callback: given the path to the freshly-extracted binary (before
-/// it is installed), returns `true` to accept it or `false` to reject it (aborting the update).
-pub(crate) type DynVerifyFn = dyn Fn(&std::path::Path) -> bool + Send + Sync;
+/// A post-update verification callback: given the path to the freshly-extracted binary (before it
+/// is installed), returns `Ok(())` to accept it or `Err(..)` to reject it (aborting the update). A
+/// returned error's message is carried as the reason of the resulting
+/// [`Error::VerificationRejected`](errors::Error::VerificationRejected).
+pub(crate) type DynVerifyFn = dyn Fn(&std::path::Path) -> Result<()> + Send + Sync;
 
 /// Wrapper around a [`DynVerifyFn`] so structs holding one can still derive `Clone`/`Debug`.
 #[derive(Clone)]
@@ -1199,6 +1246,13 @@ pub struct Download {
     progress_chars: String,
     timeout: Option<std::time::Duration>,
     on_progress: Option<ProgressCallback>,
+    /// Number of times to retry establishing the download request (before any bytes are streamed)
+    /// with exponential backoff. `0` (the default) means a single attempt, preserving the prior
+    /// no-retry behavior. A failure that occurs *after* streaming has begun is not retried (it would
+    /// corrupt the partially-written destination).
+    retries: u32,
+    retry_base_delay: std::time::Duration,
+    retry_max_delay: std::time::Duration,
     /// Optional user-supplied sync HTTP client (used through the trait); `None` => crate default.
     client: Option<std::sync::Arc<dyn http_client::HttpClient>>,
     /// Optional user-supplied async HTTP client; `None` => crate default. Async is reqwest-only.
@@ -1231,11 +1285,11 @@ impl std::fmt::Debug for Download {
 }
 
 impl Download {
-    /// Specify download url
-    pub fn from_url(url: &str) -> Self {
+    /// Specify download url. Accepts anything string-like (`&str`, `String`, …).
+    pub fn from_url(url: impl Into<String>) -> Self {
         Self {
             show_progress: false,
-            url: url.to_owned(),
+            url: url.into(),
             headers: http_client::header::HeaderMap::new(),
             #[cfg(feature = "progress-bar")]
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
@@ -1243,6 +1297,9 @@ impl Download {
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             timeout: None,
             on_progress: None,
+            retries: 0,
+            retry_base_delay: std::time::Duration::from_millis(100),
+            retry_max_delay: std::time::Duration::from_millis(3200),
             client: None,
             #[cfg(feature = "async")]
             async_client: None,
@@ -1286,70 +1343,34 @@ impl Download {
         self
     }
 
-    /// Set the progress style
+    /// Set the progress style, as a typed [`ProgressStyle`] (template + chars) so the two strings
+    /// can't be transposed.
     #[cfg(feature = "progress-bar")]
-    pub fn progress_style(
-        &mut self,
-        progress_template: impl Into<String>,
-        progress_chars: impl Into<String>,
-    ) -> &mut Self {
-        self.progress_template = progress_template.into();
-        self.progress_chars = progress_chars.into();
+    pub fn progress_style(&mut self, style: ProgressStyle) -> &mut Self {
+        self.progress_template = style.template;
+        self.progress_chars = style.chars;
         self
     }
 
     /// Replace the entire download request `HeaderMap`. To add a single header without discarding
-    /// the others, use [`header`](Self::header) instead.
+    /// the others, use [`request_header`](Self::request_header) instead.
     pub fn replace_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
         self
     }
 
-    /// Use a custom [`HttpClient`](http_client::HttpClient) for the download instead of the
-    /// per-call client the crate builds. This is the canonical injection seam; the client-specific
-    /// setters below are thin convenience wrappers over it.
-    pub(crate) fn http_client(
+    /// Internal: set the download request-establishment retry budget and backoff (used by the
+    /// update flow to forward an `Update`'s configured `retries`/`retry_backoff` to the download).
+    pub(crate) fn set_retries(
         &mut self,
-        client: std::sync::Arc<dyn http_client::HttpClient>,
+        retries: u32,
+        base: std::time::Duration,
+        max: std::time::Duration,
     ) -> &mut Self {
-        self.client = Some(client);
+        self.retries = retries;
+        self.retry_base_delay = base;
+        self.retry_max_delay = max;
         self
-    }
-
-    /// Async sibling of [`http_client`](Self::http_client).
-    #[cfg(feature = "async")]
-    pub(crate) fn http_client_async(
-        &mut self,
-        client: std::sync::Arc<dyn http_client::AsyncHttpClient>,
-    ) -> &mut Self {
-        self.async_client = Some(client);
-        self
-    }
-
-    /// Use a pre-built blocking [`reqwest::Client`](::reqwest::blocking::Client) for the download
-    /// instead of the per-call client. See the `Update` builder's `reqwest_client` for the
-    /// rationale and precedence rules.
-    #[cfg(feature = "reqwest")]
-    pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
-        self.http_client(std::sync::Arc::new(http_client::ReqwestClient::from(
-            client,
-        )))
-    }
-
-    /// Async sibling of [`reqwest_client`](Self::reqwest_client), used by
-    /// [`download_to_async`](Self::download_to_async).
-    #[cfg(feature = "async")]
-    pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
-        self.http_client_async(std::sync::Arc::new(http_client::ReqwestAsyncClient::from(
-            client,
-        )))
-    }
-
-    /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for the download instead of the per-call
-    /// agent. The agent owns its own timeout / TLS / proxy config.
-    #[cfg(feature = "ureq")]
-    pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
-        self.http_client(std::sync::Arc::new(http_client::UreqClient::from(agent)))
     }
 
     /// Internal: set the injected HTTP clients from already-built `Arc`s (used by the update flow to
@@ -1374,23 +1395,24 @@ impl Download {
     /// [`replace_headers`](Self::replace_headers).
     ///
     /// Accepts anything that converts into a header name/value, so both typed values and plain
-    /// strings work: `.header("X-Foo", "bar")?` or
-    /// `.header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or value
-    /// that is not a valid HTTP header returns an [`Error::InvalidHeader`](errors::Error::InvalidHeader)
-    /// rather than panicking. Mirrors the builders' `request_header`.
-    pub fn header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
+    /// strings work: `.request_header("X-Foo", "bar")?` or
+    /// `.request_header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or
+    /// value that is not a valid HTTP header returns an
+    /// [`Error::InvalidHeader`](errors::Error::InvalidHeader) rather than panicking. Matches the
+    /// builders' `request_header` verb.
+    pub fn request_header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
     where
         N: ::core::convert::TryInto<http_client::header::HeaderName>,
         V: ::core::convert::TryInto<http_client::header::HeaderValue>,
     {
         let name = name.try_into().map_err(|_| Error::InvalidHeader {
             source: Box::new(errors::MessageError(
-                "invalid HTTP header name passed to `header`".to_string(),
+                "invalid HTTP header name passed to `request_header`".to_string(),
             )),
         })?;
         let value = value.try_into().map_err(|_| Error::InvalidHeader {
             source: Box::new(errors::MessageError(
-                "invalid HTTP header value passed to `header`".to_string(),
+                "invalid HTTP header value passed to `request_header`".to_string(),
             )),
         })?;
         self.headers.insert(name, value);
@@ -1427,7 +1449,22 @@ impl Download {
                 &*default
             }
         };
-        let resp = client.get(&self.url, &headers, self.timeout)?;
+        // Retry only the request-establishment phase (before any bytes are streamed): a failure
+        // after streaming begins would corrupt the partially-written destination. With the default
+        // `retries == 0` this is a single attempt.
+        let resp = backends::retry(
+            self.retries,
+            self.retry_base_delay,
+            self.retry_max_delay,
+            || client.get(&self.url, &headers, self.timeout),
+            |e, backoff| {
+                log::warn!(
+                    "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
+                    self.url
+                );
+                std::thread::sleep(std::time::Duration::from_millis(backoff));
+            },
+        )?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1448,7 +1485,7 @@ impl Download {
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
             pb.set_style(
-                ProgressStyle::default_bar()
+                IndicatifProgressStyle::default_bar()
                     .template(&self.progress_template)
                     .expect("set ProgressStyle template failed")
                     .progress_chars(&self.progress_chars),
@@ -1510,7 +1547,21 @@ impl Download {
                 &*default
             }
         };
-        let resp = client.get(&self.url, &headers, self.timeout).await?;
+        // Retry only the request-establishment phase (see `download_to`).
+        let resp = backends::retry_async(
+            self.retries,
+            self.retry_base_delay,
+            self.retry_max_delay,
+            || client.get(&self.url, &headers, self.timeout),
+            |e, backoff| {
+                log::warn!(
+                    "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
+                    self.url
+                );
+            },
+            |backoff| tokio::time::sleep(std::time::Duration::from_millis(backoff)),
+        )
+        .await?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1530,7 +1581,7 @@ impl Download {
         let mut bar = if show_progress {
             let pb = ProgressBar::new(size);
             pb.set_style(
-                ProgressStyle::default_bar()
+                IndicatifProgressStyle::default_bar()
                     .template(&self.progress_template)
                     .expect("set ProgressStyle template failed")
                     .progress_chars(&self.progress_chars),
@@ -1630,11 +1681,50 @@ mod tests {
         assert_eq!(ArchiveKind::Zip.to_string(), "zip");
     }
 
+    // A3/A4/A12/A5: the ergonomic argument types are accepted. These are compile-locks plus light
+    // assertions: `Download::from_url` takes `impl Into<String>`; `Extract::from_source` /
+    // `Move::from_source` / `MoveAll::from_temp` take `impl AsRef<Path>` (now lifetime-free); the
+    // Download header verb is `request_header`; and `progress_style` takes a typed `ProgressStyle`.
+    #[test]
+    fn ergonomic_constructors_accept_owned_and_borrowed_paths_and_strings() {
+        // from_url accepts &str and String.
+        let _ = Download::from_url("https://example.com/a.bin");
+        let _ = Download::from_url(String::from("https://example.com/b.bin"));
+
+        // Extract::from_source accepts &str, PathBuf, and &Path — and the struct holds no lifetime.
+        let _: Extract = Extract::from_source("some/path.tar.gz");
+        let _: Extract = Extract::from_source(PathBuf::from("some/path.tar.gz"));
+        let owned = PathBuf::from("some/path.tar.gz");
+        let _: Extract = Extract::from_source(owned.as_path());
+
+        // Move::from_source / replace_using_temp accept path-like; the type is lifetime-free.
+        let mut mv: Move = Move::from_source("src");
+        mv.replace_using_temp("tmp");
+
+        // MoveAll::from_temp accepts path-like; lifetime-free.
+        let _: MoveAll = MoveAll::from_temp("tmp-dir");
+    }
+
+    #[cfg(feature = "progress-bar")]
+    #[test]
+    fn progress_style_newtype_threads_template_and_chars() {
+        // A5: `ProgressStyle::new(template, chars)` builds the typed pair and the Download setter
+        // threads both fields through (no transposable two-arg setter).
+        let style = ProgressStyle::new("[{bar:40}] {bytes}", "#>-");
+        assert_eq!(style.template, "[{bar:40}] {bytes}");
+        assert_eq!(style.chars, "#>-");
+
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        dl.progress_style(style);
+        assert_eq!(dl.progress_template, "[{bar:40}] {bytes}");
+        assert_eq!(dl.progress_chars, "#>-");
+    }
+
     #[test]
     fn download_header_accepts_str_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // Plain string literals must convert into a valid name/value.
-        dl.header("x-custom-header", "custom-value")
+        dl.request_header("x-custom-header", "custom-value")
             .expect("valid str header should be accepted");
         let stored = dl
             .headers
@@ -1647,7 +1737,7 @@ mod tests {
     fn download_header_accepts_typed_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // The typed `HeaderName` / `&str` value form still works.
-        dl.header(http_client::header::ACCEPT, "application/octet-stream")
+        dl.request_header(http_client::header::ACCEPT, "application/octet-stream")
             .expect("typed name + str value should be accepted");
         assert_eq!(
             dl.headers.get(http_client::header::ACCEPT).unwrap(),
@@ -1660,8 +1750,8 @@ mod tests {
         // B5: `header()` inserts into the existing map. Calling it twice with the same name must
         // keep the *last* value (insert semantics), not append or keep the first.
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.header("x-dup", "first").unwrap();
-        dl.header("x-dup", "second").unwrap();
+        dl.request_header("x-dup", "first").unwrap();
+        dl.request_header("x-dup", "second").unwrap();
         // `get` returns the (single) value; `get_all` must contain exactly one entry.
         assert_eq!(dl.headers.get("x-dup").unwrap(), "second");
         assert_eq!(
@@ -1676,8 +1766,8 @@ mod tests {
         // B5: after building up headers with `header()`, `replace_headers` must discard them all
         // and install only the supplied map (it is a whole-map setter, not a merge).
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.header("x-old-a", "a").unwrap();
-        dl.header("x-old-b", "b").unwrap();
+        dl.request_header("x-old-a", "a").unwrap();
+        dl.request_header("x-old-b", "b").unwrap();
 
         let mut fresh = http_client::header::HeaderMap::new();
         fresh.insert("x-new", "n".parse().unwrap());
@@ -1696,7 +1786,7 @@ mod tests {
         );
 
         // And `header()` still works after a replace, inserting into the new map.
-        dl.header("x-after", "y").unwrap();
+        dl.request_header("x-after", "y").unwrap();
         assert_eq!(dl.headers.get("x-after").unwrap(), "y");
         assert_eq!(dl.headers.get("x-new").unwrap(), "n");
     }
@@ -1706,7 +1796,7 @@ mod tests {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // A newline is not a valid header value -> conversion fails -> Err, no panic.
         let err = dl
-            .header("x-ok", "bad\nvalue")
+            .request_header("x-ok", "bad\nvalue")
             .expect_err("invalid header value must be rejected");
         assert!(
             matches!(err, Error::InvalidHeader { .. }),
@@ -1722,7 +1812,7 @@ mod tests {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // A space is not valid in a header name -> conversion fails -> Err, no panic.
         let err = dl
-            .header("inva lid", "ok")
+            .request_header("inva lid", "ok")
             .expect_err("invalid header name must be rejected");
         assert!(matches!(err, Error::InvalidHeader { .. }));
         // The invalid name is rejected before any value insertion, so the map stays empty: no
@@ -1876,7 +1966,7 @@ mod tests {
         let progress = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
         let sink_progress = progress.clone();
         let mut out = Vec::new();
-        Download::from_url(&format!("http://{addr}/file"))
+        Download::from_url(format!("http://{addr}/file"))
             .progress_callback(move |downloaded, total| {
                 sink_progress.lock().unwrap().push((downloaded, total));
             })
@@ -1950,6 +2040,109 @@ mod tests {
         }
     }
 
+    /// A flaky [`HttpClient`](http_client::HttpClient) that fails the first `fail_times` GETs with a
+    /// transport error, then succeeds — to prove `download_to` retries the request-establishment
+    /// phase when a retry budget is configured (B9).
+    struct FlakyDlClient {
+        body: Vec<u8>,
+        fail_times: std::sync::atomic::AtomicU32,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl http_client::HttpClient for FlakyDlClient {
+        fn get(
+            &self,
+            _url: &str,
+            _headers: &http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<Box<dyn http_client::HttpResponse>> {
+            use std::sync::atomic::Ordering;
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.fail_times.load(Ordering::SeqCst) > 0 {
+                self.fail_times.fetch_sub(1, Ordering::SeqCst);
+                return Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                });
+            }
+            let mut headers = http_client::header::HeaderMap::new();
+            headers.insert(
+                http_client::header::CONTENT_LENGTH,
+                self.body.len().to_string().parse().unwrap(),
+            );
+            Ok(Box::new(DlResponse {
+                body: self.body.clone(),
+                headers,
+            }))
+        }
+    }
+
+    #[test]
+    fn download_retries_request_establishment_with_configured_budget() {
+        // B9: with a retry budget, `download_to` re-establishes the request after a transient
+        // failure (before any bytes are streamed) and ultimately succeeds. Two failures then a
+        // success => three attempts. A short base/cap keeps the test fast.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let body = b"payload-after-retries".to_vec();
+        let attempts = std::sync::Arc::new(AtomicU32::new(0));
+        let client = std::sync::Arc::new(FlakyDlClient {
+            body: body.clone(),
+            fail_times: AtomicU32::new(2),
+            attempts: attempts.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.set_retries(
+            3,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(2),
+        );
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(out, body, "the download succeeds after retrying");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "two failed attempts plus the successful third"
+        );
+    }
+
+    #[test]
+    fn download_without_retry_budget_does_not_retry() {
+        // With the default `retries == 0`, a single failure is fatal (one attempt, no retry).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = std::sync::Arc::new(AtomicU32::new(0));
+        let client = std::sync::Arc::new(FlakyDlClient {
+            body: b"never-reached".to_vec(),
+            fail_times: AtomicU32::new(5),
+            attempts: attempts.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        let res = dl.download_to(&mut out);
+        assert!(
+            res.is_err(),
+            "no retry budget => the first failure is fatal"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "exactly one attempt with retries == 0"
+        );
+    }
+
     #[test]
     fn download_to_uses_injected_http_client_through_the_trait() {
         // Gap #4 (sync Download path): an arbitrary `Arc<dyn HttpClient>` that is NOT reqwest/ureq,
@@ -1966,7 +2159,11 @@ mod tests {
 
         let mut out = Vec::new();
         let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
-        dl.http_client(client);
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
         dl.download_to(&mut out).unwrap();
 
         assert_eq!(out, body, "download_to streamed the injected client's body");
@@ -1996,7 +2193,11 @@ mod tests {
         let sink = totals.clone();
         let mut out = Vec::new();
         let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
-        dl.http_client(client);
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
         dl.progress_callback(move |_d, total| sink.lock().unwrap().push(total));
         dl.download_to(&mut out).unwrap();
 
@@ -2084,7 +2285,7 @@ mod tests {
 
         let mut out = Vec::new();
         let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
-        dl.http_client_async(client);
+        dl.set_http_client(None, Some(client));
         dl.download_to_async(&mut out).await.unwrap();
 
         assert_eq!(
@@ -2115,7 +2316,7 @@ mod tests {
         });
 
         let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
-        dl.http_client_async(async_client);
+        dl.set_http_client(None, Some(async_client));
         // The sync slot was never set.
         assert!(
             dl.client.is_none(),
@@ -2156,7 +2357,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
         let sink = calls.clone();
         let mut out = Vec::new();
-        Download::from_url(&format!("http://{addr}/file"))
+        Download::from_url(format!("http://{addr}/file"))
             // `show_download_progress(true)` is intentionally set: with progress-bar OFF it
             // must be a no-op, while the callback below must still fire.
             .show_download_progress(true)

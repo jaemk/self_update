@@ -157,7 +157,14 @@ impl ReleaseListBuilder {
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
-            request: self.request.clone(),
+            // Thread the auth token + gitlab's `Bearer` scheme into the request so the shared
+            // `apply_auth` applies it on the listing path (honoring a user override).
+            request: {
+                let mut request = self.request.clone();
+                request.auth_scheme = crate::backends::common::AuthScheme::Bearer;
+                request.auth_token = self.auth_token.clone();
+                request
+            },
         })
     }
 }
@@ -273,7 +280,13 @@ impl UpdateBuilder {
             } else {
                 return Err(Error::MissingField { field: "repo_name" });
             },
-            common: self.common.build()?,
+            common: {
+                // gitlab authenticates with the `Bearer` scheme; set it before resolving so the
+                // shared `apply_auth` renders `Bearer <token>` on both listing and download.
+                let mut common = self.common.clone();
+                common.auth_scheme = crate::backends::common::AuthScheme::Bearer;
+                common.build()?
+            },
         })
     }
 
@@ -526,7 +539,10 @@ impl crate::update::AsyncReleaseUpdate for Update {
     }
 }
 
-fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
+/// Build gitlab's base request headers (its User-Agent). The Authorization header is applied
+/// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
+/// gitlab's `Bearer` scheme on both the listing and download paths (B5), honoring a user override.
+fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -534,18 +550,6 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
             .parse()
             .expect("gitlab invalid user-agent"),
     );
-
-    if let Some(token) = auth_token {
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", token)
-                .parse::<header::HeaderValue>()
-                .map_err(|err| Error::InvalidAuthToken {
-                    source: Box::new(err),
-                })?,
-        );
-    };
-
     Ok(headers)
 }
 
@@ -1306,10 +1310,10 @@ mod tests {
     }
 
     #[test]
-    fn api_headers_override_uses_gitlab_user_agent_and_bearer_scheme() {
+    fn api_headers_override_uses_gitlab_user_agent() {
         // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire gitlab's
-        // custom `api_headers` (User-Agent + `Bearer` auth scheme), not the trait default (which
-        // sets no User-Agent and a `token` scheme).
+        // custom `api_headers` (User-Agent), not the trait default (which sets no User-Agent). After
+        // B5 the auth scheme/token is applied centrally by `apply_auth`, not baked here.
         let upd = Update::configure()
             .repo_owner("o")
             .repo_name("r")
@@ -1326,14 +1330,54 @@ mod tests {
                 .unwrap(),
             "rust-reqwest/self-update"
         );
-        assert_eq!(
+        assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+                .is_none(),
+            "api_headers no longer bakes auth; apply_auth applies the Bearer scheme"
+        );
+    }
+
+    // B5: gitlab resolves to the `Bearer` scheme, applied by the shared `apply_auth` on the request
+    // config consumed by BOTH the listing and download paths. A user `request_header(AUTHORIZATION)`
+    // override wins.
+    #[test]
+    fn gitlab_bearer_scheme_applied_to_both_paths() {
+        use crate::http_client::header::{AUTHORIZATION, HeaderMap};
+        #[allow(unused_imports)]
+        use crate::update::UpdateInternals;
+        let upd = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer secret",
             "gitlab authenticates with the Bearer scheme"
+        );
+
+        // A user AUTHORIZATION override wins over the Bearer scheme.
+        let upd = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .request_header(AUTHORIZATION, "token user-override")
+            .build()
+            .unwrap();
+        let mut headers = upd.request_config().headers.clone();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "token user-override",
+            "a user AUTHORIZATION override must win over the Bearer scheme"
         );
     }
 

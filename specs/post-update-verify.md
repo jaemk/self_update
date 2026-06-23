@@ -11,12 +11,14 @@ no recourse, which could brick the tool until a manual reinstall.
 ## Decision
 
 A user-supplied verification closure:
-`Update::configure().verify_with(|new_exe: &Path| -> bool ..)`. It runs on the
-extracted binary before the final swap; returning `false` (or erroring) aborts the
-update with nothing installed. Verifying before the swap (rather than after, then
-rolling back) sidesteps the ordering problem of replacing the running exe via
-`self_replace`, so no rollback machinery is needed. A typical use runs
-`new_exe --version` and checks the output.
+`Update::configure().verify_binary(|new_exe: &Path| -> self_update::Result<()> ..)` (WS5 / P4+A6
+renamed `verify_with` -> `verify_binary` and switched the return type from `bool` to
+`Result<()>`). It runs on the extracted binary before the final swap; returning `Err(..)` aborts the
+update with nothing installed, and the hook error's message is carried as the reason of the
+resulting `Error::VerificationRejected { reason: Some(..) }` (a hook IO error propagates the same
+way). Verifying before the swap (rather than after, then rolling back) sidesteps the ordering
+problem of replacing the running exe via `self_replace`, so no rollback machinery is needed. A
+typical use runs `new_exe --version`, checks the output, and returns `Ok(())` / `Err(..)`.
 
-See the `verify_with` setter in `src/update.rs` / `src/macros.rs` and the CHANGELOG
-`[1.0.0]` Added entry.
+See the `verify_binary` setter in `src/macros.rs`, the `DynVerifyFn` type and `install_binary` in
+`src/lib.rs` / `src/update.rs`, and the `VerificationRejected` variant in `src/errors.rs`.

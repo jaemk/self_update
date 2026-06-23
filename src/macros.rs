@@ -38,18 +38,35 @@ macro_rules! request_config_setters {
         }
 
         /// Number of times to retry a failed API request (release listing, single-release-by-tag
-        /// fetches, and any other listing or lookup request), with exponential backoff. Defaults to
-        /// `0` (no retries). Intended for transient failures, though any failed attempt (including
-        /// a permanent one such as a 404) consumes the retry budget. The binary **download** is not
-        /// retried — this knob does not affect it.
+        /// fetches, and any other listing or lookup request) **and** the binary download's
+        /// request-establishment phase, with exponential backoff (see
+        /// [`retry_backoff`](Self::retry_backoff)). Defaults to `0` (no retries). Intended for
+        /// transient failures, though any failed attempt (including a permanent one such as a 404)
+        /// consumes the retry budget.
         ///
-        /// **No-op on the custom backend.** It only ever retried the crate's built-in
-        /// release-listing requests; on
-        /// [`backends::custom`](crate::backends::custom) the listing is performed entirely by your
-        /// [`ReleaseSource`](crate::ReleaseSource), so this setter has no effect there. Configure
-        /// retries inside your source implementation instead.
+        /// The download is retried only *before* any bytes are streamed to disk (a failure
+        /// mid-stream is not retried, since it would corrupt the partially-written file).
+        ///
+        /// On the [`backends::custom`](crate::backends::custom) backend this affects only the
+        /// crate-controlled **download**: the release *listing* is performed entirely by your
+        /// [`ReleaseSource`](crate::ReleaseSource), so retries there are your source's
+        /// responsibility.
         pub fn retries(&mut self, retries: u32) -> &mut Self {
             self.$($path).+.retries = retries;
+            self
+        }
+
+        /// Configure the exponential retry backoff: `base` is the delay before the first retry and
+        /// the delay doubles each subsequent attempt, clamped to never exceed `max`. Defaults to a
+        /// `100ms` base and a `~3.2s` cap. Only affects retried listing/lookup requests (see
+        /// [`retries`](Self::retries)); the binary download is not retried.
+        pub fn retry_backoff(
+            &mut self,
+            base: std::time::Duration,
+            max: std::time::Duration,
+        ) -> &mut Self {
+            self.$($path).+.retry_base_delay = base;
+            self.$($path).+.retry_max_delay = max;
             self
         }
 
@@ -138,9 +155,11 @@ macro_rules! request_config_setters {
 macro_rules! impl_update_config_accessors {
     ($t:ty) => {
         impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), {});
+        impl_update_config_accessors!(@internals (impl crate::update::UpdateInternals for $t));
     };
     ($t:ty, { $($extra:tt)* }) => {
         impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), { $($extra)* });
+        impl_update_config_accessors!(@internals (impl crate::update::UpdateInternals for $t));
     };
     // Generic form for the custom `AsyncUpdate<S>`: a `where (...)` clause carries the bound.
     ($t:ty, where ( $($bound:tt)* )) => {
@@ -148,6 +167,48 @@ macro_rules! impl_update_config_accessors {
             @emit (impl<S> crate::update::UpdateConfig for $t where $($bound)*),
             {}
         );
+        impl_update_config_accessors!(
+            @internals (impl<S> crate::update::UpdateInternals for $t where $($bound)*)
+        );
+    };
+    (@internals ($($header:tt)*)) => {
+        $($header)* {
+            fn request_timeout(&self) -> Option<std::time::Duration> {
+                self.common.request.timeout
+            }
+            fn request_headers(&self) -> &crate::http_client::HeaderMap {
+                &self.common.request.headers
+            }
+            fn request_config(&self) -> &crate::backends::common::RequestConfig {
+                &self.common.request
+            }
+            fn request_client(&self) -> Option<std::sync::Arc<dyn crate::http_client::HttpClient>> {
+                self.common.request.client.clone()
+            }
+            #[cfg(feature = "async")]
+            fn request_async_client(
+                &self,
+            ) -> Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>> {
+                self.common.request.async_client.clone()
+            }
+            fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>> {
+                self.common.progress_callback.as_ref().map(|c| c.0.clone())
+            }
+            fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
+                self.common.verify.as_ref().map(|c| c.0.clone())
+            }
+            fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
+                self.common.asset_matcher.as_ref().map(|c| c.0.clone())
+            }
+            #[cfg(feature = "checksums")]
+            fn verify_checksum(&self) -> Option<&crate::Checksum> {
+                self.common.checksum.as_ref()
+            }
+            #[cfg(feature = "signatures")]
+            fn verify_keys(&self) -> &[crate::VerifyingKey] {
+                &self.common.verifying_keys
+            }
+        }
     };
     (@emit ($($header:tt)*), { $($extra:tt)* }) => {
         $($header)* {
@@ -193,46 +254,6 @@ macro_rules! impl_update_config_accessors {
         }
         fn auth_token(&self) -> Option<&str> {
             self.common.auth_token.as_deref()
-        }
-        #[doc(hidden)]
-        fn request_timeout(&self) -> Option<std::time::Duration> {
-            self.common.request.timeout
-        }
-        #[doc(hidden)]
-        fn request_headers(&self) -> &crate::http_client::HeaderMap {
-            &self.common.request.headers
-        }
-        #[doc(hidden)]
-        fn request_client(&self) -> Option<std::sync::Arc<dyn crate::http_client::HttpClient>> {
-            self.common.request.client.clone()
-        }
-        #[doc(hidden)]
-        #[cfg(feature = "async")]
-        fn request_async_client(
-            &self,
-        ) -> Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>> {
-            self.common.request.async_client.clone()
-        }
-        #[doc(hidden)]
-        fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>> {
-            self.common.progress_callback.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
-            self.common.verify.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
-            self.common.asset_matcher.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        #[cfg(feature = "checksums")]
-        fn verify_checksum(&self) -> Option<&crate::Checksum> {
-            self.common.checksum.as_ref()
-        }
-        #[cfg(feature = "signatures")]
-        fn verify_keys(&self) -> &[crate::VerifyingKey] {
-            &self.common.verifying_keys
         }
         }
     };
@@ -377,15 +398,12 @@ macro_rules! impl_common_builder_setters {
             self
         }
 
-        /// Set download progress style.
+        /// Set download progress style, as a typed [`ProgressStyle`](crate::ProgressStyle)
+        /// (template + chars) so the two strings can't be transposed.
         #[cfg(feature = "progress-bar")]
-        pub fn progress_style(
-            &mut self,
-            progress_template: impl Into<String>,
-            progress_chars: impl Into<String>,
-        ) -> &mut Self {
-            self.common.progress_template = progress_template.into();
-            self.common.progress_chars = progress_chars.into();
+        pub fn progress_style(&mut self, style: crate::ProgressStyle) -> &mut Self {
+            self.common.progress_template = style.template;
+            self.common.progress_chars = style.chars;
             self
         }
 
@@ -455,18 +473,20 @@ macro_rules! impl_common_builder_setters {
 
         /// Register a post-update verification hook. After the new binary is extracted but
         /// **before** it replaces the installed one, the closure is called with the path to the
-        /// extracted binary; returning `false` aborts the update (nothing is installed), so a bad
-        /// release cannot replace a working binary. Typical use: run `new --version` and check it.
+        /// extracted binary; returning `Err(..)` aborts the update (nothing is installed), so a bad
+        /// release cannot replace a working binary. Typical use: run `new --version` and check it,
+        /// returning `Ok(())` on success or an error describing the rejection.
         ///
         /// This runs **last** in the verification chain and on the **extracted binary**, not the
         /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
         /// of the archive) -> signature ([`verify_keys`](Self::verify_keys), over the archive) ->
-        /// extract -> `verify_with` (the extracted binary) -> replace. Use
-        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_with` to
-        /// gate it by running the new binary.
-        pub fn verify_with(
+        /// extract -> `verify_binary` (the extracted binary) -> replace. Use
+        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_binary` to
+        /// gate it by running the new binary. A returned error's message becomes the reason of the
+        /// resulting `Error::VerificationRejected`.
+        pub fn verify_binary(
             &mut self,
-            verify: impl Fn(&std::path::Path) -> bool + Send + Sync + 'static,
+            verify: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
         ) -> &mut Self {
             self.common.verify = Some(crate::VerifyCallback(std::sync::Arc::new(verify)));
             self

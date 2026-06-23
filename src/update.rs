@@ -528,8 +528,12 @@ pub trait AsyncReleaseSource: Send + Sync {
 /// The shared accessor methods live on the [`UpdateConfig`] supertrait; bring it into scope
 /// (`use self_update::UpdateConfig;`) only to call them from generic code bounded
 /// `U: AsyncReleaseUpdate`.
+// `UpdateInternals` is intentionally `pub(crate)`: it carries the crate-private-typed accessors
+// and seals the trait further. The public trait is reachable but the bound is not nameable
+// downstream, which is the intent.
+#[allow(private_bounds)]
 #[cfg(feature = "async")]
-pub trait AsyncReleaseUpdate: UpdateConfig {
+pub trait AsyncReleaseUpdate: UpdateConfig + UpdateInternals {
     /// Async sibling of [`ReleaseUpdate::get_latest_release`]: fetch the single newest release as a
     /// one-element [`Releases`].
     fn get_latest_release_async(
@@ -645,40 +649,58 @@ pub trait UpdateConfig: sealed::Sealed {
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<&str>;
 
+    /// Construct a header with an authorisation entry if an auth token is provided.
+    ///
+    /// The trait default is a no-op (empty header map): the authorization scheme now lives in the
+    /// per-backend [`RequestConfig`](crate::backends::common::RequestConfig) and is applied by the
+    /// shared header-derivation, not here. Backends that need a custom user-agent / scheme still
+    /// override this (github/gitlab/gitea).
+    fn api_headers(&self, _auth_token: Option<&str>) -> Result<http_client::HeaderMap> {
+        Ok(header::HeaderMap::new())
+    }
+}
+
+/// The crate-private accessors of an updater whose signatures name crate-private types
+/// (transport config, callback newtypes, verification material).
+///
+/// These were previously `#[doc(hidden)]` methods on the public sealed [`UpdateConfig`] trait,
+/// which leaked the crate-private types into the public trait contract (shape-only, since the
+/// types are not nameable downstream). They now live on this separate `pub(crate)` sub-trait so
+/// `UpdateConfig` exposes only public-typed accessors. The orchestration reads these through this
+/// trait; both [`ReleaseUpdate`] and [`AsyncReleaseUpdate`] require it as a supertrait so the
+/// generic orchestrator bounds (`U: ReleaseUpdate` / `U: AsyncReleaseUpdate`) still reach them.
+pub(crate) trait UpdateInternals: sealed::Sealed {
     /// Per-request timeout to apply to backend HTTP requests, if any.
-    #[doc(hidden)]
     fn request_timeout(&self) -> Option<std::time::Duration>;
 
     /// Extra HTTP headers to merge into every backend request.
-    #[doc(hidden)]
     fn request_headers(&self) -> &http_client::HeaderMap;
+
+    /// The full resolved per-request transport config (timeout, headers, retries/backoff, injected
+    /// clients, and the derived auth scheme/token). Used by the download path to apply the same
+    /// auth-header derivation the listing path uses.
+    fn request_config(&self) -> &crate::backends::common::RequestConfig;
 
     /// Optional user-supplied sync HTTP client to apply to the download, mirroring the listing
     /// requests.
-    #[doc(hidden)]
     fn request_client(&self) -> Option<std::sync::Arc<dyn http_client::HttpClient>>;
 
     /// Optional user-supplied async HTTP client to apply to the download (async path only).
-    #[doc(hidden)]
     #[cfg(feature = "async")]
     fn request_async_client(&self) -> Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>;
 
     /// Optional download-progress callback to forward to the download step.
-    #[doc(hidden)]
     fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>>;
 
     /// Optional post-update verification hook, run on the extracted binary before install.
-    #[doc(hidden)]
     fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
 
     /// Optional custom asset matcher, overriding the built-in target/identifier selection.
-    #[doc(hidden)]
     fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
         None
     }
 
     /// Optional checksum to verify the downloaded artifact against before installing it.
-    #[doc(hidden)]
     #[cfg(feature = "checksums")]
     fn verify_checksum(&self) -> Option<&crate::Checksum>;
 
@@ -686,22 +708,6 @@ pub trait UpdateConfig: sealed::Sealed {
     #[cfg(feature = "signatures")]
     fn verify_keys(&self) -> &[crate::VerifyingKey] {
         &[]
-    }
-
-    /// Construct a header with an authorisation entry if an auth token is provided
-    fn api_headers(&self, auth_token: Option<&str>) -> Result<http_client::HeaderMap> {
-        let mut headers = header::HeaderMap::new();
-
-        if let Some(token) = auth_token {
-            let value = format!("token {}", token)
-                .parse::<header::HeaderValue>()
-                .map_err(|err| Error::InvalidAuthToken {
-                    source: Box::new(err),
-                })?;
-            headers.insert(header::AUTHORIZATION, value);
-        };
-
-        Ok(headers)
     }
 }
 
@@ -719,7 +725,8 @@ pub trait UpdateConfig: sealed::Sealed {
 /// The trait is sealed transitively: its [`UpdateConfig`] supertrait requires
 /// [`sealed::Sealed`](sealed) (implemented only inside this crate), so `ReleaseUpdate` cannot be
 /// implemented for a foreign type even though the trait itself has no visible seal.
-pub trait ReleaseUpdate: UpdateConfig {
+#[allow(private_bounds)]
+pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
     /// Fetch the single newest release from the backend.
     ///
     /// The result is a one-element [`Releases`] wrapping the **raw** newest release, unfiltered
@@ -816,21 +823,9 @@ fn choose_latest_release(
 
     // Sort the candidates semver-descending (newest first) so the selection below does not depend
     // on the order the source/backend returned them. The built-in backends already sort or filter,
-    // but `backends::custom`'s `ReleaseSource` may hand back releases in any order. Mirrors the
-    // descending comparator in `backends::s3::sort_newer`.
-    releases.sort_by(
-        |x, y| match version::bump_is_greater(y.version(), x.version()) {
-            Ok(is_greater) => {
-                if is_greater {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Greater
-                }
-            }
-            // Ignoring release due to an unexpected failure in parsing its version string
-            Err(_) => std::cmp::Ordering::Greater,
-        },
-    );
+    // but `backends::custom`'s `ReleaseSource` may hand back releases in any order. Uses the shared
+    // release comparator (also used by `backends::s3::sort_newer`/`pick_latest`).
+    releases.sort_by(|x, y| version::cmp_releases_newest_first(x.version(), y.version()));
 
     // Filter to versions compatible with the current one.
     let compatible_releases = releases
@@ -902,7 +897,10 @@ pub(crate) mod testing {
 
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
 /// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
-fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Result<ReleaseAsset> {
+fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
+    u: &U,
+    release: &Release,
+) -> Result<ReleaseAsset> {
     let target = u.target();
     let target_asset = match u.asset_matcher() {
         Some(matcher) => matcher(&release.assets),
@@ -934,13 +932,19 @@ fn resolve_and_confirm<U: UpdateConfig + ?Sized>(u: &U, release: &Release) -> Re
 /// Build the [`Download`] for an asset, applying the auth/accept/extra headers, timeout, progress
 /// callback, and progress style from the updater. Shared by both orchestrators; the caller drives
 /// it with `download_to` (sync) or `download_to_async` (async).
-fn build_download<U: UpdateConfig + ?Sized>(
+fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     u: &U,
     target_asset: &ReleaseAsset,
 ) -> Result<Download> {
     let mut download = Download::from_url(target_asset.download_url());
+    // Backend base headers (e.g. github's User-Agent). The trait default is a no-op; the auth
+    // scheme/token is applied below by the shared `apply_auth` so the download honors a user
+    // `request_header(AUTHORIZATION, ..)` override exactly like the listing path.
     let mut headers = u.api_headers(u.auth_token())?;
     headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
+    // Apply the backend's derived Authorization (scheme + token), skipped when the user supplied
+    // their own Authorization via `request_header`.
+    u.request_config().apply_auth(&mut headers)?;
     // Apply the user's extra request headers to the download too. This runs after the ACCEPT and
     // auth headers set above, so a user-supplied header of the same name overrides them here.
     for (name, value) in u.request_headers() {
@@ -956,12 +960,26 @@ fn build_download<U: UpdateConfig + ?Sized>(
     if let Some(timeout) = u.request_timeout() {
         download.timeout(timeout);
     }
+    // Forward the configured retry budget/backoff so the download retries its request-establishment
+    // phase (B9: on the custom backend this is the only crate-controlled transport, so `.retries()`
+    // now has a real effect there; consistent with the other transport knobs forwarded here).
+    {
+        let request = u.request_config();
+        download.set_retries(
+            request.retries,
+            request.retry_base_delay,
+            request.retry_max_delay,
+        );
+    }
     if let Some(callback) = u.progress_callback() {
         download.set_progress_callback_arc(callback);
     }
     download.show_download_progress(u.show_download_progress());
     #[cfg(feature = "progress-bar")]
-    download.progress_style(u.progress_template(), u.progress_chars());
+    download.progress_style(crate::ProgressStyle::new(
+        u.progress_template(),
+        u.progress_chars(),
+    ));
     Ok(download)
 }
 
@@ -983,7 +1001,7 @@ struct FinishCtx {
 
 impl FinishCtx {
     /// Capture the owned fields the finish tail needs from the updater and the resolved `release`.
-    fn capture<U: UpdateConfig + ?Sized>(u: &U, release: Release) -> Self {
+    fn capture<U: UpdateConfig + UpdateInternals + ?Sized>(u: &U, release: Release) -> Self {
         Self {
             release,
             bin_install_path: u.bin_install_path().to_path_buf(),
@@ -1004,7 +1022,7 @@ impl FinishCtx {
 /// the sync tail shared verbatim by the sync and async update flows. Builds a [`FinishCtx`] from
 /// the updater and delegates to [`finish_update_owned`] without spawning (the sync path runs it
 /// inline). Consumes `release` and returns the resulting status.
-fn finish_update<U: UpdateConfig + ?Sized>(
+fn finish_update<U: UpdateConfig + UpdateInternals + ?Sized>(
     u: &U,
     release: Release,
     tmp_archive_dir: tempfile::TempDir,
@@ -1123,16 +1141,19 @@ where
 
 /// Run the post-update verification hook (if any) on the freshly-extracted binary, then install
 /// it — replacing the current executable in place, or moving it to `bin_install_path`. If the
-/// hook returns `false` the install is aborted before anything is replaced.
+/// hook returns `Err(..)` the install is aborted (as `Error::VerificationRejected`) before
+/// anything is replaced.
 fn install_binary(
     new_exe: &std::path::Path,
     bin_install_path: &std::path::Path,
     verify: Option<&crate::DynVerifyFn>,
 ) -> Result<()> {
     if let Some(verify) = verify {
-        if !verify(new_exe) {
-            return Err(Error::VerificationRejected { reason: None });
-        }
+        // A hook that returns `Err` (an explicit rejection or a hook IO error) aborts the install;
+        // its message becomes the rejection reason.
+        verify(new_exe).map_err(|e| Error::VerificationRejected {
+            reason: Some(e.to_string()),
+        })?;
     }
     let current_exe = std::env::current_exe()?;
     if bin_install_path == current_exe.as_path() {
@@ -1206,6 +1227,7 @@ fn verify_signature(
 #[cfg(test)]
 mod tests {
     use super::{Releases, choose_latest_release, install_binary};
+    use crate::Download;
     use crate::DynVerifyFn;
     use crate::errors::Result;
     use crate::update::Release;
@@ -1686,13 +1708,21 @@ mod tests {
     // The refactor split the accessors onto the `UpdateConfig` supertrait. These items don't run
     // assertions; they exist to *fail to compile* if the trait relationships regress.
 
-    use crate::update::{ReleaseUpdate, UpdateConfig};
+    use crate::update::{ReleaseUpdate, UpdateConfig, UpdateInternals};
 
     // A generic helper bounded only on `ReleaseUpdate` must still be able to call the accessors
     // that now live on the `UpdateConfig` supertrait — because `ReleaseUpdate: UpdateConfig`. If
     // the supertrait bound were dropped, `bin_name()`/`target()` would not resolve here.
     fn accessor_via_release_update_bound<R: ReleaseUpdate + ?Sized>(r: &R) -> (String, String) {
         (r.bin_name().to_string(), r.target().to_string())
+    }
+
+    // B1: a generic fn bounded only on the crate-private `UpdateInternals` sub-trait must compile
+    // and read an internal accessor. This proves the orchestrator can reach the internal-typed
+    // accessors through the supertrait. (`UpdateConfig` itself no longer carries these — a
+    // `<dyn UpdateConfig>` value cannot call `request_headers()`, which is what moved them off.)
+    fn internal_accessor_via_update_internals_bound<U: UpdateInternals + ?Sized>(u: &U) -> usize {
+        u.request_headers().len()
     }
 
     // Accessors must also resolve on a `&dyn ReleaseUpdate` (trait-object form returned by every
@@ -1724,6 +1754,8 @@ mod tests {
         assert_eq!(target, "x86_64-unknown-linux-gnu");
         assert_eq!(accessor_via_dyn_release_update(&*upd), "1.0.0");
         assert_eq!(accessor_via_update_config_bound(&*upd), "app");
+        // B1: the internal accessor is reachable through the `UpdateInternals` bound.
+        assert_eq!(internal_accessor_via_update_internals_bound(&*upd), 0);
     }
 
     // --- F2: public async `get_release_version_async` ----------------------------------------
@@ -1862,21 +1894,60 @@ mod tests {
         // A dest that isn't the current exe takes the move path (not self_replace).
         let dest = dir.path().join("installed");
 
-        let reject: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| false);
+        let reject: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(crate::errors::Error::VerificationRejected {
+                reason: Some("binary did not pass the smoke test".to_string()),
+            })
+        });
         let res = install_binary(&new_exe, &dest, Some(&*reject));
-        // E3: a rejecting verify callback surfaces the dedicated `VerificationRejected` variant
-        // (was previously the catch-all `Error::Update`).
-        let err = res.expect_err("verify=false must abort the install");
-        assert!(
-            matches!(err, crate::errors::Error::VerificationRejected { .. }),
-            "verify=false must surface as Error::VerificationRejected, got {:?}",
-            err
-        );
+        // P4: a rejecting verify callback surfaces the dedicated `VerificationRejected` variant,
+        // carrying the hook's error message as the reason.
+        let err = res.expect_err("a rejecting verify hook must abort the install");
+        match err {
+            crate::errors::Error::VerificationRejected { reason } => {
+                let reason = reason.expect("a rejecting hook must carry a reason");
+                assert!(
+                    reason.contains("binary did not pass the smoke test"),
+                    "the rejection reason must carry the hook's error message, got: {reason}"
+                );
+            }
+            other => panic!("expected Error::VerificationRejected, got {:?}", other),
+        }
         assert!(
             !dest.exists(),
             "nothing is installed when verification fails"
         );
         assert!(new_exe.exists(), "the extracted binary is left untouched");
+    }
+
+    #[test]
+    fn install_binary_propagates_hook_io_error_as_reason() {
+        // A hook that fails with an IO error (e.g. it couldn't spawn `new --version`) propagates
+        // that error's message as the `VerificationRejected` reason, not a generic None.
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+        let dest = dir.path().join("installed");
+
+        let io_failing: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(crate::errors::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not run new --version",
+            )))
+        });
+        let err = install_binary(&new_exe, &dest, Some(&*io_failing))
+            .expect_err("a hook IO error must abort the install");
+        match err {
+            crate::errors::Error::VerificationRejected { reason } => {
+                let reason = reason.expect("a hook IO error must carry its message as the reason");
+                assert!(
+                    reason.contains("could not run new --version"),
+                    "the hook IO error message must propagate as the reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Error::VerificationRejected, got {:?}", other),
+        }
+        assert!(!dest.exists());
     }
 
     #[test]
@@ -1886,7 +1957,7 @@ mod tests {
         std::fs::write(&new_exe, b"new binary").unwrap();
         let dest = dir.path().join("installed");
 
-        let accept: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| true);
+        let accept: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| Ok(()));
         install_binary(&new_exe, &dest, Some(&*accept)).unwrap();
         assert!(
             dest.exists(),
@@ -2013,6 +2084,339 @@ mod tests {
             err.to_string(),
             "InternalError: finish-update task failed",
             "Display must render the message without panicking"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WS5 item 1 (HIGHEST RISK): the DOWNLOAD path applies the backend's derived
+    // Authorization scheme AND honors a user override — captured off a loopback TCP
+    // stub through the real http client (reqwest or ureq), exercising
+    // `build_download` + `download_to` end to end, not just `apply_auth` in isolation.
+    //
+    // The listing path already had a wire-level loopback test (backends::mod tests);
+    // the author flagged that the download path lacked one. These close that gap.
+    // -----------------------------------------------------------------------
+
+    /// Bind a loopback stub that accepts one request, captures its raw header lines, and replies
+    /// with a small 200 body. Returns the base URL and the captured-request handle.
+    #[cfg(any(feature = "github", feature = "gitlab"))]
+    fn download_auth_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let lines: Vec<String> = req.lines().map(|l| l.to_string()).collect();
+                *sink.lock().unwrap() = lines;
+                let body = "payload";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    /// Extract the `Authorization` header value the stub received, if any.
+    #[cfg(any(feature = "github", feature = "gitlab"))]
+    fn captured_download_authorization(lines: &[String]) -> Option<String> {
+        lines.iter().find_map(|l| {
+            l.strip_prefix("Authorization: ")
+                .or_else(|| l.strip_prefix("authorization: "))
+                .map(|v| v.to_string())
+        })
+    }
+
+    #[cfg(feature = "github")]
+    #[test]
+    fn download_path_applies_github_token_scheme() {
+        // github resolves to the `token` scheme; the download GET must carry `token secret`.
+        let (base, captured) = download_auth_capture_stub();
+        let upd = crate::backends::github::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
+        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        assert_eq!(out, b"payload", "the download streamed the stub body");
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_download_authorization(&lines),
+            Some("token secret".to_string()),
+            "the download path must send github's derived `token` auth header"
+        );
+    }
+
+    #[cfg(feature = "github")]
+    #[test]
+    fn download_path_honors_user_authorization_override() {
+        // A backend token is configured AND the user supplies their own Authorization via
+        // `request_header`. The override must win on the DOWNLOAD path, exactly like the listing path.
+        use crate::http_client::header::AUTHORIZATION;
+        let (base, captured) = download_auth_capture_stub();
+        let upd = crate::backends::github::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .request_header(AUTHORIZATION, "Bearer user-override")
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
+        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_download_authorization(&lines),
+            Some("Bearer user-override".to_string()),
+            "a user AUTHORIZATION override must win over the backend token on the download path"
+        );
+    }
+
+    #[cfg(feature = "gitlab")]
+    #[test]
+    fn download_path_applies_gitlab_bearer_scheme() {
+        // gitlab resolves to the `Bearer` scheme; the download GET must carry `Bearer secret`,
+        // proving the per-backend default scheme is threaded all the way to the download wire.
+        let (base, captured) = download_auth_capture_stub();
+        let upd = crate::backends::gitlab::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
+        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_download_authorization(&lines),
+            Some("Bearer secret".to_string()),
+            "the download path must send gitlab's derived `Bearer` auth header"
+        );
+    }
+
+    // WS5 item 7 (B9): the configured retry budget is forwarded onto the Download built by
+    // `build_download`. Without forwarding, a custom-backend `.retries(N)` would be a silent no-op
+    // on the one transport the crate controls (the download). We assert the budget reaches the GET
+    // by pointing the asset at a closed loopback port (immediate connection-refused) and counting
+    // attempts is impractical through the real client, so instead we drive the forwarding directly:
+    // a custom updater with `.retries(2)` must produce a download that retries. We prove the wiring
+    // by checking `build_download` carries the budget through to a re-established request via an
+    // injected flaky client.
+    #[test]
+    fn build_download_forwards_configured_retry_budget() {
+        use crate::http_client::header::HeaderMap;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct FlakyClient {
+            body: Vec<u8>,
+            fail_times: AtomicU32,
+            attempts: Arc<AtomicU32>,
+        }
+        impl crate::http_client::HttpClient for FlakyClient {
+            fn get(
+                &self,
+                _url: &str,
+                _headers: &HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> Result<Box<dyn crate::http_client::HttpResponse>> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                if self.fail_times.load(Ordering::SeqCst) > 0 {
+                    self.fail_times.fetch_sub(1, Ordering::SeqCst);
+                    return Err(crate::errors::Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    });
+                }
+                Ok(Box::new(CannedResponse {
+                    body: self.body.clone(),
+                }))
+            }
+        }
+        struct CannedResponse {
+            body: Vec<u8>,
+        }
+        impl crate::http_client::HttpResponse for CannedResponse {
+            fn headers(&self) -> &HeaderMap {
+                static EMPTY: std::sync::OnceLock<HeaderMap> = std::sync::OnceLock::new();
+                EMPTY.get_or_init(HeaderMap::new)
+            }
+            fn json_value(&mut self) -> Result<serde_json::Value> {
+                unreachable!()
+            }
+            fn text(&mut self) -> Result<String> {
+                Ok(String::from_utf8_lossy(&self.body).into_owned())
+            }
+            fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+                Box::new(std::io::Cursor::new(self.body))
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let client = Arc::new(FlakyClient {
+            body: b"after-retry".to_vec(),
+            fail_times: AtomicU32::new(2),
+            attempts: attempts.clone(),
+        });
+
+        // A custom-backend updater configured with `.retries(3)` and a fast backoff, plus the flaky
+        // client injected. `build_download` must forward that budget onto the Download so the GET is
+        // re-established after the transient failures.
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .retries(3)
+            .retry_backoff(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(2),
+            )
+            .http_client(client)
+            .build()
+            .unwrap();
+
+        let asset = super::ReleaseAsset::new("app.bin", "https://nonroutable.invalid/app.bin");
+        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        assert_eq!(out, b"after-retry", "the download succeeds after retrying");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "the configured retry budget (3) must be forwarded to the download: two failures + success"
+        );
+    }
+
+    // WS5 item 6: download retry only covers the request-ESTABLISHMENT phase. A failure that occurs
+    // AFTER streaming has begun must NOT re-issue the GET (which would append a duplicate/partial
+    // body to the destination and corrupt it). We assert: exactly one GET attempt despite a generous
+    // retry budget, the call errors, and `dest` holds only the partial pre-failure bytes (never a
+    // duplicated or completed body).
+    #[test]
+    fn download_does_not_retry_or_corrupt_after_streaming_begins() {
+        use crate::http_client::header::{CONTENT_LENGTH, HeaderMap};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // A reader that yields `prefix` once, then errors — simulating a mid-stream transport drop.
+        struct FailingMidStream {
+            prefix: Vec<u8>,
+            yielded: bool,
+        }
+        impl std::io::Read for FailingMidStream {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.yielded {
+                    self.yielded = true;
+                    let n = self.prefix.len().min(buf.len());
+                    buf[..n].copy_from_slice(&self.prefix[..n]);
+                    return Ok(n);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset mid-stream",
+                ))
+            }
+        }
+        struct MidStreamResponse {
+            headers: HeaderMap,
+            prefix: Vec<u8>,
+        }
+        impl crate::http_client::HttpResponse for MidStreamResponse {
+            fn headers(&self) -> &HeaderMap {
+                &self.headers
+            }
+            fn json_value(&mut self) -> Result<serde_json::Value> {
+                unreachable!()
+            }
+            fn text(&mut self) -> Result<String> {
+                unreachable!()
+            }
+            fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+                Box::new(FailingMidStream {
+                    prefix: self.prefix,
+                    yielded: false,
+                })
+            }
+        }
+        struct MidStreamClient {
+            attempts: Arc<AtomicU32>,
+        }
+        impl crate::http_client::HttpClient for MidStreamClient {
+            fn get(
+                &self,
+                _url: &str,
+                _headers: &HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> Result<Box<dyn crate::http_client::HttpResponse>> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                // The request ESTABLISHES successfully (200 + a Content-Length promising more bytes
+                // than the body will actually deliver); the failure happens later, while streaming.
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_LENGTH, "1024".parse().unwrap());
+                Ok(Box::new(MidStreamResponse {
+                    headers,
+                    prefix: b"PARTIAL".to_vec(),
+                }))
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let client = Arc::new(MidStreamClient {
+            attempts: attempts.clone(),
+        });
+
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        // A generous retry budget: if the implementation wrongly retried the streaming phase, we
+        // would see multiple GET attempts and/or a destination longer than the single 7-byte prefix.
+        dl.set_retries(
+            5,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(2),
+        );
+
+        let mut out = Vec::new();
+        let res = dl.download_to(&mut out);
+        assert!(
+            res.is_err(),
+            "a mid-stream failure must propagate, not be silently retried into a corrupt file"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "the GET must be issued exactly once: streaming-phase failures are NOT re-established"
+        );
+        assert_eq!(
+            out, b"PARTIAL",
+            "the destination must hold only the single pre-failure prefix, never a duplicated body"
         );
     }
 }

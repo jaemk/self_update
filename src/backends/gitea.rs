@@ -91,8 +91,8 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
-        self.host = Some(host.into());
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.host = Some(url.into());
         self
     }
 
@@ -156,7 +156,14 @@ impl ReleaseListBuilder {
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
-            request: self.request.clone(),
+            // Thread the auth token + gitea's `token` scheme (the default) into the request so the
+            // shared `apply_auth` applies it on the listing path (honoring a user override).
+            request: {
+                let mut request = self.request.clone();
+                request.auth_scheme = crate::backends::common::AuthScheme::Token;
+                request.auth_token = self.auth_token.clone();
+                request
+            },
         })
     }
 }
@@ -239,8 +246,8 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, host: impl Into<String>) -> &mut Self {
-        self.host = Some(host.into());
+    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.host = Some(url.into());
         self
     }
 
@@ -518,7 +525,10 @@ impl crate::update::AsyncReleaseUpdate for Update {
     }
 }
 
-fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
+/// Build gitea's base request headers (its User-Agent). The Authorization header is applied
+/// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
+/// gitea's `token` scheme on both the listing and download paths (B5), honoring a user override.
+fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -526,17 +536,6 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
             .parse()
             .expect("gitea invalid user-agent"),
     );
-
-    if let Some(token) = auth_token {
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("token {}", token)
-                .parse::<header::HeaderValue>()
-                .map_err(|err| Error::InvalidAuthToken {
-                    source: Box::new(err),
-                })?,
-        );
-    };
 
     Ok(headers)
 }
@@ -1115,9 +1114,10 @@ mod tests {
     }
 
     #[test]
-    fn api_headers_override_uses_gitea_user_agent_and_token_scheme() {
-        // The `{api_headers}` override arm must wire gitea's custom `api_headers` (User-Agent +
-        // `token` auth scheme), not the trait default (which sets no User-Agent).
+    fn api_headers_override_uses_gitea_user_agent() {
+        // The `{api_headers}` override arm must wire gitea's custom `api_headers` (User-Agent), not
+        // the trait default (which sets no User-Agent). After B5 the auth scheme/token is applied
+        // centrally by `apply_auth`, not baked here.
         let upd = Update::configure()
             .url("https://gitea.example.com")
             .repo_owner("o")
@@ -1135,14 +1135,55 @@ mod tests {
                 .unwrap(),
             "rust-reqwest/self-update"
         );
-        assert_eq!(
+        assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+                .is_none(),
+            "api_headers no longer bakes auth; apply_auth applies the token scheme"
+        );
+    }
+
+    // B5: gitea resolves to the `token` scheme, applied by the shared `apply_auth` on the request
+    // config consumed by BOTH the listing and download paths. A user override wins.
+    #[test]
+    fn gitea_token_scheme_applied_to_both_paths() {
+        use crate::http_client::header::{AUTHORIZATION, HeaderMap};
+        #[allow(unused_imports)]
+        use crate::update::UpdateInternals;
+        let upd = Update::configure()
+            .url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "token secret",
             "gitea authenticates with the token scheme"
+        );
+
+        // A user AUTHORIZATION override wins.
+        let upd = Update::configure()
+            .url("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .request_header(AUTHORIZATION, "Bearer user-override")
+            .build()
+            .unwrap();
+        let mut headers = upd.request_config().headers.clone();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer user-override",
+            "a user AUTHORIZATION override must win over the token scheme"
         );
     }
 

@@ -38,6 +38,24 @@ exclusive (both impls can compile, one is picked at runtime), the TLS features
 coexist (rustls wins when both are on), and any `Arc<dyn HttpClient>` — including
 a test double — can be injected.
 
+WS5 (self_update 3.0) refinements:
+
+- `.retry_backoff(base: Duration, max: Duration)` on the `Update`/`ReleaseList`
+  builders (`request_config_setters!`) configures the exponential backoff:
+  `base` before the first retry, doubling each attempt, clamped to never exceed
+  `max`. Defaults match the historical 100ms base / ~3.2s cap. Threaded into
+  `RequestConfig::{retry_base_delay, retry_max_delay}` and consumed by
+  `backends::retry_backoff_ms(attempt, base, max)`.
+- `.retries(n)` now also retries the **download's request-establishment phase**
+  (before any bytes are streamed; a mid-stream failure is not retried). On the
+  `custom` backend this is the one crate-controlled transport, so `.retries()` now
+  has a real effect there (B9). The setter is forwarded into `Download` via
+  `Download::set_retries` in `build_download`.
+- `Download`'s public surface dropped the per-client convenience setters
+  (`reqwest_client` / `reqwest_async_client` / `ureq_agent`); inject a client via
+  `.http_client(Arc<dyn HttpClient>)` on the builders instead (P8). The builder-level
+  convenience setters remain.
+
 See `src/http_client/`, `src/macros.rs` (`request_config_setters!`), and the
 CHANGELOG `[unreleased]` and `[1.0.0]` Added entries. Design notes are in
 `local/design-g2-phase2-client-injection.md`.

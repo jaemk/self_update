@@ -141,7 +141,14 @@ impl ReleaseListBuilder {
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
             custom_url: self.custom_url.clone(),
-            request: self.request.clone(),
+            // Thread the auth token + github's `token` scheme into the request so the shared
+            // `apply_auth` applies it on the listing path (honoring a user override).
+            request: {
+                let mut request = self.request.clone();
+                request.auth_scheme = crate::backends::common::AuthScheme::Token;
+                request.auth_token = self.auth_token.clone();
+                request
+            },
         })
     }
 }
@@ -522,7 +529,13 @@ impl crate::update::AsyncReleaseUpdate for Update {
     }
 }
 
-fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
+/// Build github's base request headers (its `rust/self-update` User-Agent). The Authorization
+/// header is no longer set here: the auth scheme/token is applied centrally by the shared
+/// [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) on both the listing and
+/// download paths (B5), which also honors a user `request_header(AUTHORIZATION, ..)` override. The
+/// `auth_token` argument is retained for signature compatibility but only gates whether an auth
+/// header *would* be added (it no longer is here).
+fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -530,18 +543,6 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
             .parse()
             .expect("github invalid user-agent"),
     );
-
-    if let Some(token) = auth_token {
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("token {}", token)
-                .parse::<header::HeaderValue>()
-                .map_err(|err| Error::InvalidAuthToken {
-                    source: Box::new(err),
-                })?,
-        );
-    };
-
     Ok(headers)
 }
 
@@ -549,6 +550,12 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    // The crate-private internal accessors (`request_timeout`, `verify_callback`, `asset_matcher`,
+    // …) now live on `UpdateInternals` (B1); bring it into scope so `upd.request_timeout()` etc.
+    // resolve.
+    #[allow(unused_imports)]
+    use crate::update::UpdateInternals;
 
     // The async verbs are methods on the public sealed `AsyncReleaseUpdate` trait; bring it into
     // scope so `upd.get_latest_release_async()` / `update_extended_async()` resolve in these tests.
@@ -1328,10 +1335,12 @@ mod tests {
     }
 
     #[test]
-    fn api_headers_override_uses_github_user_agent_and_token_scheme() {
+    fn api_headers_override_uses_github_user_agent() {
         // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire github's
-        // custom `api_headers` (its `rust/self-update` User-Agent + `token` auth scheme), not the
-        // trait default (which sets no User-Agent).
+        // custom `api_headers` (its `rust/self-update` User-Agent), not the trait default (which
+        // sets no User-Agent). After B5 the auth scheme/token is no longer baked into `api_headers`;
+        // it is applied centrally by `apply_auth` (asserted in
+        // `github_token_scheme_applied_to_both_paths`).
         let upd = super::Update::configure()
             .repo_owner("o")
             .repo_name("r")
@@ -1348,25 +1357,74 @@ mod tests {
                 .unwrap(),
             "rust/self-update"
         );
-        assert_eq!(
+        assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+                .is_none(),
+            "api_headers no longer bakes auth; apply_auth applies the scheme"
+        );
+    }
+
+    // B5: github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
+    // config that BOTH the listing and download paths consume. A configured auth_token renders as
+    // `token <token>`; a user `request_header(AUTHORIZATION, ..)` override wins on both paths.
+    #[test]
+    fn github_token_scheme_applied_to_both_paths() {
+        use crate::http_client::header::{AUTHORIZATION, HeaderMap};
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "token secret",
             "github authenticates with the token scheme"
+        );
+
+        // A user AUTHORIZATION override (via request_header) wins: apply_auth is a no-op.
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .request_header(AUTHORIZATION, "Bearer user-override")
+            .build()
+            .unwrap();
+        let mut headers = upd.request_config().headers.clone();
+        upd.request_config().apply_auth(&mut headers).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer user-override",
+            "a user AUTHORIZATION override must win over the backend token scheme"
         );
     }
 
     // E1/E6: an auth token that cannot be encoded as a header value surfaces as
-    // `Error::InvalidAuthToken` and chains the underlying header-parse error through `source()`
-    // (previously the parse error was stringified and dropped, so `source()` was `None`).
+    // `Error::InvalidAuthToken` and chains the underlying header-parse error through `source()`.
+    // The derivation now lives in `apply_auth` (B5).
     #[test]
-    fn api_headers_invalid_auth_token_chains_source() {
+    fn invalid_auth_token_chains_source() {
+        use crate::http_client::header::HeaderMap;
         use std::error::Error as _;
-        // A newline is not valid in a header value, so the `token <...>` parse fails.
-        let err = super::api_headers(Some("bad\nvalue"))
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("bad\nvalue")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        let err = upd
+            .request_config()
+            .apply_auth(&mut headers)
             .expect_err("an unencodable auth token must error");
         assert!(
             matches!(err, crate::errors::Error::InvalidAuthToken { .. }),
@@ -1417,7 +1475,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .verify_with(|_new_exe| true)
+            .verify_binary(|_new_exe| Ok(()))
             .build()
             .unwrap();
         assert!(upd.verify_callback().is_some());
