@@ -106,11 +106,29 @@ backoff (not just index 0). `send_async` / `retry_async`
 the log runs synchronously between tries so the error is never held across the
 await.
 
+### Security invariants for `HttpClient` implementations
+
+The `HttpClient` and `AsyncHttpClient` traits carry a documented security contract that custom
+implementations must uphold:
+
+1. TLS certificate verification must be enabled. Disabling it allows a man-in-the-middle to serve
+   arbitrary binaries. The `danger_accept_invalid_certs` option (or equivalent) must never be set.
+
+2. The `Authorization` header must not be forwarded to a different host on a redirect. An
+   attacker-controlled redirect destination could harvest bearer tokens or API keys. The HTTP
+   client must strip the `Authorization` header when following a redirect to a different origin.
+
+Both built-in clients satisfy these: reqwest strips cross-host auth headers by default; the ureq
+per-call agent sets `.redirect_auth_headers(RedirectAuthHeaders::Never)` explicitly
+(`http_client/ureq.rs`). The ureq setting is explicit (not relying on the default) so a future
+ureq version bump cannot silently change the policy. The contract is documented on the
+`HttpClient` trait doc comment; `AsyncHttpClient` references it.
+
 ### Proxy
 
 Both clients honor `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`. reqwest does this
 automatically. ureq's per-call agent sets `.proxy(ureq::Proxy::try_from_env())`
-explicitly (`http_client/ureq.rs:31-32`). Proxy-from-env applies only to the
+explicitly (`http_client/ureq.rs`). Proxy-from-env applies only to the
 per-call client; an injected client is left to its own proxy config (see below).
 
 ### Client injection (Arc<dyn HttpClient>)
@@ -187,10 +205,18 @@ status variants.
 - At least one HTTP client must be compiled (no-client is a `compile_error!`);
   both clients can coexist. `async` requires reqwest (auto-satisfied by the
   feature implication).
-- The seam traits are **object-safe** (`Box<dyn HttpClient>` / `Box<dyn
-  HttpResponse>`); `json_value` replaces the old generic `json::<T>()`.
+- The seam traits are object-safe (`Box<dyn HttpClient>` / `Box<dyn HttpResponse>`);
+  `json_value` replaces the old generic `json::<T>()`.
 - TLS is feature-selected; when both TLS features are on, rustls wins, so
   `cargo build --all-features` builds.
+- TLS certificate verification must be enabled on all `HttpClient` implementations
+  (documented security contract on the trait).
+- The ureq per-call agent explicitly sets `.redirect_auth_headers(RedirectAuthHeaders::Never)`
+  rather than relying on the ureq default. This prevents a future ureq version bump from
+  silently changing the cross-host redirect auth policy. reqwest strips cross-host auth headers
+  by default.
+- Custom `HttpClient` implementations must not forward `Authorization` to a different host on a
+  redirect (documented security contract on the `HttpClient` and `AsyncHttpClient` traits).
 - `retries == 0` means exactly one attempt; the exhaustion boundary is
   `attempts >= retries` (one retry => two attempts).
 - Backoff sequence is 100/200/400/800/1600/3200 ms, capped at 3200 from attempt
@@ -218,6 +244,9 @@ status variants.
   wins, valid-then-invalid keeps the valid header.
 - `http_client/{reqwest,ureq}.rs`: per-client status-mapping tests, exercised
   through the trait `get`/`json_value`/`text` methods.
+- `http_client/ureq.rs`: `per_call_agent_does_not_forward_auth_headers_on_redirect` constructs
+  the per-call agent config with `RedirectAuthHeaders::Never` and asserts `config.redirect_auth_headers() == RedirectAuthHeaders::Never`.
+  Fails if the explicit `.redirect_auth_headers(...)` call is removed.
 - `backends/github.rs`: `injected_fake_http_client_drives_a_backend_through_the_trait`
   (a `FakeClient` test double injected via `.http_client(Arc::new(...))` records
   the URL and returns a canned `Box<dyn HttpResponse>`), and

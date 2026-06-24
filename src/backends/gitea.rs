@@ -82,6 +82,8 @@ pub struct ReleaseListBuilder {
     target: Option<String>,
     auth_token: Option<String>,
     request: RequestConfig,
+    /// Allow plain `http://` hosts (see [`allow_insecure_http`](Self::allow_insecure_http)).
+    allow_insecure_http: bool,
 }
 impl ReleaseListBuilder {
     /// Required. Set the base URL of the Gitea instance, e.g. `https://gitea.example.com`.
@@ -91,8 +93,22 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
-        self.host = Some(url.into());
+    ///
+    /// Named `host` (not `url`) to make it clear that only the scheme + hostname is accepted
+    /// here, not a full API URL. GitHub's `url(...)` takes a full API base; this setter is
+    /// distinct to avoid confusion.
+    pub fn host(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = Some(host.into());
+        self
+    }
+
+    /// Allow plain `http://` hosts (default: `false`, https-only).
+    ///
+    /// By default the builder rejects a `host(...)` whose scheme is `http` to prevent
+    /// accidental credential (bearer-token) exposure over cleartext. Set this to `true` when
+    /// testing against a local HTTP stub or another environment where TLS is genuinely unavailable.
+    pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self {
+        self.allow_insecure_http = allow;
         self
     }
 
@@ -136,11 +152,14 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
+        if let Some(ref host) = self.host {
+            crate::backends::common::validate_url_scheme(host, self.allow_insecure_http)?;
+        }
         Ok(ReleaseList {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                return Err(Error::MissingField { field: "url" });
+                return Err(Error::MissingField { field: "host" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -189,6 +208,7 @@ impl ReleaseList {
             target: None,
             auth_token: None,
             request: RequestConfig::default(),
+            allow_insecure_http: false,
         }
     }
 
@@ -201,7 +221,9 @@ impl ReleaseList {
     pub fn fetch(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
@@ -246,8 +268,12 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
-        self.host = Some(url.into());
+    ///
+    /// Named `host` (not `url`) to make it clear that only the scheme + hostname is accepted
+    /// here, not a full API URL. GitHub's `url(...)` takes a full API base; this setter is
+    /// distinct to avoid confusion.
+    pub fn host(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = Some(host.into());
         self
     }
 
@@ -267,11 +293,14 @@ impl UpdateBuilder {
 
     /// Internal: validate config into a concrete `Update`. Shared by `build` / `build_async`.
     fn build_update(&self) -> Result<Update> {
+        if let Some(ref host) = self.host {
+            crate::backends::common::validate_url_scheme(host, self.common.allow_insecure_http)?;
+        }
         Ok(Update {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                return Err(Error::MissingField { field: "url" });
+                return Err(Error::MissingField { field: "host" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -326,7 +355,9 @@ impl Update {
     fn releases_url(&self) -> String {
         format!(
             "{}/api/v1/repos/{}/{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 }
@@ -635,7 +666,8 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitea_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -650,7 +682,8 @@ mod tests {
         current_version: &str,
     ) -> Box<dyn crate::update::ReleaseUpdate> {
         Update::configure()
-            .url(base)
+            .host(base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -933,7 +966,8 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1002,7 +1036,8 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1088,11 +1123,11 @@ mod tests {
     }
 
     #[test]
-    fn url_and_filter_target_setters_exist_on_release_list_builder() {
-        // The renamed `url` / `filter_target` setters must exist on the gitea
-        // `ReleaseListBuilder` and the builder must still build (gitea requires `url`).
+    fn host_and_filter_target_setters_exist_on_release_list_builder() {
+        // The `host` / `filter_target` setters must exist on the gitea `ReleaseListBuilder` and
+        // the builder must still build (gitea requires `host`).
         let _list = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1101,15 +1136,15 @@ mod tests {
     }
 
     #[test]
-    fn release_list_build_requires_url() {
-        // gitea has no default host, so the `ReleaseList` builder must error without `url`.
+    fn release_list_build_requires_host() {
+        // gitea has no default host, so the `ReleaseList` builder must error without `host`.
         let res = super::ReleaseList::configure()
             .repo_owner("o")
             .repo_name("r")
             .build();
         assert!(matches!(
             res,
-            Err(crate::errors::Error::MissingField { field: "url" })
+            Err(crate::errors::Error::MissingField { field: "host" })
         ));
     }
 
@@ -1119,7 +1154,7 @@ mod tests {
         // the trait default (which sets no User-Agent). The auth scheme/token is applied centrally
         // by `apply_auth`, not baked here.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1151,7 +1186,7 @@ mod tests {
         #[allow(unused_imports)]
         use crate::update::UpdateInternals;
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1169,7 +1204,7 @@ mod tests {
 
         // A user AUTHORIZATION override wins.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1193,7 +1228,7 @@ mod tests {
         // `request.check()` with `Error::Config`, not panic. (The header check runs before the
         // host check, so a valid host is supplied to isolate the header failure.)
         let res = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .request_header("inva lid", "ok")
@@ -1208,7 +1243,7 @@ mod tests {
     fn update_build_surfaces_invalid_header() {
         // Same deferred-header check via `CommonBuilderConfig::build` on the gitea UpdateBuilder.
         let res = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1222,28 +1257,32 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_url() {
-        // Gitea has no default host, so `build()` must fail when `url` is not set.
+    fn build_requires_host() {
+        // Gitea has no default host, so `build()` must fail when `host` is not set.
         let res = Update::configure()
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
             .current_version("0.1.0")
             .build();
-        assert!(res.is_err(), "build must fail without a host url");
+        assert!(res.is_err(), "build must fail without a host");
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::MissingField { field: "host" })
+        ));
     }
 
     #[test]
     fn build_requires_repo_owner_and_name() {
         let missing_owner = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_name("repo")
             .current_version("0.1.0")
             .build();
         assert!(missing_owner.is_err(), "build must fail without repo_owner");
 
         let missing_name = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .current_version("0.1.0")
             .build();
@@ -1255,7 +1294,7 @@ mod tests {
         // `build_update` yields the concrete `Update` so we can check the shared base URL that both
         // the sync and async fetch paths build on.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
@@ -1271,7 +1310,7 @@ mod tests {
     #[test]
     fn identifier_is_wired() {
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
@@ -1287,7 +1326,7 @@ mod tests {
         // `bin_name` auto-populates `bin_path_in_archive` (with the platform exe suffix).
         let expected = format!("app{}", std::env::consts::EXE_SUFFIX);
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1298,7 +1337,7 @@ mod tests {
 
         // An explicit `bin_path_in_archive` set before `bin_name` is NOT overwritten.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_path_in_archive("custom/path")
@@ -1317,7 +1356,7 @@ mod tests {
         // from `b`, not `a`: the second call re-derives because the first was an auto-derive.
         let expected_b = format!("b{}", std::env::consts::EXE_SUFFIX);
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("a")
@@ -1342,7 +1381,7 @@ mod tests {
         // Calling `.bin_path_in_archive("x")` then `.bin_name("b")` must keep `"x"` — the
         // explicit set is sticky and a later `bin_name` re-derive must not overwrite it.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_path_in_archive("x")
@@ -1370,7 +1409,8 @@ mod tests {
             }]
         });
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1637,5 +1677,201 @@ mod tests {
             "non-array payload must surface as Error::Release, got {:?}",
             res
         );
+    }
+
+    // A3 regression: `host(...)` is the correct setter name on the gitea builders (not `url`).
+    // Compiling with the old `url(...)` name would be a compile error, proving the rename.
+    #[test]
+    fn host_setter_sets_host_and_final_url_is_correct() {
+        // Build an Update with a custom host and confirm the URL does not double `/api/v1/`.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let upd = Update::configure()
+            .host(&base)
+            .allow_insecure_http(true)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let _ = upd.get_latest_release().unwrap();
+        let request_line = captured
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|r| r.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            request_line.contains("/api/v1/"),
+            "the host setter must result in `/api/v1/` in the request path; got: {}",
+            request_line
+        );
+        let count = request_line.matches("/api/v1/").count();
+        assert_eq!(
+            count, 1,
+            "exactly one `/api/v1/` in the request line (no double-append); got: {}",
+            request_line
+        );
+    }
+
+    // LOW regression: both repo_owner AND repo_name must be percent-encoded in the Gitea URL.
+    #[test]
+    fn repo_owner_and_name_are_percent_encoded_in_request_url() {
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .allow_insecure_http(true)
+            .repo_owner("my org")
+            .repo_name("my repo")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        assert_eq!(releases.len(), 1);
+        let request_line = captured
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|r| r.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            request_line.contains("my%20org"),
+            "repo_owner with a space must be percent-encoded, got: {}",
+            request_line
+        );
+        assert!(
+            request_line.contains("my%20repo"),
+            "repo_name with a space must be percent-encoded, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my org"),
+            "raw unencoded repo_owner must not appear in the request path, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my repo"),
+            "raw unencoded repo_name must not appear in the request path, got: {}",
+            request_line
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // S4: URL scheme validation for custom hosts
+    // ---------------------------------------------------------------------------
+
+    /// A minimal valid base config for Update; sets all required fields except host.
+    fn update_base() -> super::UpdateBuilder {
+        let mut b = Update::configure();
+        b.repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0");
+        b
+    }
+
+    fn build_update_err(b: &mut super::UpdateBuilder) -> crate::errors::Error {
+        match b.build() {
+            Ok(_) => panic!("expected build() to fail but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn update_http_host_rejected_by_default() {
+        // A plain http:// host must be rejected at build() with Error::Config when
+        // allow_insecure_http has not been opted in.
+        let err = build_update_err(update_base().host("http://gitea.example.com"));
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "expected Error::Config, got {:?}",
+            err
+        );
+        if let crate::errors::Error::Config(msg) = err {
+            assert!(
+                msg.contains("allow_insecure_http"),
+                "error must mention allow_insecure_http, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_http_host_allowed_after_opt_in() {
+        // After .allow_insecure_http(true) a plain http:// host must be accepted at build().
+        update_base()
+            .host("http://gitea.example.com")
+            .allow_insecure_http(true)
+            .build()
+            .map(|_| ())
+            .expect("http host must be accepted after allow_insecure_http(true)");
+    }
+
+    #[test]
+    fn update_https_host_always_allowed() {
+        // An https:// host must always be accepted regardless of allow_insecure_http.
+        update_base()
+            .host("https://gitea.example.com")
+            .build()
+            .map(|_| ())
+            .expect("https host must always be accepted");
+    }
+
+    #[test]
+    fn update_no_host_errors_with_missing_field_not_config() {
+        // When no host is set at all the error is MissingField, not a scheme error.
+        let err = build_update_err(&mut update_base());
+        assert!(
+            matches!(err, crate::errors::Error::MissingField { field: "host" }),
+            "no host must error with MissingField, not a scheme error, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn release_list_http_host_rejected_by_default() {
+        let res = super::ReleaseList::configure()
+            .host("http://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http host on ReleaseList must be rejected by default, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn release_list_http_host_allowed_after_opt_in() {
+        super::ReleaseList::configure()
+            .host("http://gitea.example.com")
+            .allow_insecure_http(true)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("http host on ReleaseList must be accepted after opt-in");
+    }
+
+    #[test]
+    fn release_list_https_host_always_allowed() {
+        super::ReleaseList::configure()
+            .host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("https host on ReleaseList must always be accepted");
     }
 }

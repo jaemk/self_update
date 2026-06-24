@@ -255,6 +255,9 @@ macro_rules! impl_update_config_accessors {
         fn auth_token(&self) -> Option<&str> {
             self.common.auth_token.as_deref()
         }
+        fn allow_insecure_http(&self) -> bool {
+            self.common.allow_insecure_http
+        }
         }
     };
 }
@@ -517,6 +520,28 @@ macro_rules! impl_common_builder_setters {
             keys: impl Into<Vec<crate::VerifyingKey>>,
         ) -> &mut Self {
             self.common.verifying_keys = keys.into();
+            self
+        }
+
+        /// Allow plain `http://` for custom endpoints and the artifact download URL (default:
+        /// `false`, https-only).
+        ///
+        /// When `true`, two protections are relaxed in one opt-in:
+        ///
+        /// 1. **Endpoint validation** — a custom `url(...)` / `host(...)` / `endpoint(...)` whose
+        ///    scheme is `http` is accepted at `build()` time instead of returning
+        ///    `Error::Config`. (The default endpoint for git backends, `https://api.github.com` etc.,
+        ///    is unaffected and never needs this.)
+        /// 2. **Artifact download** — the [`Download`](crate::Download) built internally by the
+        ///    update pipeline is told to accept the artifact URL even when its scheme is `http`.
+        ///    Without this, a release asset served over plain HTTP (e.g. a loopback test stub) is
+        ///    rejected at download time regardless of the endpoint setting.
+        ///
+        /// Set this to `true` when testing against a local HTTP stub or another environment where
+        /// TLS is genuinely unavailable. Leave it `false` (the default) in production to prevent
+        /// accidental credential exposure over cleartext.
+        pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self {
+            self.common.allow_insecure_http = allow;
             self
         }
     };

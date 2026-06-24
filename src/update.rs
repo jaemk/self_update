@@ -279,6 +279,7 @@ impl ReleaseBuilder {
 /// [`all`](Self::all) answer "is there anything newer?" / "what is it?" without downloading or
 /// installing anything.
 #[derive(Debug, Clone)]
+#[must_use = "query `.is_update_available()` or `.latest()` to use the fetched release list"]
 #[non_exhaustive]
 pub struct Releases {
     releases: Vec<Release>,
@@ -649,6 +650,14 @@ pub trait UpdateConfig: sealed::Sealed {
     /// Authorisation token for communicating with backend
     fn auth_token(&self) -> Option<&str>;
 
+    /// Whether plain `http://` is allowed for custom endpoints and the artifact download URL.
+    ///
+    /// Set via `.allow_insecure_http(true)` on the builder. When `true`, the update pipeline
+    /// forwards this to the [`Download`](crate::Download) built by `build_download` so the artifact
+    /// fetch over a plain-http stub succeeds. Without it, the default `http_allowed = false` on
+    /// `Download` rejects any non-https download URL.
+    fn allow_insecure_http(&self) -> bool;
+
     /// Construct a header with an authorisation entry if an auth token is provided.
     ///
     /// The trait default is a no-op (empty header map): the authorization scheme now lives in the
@@ -980,23 +989,25 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
         u.progress_template(),
         u.progress_chars(),
     ));
+    // Forward the unified flag so plain-http artifact URLs are accepted when the user opted in.
+    download.allow_insecure_http(u.allow_insecure_http());
     Ok(download)
 }
 
 /// The owned, `'static` fields the blocking finish tail needs, copied out of the `&U` accessors so
 /// the tail can run inside [`tokio::task::spawn_blocking`] without borrowing the updater.
-struct FinishCtx {
-    release: Release,
-    bin_install_path: std::path::PathBuf,
-    target: String,
-    bin_name: String,
-    bin_path_in_archive: String,
-    show_output: bool,
-    verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
+pub(crate) struct FinishCtx {
+    pub(crate) release: Release,
+    pub(crate) bin_install_path: std::path::PathBuf,
+    pub(crate) target: String,
+    pub(crate) bin_name: String,
+    pub(crate) bin_path_in_archive: String,
+    pub(crate) show_output: bool,
+    pub(crate) verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
     #[cfg(feature = "checksums")]
-    verify_checksum: Option<crate::Checksum>,
+    pub(crate) verify_checksum: Option<crate::Checksum>,
     #[cfg(feature = "signatures")]
-    verify_keys: Vec<crate::VerifyingKey>,
+    pub(crate) verify_keys: Vec<crate::VerifyingKey>,
 }
 
 impl FinishCtx {
@@ -1032,6 +1043,40 @@ fn finish_update<U: UpdateConfig + UpdateInternals + ?Sized>(
     finish_update_owned(ctx, tmp_archive_dir, tmp_archive_path)
 }
 
+/// Returns `true` when neither a checksum nor any verifying keys are configured — i.e. the
+/// update would install with no artifact authentication at all. Used by `finish_update_owned`
+/// to emit a `log::warn!` on the fully-unverified path, and exposed as a testable predicate.
+///
+/// When neither the `checksums` nor `signatures` feature is enabled, `ctx` is unread (the
+/// function is a const `true`: nothing can be configured to verify), so silence the lint there.
+#[cfg_attr(
+    not(any(feature = "checksums", feature = "signatures")),
+    allow(unused_variables)
+)]
+pub(crate) fn ctx_is_unverified(ctx: &FinishCtx) -> bool {
+    let has_checksum = {
+        #[cfg(feature = "checksums")]
+        {
+            ctx.verify_checksum.is_some()
+        }
+        #[cfg(not(feature = "checksums"))]
+        {
+            false
+        }
+    };
+    let has_keys = {
+        #[cfg(feature = "signatures")]
+        {
+            !ctx.verify_keys.is_empty()
+        }
+        #[cfg(not(feature = "signatures"))]
+        {
+            false
+        }
+    };
+    !has_checksum && !has_keys
+}
+
 /// The blocking finish tail over **owned** fields: verify (checksum/signature), extract, install.
 /// Takes the [`tempfile::TempDir`] by value (moved in, dropped at the end) and the owned `ctx`, so
 /// it can be run directly inside [`tokio::task::spawn_blocking`] on the async path. Returns the
@@ -1042,6 +1087,18 @@ fn finish_update_owned(
     tmp_archive_path: &std::path::Path,
 ) -> Result<ReleaseStatus> {
     let show_output = ctx.show_output;
+
+    // S3: warn when the update is about to install with no verification whatsoever. This is a
+    // fail-open guard (not an error), so deployments that intentionally skip verification still
+    // work, but server-side logs surface misconfigured ones.
+    if ctx_is_unverified(&ctx) {
+        log::warn!(
+            "self_update: installing update for `{}` without any checksum or signature \
+             verification — the downloaded artifact is unauthenticated. Configure \
+             `verify_checksum` or `verifying_keys` for production use.",
+            ctx.bin_name
+        );
+    }
 
     #[cfg(feature = "checksums")]
     if let Some(checksum) = ctx.verify_checksum.as_ref() {
@@ -2151,7 +2208,8 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut download = super::build_download(&*upd, &asset).unwrap();
+        download.allow_insecure_http(true); // test server is HTTP
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         assert_eq!(out, b"payload", "the download streamed the stub body");
@@ -2180,7 +2238,8 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut download = super::build_download(&*upd, &asset).unwrap();
+        download.allow_insecure_http(true); // test server is HTTP
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         let lines = captured.lock().unwrap().clone();
@@ -2206,7 +2265,8 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut download = super::build_download(&*upd, &asset).unwrap();
+        download.allow_insecure_http(true); // test server is HTTP
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         let lines = captured.lock().unwrap().clone();
@@ -2417,6 +2477,54 @@ mod tests {
         assert_eq!(
             out, b"PARTIAL",
             "the destination must hold only the single pre-failure prefix, never a duplicated body"
+        );
+    }
+
+    // S3: `ctx_is_unverified` returns true when neither a checksum nor any signing keys are
+    // configured on a `FinishCtx`, and false when at least one is set.
+    #[test]
+    fn ctx_is_unverified_true_when_nothing_configured() {
+        let release = rel("1.0.0");
+        let ctx = super::FinishCtx {
+            release,
+            bin_install_path: std::path::PathBuf::from("/tmp/app"),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            bin_name: "app".to_string(),
+            bin_path_in_archive: "app".to_string(),
+            show_output: false,
+            verify_callback: None,
+            #[cfg(feature = "checksums")]
+            verify_checksum: None,
+            #[cfg(feature = "signatures")]
+            verify_keys: vec![],
+        };
+        assert!(
+            super::ctx_is_unverified(&ctx),
+            "ctx with no checksum and no keys must be considered unverified"
+        );
+    }
+
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn ctx_is_unverified_false_when_checksum_configured() {
+        let release = rel("1.0.0");
+        let ctx = super::FinishCtx {
+            release,
+            bin_install_path: std::path::PathBuf::from("/tmp/app"),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            bin_name: "app".to_string(),
+            bin_path_in_archive: "app".to_string(),
+            show_output: false,
+            verify_callback: None,
+            verify_checksum: Some(crate::Checksum::Sha256(
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string(),
+            )),
+            #[cfg(feature = "signatures")]
+            verify_keys: vec![],
+        };
+        assert!(
+            !super::ctx_is_unverified(&ctx),
+            "ctx with a checksum must not be considered unverified"
         );
     }
 }

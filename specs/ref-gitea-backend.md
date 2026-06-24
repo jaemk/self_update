@@ -45,19 +45,36 @@ Both delegate to the private `build_update()` helper (see below).
 - Fetch-by-tag appends `/tags/{tag}` to that base, with the tag percent-encoded via
   `urlencoding::encode(ver)`: `<base>/tags/{encoded_tag}`
   (`gitea.rs:376` sync, `gitea.rs:484` async).
-- The custom host is set with `url(impl Into<String>)` on both builders. The setter
-  carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped); it was
-  renamed from `instance_url` / `with_host` in earlier work, but no alias remains.
-  The setter's parameter is named `url` (matching the github/gitlab `url(url)` signature;
-  behavior unchanged: it still writes `self.host`). Its doc states the instance host
-  only (scheme + host, no trailing slash and no `/api/v1`): the crate appends the
-  `/api/v1/...` path itself (`gitea.rs:71-77`, `gitea.rs:218-224`). Gitea has no
-  canonical public host, so `url` is required: `build()` / `build_update()` `bail!`
-  with `Error::Config` when it is unset, with a message that names the setter
-  ("`url` required (gitea has no default host; call `.url(...)`)")
-  (`gitea.rs:127-130`, `gitea.rs:250-253`). The string setters (`url`, `repo_owner`,
-  `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's common
-  setters) take `impl Into<String>`.
+- The custom host is set with `host(impl Into<String>)` on both builders. The setter
+  carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped). It is named
+  `host` (not `url`) to signal that only the scheme + hostname is accepted, not a full
+  API URL (GitHub's `url(...)` takes a full API base; these are intentionally distinct).
+  Its doc states the instance host only (scheme + host, no trailing slash and no `/api/v1`):
+  the crate appends the `/api/v1/...` path itself (`gitea.rs:71-77`, `gitea.rs:218-224`).
+  Gitea has no canonical public host, so `host` is required: `build()` / `build_update()`
+  bail with `Error::Config` when it is unset, with a message that names the setter
+  (`MissingField { field: "host" }`, message: "`host` required (gitea has no default host;
+  call `.host(...)`)") (`gitea.rs:127-130`, `gitea.rs:250-253`). The string setters
+  (`host`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`, and the `Update`
+  builder's common setters) take `impl Into<String>`.
+
+### URL scheme validation (`allow_insecure_http`)
+
+When `host(...)` is set, both `ReleaseListBuilder::build()` and `UpdateBuilder::build_update()`
+validate the scheme of the supplied host via `backends::common::validate_url_scheme`. An
+`https://` host is always accepted. An `http://` host is rejected with `Error::Config` containing
+the text `allow_insecure_http` unless `allow_insecure_http(true)` has been called on the builder.
+This prevents accidental credential leakage over cleartext connections.
+
+Because `host` is required (no default), the scheme check runs for every successful build. When
+`host` is absent the existing `MissingField` error fires first; a scheme error only fires when a
+host is present but uses `http://`.
+
+Both builders expose:
+```rust
+pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self
+```
+placed immediately after the `host(...)` setter.
 - Unlike GitHub, Gitea has no dedicated `/releases/latest` endpoint, so "latest" is
   derived from the list endpoint (see ordering below) (`gitea.rs:340-343`).
 
@@ -111,8 +128,8 @@ Both delegate to the private `build_update()` helper (see below).
 ### Errors
 
 - Missing/invalid host, owner, or name at build time -> `Error::Config`, with a
-  message that names the missing setter (e.g. "`url` required (gitea has no default
-  host; call `.url(...)`)") (`gitea.rs:127-146`, `gitea.rs:250-269`).
+  message that names the missing setter (e.g. "`host` required (gitea has no default
+  host; call `.host(...)`)") (`gitea.rs:127-146`, `gitea.rs:250-269`).
 - A deferred `request_header` conversion failure surfaces from `build()` via
   `request.check()` / `CommonBuilderConfig::build` as `Error::Config`
   (`gitea.rs:122`, `gitea.rs:271`).
@@ -135,13 +152,13 @@ validate identically and cannot drift.
 
 - `gitea::ReleaseList`, `gitea::ReleaseListBuilder`
   - `ReleaseList::configure() -> ReleaseListBuilder`
-  - `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`,
+  - `ReleaseListBuilder`: `host`, `repo_owner`, `repo_name`, `filter_target`,
     `auth_token`, the `request_config_setters!` setters, `build`
   - `ReleaseList::fetch() -> Result<Releases>` (filters by `target` when set; a bare listing whose
     `current_version()` is `None`, recover the `Vec<Release>` with `into_vec()`)
 - `gitea::Update` (`#[non_exhaustive]`), `gitea::UpdateBuilder`
   - `Update::configure() -> UpdateBuilder`
-  - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, common setters,
+  - `UpdateBuilder`: `new`, `host`, `repo_owner`, `repo_name`, common setters,
     `build`, `build_async` (feature `async`)
   - `Update` implements `ReleaseUpdate` (sync) and the public sealed `AsyncReleaseUpdate`
     (feature `async`)
@@ -155,35 +172,46 @@ fields do not break downstream code; it is constructed only through the builder.
 
 - Tag is percent-encoded in the fetch-by-tag route via `urlencoding::encode`
   (`gitea.rs:376`, `gitea.rs:484`).
-- Base route shape is exactly `<host>/api/v1/repos/<owner>/<repo>/releases`, shared by
-  sync, async, and `ReleaseList` paths via `releases_url()` (`gitea.rs:314-319`).
+- Base route shape is exactly `<host>/api/v1/repos/<enc(owner)>/<enc(repo)>/releases`,
+  shared by sync, async, and `ReleaseList` paths via `releases_url()` (`gitea.rs:314-319`).
+  Both `repo_owner` and `repo_name` pass through `urlencoding::encode`.
 - "Latest" is `releases[0]` of the first page, depending on the endpoint's newest-first
   ordering; the latest path does not paginate (`gitea.rs:343`, `gitea.rs:462`).
 - Newer-release filtering is strict (`bump_is_greater`), runs after pagination, and
   preserves source order.
-- `url` is required (no default host); missing it is `Error::Config`.
+- `host` is required (no default host); missing it is `Error::MissingField { field: "host" }`.
+  The setter is named `host`, not `url`.
 - Auth uses the `token <token>` scheme with a fixed `rust-reqwest/self-update`
   User-Agent.
 - `version` has a single leading `v` stripped; `name` defaults to the tag.
+- A `host(...)` value with an `http://` scheme is rejected at `build()` with `Error::Config`
+  unless `allow_insecure_http(true)` is set. Because `host` is required, this check fires on
+  every build where a host is present; a missing host surfaces `MissingField` before the scheme
+  check runs.
 
 ## Tests
 
-In `src/backends/gitea.rs` `mod tests` (`gitea.rs:517-1186`), backed by a loopback
-`TcpListener` stub (no external network):
+In `src/backends/gitea.rs` `mod tests`, backed by a loopback `TcpListener` stub (no external
+network):
 
 - Sync `ReleaseUpdate` fetch: one-element latest wrap, strictly-newer filtering,
-  no-update-when-up-to-date, and single-vs-list agreement
-  (`gitea.rs:628-754`).
-- Builder shape: `url`/`filter_target` exist on `ReleaseListBuilder`; `ReleaseList`
-  and `Update` builds require `url`, `repo_owner`, `repo_name`; invalid header surfaces
-  as `Error::Config`; `releases_url` shape; identifier and `bin_name` wiring
-  (`gitea.rs:756-976`).
-- `api_headers` override uses the Gitea User-Agent and `token` scheme
-  (`gitea.rs:779-809`).
+  no-update-when-up-to-date, and single-vs-list agreement.
+- Builder shape: `host`/`filter_target` exist on `ReleaseListBuilder`
+  (`host_and_filter_target_setters_exist_on_release_list_builder`); `ReleaseList` and `Update`
+  builds require `host` (`release_list_build_requires_host`, `build_requires_host`), asserting
+  `Error::MissingField { field: "host" }`; builds also require `repo_owner`, `repo_name`;
+  invalid header surfaces as `Error::Config`; `releases_url` shape; identifier and `bin_name`
+  wiring.
+- `host_setter_sets_host_and_final_url_is_correct`: verifies that `host(...)` overrides the
+  default and the built URL contains no double `/api/...` segment.
+- `repo_owner_and_name_are_percent_encoded_in_request_url`: captures the raw request line and
+  asserts that reserved characters in both `repo_owner` and `repo_name` are percent-encoded on
+  the wire.
+- `api_headers` override uses the Gitea User-Agent and `token` scheme.
 - Async (feature `async`): latest parse, `Link` pagination across two pages,
   `/tags/{ver}` single-object parse, missing-`tag_name` error, newer-only filtering,
   empty-when-up-to-date, accumulate-then-filter across pages, empty-array error,
-  non-array-payload error (`gitea.rs:978-1185`).
+  non-array-payload error.
 
 ## Related
 

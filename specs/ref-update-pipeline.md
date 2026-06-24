@@ -55,12 +55,27 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 
 `resolve_and_confirm` prints the release-status block and (unless `no_confirm`) prompts
 (see below). Then a `tempfile::TempDir` is created and the asset is downloaded to
-`<tmpdir>/<asset.name>` (`update.rs:608-613`). `build_download` (`update.rs:741`) builds the
-`Download` from the asset URL, applies auth/`api_headers`, sets `ACCEPT:
-application/octet-stream`, merges the user's `request_headers()` *after* (so a same-named
-user header overrides), forwards the injected HTTP client, per-request timeout, progress
-callback, and progress style. The download is driven by `download_to` (sync, `lib.rs:1305`)
-or `download_to_async` (`lib.rs:1375`). The download is never retried.
+`<tmpdir>/<asset.name>`. `build_download` builds the `Download` from the asset URL, applies
+auth/`api_headers`, sets `ACCEPT: application/octet-stream`, merges the user's
+`request_headers()` after (so a same-named user header overrides), forwards the injected HTTP
+client, per-request timeout, retry budget, progress callback, progress style, and the unified
+`allow_insecure_http` flag (`u.allow_insecure_http()` -> `download.allow_insecure_http(...)`).
+The download is driven by `download_to` (sync) or `download_to_async` (async).
+
+`Download` enforces a HTTPS-by-default policy: `download_to` and `download_to_async` both
+reject any URL whose scheme is `http://` (case-insensitive) unless `.allow_insecure_http(true)`
+was called. The check fires at call time, not at construction time. `from_url` sets
+`http_allowed = false`; `.allow_insecure_http(true)` sets it to true. An `http://` URL without
+the opt-in returns `Error::Config`. `build_download` forwards the unified builder flag so a
+single `.allow_insecure_http(true)` on the updater builder covers both endpoint validation at
+`build()` time and the artifact download; callers no longer need to call it on the `Download`
+directly.
+
+`Download::request_header` is infallible (`-> &mut Self`). If a header name or value cannot
+be converted, the error is deferred: the first conversion failure is stored in
+`Download::header_error` and `download_to` / `download_to_async` surface it as
+`Error::InvalidHeader` before any network activity. Subsequent calls with valid headers still
+succeed; subsequent calls with invalid headers are ignored (first error wins).
 
 ### Extract
 
@@ -78,13 +93,31 @@ copied (gz-decoded if `compression-tar-gz`), `Tar` is unpacked via the `tar` cra
 the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
 (`update.rs:803`).
 
+**ZIP path traversal (zip-slip) guard.** For every zip entry, `extract_into` and
+`extract_file` call `ZipFile::enclosed_name()` before joining the entry path to `into_dir`.
+`enclosed_name()` returns `None` for any entry whose name contains `..` components, is
+absolute, or would otherwise escape the destination directory. A `None` result aborts
+extraction with `Error::Internal` naming the offending entry. The `zip` crate's `name()` is
+never joined to a filesystem path directly.
+
+**Decompression-bomb guard.** The constant `MAX_EXTRACT_BYTES` (`lib.rs`, 512 MiB) caps total
+extracted bytes. For `Plain` and `Gz` entries the reader is wrapped with
+`.take(MAX_EXTRACT_BYTES + 1)` and the written byte count is checked against the limit; for
+`Zip` archives `extract_into` tracks cumulative bytes written across all entries, and
+`extract_file` caps the single entry. Exceeding the limit aborts with `Error::Io` (kind
+`InvalidData`) citing the decompression-bomb guard. The cap applies after decompression, so
+a highly compressed payload is still bounded.
+
 ### Verify ordering
 
 In `finish_update`, before any extraction or replacement:
 
-1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
+1. **Unverified-update warning.** `ctx_is_unverified(&ctx)` checks whether neither a checksum
+   nor any signing keys are configured. If so, `log::warn!` emits a message at the `warn` level
+   naming `bin_name`. This is a warn-and-continue: the update proceeds regardless.
+2. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
    on the downloaded archive; a mismatch aborts here (`update.rs:806-809`).
-2. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
+3. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
    (`update.rs:811`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
    archive file name as context; any other kind => `Error::NoSignatures(kind)`
@@ -94,8 +127,8 @@ In `finish_update`, before any extraction or replacement:
 
 Both run on the *downloaded archive bytes* and before extraction. The third hook,
 `verify_with`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
-immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_with ->
-replace.
+immediately before the swap. Ordering: warn-if-unverified -> verify_checksum -> verify_keys ->
+extract -> verify_with -> replace.
 
 ### Replace
 
@@ -163,14 +196,16 @@ via `into_version_status`.
   but never `dyn`). Bring it into scope to call the verbs.
 - `update::ReleaseStatus` (`#[non_exhaustive]`): `into_version_status`, `is_up_to_date`, `is_updated`.
 - `VersionStatus` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
-- `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
-  `progress_style`, `replace_headers`, `header`, `download_to`, `download_to_async`
-  (feature `async`), `reqwest_client`/`reqwest_async_client`/`ureq_agent` (client-gated).
-- `Extract<'a>`: `from_source`, `archive`, `extract_into`, `extract_file`.
+- `Download` (`#[must_use]`): `from_url`, `allow_insecure_http`, `show_download_progress`,
+  `timeout`, `progress_callback`, `progress_style`, `replace_headers`, `request_header`
+  (infallible, deferred error), `download_to`, `download_to_async` (feature `async`),
+  `reqwest_client`/`reqwest_async_client`/`ureq_agent` (client-gated).
+- `Extract<'a>` (`#[must_use]`): `from_source`, `archive`, `extract_into`, `extract_file`.
 - `ArchiveKind` (`#[non_exhaustive]`): `Plain(Option<Compression>)`, `Tar(...)` (feature
   `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`.
-- `Move<'a>`: `from_source`, `replace_using_temp`, `to_dest`.
+- `Move<'a>` (`#[must_use]`): `from_source`, `replace_using_temp`, `to_dest`.
 - `MoveAll<'a>` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
+- `MAX_EXTRACT_BYTES: u64` (512 MiB): the decompression-bomb cap applied to all extraction paths.
 
 Async `update_async` / `update_extended_async` are default methods on the public sealed
 `AsyncReleaseUpdate` trait, implemented by each backend's `Update` (and the custom `AsyncUpdate`)
@@ -200,6 +235,20 @@ under feature `async`; the free `update::update_extended_async` they route to is
   sync and async paths share the same owned finish tail, so verify/extract/replace behavior is
   identical (sync/async parity). `update_extended_async`'s future is `Send` (the page parsers are
   `+ Send`).
+- ZIP path traversal: any zip entry whose name contains `..` components or an absolute path
+  is rejected with `Error::Internal` before any file is written. `enclosed_name()` is used for
+  all path joins; the raw `name()` string is never joined to a filesystem path.
+- Decompression-bomb cap: total extracted bytes across all entries (zip) or per-file (plain/gz)
+  are capped at `MAX_EXTRACT_BYTES` (512 MiB). Exceeding the cap aborts with `Error::Io`
+  (kind `InvalidData`) before the extracted file is fully written.
+- HTTPS enforcement: `download_to` and `download_to_async` reject `http://` URLs unless
+  `.allow_insecure_http(true)` was called. The check fires at call time, not at construction.
+- Infallible `request_header`: a conversion failure is stored as `Download::header_error` and
+  surfaced as `Error::InvalidHeader` at `download_to` time. Valid headers inserted before or
+  after a bad call are not affected; only the first bad call's error is stored.
+- Unverified-update warning: if neither a checksum nor signing keys are configured,
+  `finish_update_owned` emits a `log::warn!` before proceeding. This is warn-and-continue; it
+  does not block the install.
 
 ## Tests
 
@@ -207,12 +256,20 @@ under feature `async`; the free `update::update_extended_async` they route to is
 sorts-out-of-order / ignores-unparseable / falls-back-to-incompatible);
 `install_binary_aborts_when_verify_rejects`, `install_binary_installs_when_verify_accepts`;
 `finish_update_rejects_a_mismatched_checksum_before_extracting`,
-`finish_update_passes_a_matching_checksum_then_proceeds` (feature-gated). `lib.rs` `mod tests`:
+`finish_update_passes_a_matching_checksum_then_proceeds` (feature-gated);
+`ctx_is_unverified_true_when_nothing_configured`,
+`ctx_is_unverified_false_when_checksum_configured` (checksums feature). `lib.rs` `mod tests`:
 `detect_*` (archive detection), `unpack_*` / `test_extract_into` / `test_extract_file`
 (extraction), `move_all_commits_every_move`, `move_all_rolls_back_on_failure`,
 `move_all_installs_fresh_destinations`, `move_all_second_commit_is_a_noop`,
 `download_invokes_progress_callback`, the `download_header_*` / `replace_headers_*` header
-tests, and `status_is_up_to_date`. Doctests in the `lib.rs` crate docs cover the manual
+tests, `download_header_invalid_name_deferred_to_download_time` /
+`download_header_invalid_value_deferred_to_download_time` (deferred-error path),
+`download_rejects_http_url_by_default`, `download_allows_http_when_opted_in`,
+`download_allows_https_by_default` (URL scheme enforcement),
+`zip_extract_into_rejects_traversal_entry`, `zip_extract_file_rejects_traversal_stored_name`
+(zip-slip regression), `zip_extract_into_rejects_oversized_content` (decompression-bomb),
+and `status_is_up_to_date`. Doctests in the `lib.rs` crate docs cover the manual
 download/extract/replace and `MoveAll` flows.
 
 ## Related

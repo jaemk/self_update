@@ -52,14 +52,33 @@ it in `api_base()` so the sync and async paths cannot drift (`github.rs:290-294`
 The `url(...)` doc comment specifies no trailing slash, e.g. `https://api.github.com`
 or `https://github.mycorp.com/api/v3` (`github.rs:90-92`, `217-219`).
 
+### URL scheme validation (`allow_insecure_http`)
+
+When a custom URL is set via `url(...)`, both `ReleaseListBuilder::build()` and
+`UpdateBuilder::build_update()` validate the scheme of the supplied URL via
+`backends::common::validate_url_scheme`. An `https://` URL is always accepted. An
+`http://` URL is rejected with `Error::Config` containing the text
+`allow_insecure_http` unless `allow_insecure_http(true)` has been called on the
+builder. This prevents accidental credential leakage over cleartext connections.
+
+The default endpoint (`https://api.github.com`) is never validated and never
+requires the opt-in -- the check runs only when `custom_url` is `Some`.
+
+Both builders expose:
+```rust
+pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self
+```
+placed immediately after the `url(...)` setter.
+
 Routes built (all GET), each via a shared URL helper (`releases_url`, `latest_url`,
-`tag_url`) so the sync and async paths cannot drift:
-- List releases: `{base}/repos/{owner}/{name}/releases`. Used by `ReleaseList::fetch`,
+`tag_url`) so the sync and async paths cannot drift. Both `repo_owner` and `repo_name` are
+passed through `urlencoding::encode` in every URL:
+- List releases: `{base}/repos/{enc(owner)}/{enc(name)}/releases`. Used by `ReleaseList::fetch`,
   `get_latest_releases`, and `get_latest_releases_async`.
-- Latest release: `{base}/repos/{owner}/{name}/releases/latest`. Used by
+- Latest release: `{base}/repos/{enc(owner)}/{enc(name)}/releases/latest`. Used by
   `get_latest_release` / `get_latest_release_async`. This route returns a single release
   object (not an array).
-- Fetch by tag: `{base}/repos/{owner}/{name}/releases/tags/{tag}` where `tag` is
+- Fetch by tag: `{base}/repos/{enc(owner)}/{enc(name)}/releases/tags/{tag}` where `tag` is
   `urlencoding::encode(ver)`. Used by `get_release_version` and `get_release_version_async`.
 
 The list routes go through `first_page_url` (`common.rs:58`), which appends
@@ -153,15 +172,17 @@ earlier work, but no alias remains.
 
 ## Invariants and regression checklist
 
-- The fetch-by-tag route percent-encodes the caller-supplied tag at every site:
-  `get_release_version` (`github.rs:357`) and `get_release_version_async`
-  (`github.rs:475`) both use `urlencoding::encode(ver)`. A tag with a URL-special
-  `+` must appear as `%2B` on the wire, never raw.
+- Both `repo_owner` and `repo_name` are percent-encoded via `urlencoding::encode` in every URL
+  (list, latest, and tag routes). A space or other reserved character in either field must appear
+  encoded on the wire, never raw.
+- The fetch-by-tag route also percent-encodes the caller-supplied tag at every site:
+  `get_release_version` and `get_release_version_async` both use `urlencoding::encode(ver)`.
+  A tag with a URL-special `+` must appear as `%2B` on the wire, never raw.
 - Releases are returned newest-first (GitHub API order), with no client-side
   re-sort in this backend.
-- Route shapes are exactly `/repos/{owner}/{name}/releases`,
-  `/repos/{owner}/{name}/releases/latest`, and
-  `/repos/{owner}/{name}/releases/tags/{tag}` against the resolved base URL.
+- Route shapes are exactly `/repos/{enc(owner)}/{enc(name)}/releases`,
+  `/repos/{enc(owner)}/{enc(name)}/releases/latest`, and
+  `/repos/{enc(owner)}/{enc(name)}/releases/tags/{enc(tag)}` against the resolved base URL.
 - Base URL defaults to `https://api.github.com`; the `Update` sync and async paths
   share `api_base()` so they cannot diverge.
 - Auth header is `Authorization: token {token}` (legacy scheme), User-Agent is
@@ -169,30 +190,34 @@ earlier work, but no alias remains.
 - List per-page size defaults to 100 and pagination follows `Link: rel="next"`,
   bounded at 100 pages.
 - `version` strips exactly one leading `v` from `tag_name`.
+- A custom `url(...)` with an `http://` scheme is rejected at `build()` with `Error::Config`
+  unless `allow_insecure_http(true)` is set. The default `https://api.github.com` is never
+  validated and never requires the opt-in.
 
 ## Tests
 
 In `src/backends/github.rs` (`#[cfg(test)] mod tests`), driven by a loopback TCP
 stub (no external network):
-- `get_release_version_percent_encodes_the_tag_in_the_url` (`github.rs:884`):
-  asserts `/releases/tags/v1.0.0%2Bbuild.5` on the wire and no raw `+`.
-- `fetch_all_releases_follows_link_pagination` (`github.rs:771`) and the async
-  `fetch_all_releases_async_follows_pagination` (`github.rs:567`): two-page accumulation.
-- `fetch_all_releases_errors_on_http_error_status` (`github.rs:803`): a non-2xx is
-  the structured status variant (`NotFound`/`Unauthorized`/`HttpStatus`).
-- `fetch_all_releases_errors_when_body_is_not_an_array` (`github.rs:827`):
-  `Error::Release`.
-- `get_latest_release_sync_wraps_single_object_into_one_element_releases`
-  (`github.rs:692`) and `..._reports_not_available_when_newest_equals_current`
-  (`github.rs:719`): the `/latest` single-object path.
-- `get_latest_releases_sync_returns_releases_and_precheck` (`github.rs:648`):
-  strictly-newer filtering and the returned `Releases` pre-check.
-- `api_headers_override_uses_github_user_agent_and_token_scheme` (`github.rs:964`):
-  User-Agent `rust/self-update` and `Authorization: token secret`.
-- `release_list_applies_its_request_config` (`github.rs:1349`): `ReleaseList`
-  transport setters (retries) flow through `fetch`.
-- Transport/builder tests: timeout, retries, custom request header on the wire,
-  injected reqwest/ureq/async clients, progress/verify/checksum/asset-matcher storage.
+- `get_release_version_percent_encodes_the_tag_in_the_url`: asserts
+  `/releases/tags/v1.0.0%2Bbuild.5` on the wire and no raw `+`.
+- `repo_owner_and_name_are_percent_encoded_in_request_url`: captures the raw request line and
+  asserts that a space in `repo_owner` appears as `%20` and a space in `repo_name` appears as
+  `%20` on the wire, with no literal spaces in the URL path.
+- `fetch_all_releases_follows_link_pagination` and the async
+  `fetch_all_releases_async_follows_pagination`: two-page accumulation.
+- `fetch_all_releases_errors_on_http_error_status`: a non-2xx is the structured status variant
+  (`NotFound`/`Unauthorized`/`HttpStatus`).
+- `fetch_all_releases_errors_when_body_is_not_an_array`: `Error::Release`.
+- `get_latest_release_sync_wraps_single_object_into_one_element_releases` and
+  `..._reports_not_available_when_newest_equals_current`: the `/latest` single-object path.
+- `get_latest_releases_sync_returns_releases_and_precheck`: strictly-newer filtering and the
+  returned `Releases` pre-check.
+- `api_headers_override_uses_github_user_agent_and_token_scheme`: User-Agent `rust/self-update`
+  and `Authorization: token secret`.
+- `release_list_applies_its_request_config`: `ReleaseList` transport setters (retries) flow
+  through `fetch`.
+- Transport/builder tests: timeout, retries, custom request header on the wire, injected
+  reqwest/ureq/async clients, progress/verify/checksum/asset-matcher storage.
 
 ## Related
 

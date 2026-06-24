@@ -139,6 +139,14 @@ use crate::update::{Release, ReleaseSource, ReleaseUpdate, Releases};
 /// likewise apply to the download but not to your source's requests. An injected client
 /// (`reqwest_client`, `reqwest_async_client`, or `ureq_agent`) is also honored for the download
 /// — `build_download` forwards the override to the crate-controlled file transfer.
+///
+/// # Async
+///
+/// This builder is **sync-only**: it has a `build()` method that returns `Box<dyn ReleaseUpdate>`,
+/// but no `build_async()`. For the async API, use [`AsyncUpdate::configure()`] which returns
+/// [`AsyncUpdateBuilder`] — a separate, generic builder that calls `build_async()` and works with
+/// [`AsyncReleaseSource`](crate::AsyncReleaseSource). Unlike the other git backends, the custom
+/// backend exposes two distinct builder types for the sync and async paths.
 #[must_use]
 #[derive(Clone, Default)]
 pub struct UpdateBuilder {
@@ -697,6 +705,189 @@ mod tests {
             vec!["app-1.4.0.bin".to_string()],
             "the sync orchestrator must select the newest compatible release (1.4.0)"
         );
+    }
+
+    // --- S4: unified allow_insecure_http end-to-end regression tests ---------
+    //
+    // These guard the exact gap that was fixed: a single `.allow_insecure_http(true)` call on the
+    // builder must cover BOTH the endpoint validation at `build()` time AND the artifact download
+    // built by `build_download` inside the update pipeline. Before the fix the flag was not
+    // forwarded to `Download`, so an http loopback stub was accepted by `build()` but then
+    // rejected at download time.
+
+    /// Build a minimal tar.gz in memory containing a single file named `app`.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    fn make_app_tar_gz(payload: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("app").unwrap();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append(&header, payload).unwrap();
+        let tar_bytes = tar.into_inner().unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar_bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Serve a single HTTP response (status 200, body `body_bytes`) once on a loopback port and
+    /// return the base URL (`http://127.0.0.1:<port>`).
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    fn http_once(body_bytes: Vec<u8>) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_bytes.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(&body_bytes);
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    /// Sync path: the unified `allow_insecure_http(true)` on the builder must let a plain-http
+    /// artifact download succeed end-to-end. This is the regression test for the gap where the
+    /// flag was forwarded to endpoint validation but NOT to the `Download` built by `build_download`.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn allow_insecure_http_propagates_to_artifact_download_sync() {
+        let payload = b"sync-installed-payload";
+        let archive = make_app_tar_gz(payload);
+        let base = http_once(archive);
+
+        struct ServingSource {
+            url: String,
+        }
+        impl ReleaseSource for ServingSource {
+            fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                Release::builder()
+                    .version("2.0.0")
+                    .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                    .build()
+            }
+            fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                Ok(vec![self.get_latest_release()?])
+            }
+            fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+                Release::builder()
+                    .version(ver)
+                    .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                    .build()
+            }
+        }
+
+        let install_dir = tempfile::tempdir().unwrap();
+        let install_path = install_dir.path().join("installed-app");
+
+        // The critical assertion: `.allow_insecure_http(true)` on the BUILDER must be enough.
+        // Before the fix, `build_download` did not forward the flag, so this would fail with
+        // Error::Config("non-HTTPS URL ... is not allowed; call .allow_insecure_http(true)...").
+        let result = Update::configure()
+            .source(ServingSource {
+                url: format!("{base}/app.tar.gz"),
+            })
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .bin_install_path(&install_path)
+            .no_confirm(true)
+            .show_output(false)
+            .allow_insecure_http(true)
+            .asset_matcher(|assets| assets.first().cloned())
+            .build()
+            .unwrap()
+            .update_extended();
+
+        let status = result.expect(
+            "sync update with allow_insecure_http(true) must complete without Error::Config",
+        );
+        assert!(
+            status.is_updated(),
+            "a newer release from a plain-http stub must install -> Updated, got {:?}",
+            status
+        );
+        assert!(
+            install_path.exists(),
+            "the binary must have been installed to {:?}",
+            install_path
+        );
+        assert_eq!(
+            std::fs::read(&install_path).unwrap(),
+            payload,
+            "the installed file must be the payload extracted from the archive"
+        );
+    }
+
+    /// Negative case: WITHOUT `allow_insecure_http(true)` the artifact download over plain http
+    /// must fail at download time with an `Error::Config` (the https-only guard on `Download`).
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn without_allow_insecure_http_artifact_download_is_rejected() {
+        // We don't even need a real server: the rejection fires before any bytes are read.
+        struct StaticSource {
+            url: String,
+        }
+        impl ReleaseSource for StaticSource {
+            fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                Release::builder()
+                    .version("2.0.0")
+                    .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                    .build()
+            }
+            fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                Ok(vec![self.get_latest_release()?])
+            }
+            fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+                Release::builder()
+                    .version(ver)
+                    .asset(ReleaseAsset::new("app.tar.gz", self.url.clone()))
+                    .build()
+            }
+        }
+
+        let install_dir = tempfile::tempdir().unwrap();
+        let install_path = install_dir.path().join("installed-app");
+
+        let err = Update::configure()
+            .source(StaticSource {
+                url: "http://127.0.0.1:9/app.tar.gz".to_string(),
+            })
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .bin_install_path(&install_path)
+            .no_confirm(true)
+            .show_output(false)
+            // allow_insecure_http NOT set (default false)
+            .asset_matcher(|assets| assets.first().cloned())
+            .build()
+            .unwrap()
+            .update_extended()
+            .expect_err(
+                "without allow_insecure_http(true) a plain-http artifact URL must be rejected",
+            );
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "expected Error::Config for rejected http download, got {:?}",
+            err
+        );
+        if let crate::errors::Error::Config(ref msg) = err {
+            assert!(
+                msg.contains("allow_insecure_http"),
+                "error must mention allow_insecure_http, got: {msg}"
+            );
+        }
     }
 
     #[cfg(feature = "async")]
@@ -1312,6 +1503,9 @@ mod tests {
                 .bin_install_path(&install_path)
                 .no_confirm(true)
                 .show_output(false)
+                // The loopback stub serves over plain http; opt in so the artifact download is
+                // not rejected by the `http_allowed = false` default on `Download`.
+                .allow_insecure_http(true)
                 // Pick the single served asset directly, sidestepping target-name matching.
                 .asset_matcher(|assets| assets.first().cloned())
                 .build_async()

@@ -112,7 +112,9 @@ builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `cu
 - `trait AsyncReleaseSource: Send + Sync` (feature `async`), same three methods returning
   `impl Future<Output = ...> + Send`.
 - `backends::custom::Update` (`#[non_exhaustive]`) and `UpdateBuilder` with `configure()`,
-  `source()`, `build()`.
+  `source()`, `build()`. Note: `UpdateBuilder` is sync-only; it has `build()` but no
+  `build_async()`. For async, use `AsyncUpdate::configure()` which returns an
+  `AsyncUpdateBuilder<S>` with `build_async()`.
 - `backends::custom::AsyncUpdate<S>` (`#[non_exhaustive]`, feature `async`) and
   `AsyncUpdateBuilder<S>` with `configure()`, `source()`, `build_async()`.
 - `backends::custom::Blocking<S>` (feature `async`) with `new`, `into_inner`, `as_inner`.

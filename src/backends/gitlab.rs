@@ -84,11 +84,16 @@ impl ReleaseDto {
 #[must_use]
 pub struct ReleaseListBuilder {
     host: String,
+    /// `true` when `host` was set explicitly via [`host`](Self::host) (not the default).
+    /// Only explicitly-set hosts are subject to scheme validation.
+    host_is_custom: bool,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
     request: RequestConfig,
+    /// Allow plain `http://` custom hosts (see [`allow_insecure_http`](Self::allow_insecure_http)).
+    allow_insecure_http: bool,
 }
 impl ReleaseListBuilder {
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
@@ -96,8 +101,24 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
-        self.host = url.into();
+    ///
+    /// Named `host` (not `url`) to make it clear that only the scheme + hostname is accepted
+    /// here, not a full API URL. GitHub's `url(...)` takes a full API base; this setter is
+    /// distinct to avoid confusion.
+    pub fn host(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = host.into();
+        self.host_is_custom = true;
+        self
+    }
+
+    /// Allow plain `http://` custom hosts (default: `false`, https-only).
+    ///
+    /// By default the builder rejects a custom `host(...)` whose scheme is `http` to prevent
+    /// accidental credential (bearer-token) exposure over cleartext. Set this to `true` when
+    /// testing against a local HTTP stub or another environment where TLS is genuinely unavailable.
+    /// The default host (`https://gitlab.com`) is unaffected.
+    pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self {
+        self.allow_insecure_http = allow;
         self
     }
 
@@ -141,6 +162,9 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
+        if self.host_is_custom {
+            crate::backends::common::validate_url_scheme(&self.host, self.allow_insecure_http)?;
+        }
         Ok(ReleaseList {
             host: self.host.clone(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -185,11 +209,13 @@ impl ReleaseList {
     pub fn configure() -> ReleaseListBuilder {
         ReleaseListBuilder {
             host: String::from("https://gitlab.com"),
+            host_is_custom: false,
             repo_owner: None,
             repo_name: None,
             target: None,
             auth_token: None,
             request: RequestConfig::default(),
+            allow_insecure_http: false,
         }
     }
 
@@ -204,7 +230,7 @@ impl ReleaseList {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases = run_paginated(
@@ -230,6 +256,9 @@ impl ReleaseList {
 #[must_use]
 pub struct UpdateBuilder {
     host: String,
+    /// `true` when `host` was set explicitly via [`host`](Self::host) (not the default).
+    /// Only explicitly-set hosts are subject to scheme validation.
+    host_is_custom: bool,
     repo_owner: Option<String>,
     repo_name: Option<String>,
     common: CommonBuilderConfig,
@@ -246,8 +275,13 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
-        self.host = url.into();
+    ///
+    /// Named `host` (not `url`) to make it clear that only the scheme + hostname is accepted
+    /// here, not a full API URL. GitHub's `url(...)` takes a full API base; this setter is
+    /// distinct to avoid confusion.
+    pub fn host(&mut self, host: impl Into<String>) -> &mut Self {
+        self.host = host.into();
+        self.host_is_custom = true;
         self
     }
 
@@ -266,6 +300,12 @@ impl UpdateBuilder {
     impl_common_builder_setters!();
 
     fn build_update(&self) -> Result<Update> {
+        if self.host_is_custom {
+            crate::backends::common::validate_url_scheme(
+                &self.host,
+                self.common.allow_insecure_http,
+            )?;
+        }
         Ok(Update {
             host: self.host.to_owned(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -329,7 +369,7 @@ impl Update {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         )
     }
 }
@@ -392,6 +432,7 @@ impl Default for UpdateBuilder {
     fn default() -> Self {
         Self {
             host: String::from("https://gitlab.com"),
+            host_is_custom: false,
             repo_owner: None,
             repo_name: None,
             common: CommonBuilderConfig::default(),
@@ -695,7 +736,8 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitlab_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -708,7 +750,8 @@ mod tests {
     /// Available under both sync transports (reqwest blocking and ureq).
     fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
         Update::configure()
-            .url(base)
+            .host(base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1095,7 +1138,8 @@ mod tests {
         });
 
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("group/subgroup")
             .repo_name("r")
             .bin_name("app")
@@ -1284,11 +1328,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn url_and_filter_target_setters_exist_on_release_list_builder() {
-        // The renamed `url` / `filter_target` setters must exist on the gitlab
+    fn host_and_filter_target_setters_exist_on_release_list_builder() {
+        // The `host` / `filter_target` setters must exist on the gitlab
         // `ReleaseListBuilder` and the builder must still build.
         let _list = super::ReleaseList::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1297,10 +1341,10 @@ mod tests {
     }
 
     #[test]
-    fn url_setter_exists_on_update_builder() {
-        // The renamed `url` setter must exist on the gitlab `UpdateBuilder`.
+    fn host_setter_exists_on_update_builder() {
+        // The renamed `host` setter must exist on the gitlab `UpdateBuilder`.
         let _upd = Update::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1715,7 +1759,8 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1785,7 +1830,8 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1870,5 +1916,215 @@ mod tests {
                 other
             ),
         }
+    }
+
+    // A3 regression: `host(...)` is the correct setter name on the gitlab builders (not `url`).
+    // Compiling with the old `url(...)` name would be a compile error, proving the rename.
+    #[test]
+    fn host_setter_sets_host_and_final_url_is_correct() {
+        // Build an Update with a custom host and confirm releases_url() contains it verbatim
+        // without double `/api/v4`. The URL helper is private; confirm indirectly via the request
+        // line reaching the loopback stub.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let upd = Update::configure()
+            .host(&base)
+            .allow_insecure_http(true)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let _ = upd.get_latest_release().unwrap();
+        let request_line = captured
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|r| r.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            request_line.contains("/api/v4/"),
+            "the host setter must result in `/api/v4/` in the request path; got: {}",
+            request_line
+        );
+        // Make sure /api/v4/ is not duplicated.
+        let count = request_line.matches("/api/v4/").count();
+        assert_eq!(
+            count, 1,
+            "exactly one `/api/v4/` in the request line (no double-append); got: {}",
+            request_line
+        );
+    }
+
+    // LOW regression: both repo_owner AND repo_name must be percent-encoded in the GitLab URL.
+    // Without the fix for repo_name the raw reserved char reaches the path.
+    #[test]
+    fn repo_owner_and_name_are_percent_encoded_in_request_url() {
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        // repo_name contains a space (reserved); repo_owner already encoded — now repo_name must be too.
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .allow_insecure_http(true)
+            .repo_owner("my org")
+            .repo_name("my repo")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        assert_eq!(releases.len(), 1);
+        let request_line = captured
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|r| r.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            request_line.contains("my%20org"),
+            "repo_owner with a space must be percent-encoded, got: {}",
+            request_line
+        );
+        assert!(
+            request_line.contains("my%20repo"),
+            "repo_name with a space must be percent-encoded, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my org"),
+            "raw unencoded repo_owner must not appear in the request path, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my repo"),
+            "raw unencoded repo_name must not appear in the request path, got: {}",
+            request_line
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // S4: URL scheme validation for custom hosts
+    // ---------------------------------------------------------------------------
+
+    /// A minimal valid base config for Update; sets all required fields except host.
+    fn update_base() -> super::UpdateBuilder {
+        let mut b = Update::configure();
+        b.repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0");
+        b
+    }
+
+    fn build_update_err(b: &mut super::UpdateBuilder) -> crate::errors::Error {
+        match b.build() {
+            Ok(_) => panic!("expected build() to fail but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn update_http_custom_host_rejected_by_default() {
+        // A plain http:// custom host must be rejected at build() with Error::Config when
+        // allow_insecure_http has not been opted in.
+        let err = build_update_err(update_base().host("http://gitlab.example.com"));
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "expected Error::Config, got {:?}",
+            err
+        );
+        if let crate::errors::Error::Config(msg) = err {
+            assert!(
+                msg.contains("allow_insecure_http"),
+                "error must mention allow_insecure_http, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_http_custom_host_allowed_after_opt_in() {
+        // After .allow_insecure_http(true) a plain http:// host must be accepted at build().
+        update_base()
+            .host("http://gitlab.example.com")
+            .allow_insecure_http(true)
+            .build()
+            .map(|_| ())
+            .expect("http custom host must be accepted after allow_insecure_http(true)");
+    }
+
+    #[test]
+    fn update_https_custom_host_always_allowed() {
+        // An https:// custom host must always be accepted regardless of allow_insecure_http.
+        update_base()
+            .host("https://gitlab.example.com")
+            .build()
+            .map(|_| ())
+            .expect("https custom host must always be accepted");
+    }
+
+    #[test]
+    fn update_default_endpoint_needs_no_opt_in() {
+        // When no custom host is set, the default https://gitlab.com is used and must
+        // never require allow_insecure_http.
+        update_base()
+            .build()
+            .map(|_| ())
+            .expect("default endpoint must build without allow_insecure_http");
+    }
+
+    #[test]
+    fn release_list_http_custom_host_rejected_by_default() {
+        let res = super::ReleaseList::configure()
+            .host("http://gitlab.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http custom host on ReleaseList must be rejected by default, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn release_list_http_custom_host_allowed_after_opt_in() {
+        super::ReleaseList::configure()
+            .host("http://gitlab.example.com")
+            .allow_insecure_http(true)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("http custom host on ReleaseList must be accepted after opt-in");
+    }
+
+    #[test]
+    fn release_list_https_custom_host_always_allowed() {
+        super::ReleaseList::configure()
+            .host("https://gitlab.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("https custom host on ReleaseList must always be accepted");
+    }
+
+    #[test]
+    fn release_list_default_endpoint_needs_no_opt_in() {
+        // No custom host -> no validation needed; the default gitlab.com is always https.
+        super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("ReleaseList default endpoint must build without opt-in");
     }
 }

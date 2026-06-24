@@ -29,6 +29,39 @@ fn clamp_max_keys(max_keys: u16) -> u16 {
     max_keys.clamp(1, DEFAULT_MAX_KEYS)
 }
 
+/// Redact sensitive SigV4 query parameters from a URL before logging it.
+///
+/// Under `s3-auth`, presigned URLs carry `X-Amz-Signature` (the HMAC-SHA256 signing token) and
+/// `X-Amz-Credential` (the access-key ID embedded in a scope string). Logging these verbatim
+/// exposes credentials in debug logs. This helper replaces the values of `X-Amz-Signature` and
+/// `X-Amz-Credential` with `<redacted>` so the URL remains structurally readable for debugging
+/// without leaking secrets. Parameters absent from the URL are left unchanged (the function is a
+/// no-op on unsigned URLs).
+fn redact_signed_url(url: &str) -> String {
+    // Only bother parsing when the URL carries any SigV4 markers.
+    if !url.contains("X-Amz-") {
+        return url.to_owned();
+    }
+    // Split on '?' to get the base and the query separately.
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, q),
+        None => return url.to_owned(),
+    };
+    let redacted_query: String = query
+        .split('&')
+        .map(|param| {
+            if let Some((k, _v)) = param.split_once('=') {
+                if k == "X-Amz-Signature" || k == "X-Amz-Credential" {
+                    return format!("{k}=<redacted>");
+                }
+            }
+            param.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}?{redacted_query}")
+}
+
 /// Re-export the S3 [`AccessKey`] credential type at the backend module level so consumers can
 /// name it as `self_update::backends::s3::AccessKey` (e.g. to build one explicitly). Available
 /// under the `s3-auth` feature.
@@ -56,12 +89,24 @@ pub enum Endpoint {
 }
 
 impl From<&str> for Endpoint {
+    /// Produces `Endpoint::Generic` from the supplied string, treating it as a full endpoint URL.
+    ///
+    /// Any string — including one that resembles a known-variant name — is always converted into
+    /// `Generic`. There is no name-based routing: a typo such as `"s3"` or `"GCS"` becomes a
+    /// `Generic` URL, not the `S3` / `GCS` variant. Use the enum variants directly when you want a
+    /// named endpoint.
     fn from(value: &str) -> Self {
         Self::Generic(value.to_owned())
     }
 }
 
 impl From<String> for Endpoint {
+    /// Produces `Endpoint::Generic` from the supplied string, treating it as a full endpoint URL.
+    ///
+    /// Any string — including one that resembles a known-variant name — is always converted into
+    /// `Generic`. There is no name-based routing: a typo such as `"s3"` or `"GCS"` becomes a
+    /// `Generic` URL, not the `S3` / `GCS` variant. Use the enum variants directly when you want a
+    /// named endpoint.
     fn from(value: String) -> Self {
         Self::Generic(value)
     }
@@ -100,6 +145,8 @@ pub struct ReleaseListBuilder {
     #[cfg(feature = "s3-auth")]
     access_key: Option<auth::AccessKey>,
     request: RequestConfig,
+    /// Allow plain `http://` endpoints (see [`allow_insecure_http`](Self::allow_insecure_http)).
+    allow_insecure_http: bool,
 }
 
 impl ReleaseListBuilder {
@@ -172,12 +219,26 @@ impl ReleaseListBuilder {
         self
     }
 
+    /// Allow plain `http://` endpoints for `Endpoint::Generic` (default: `false`, https-only).
+    ///
+    /// By default the builder rejects a `Generic` endpoint URL whose scheme is `http` to prevent
+    /// accidental credential exposure. Set this to `true` when testing against a local HTTP stub
+    /// or another environment where TLS is genuinely unavailable. Named endpoints (`S3`,
+    /// `S3DualStack`, `GCS`, `DigitalOceanSpaces`) always use `https` and are unaffected.
+    pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self {
+        self.allow_insecure_http = allow;
+        self
+    }
+
     request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
         check_endpoint_region(&self.endpoint, &self.region)?;
+        if let Endpoint::Generic(ref url) = self.endpoint {
+            crate::backends::common::validate_url_scheme(url, self.allow_insecure_http)?;
+        }
         Ok(ReleaseList {
             endpoint: self.endpoint.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
@@ -232,6 +293,7 @@ impl ReleaseList {
             #[cfg(feature = "s3-auth")]
             access_key: None,
             request: RequestConfig::default(),
+            allow_insecure_http: false,
         }
     }
 
@@ -368,6 +430,9 @@ impl UpdateBuilder {
 
     fn build_update(&self) -> Result<Update> {
         check_endpoint_region(&self.endpoint, &self.region)?;
+        if let Endpoint::Generic(ref url) = self.endpoint {
+            crate::backends::common::validate_url_scheme(url, self.common.allow_insecure_http)?;
+        }
         Ok(Update {
             endpoint: self.endpoint.clone(),
             bucket_name: if let Some(ref name) = self.bucket_name {
@@ -552,11 +617,25 @@ mod auth {
     /// [`access_key`](super::UpdateBuilder::access_key) accepts. It is `#[non_exhaustive]` so future
     /// credential fields (e.g. an STS session token) can be added without a breaking change; build
     /// it through `new` or the `From` impls rather than a struct literal.
-    #[derive(Clone, Debug)]
+    ///
+    /// The credential values are intentionally not `pub`: use the accessor methods
+    /// [`access_key_id`](Self::access_key_id) and [`secret_access_key`](Self::secret_access_key).
+    /// This prevents the secret from being casually accessed in non-signing code and surfaced
+    /// in derived `Debug`/`Display` output.
+    #[derive(Clone)]
     #[non_exhaustive]
     pub struct AccessKey {
-        pub access_key_id: String,
-        pub secret_access_key: String,
+        access_key_id: String,
+        secret_access_key: String,
+    }
+
+    impl std::fmt::Debug for AccessKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("AccessKey")
+                .field("access_key_id", &self.access_key_id)
+                .field("secret_access_key", &"<redacted>")
+                .finish()
+        }
     }
 
     impl AccessKey {
@@ -568,6 +647,16 @@ mod auth {
                 access_key_id: access_key_id.into(),
                 secret_access_key: secret_access_key.into(),
             }
+        }
+
+        /// The AWS access key ID (public identifier, e.g. `"AKIAIOSFODNN7EXAMPLE"`).
+        pub fn access_key_id(&self) -> &str {
+            &self.access_key_id
+        }
+
+        /// The AWS secret access key. Keep this value private; do not log it.
+        pub fn secret_access_key(&self) -> &str {
+            &self.secret_access_key
         }
     }
 
@@ -642,6 +731,31 @@ mod auth {
         Ok((date_stamp, amz_date))
     }
 
+    /// Build the canonical `Host` header value for a SigV4 request.
+    ///
+    /// AWS SigV4 requires the `host` canonical header to match exactly what the HTTP client sends
+    /// as its `Host:` header. For a URL on the default port for its scheme (443 for https, 80 for
+    /// http) the header is just the hostname. For a non-default port the header must be
+    /// `hostname:port` — otherwise the signature the signer computes won't match the one AWS
+    /// verifies against the actual request, producing `SignatureDoesNotMatch`.
+    ///
+    /// `url.host_str()` returns only the hostname (no port); this helper reinstates the port when
+    /// the URL carries one that differs from the scheme default.
+    pub(super) fn canonical_host(url: &Url) -> Result<String> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url.as_str())))?;
+        let default_port = match url.scheme() {
+            "https" => Some(443u16),
+            "http" => Some(80u16),
+            _ => None,
+        };
+        match url.port() {
+            Some(port) if Some(port) != default_port => Ok(format!("{host}:{port}")),
+            _ => Ok(host.to_owned()),
+        }
+    }
+
     pub fn s3_signature_v4(
         url_str: &str,
         region: &Option<String>,
@@ -681,9 +795,9 @@ mod auth {
             None => return Ok(url_str.to_owned()),
         };
         let url = Url::parse(url_str)?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url_str)))?;
+        // Include the port in the canonical host when it is non-default, so the signature matches
+        // the `Host: host:port` header the HTTP client sends (SigV4 LOW fix).
+        let host = canonical_host(&url)?;
         let canonical_uri = if url.path().is_empty() {
             "/"
         } else {
@@ -758,9 +872,8 @@ mod auth {
         let access_key_id = &access_key.access_key_id;
         let secret_access_key = &access_key.secret_access_key;
         let url = Url::parse(url_str)?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url_str)))?;
+        // Include non-default port in canonical host (mirrors s3_signature_v4_at).
+        let host = canonical_host(&url)?;
         let canonical_uri = if url.path().is_empty() {
             "/"
         } else {
@@ -1310,7 +1423,7 @@ fn s3_page(
         #[cfg(feature = "s3-auth")]
         &access_key,
     )?;
-    debug!("using api url: {:?}", api_url);
+    debug!("using api url: {:?}", redact_signed_url(&api_url));
 
     Ok(PageRequest {
         url: api_url,
@@ -1434,7 +1547,24 @@ fn parse_s3_response<R: std::io::BufRead>(
                                 )?;
 
                                 release.assets = vec![ReleaseAsset::new(exe_name, download_url)];
-                                debug!("Matched release: {:?}", release);
+                                // Log name/version; redact the asset download URL to avoid
+                                // leaking SigV4 credentials (X-Amz-Signature, X-Amz-Credential)
+                                // in debug output.
+                                debug!(
+                                    "Matched release: name={:?} version={:?} assets=[{}]",
+                                    release.name,
+                                    release.version(),
+                                    release
+                                        .assets
+                                        .iter()
+                                        .map(|a| format!(
+                                            "{{name={:?} url={:?}}}",
+                                            a.name(),
+                                            redact_signed_url(a.download_url())
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
                             } else {
                                 debug!("Regex mismatch: {:?}", &txt);
                             }
@@ -1875,7 +2005,8 @@ mod tests {
     }
 
     /// Build a `fetch_releases_from_s3_async`-ready `Update` whose `Endpoint::Generic` points at
-    /// the stub base URL. The Generic endpoint does not require a region.
+    /// the stub base URL. The Generic endpoint does not require a region. `allow_insecure_http`
+    /// is set because the loopback stub serves plain http.
     #[cfg(feature = "async")]
     fn s3_update(base_url: &str, current_version: &str) -> Update {
         Update::configure()
@@ -1883,18 +2014,21 @@ mod tests {
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version(current_version)
+            .allow_insecure_http(true)
             .build_async()
             .unwrap()
     }
 
     /// Sync sibling of [`s3_update`]: a `Box<dyn ReleaseUpdate>` pointed at the loopback stub via a
-    /// `Generic` endpoint (no region required).
+    /// `Generic` endpoint (no region required). `allow_insecure_http` is set because the loopback
+    /// stub serves plain http.
     fn s3_update_sync(base_url: &str, current_version: &str) -> Box<dyn ReleaseUpdate> {
         Update::configure()
             .endpoint(super::Endpoint::Generic(base_url.to_owned()))
             .bucket_name("test-bucket")
             .bin_name("myapp")
             .current_version(current_version)
+            .allow_insecure_http(true)
             .build()
             .unwrap()
     }
@@ -2046,7 +2180,7 @@ mod tests {
             },
         ]);
         // A `Generic` endpoint pointed at the loopback stub, but WITH an access key + region so the
-        // listing URLs are signed.
+        // listing URLs are signed. `allow_insecure_http` is needed because the stub uses plain http.
         let upd = Update::configure()
             .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
@@ -2054,6 +2188,7 @@ mod tests {
             .bin_name("myapp")
             .current_version("0.1.0")
             .access_key(("AKIA", "secret"))
+            .allow_insecure_http(true)
             .build()
             .unwrap();
         let releases = upd.get_latest_releases().unwrap();
@@ -2157,6 +2292,7 @@ mod tests {
             .bin_name("myapp")
             .current_version("0.1.0")
             .max_keys(250u16)
+            .allow_insecure_http(true)
             .build()
             .unwrap();
         let _ = upd.get_latest_releases().unwrap();
@@ -2181,6 +2317,7 @@ mod tests {
             .bin_name("myapp")
             .current_version("0.1.0")
             .max_keys(5000u16)
+            .allow_insecure_http(true)
             .build()
             .unwrap();
         let _ = upd.get_latest_releases().unwrap();
@@ -2266,6 +2403,7 @@ mod tests {
         let releases = super::ReleaseList::configure()
             .endpoint(super::Endpoint::Generic(base.clone()))
             .bucket_name("test-bucket")
+            .allow_insecure_http(true)
             .build()
             .unwrap()
             .fetch()
@@ -2682,13 +2820,14 @@ mod tests {
     fn access_key_is_reexported_and_built_from_tuples() {
         // `AccessKey` is re-exported at the backend module level and is built via the tuple `From`
         // impls (it is `#[non_exhaustive]`, so no struct literal from outside this module).
+        // Fields are private; use the accessor methods (A1 fix).
         let from_strs: super::AccessKey = ("AKIA-id", "secret").into();
-        assert_eq!(from_strs.access_key_id, "AKIA-id");
-        assert_eq!(from_strs.secret_access_key, "secret");
+        assert_eq!(from_strs.access_key_id(), "AKIA-id");
+        assert_eq!(from_strs.secret_access_key(), "secret");
 
         let from_owned: super::AccessKey = (String::from("id2"), String::from("secret2")).into();
-        assert_eq!(from_owned.access_key_id, "id2");
-        assert_eq!(from_owned.secret_access_key, "secret2");
+        assert_eq!(from_owned.access_key_id(), "id2");
+        assert_eq!(from_owned.secret_access_key(), "secret2");
     }
 
     #[cfg(feature = "s3-auth")]
@@ -3397,6 +3536,306 @@ mod tests {
             upd.is_ok(),
             "the endpoint(&str) setter must resolve to a Generic endpoint and build, got {:?}",
             upd.err()
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // S2: redact_signed_url removes X-Amz-Signature and X-Amz-Credential
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn redact_signed_url_masks_sensitive_params() {
+        // A presigned URL carrying both X-Amz-Signature and X-Amz-Credential must have those
+        // values replaced with "<redacted>"; other params must pass through unchanged.
+        let signed = "https://bucket.s3.us-east-1.amazonaws.com/key?\
+            X-Amz-Algorithm=AWS4-HMAC-SHA256&\
+            X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&\
+            X-Amz-Date=20130524T000000Z&\
+            X-Amz-Expires=300&\
+            X-Amz-SignedHeaders=host&\
+            X-Amz-Signature=3ed0be64024db54d5574a27da223529635c383f911f80e636f0ccc13890053d2";
+        let redacted = super::redact_signed_url(signed);
+        assert!(
+            !redacted.contains("3ed0be64024db54d5574a27da223529635c383f911f80e636f0ccc13890053d2"),
+            "X-Amz-Signature value must not appear in the redacted URL"
+        );
+        assert!(
+            !redacted.contains("AKIAIOSFODNN7EXAMPLE"),
+            "X-Amz-Credential value (including access-key ID) must not appear in the redacted URL"
+        );
+        assert!(
+            redacted.contains("X-Amz-Signature=<redacted>"),
+            "X-Amz-Signature key must be present with value '<redacted>', got: {redacted}"
+        );
+        assert!(
+            redacted.contains("X-Amz-Credential=<redacted>"),
+            "X-Amz-Credential key must be present with value '<redacted>', got: {redacted}"
+        );
+        // Non-sensitive params are preserved verbatim.
+        assert!(
+            redacted.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+            "X-Amz-Algorithm must be left unchanged, got: {redacted}"
+        );
+        assert!(
+            redacted.contains("X-Amz-Expires=300"),
+            "X-Amz-Expires must be left unchanged, got: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_signed_url_passes_unsigned_url_through_unchanged() {
+        // A plain (unsigned) URL has no X-Amz-* params and must be returned verbatim.
+        let plain = "https://bucket.s3.us-east-1.amazonaws.com/?list-type=2&max-keys=1000";
+        assert_eq!(
+            super::redact_signed_url(plain),
+            plain,
+            "an unsigned URL must be returned unchanged"
+        );
+    }
+
+    #[test]
+    fn redact_signed_url_no_query_string_is_unchanged() {
+        let no_qs = "https://bucket.s3.us-east-1.amazonaws.com/key";
+        assert_eq!(super::redact_signed_url(no_qs), no_qs);
+    }
+
+    // ---------------------------------------------------------------------------
+    // LOW: canonical_host includes port for non-default ports
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn canonical_host_includes_port_for_non_default_port() {
+        // A Generic endpoint URL with an explicit non-default port must produce a canonical host of
+        // `host:port` so the SigV4 signature covers the full host-including-port that the HTTP
+        // client sends in the `Host:` header.
+        use url::Url;
+        let url_with_port = Url::parse("https://minio.local:9000/bucket/key").expect("valid URL");
+        let host = super::auth::canonical_host(&url_with_port).unwrap();
+        assert_eq!(
+            host, "minio.local:9000",
+            "non-default port must appear in the canonical host, got: {host}"
+        );
+
+        // Port 443 on https is the default: the canonical host must be hostname-only.
+        let url_default_https =
+            Url::parse("https://bucket.s3.amazonaws.com:443/key").expect("valid URL");
+        let host_default = super::auth::canonical_host(&url_default_https).unwrap();
+        assert_eq!(
+            host_default, "bucket.s3.amazonaws.com",
+            "default https port 443 must not appear in the canonical host, got: {host_default}"
+        );
+
+        // No explicit port: same as default port.
+        let url_no_port = Url::parse("https://bucket.s3.amazonaws.com/key").expect("valid URL");
+        let host_no_port = super::auth::canonical_host(&url_no_port).unwrap();
+        assert_eq!(
+            host_no_port, "bucket.s3.amazonaws.com",
+            "a URL with no explicit port must produce a hostname-only canonical host, \
+             got: {host_no_port}"
+        );
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn signer_uses_canonical_host_with_port_for_generic_non_default_endpoint() {
+        // A Generic endpoint on a non-default port (e.g. a local MinIO instance) must produce a
+        // presigned URL whose canonical request embeds `host:port` in the `host:` header line.
+        // We use the test-parts helper to inspect the intermediate canonical request.
+        let key = super::AccessKey::new("AKIAEXAMPLE", "secretkey");
+        let url = "https://minio.local:9000/bucket/key";
+        let parts = super::auth::s3_signature_v4_parts(
+            url,
+            &Some("us-east-1".to_owned()),
+            &key,
+            300,
+            // arbitrary fixed instant
+            1_000_000_000,
+        )
+        .unwrap();
+        assert!(
+            parts
+                .canonical_request
+                .contains("\nhost:minio.local:9000\n"),
+            "canonical request must contain 'host:minio.local:9000' for a non-default port URL, \
+             got: {}",
+            parts.canonical_request
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // A1: AccessKey accessors — fields are private, access via methods
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn access_key_accessors_return_correct_values() {
+        // A1: fields are private; the public API is the accessor methods.
+        let key = super::AccessKey::new("AKIA-test-id", "super-secret");
+        assert_eq!(key.access_key_id(), "AKIA-test-id");
+        assert_eq!(key.secret_access_key(), "super-secret");
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn access_key_debug_redacts_secret() {
+        // A1: The custom Debug impl must show the access_key_id but redact the secret_access_key.
+        let key = super::AccessKey::new("AKIA-id", "my-secret");
+        let debug_str = format!("{key:?}");
+        assert!(
+            debug_str.contains("AKIA-id"),
+            "Debug output must show the access_key_id, got: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("my-secret"),
+            "Debug output must NOT show the secret_access_key, got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("<redacted>"),
+            "Debug output must contain '<redacted>' for the secret, got: {debug_str}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // S4: scheme validation — http rejected by default, allowed with allow_insecure_http
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn http_generic_endpoint_rejected_by_default_on_update_builder() {
+        // An http:// Generic endpoint must be rejected at build() unless allow_insecure_http(true)
+        // is set (S4 fix). Named endpoints (S3, GCS, etc.) always use https and are unaffected.
+        let res = super::Update::configure()
+            .endpoint(super::Endpoint::Generic(
+                "http://localhost:9000/bucket/".to_owned(),
+            ))
+            .bucket_name("b")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http Generic endpoint must be rejected at build() by default, got {:?}",
+            res.map(|_| "Ok")
+        );
+    }
+
+    #[test]
+    fn http_generic_endpoint_allowed_after_opt_in_on_update_builder() {
+        // allow_insecure_http(true) opts in to plain http, so the build must succeed.
+        let res = super::Update::configure()
+            .endpoint(super::Endpoint::Generic(
+                "http://localhost:9000/bucket/".to_owned(),
+            ))
+            .bucket_name("b")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .allow_insecure_http(true)
+            .build();
+        assert!(
+            res.is_ok(),
+            "http Generic endpoint must be allowed after allow_insecure_http(true), got {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn https_generic_endpoint_always_allowed_on_update_builder() {
+        // https is always accepted regardless of allow_insecure_http.
+        assert!(
+            super::Update::configure()
+                .endpoint(super::Endpoint::Generic(
+                    "https://s3.example.com/bucket/".to_owned()
+                ))
+                .bucket_name("b")
+                .bin_name("app")
+                .current_version("0.1.0")
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn http_generic_endpoint_rejected_by_default_on_release_list_builder() {
+        // Same scheme validation on ReleaseListBuilder.
+        let res = super::ReleaseList::configure()
+            .endpoint(super::Endpoint::Generic(
+                "http://localhost:9000/bucket/".to_owned(),
+            ))
+            .bucket_name("b")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http Generic endpoint must be rejected at ReleaseList build() by default, got {:?}",
+            res.map(|_| "Ok")
+        );
+    }
+
+    #[test]
+    fn http_generic_endpoint_allowed_after_opt_in_on_release_list_builder() {
+        let res = super::ReleaseList::configure()
+            .endpoint(super::Endpoint::Generic(
+                "http://localhost:9000/bucket/".to_owned(),
+            ))
+            .bucket_name("b")
+            .allow_insecure_http(true)
+            .build();
+        assert!(
+            res.is_ok(),
+            "http Generic endpoint must be allowed after allow_insecure_http(true) on \
+             ReleaseListBuilder, got {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn named_endpoints_are_unaffected_by_scheme_validation() {
+        // Named endpoints (S3, S3DualStack, GCS, DigitalOceanSpaces) always produce https URLs
+        // and must build successfully regardless of the allow_insecure_http flag.
+        assert!(
+            super::Update::configure()
+                .endpoint(super::Endpoint::GCS)
+                .bucket_name("b")
+                .bin_name("app")
+                .current_version("0.1.0")
+                .build()
+                .is_ok(),
+            "GCS endpoint must build without scheme errors"
+        );
+        assert!(
+            super::Update::configure()
+                .endpoint(super::Endpoint::S3)
+                .bucket_name("b")
+                .region("us-east-1")
+                .bin_name("app")
+                .current_version("0.1.0")
+                .build()
+                .is_ok(),
+            "S3 endpoint must build without scheme errors"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // A2: common.rs deferred-error mechanism — verify tests exist (covered by common.rs tests)
+    // The existing tests in src/backends/common.rs already cover the insert_header deferred-error
+    // path (invalid name, invalid value, first-error-wins). Additionally confirm the mechanism
+    // surfaces from the s3 Update builder (end-to-end, not just the inner RequestConfig).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn update_builder_invalid_request_header_surfaces_at_build() {
+        // End-to-end: an invalid header name on the s3 UpdateBuilder must surface as
+        // Error::InvalidHeader from build(), not panic.
+        let res = super::Update::configure()
+            .endpoint(super::Endpoint::GCS)
+            .bucket_name("b")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header("inva lid header", "ok")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidHeader { .. })),
+            "invalid header on UpdateBuilder must surface as Error::InvalidHeader, got {:?}",
+            res.map(|_| "Ok")
         );
     }
 }

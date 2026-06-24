@@ -81,6 +81,8 @@ pub struct ReleaseListBuilder {
     auth_token: Option<String>,
     custom_url: Option<String>,
     request: RequestConfig,
+    /// Allow plain `http://` custom endpoints (see [`allow_insecure_http`](Self::allow_insecure_http)).
+    allow_insecure_http: bool,
 }
 impl ReleaseListBuilder {
     /// Required. Set the repo owner, used to build a github api url
@@ -109,6 +111,17 @@ impl ReleaseListBuilder {
         self
     }
 
+    /// Allow plain `http://` custom endpoints (default: `false`, https-only).
+    ///
+    /// By default the builder rejects a custom `url(...)` whose scheme is `http` to prevent
+    /// accidental credential (bearer-token) exposure over cleartext. Set this to `true` when
+    /// testing against a local HTTP stub or another environment where TLS is genuinely unavailable.
+    /// The default endpoint (`https://api.github.com`) is unaffected.
+    pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self {
+        self.allow_insecure_http = allow;
+        self
+    }
+
     /// Set the authorization token, used in requests to the github api url
     ///
     /// This is to support private repos where you need a GitHub auth token.
@@ -125,6 +138,9 @@ impl ReleaseListBuilder {
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
         self.request.check()?;
+        if let Some(ref url) = self.custom_url {
+            crate::backends::common::validate_url_scheme(url, self.allow_insecure_http)?;
+        }
         Ok(ReleaseList {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -174,6 +190,7 @@ impl ReleaseList {
             auth_token: None,
             custom_url: None,
             request: RequestConfig::default(),
+            allow_insecure_http: false,
         }
     }
 
@@ -189,8 +206,8 @@ impl ReleaseList {
             self.custom_url
                 .as_ref()
                 .unwrap_or(&"https://api.github.com".to_string()),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases = run_paginated(
@@ -250,6 +267,9 @@ impl UpdateBuilder {
     impl_common_builder_setters!();
 
     fn build_update(&self) -> Result<Update> {
+        if let Some(ref url) = self.custom_url {
+            crate::backends::common::validate_url_scheme(url, self.common.allow_insecure_http)?;
+        }
         Ok(Update {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -318,8 +338,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 
@@ -328,8 +348,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 
@@ -338,8 +358,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases/tags/{}",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name),
             urlencoding::encode(ver)
         )
     }
@@ -766,6 +786,7 @@ mod tests {
         });
         let releases = super::ReleaseList::configure()
             .url(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -804,6 +825,7 @@ mod tests {
         });
         let releases = super::ReleaseList::configure()
             .url(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -910,6 +932,7 @@ mod tests {
             .bin_name("app")
             .current_version("1.0.0")
             .url(&async_base)
+            .allow_insecure_http(true)
             .build_async()
             .unwrap();
         let async_versions: Vec<String> = upd
@@ -981,6 +1004,7 @@ mod tests {
             .bin_name("app")
             .current_version("0.1.0")
             .url(&base)
+            .allow_insecure_http(true)
             .build_async()
             .unwrap();
         let releases = upd.get_latest_release_async().await.unwrap();
@@ -1006,6 +1030,7 @@ mod tests {
             .bin_name("app")
             .current_version("2.0.0")
             .url(&base)
+            .allow_insecure_http(true)
             .no_confirm(true)
             .show_output(false)
             .build_async()
@@ -1032,6 +1057,7 @@ mod tests {
             .bin_name("app")
             .current_version("1.0.0")
             .url(&base)
+            .allow_insecure_http(true)
             .build()
             .unwrap();
         let releases = upd.get_latest_releases().unwrap();
@@ -1054,6 +1080,7 @@ mod tests {
             .bin_name("app")
             .current_version(current_version)
             .url(base)
+            .allow_insecure_http(true)
             .build()
             .unwrap()
     }
@@ -1126,6 +1153,7 @@ mod tests {
             .bin_name("app")
             .current_version("2.0.0")
             .url(&base)
+            .allow_insecure_http(true)
             .no_confirm(true)
             .show_output(false)
             .build()
@@ -1272,6 +1300,7 @@ mod tests {
             .bin_name("app")
             .current_version("0.1.0")
             .url(&base)
+            .allow_insecure_http(true)
             .build()
             .unwrap();
         let rel = upd.get_release_version("v1.0.0+build.5").unwrap();
@@ -1919,6 +1948,7 @@ mod tests {
         });
         let releases = super::ReleaseList::configure()
             .url(&base)
+            .allow_insecure_http(true)
             .repo_owner("o")
             .repo_name("r")
             .retries(1)
@@ -1994,5 +2024,171 @@ mod tests {
             key_bytes,
             "returned key bytes must match what was supplied"
         );
+    }
+
+    #[test]
+    fn repo_owner_and_name_are_percent_encoded_in_request_url() {
+        // A repo_owner or repo_name that contains a reserved character (e.g. a space) must be
+        // percent-encoded in every URL the backend constructs. Without the fix the raw character
+        // reaches the path as-is and this assertion fails.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v1.0.0"),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .allow_insecure_http(true)
+            .repo_owner("my org")
+            .repo_name("my repo")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        assert_eq!(releases.len(), 1);
+        let request_line = captured
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|r| r.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            request_line.contains("my%20org"),
+            "repo_owner with a space must be percent-encoded as `my%20org`, got: {}",
+            request_line
+        );
+        assert!(
+            request_line.contains("my%20repo"),
+            "repo_name with a space must be percent-encoded as `my%20repo`, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my org"),
+            "raw unencoded repo_owner space must not reach the request path, got: {}",
+            request_line
+        );
+        assert!(
+            !request_line.contains("my repo"),
+            "raw unencoded repo_name space must not reach the request path, got: {}",
+            request_line
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // S4: URL scheme validation for custom endpoints
+    // ---------------------------------------------------------------------------
+
+    /// A minimal valid base config for Update; sets all required fields except custom_url.
+    fn update_base() -> super::UpdateBuilder {
+        let mut b = super::Update::configure();
+        b.repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0");
+        b
+    }
+
+    fn build_update_err(b: &mut super::UpdateBuilder) -> crate::errors::Error {
+        match b.build() {
+            Ok(_) => panic!("expected build() to fail but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn update_http_custom_url_rejected_by_default() {
+        // A plain http:// custom url must be rejected at build() with Error::Config when
+        // allow_insecure_http has not been opted in.
+        let err = build_update_err(update_base().url("http://github.example.com/api/v3"));
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "expected Error::Config, got {:?}",
+            err
+        );
+        if let crate::errors::Error::Config(msg) = err {
+            assert!(
+                msg.contains("allow_insecure_http"),
+                "error must mention allow_insecure_http, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_http_custom_url_allowed_after_opt_in() {
+        // After .allow_insecure_http(true) a plain http:// url must be accepted at build().
+        update_base()
+            .url("http://github.example.com/api/v3")
+            .allow_insecure_http(true)
+            .build()
+            .map(|_| ())
+            .expect("http custom url must be accepted after allow_insecure_http(true)");
+    }
+
+    #[test]
+    fn update_https_custom_url_always_allowed() {
+        // An https:// custom url must always be accepted regardless of allow_insecure_http.
+        update_base()
+            .url("https://github.example.com/api/v3")
+            .build()
+            .map(|_| ())
+            .expect("https custom url must always be accepted");
+    }
+
+    #[test]
+    fn update_default_endpoint_needs_no_opt_in() {
+        // When no custom url is set, the default https://api.github.com is used and must
+        // never require allow_insecure_http.
+        update_base()
+            .build()
+            .map(|_| ())
+            .expect("default endpoint must build without allow_insecure_http");
+    }
+
+    #[test]
+    fn release_list_http_custom_url_rejected_by_default() {
+        let res = super::ReleaseList::configure()
+            .url("http://github.example.com/api/v3")
+            .repo_owner("o")
+            .repo_name("r")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http custom url on ReleaseList must be rejected by default, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn release_list_http_custom_url_allowed_after_opt_in() {
+        super::ReleaseList::configure()
+            .url("http://github.example.com/api/v3")
+            .allow_insecure_http(true)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("http custom url on ReleaseList must be accepted after opt-in");
+    }
+
+    #[test]
+    fn release_list_https_custom_url_always_allowed() {
+        super::ReleaseList::configure()
+            .url("https://github.example.com/api/v3")
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("https custom url on ReleaseList must always be accepted");
+    }
+
+    #[test]
+    fn release_list_default_endpoint_needs_no_opt_in() {
+        // No custom url -> no validation needed; the default api.github.com is always https.
+        super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .expect("ReleaseList default endpoint must build without opt-in");
     }
 }

@@ -18,7 +18,7 @@ pagination/transport helpers (`send`, the sans-io `PageRequest`/`Page` core and 
 
 `ReleaseList` lists releases for a repo and returns `Vec<Release>`. It is configured via
 `ReleaseList::configure()` (`gitlab.rs:160`), which seeds `host` to `https://gitlab.com`
-(`gitlab.rs:162`). The builder (`ReleaseListBuilder`, `gitlab.rs:63`) exposes `url`,
+(`gitlab.rs:162`). The builder (`ReleaseListBuilder`, `gitlab.rs:63`) exposes `host`,
 `repo_owner`, `repo_name`, `filter_target`, `auth_token`, the shared
 `request_config_setters!(request)` setters (`gitlab.rs:117`), and `build()`
 (`gitlab.rs:120`). `build()` calls `self.request.check()` first (surfacing any deferred
@@ -35,7 +35,7 @@ matching asset; it is the `ReleaseList` release filter. `fetch()` applies it via
 which selects *which asset* to download.
 
 `Update` is built via `Update::configure()` -> `UpdateBuilder` (`gitlab.rs:198`,
-`gitlab.rs:283`). Backend-specific setters are `url`, `repo_owner`, `repo_name`; all common
+`gitlab.rs:283`). Backend-specific setters are `host`, `repo_owner`, `repo_name`; all common
 options come from `impl_common_builder_setters!()` (`gitlab.rs:233`). `build()` returns
 `Box<dyn ReleaseUpdate>` (`gitlab.rs:262`); under the `async` feature `build_async()`
 returns the concrete `Update` so the inherent `*_async` methods are reachable
@@ -55,10 +55,9 @@ and `ReleaseList::fetch` builds the same shape (`gitlab.rs:174`):
 ```
 
 The literal `%2F` separating owner and repo is hard-coded in the format string
-(`gitlab.rs:175-178`, `gitlab.rs:298-303`); only `repo_owner` is run through
-`urlencoding::encode`, while `repo_name` is interpolated verbatim. Encoding `repo_owner`
-matters for subgroup paths (e.g. `group/subgroup` becomes `group%2Fsubgroup`) so an
-embedded `/` does not create an extra path segment.
+(`gitlab.rs:175-178`, `gitlab.rs:298-303`); both `repo_owner` and `repo_name` are run through
+`urlencoding::encode`. Encoding `repo_owner` matters for subgroup paths (e.g. `group/subgroup`
+becomes `group%2Fsubgroup`); encoding `repo_name` handles any reserved character in the repo name.
 
 Fetch-by-tag (`get_release_version` / `get_release_version_async`) appends the tag to the
 releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
@@ -70,14 +69,34 @@ releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
 This route returns a single release *object* (not an array), parsed directly by
 `Release::from_release_gitlab`.
 
-Custom host: `url(impl Into<String>)` (`gitlab.rs:77`, `gitlab.rs:216`) overrides `host`. The
-setter was renamed from `instance_url`/`with_host` to `url`; it carries no `#[doc(alias)]`
-(all builder-setter doc-aliases were dropped). Its doc states the instance host only (scheme
-+ host, no trailing slash and no `/api/v4`): the crate appends the `/api/v4/...` path itself
-(`gitlab.rs:75-76`, `gitlab.rs:214-215`), so callers pass e.g. `https://gitlab.example.com`.
-The string setters
-(`url`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's
+Custom host: `host(impl Into<String>)` (`gitlab.rs:77`, `gitlab.rs:216`) overrides the default
+`https://gitlab.com`. The setter is named `host` (not `url`) to signal that only the scheme +
+hostname is accepted here, not a full API URL (GitHub's `url(...)` takes a full API base; these
+are intentionally distinct). It carries no `#[doc(alias)]` (all builder-setter doc-aliases were
+dropped). Its doc states the instance host only (scheme + host, no trailing slash and no
+`/api/v4`): the crate appends the `/api/v4/...` path itself (`gitlab.rs:75-76`,
+`gitlab.rs:214-215`), so callers pass e.g. `https://gitlab.example.com`. The string setters
+(`host`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's
 common setters) take `impl Into<String>`.
+
+### URL scheme validation (`allow_insecure_http`)
+
+When a custom host is set via `host(...)` (i.e. the host differs from the default
+`https://gitlab.com`), both `ReleaseListBuilder::build()` and `UpdateBuilder::build_update()`
+validate the scheme of the supplied host via `backends::common::validate_url_scheme`. An
+`https://` host is always accepted. An `http://` host is rejected with `Error::Config` containing
+the text `allow_insecure_http` unless `allow_insecure_http(true)` has been called on the builder.
+This prevents accidental credential leakage over cleartext connections.
+
+The default endpoint (`https://gitlab.com`) is never validated and never requires the opt-in.
+Internally, both builders track whether `host(...)` was called via a `host_is_custom: bool`
+field; the scheme check runs only when that flag is set.
+
+Both builders expose:
+```rust
+pub fn allow_insecure_http(&mut self, allow: bool) -> &mut Self
+```
+placed immediately after the `host(...)` setter.
 
 ### Authentication
 
@@ -144,43 +163,55 @@ deferred bad `request_header`, unparseable auth token) surface as `Error::Config
 
 - `ReleaseList::configure() -> ReleaseListBuilder`; `ReleaseList::fetch() -> Result<Releases>` (a
   bare listing: `current_version()` is `None`; recover the `Vec<Release>` with `into_vec()`).
-- `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`,
+- `ReleaseListBuilder`: `host`, `repo_owner`, `repo_name`, `filter_target`, `auth_token`,
   the `request_config_setters!` setters, `build() -> Result<ReleaseList>`.
 - `Update::configure() -> UpdateBuilder`.
-- `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, the common setters,
+- `UpdateBuilder`: `new`, `host`, `repo_owner`, `repo_name`, the common setters,
   `build() -> Result<Box<dyn ReleaseUpdate>>`, and (feature `async`)
   `build_async() -> Result<Update>`.
 - `Update` is `#[non_exhaustive]`, implements `ReleaseUpdate` (`get_latest_release`,
   `get_latest_releases`, `get_release_version`) and, under `async`, the public sealed
   `AsyncReleaseUpdate` (the `*_async` fetch verbs plus the default `update_async` /
   `update_extended_async`).
-- `url` carries no `#[doc(alias)]`; all builder-setter doc-aliases were dropped.
+- `host` carries no `#[doc(alias)]`; all builder-setter doc-aliases were dropped.
 
 ## Invariants and regression checklist
 
-- Project path is percent-encoded: `repo_owner` passes through `urlencoding::encode`; the
-  `%2F` between owner and repo is literal in the route. A `/` in `repo_owner` must appear as
-  `%2F` in the request line, never as a literal slash.
+- Project path is percent-encoded: both `repo_owner` and `repo_name` pass through
+  `urlencoding::encode`; the `%2F` between them is literal in the route. A `/` in `repo_owner`
+  must appear as `%2F` in the request line, never as a literal slash. Any reserved character in
+  `repo_name` must also be percent-encoded.
 - Fetch-by-tag percent-encodes the tag (`urlencoding::encode(ver)`) before appending it to
   `{releases_url}/`.
-- List route is exactly `<host>/api/v4/projects/<owner>%2F<repo>/releases`; tag route is
-  `{releases_url}/{enc(tag)}`.
+- List route is exactly `<host>/api/v4/projects/<enc(owner)>%2F<enc(repo)>/releases`; tag route
+  is `{releases_url}/{enc(tag)}`.
 - Single-newest path takes `releases[0]` and depends on the list endpoint's descending
   order; empty/non-array payloads error rather than panic.
 - Newer-than filtering runs after pagination, preserving order.
 - Auth uses `Authorization: Bearer <token>` plus a fixed `User-Agent`; no `PRIVATE-TOKEN`
   header, no env var.
 - `Update` is `#[non_exhaustive]`.
+- The host setter is named `host` (not `url`); it accepts scheme + hostname only, no path
+  component. GitHub's `url(...)` is a different setter that accepts a full API base URL.
+- A custom `host(...)` with an `http://` scheme is rejected at `build()` with `Error::Config`
+  unless `allow_insecure_http(true)` is set. The default `https://gitlab.com` is never
+  validated and never requires the opt-in.
 
 ## Tests
 
-In-file tests (`gitlab.rs:513-1420`) use a loopback `TcpListener` stub (no external
-network). Coverage: sync and async latest/newer/by-tag parsing and version trimming;
-`Link: rel="next"` pagination accumulation across two pages; newer-than filtering after
-pagination; empty-array and non-array error paths; missing `tag_name` and missing
-`assets.links` parser guards; non-2xx (404 -> `NotFound`, 500/503 -> `HttpStatus`);
+In-file tests (`gitlab.rs:513+`) use a loopback `TcpListener` stub (no external network).
+Coverage: sync and async latest/newer/by-tag parsing and version trimming; `Link: rel="next"`
+pagination accumulation across two pages; newer-than filtering after pagination; empty-array and
+non-array error paths; missing `tag_name` and missing `assets.links` parser guards; non-2xx
+(404 -> `NotFound`, 500/503 -> `HttpStatus`);
 `releases_url_encodes_repo_owner_with_slash` asserting `%2F` (and absence of a literal
-`group/subgroup`) in the captured request line; `url`/`filter_target` setter existence;
+`group/subgroup`) in the captured request line;
+`repo_owner_and_name_are_percent_encoded_in_request_url` asserting percent-encoding of reserved
+chars in both `repo_owner` and `repo_name`;
+`host_setter_sets_host_and_final_url_is_correct` verifying that `host(...)` overrides the
+default and the final URL contains no double `/api/...` segment;
+`host_and_filter_target_setters_exist_on_release_list_builder` and
+`host_setter_exists_on_update_builder` confirming the renamed setter compiles;
 `api_headers` Bearer + User-Agent wiring; invalid-header `Error::Config` at build; and
 `identifier`/`bin_name` wiring. Shared pagination/retry helpers are tested in
 `src/backends/mod.rs`.

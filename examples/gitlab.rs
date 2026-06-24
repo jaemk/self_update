@@ -22,8 +22,8 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         //.show_output(false)
         //.no_confirm(true)
         //
-        // Defaults to https://gitlab.com; for a self-hosted instance, set the base URL:
-        //.url("https://gitlab.mycorp.com")
+        // Defaults to https://gitlab.com; for a self-hosted instance, set the host:
+        //.host("https://gitlab.mycorp.com")
         //
         // For private repos, you will need to provide an auth token
         // **Make sure not to bake the token into your app**; it is recommended

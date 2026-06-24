@@ -25,6 +25,19 @@ pub use ureq::UreqClient;
 /// Object safety is what makes the transport injectable: a user can hand the crate any
 /// `Arc<dyn HttpClient>` (e.g. a test double or a wrapper around a custom client). Retries are
 /// **not** part of this trait — they stay in `backends::send`/`retry`, wrapping `client.get(...)`.
+///
+/// # Security contract for implementations
+///
+/// Custom implementations **MUST** uphold two security properties:
+///
+/// 1. **TLS certificate verification must be enabled.** Disabling certificate verification allows
+///    a man-in-the-middle to serve arbitrary binaries as release artifacts. Never pass
+///    `danger_accept_invalid_certs` or equivalent options.
+///
+/// 2. **The `Authorization` header MUST NOT be forwarded to a different host on a redirect.**
+///    An attacker-controlled redirect destination could harvest bearer tokens or API keys.
+///    Configure your HTTP client to strip the `Authorization` header when following a redirect
+///    to a different origin (both reqwest and the built-in ureq client do this by default).
 pub trait HttpClient: Send + Sync {
     /// Issue a GET to `url` with the given `headers` and optional per-request `timeout`, returning
     /// the response (already status-checked) as a boxed [`HttpResponse`].
@@ -65,6 +78,12 @@ pub trait HttpResponse {
 
 /// Async sibling of [`HttpClient`] (reqwest + tokio only). Object-safe like the sync seam, so an
 /// async client can be injected as an `Arc<dyn AsyncHttpClient>`.
+///
+/// # Security contract for implementations
+///
+/// The same security requirements as [`HttpClient`] apply: TLS certificate verification
+/// **MUST** be enabled, and the `Authorization` header **MUST NOT** be forwarded to a different
+/// host on a redirect. See [`HttpClient`] for details.
 #[cfg(feature = "async")]
 pub trait AsyncHttpClient: Send + Sync {
     /// Issue a GET, returning a boxed future resolving to the status-checked response.

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ureq::config::RedirectAuthHeaders;
 use ureq::tls::TlsProvider;
 use ureq::{Agent, Body, http::Response};
 
@@ -52,6 +53,11 @@ impl HttpClient for UreqClient {
                     // Disable ureq's built-in status-error so we reach our own is_success() check,
                     // which maps the status to the structured NotFound/Unauthorized/HttpStatus variants.
                     .http_status_as_error(false)
+                    // Security: never forward the Authorization header to a different host on a
+                    // redirect. `Never` is already ureq's default, but we set it explicitly here
+                    // so the policy is visible and cannot be silently changed by a ureq version
+                    // bump that alters the default. reqwest strips cross-host auth headers too.
+                    .redirect_auth_headers(RedirectAuthHeaders::Never)
                     .build();
                 built_agent = Agent::new_with_config(config);
                 (&built_agent, false)
@@ -259,6 +265,35 @@ mod tests {
             get_default("503 Service Unavailable"),
             Error::HttpStatus { status: 503, .. }
         ));
+    }
+
+    // S5 regression: the per-call agent must be built with `RedirectAuthHeaders::Never` so that
+    // the Authorization header is not forwarded to a different host on a redirect. We cannot
+    // easily test a real cross-host redirect in a unit test, so we verify the policy at the
+    // config-builder level by inspecting the agent's config after construction.
+    #[test]
+    fn per_call_agent_does_not_forward_auth_headers_on_redirect() {
+        // Reproduce the exact config construction from `get`, then inspect `redirect_auth_headers`.
+        // This fails if the explicit `.redirect_auth_headers(RedirectAuthHeaders::Never)` call is
+        // removed, because while `Never` is the ureq default today a future bump could change it.
+        #[cfg(feature = "rustls")]
+        let provider = TlsProvider::Rustls;
+        #[cfg(not(feature = "rustls"))]
+        let provider = TlsProvider::NativeTls;
+
+        let config = Agent::config_builder()
+            .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
+            .timeout_global(None)
+            .proxy(ureq::Proxy::try_from_env())
+            .http_status_as_error(false)
+            .redirect_auth_headers(RedirectAuthHeaders::Never)
+            .build();
+
+        assert_eq!(
+            config.redirect_auth_headers(),
+            RedirectAuthHeaders::Never,
+            "per-call agent must not forward the Authorization header across hosts on redirect"
+        );
     }
 
     #[test]

@@ -102,12 +102,20 @@ The `@shared` vocabulary (`macros.rs:231-462`):
   hook on the extracted binary; its doc records the full verification order
   (`verify_checksum` -> signature/`verify_keys` -> extract -> `verify_with` -> replace),
   so it runs last.
-- `verify_checksum(Checksum)` (`macros.rs:439`, under `checksums`).
-- `verify_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:455`, under
-  `signatures`) - **replaces** the key set on each call (last call wins, unlike
-  `request_header` which appends); an empty set (or never calling it) leaves
-  signature verification disabled, which is not an error.
-- `auth_token(impl Into<String>)` (`macros.rs:220`, only the `()` form).
+- `verify_checksum(Checksum)` (under `checksums`).
+- `verify_keys(impl Into<Vec<VerifyingKey>>)` (under `signatures`) - **replaces** the key set
+  on each call (last call wins, unlike `request_header` which appends); an empty set (or never
+  calling it) leaves signature verification disabled, which is not an error.
+- `allow_insecure_http(bool)` - a single opt-in that relaxes two https-only guards: (1) endpoint
+  validation in each backend's `build()` path accepts a custom `url(...)` / `host(...)` /
+  `endpoint(...)` whose scheme is `http`, and (2) the `Download` built by `build_download` in the
+  update pipeline is told to accept the artifact URL even when its scheme is `http`. Default
+  `false`. Set `true` for localhost/CI stubs where TLS is unavailable. Stored in
+  `CommonBuilderConfig::allow_insecure_http` and carried into `CommonConfig::allow_insecure_http`;
+  read by the `UpdateConfig::allow_insecure_http()` accessor (emitted by
+  `impl_update_config_accessors!`). This replaces the per-backend `allow_insecure_http` field that
+  existed only on `UpdateBuilder`s (not `ReleaseListBuilder`s, which retain their own flag).
+- `auth_token(impl Into<String>)` (only the `()` form).
 
 ### Accessor macro: impl_update_config_accessors!
 

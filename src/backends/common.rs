@@ -131,6 +131,26 @@ impl std::fmt::Debug for RequestConfig {
     }
 }
 
+/// Validate that `url` uses the `https` scheme, returning `Ok(())` when it does. When `allow_http`
+/// is `true`, plain `http` URLs are also accepted (intended for localhost integration tests and
+/// other environments where TLS is not available). Any other scheme is always rejected.
+///
+/// Returns `Err(Error::Config(…))` when the scheme is rejected.
+pub(crate) fn validate_url_scheme(url: &str, allow_http: bool) -> Result<()> {
+    let scheme = url.split("://").next().unwrap_or("");
+    match scheme {
+        "https" => Ok(()),
+        "http" if allow_http => Ok(()),
+        "http" => Err(Error::Config(format!(
+            "insecure http endpoint rejected: {url:?}; use an https URL or call \
+             `.allow_insecure_http(true)` on the builder to opt in (e.g. for localhost tests)"
+        ))),
+        other => Err(Error::Config(format!(
+            "unsupported URL scheme {other:?} in endpoint {url:?}; only https is accepted"
+        ))),
+    }
+}
+
 impl RequestConfig {
     /// Insert an extra request header from `TryInto<HeaderName>` / `TryInto<HeaderValue>` args. A
     /// conversion failure is recorded in [`header_error`](Self::header_error) (first one wins) and
@@ -237,6 +257,11 @@ pub(crate) struct CommonBuilderConfig {
     pub checksum: Option<crate::Checksum>,
     #[cfg(feature = "signatures")]
     pub verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+    /// Allow plain `http://` for custom endpoints and the artifact download URL. Defaults to
+    /// `false` (https-only). Set to `true` for localhost/CI stubs where TLS is unavailable. This
+    /// single flag governs both the endpoint validation in each backend's `build()` path and the
+    /// [`Download`](crate::Download) built by `build_download` in the update pipeline.
+    pub allow_insecure_http: bool,
 }
 
 impl Default for CommonBuilderConfig {
@@ -267,6 +292,7 @@ impl Default for CommonBuilderConfig {
             checksum: None,
             #[cfg(feature = "signatures")]
             verifying_keys: vec![],
+            allow_insecure_http: false,
         }
     }
 }
@@ -325,6 +351,7 @@ impl CommonBuilderConfig {
             checksum: self.checksum.clone(),
             #[cfg(feature = "signatures")]
             verifying_keys: self.verifying_keys.clone(),
+            allow_insecure_http: self.allow_insecure_http,
         })
     }
 }
@@ -355,6 +382,10 @@ pub(crate) struct CommonConfig {
     pub checksum: Option<crate::Checksum>,
     #[cfg(feature = "signatures")]
     pub verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+    /// Allow plain `http://` for custom endpoints and the artifact download URL. Mirrors
+    /// [`CommonBuilderConfig::allow_insecure_http`]; carried here so the update pipeline can
+    /// forward it to the `Download` built by `build_download`.
+    pub allow_insecure_http: bool,
 }
 
 #[cfg(test)]
@@ -520,5 +551,56 @@ mod tests {
             }
             other => panic!("expected Error::MissingField, got {:?}", other),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // S4: validate_url_scheme
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn validate_url_scheme_accepts_https() {
+        assert!(
+            super::validate_url_scheme("https://bucket.s3.example.com/", false).is_ok(),
+            "https must always be accepted"
+        );
+        assert!(
+            super::validate_url_scheme("https://bucket.s3.example.com/", true).is_ok(),
+            "https accepted even when allow_http is true"
+        );
+    }
+
+    #[test]
+    fn validate_url_scheme_rejects_http_by_default() {
+        let res = super::validate_url_scheme("http://localhost:9000/bucket/", false);
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "http must be rejected when allow_http is false, got {:?}",
+            res
+        );
+        // Error message names the rejected URL and the escape hatch.
+        if let Err(crate::errors::Error::Config(msg)) = res {
+            assert!(
+                msg.contains("allow_insecure_http"),
+                "error message must mention allow_insecure_http, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_url_scheme_accepts_http_when_opted_in() {
+        assert!(
+            super::validate_url_scheme("http://localhost:9000/bucket/", true).is_ok(),
+            "http must be accepted when allow_http is true"
+        );
+    }
+
+    #[test]
+    fn validate_url_scheme_rejects_unknown_scheme() {
+        let res = super::validate_url_scheme("ftp://files.example.com/bucket/", false);
+        assert!(
+            matches!(res, Err(crate::errors::Error::Config(_))),
+            "non-http/https scheme must be rejected, got {:?}",
+            res
+        );
     }
 }

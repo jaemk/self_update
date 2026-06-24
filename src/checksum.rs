@@ -35,7 +35,52 @@ pub enum Checksum {
     Sha512(String),
 }
 
+/// Expected hex-digest lengths (nibbles = bytes * 2).
+const SHA256_HEX_LEN: usize = 64; // 32 bytes * 2
+const SHA512_HEX_LEN: usize = 128; // 64 bytes * 2
+
 impl Checksum {
+    /// Construct a `Checksum::Sha256` after validating that `hex` is a lowercase or
+    /// uppercase hex string of exactly 64 characters (32 bytes). Returns
+    /// `Err(Error::Config(_))` if the length or encoding is wrong, so a typo is a
+    /// config error that surfaces immediately rather than a runtime mismatch.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #[cfg(feature = "checksums")] {
+    /// use self_update::Checksum;
+    /// let c = Checksum::sha256("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824").unwrap();
+    /// // Wrong length => config error.
+    /// assert!(Checksum::sha256("abc").is_err());
+    /// # }
+    /// ```
+    pub fn sha256(hex: impl Into<String>) -> Result<Self> {
+        let s = hex.into();
+        validate_hex_digest(&s, SHA256_HEX_LEN, "sha256")?;
+        Ok(Checksum::Sha256(s))
+    }
+
+    /// Construct a `Checksum::Sha512` after validating that `hex` is a lowercase or
+    /// uppercase hex string of exactly 128 characters (64 bytes). Returns
+    /// `Err(Error::Config(_))` if the length or encoding is wrong.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #[cfg(feature = "checksums")] {
+    /// use self_update::Checksum;
+    /// let digest = "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043";
+    /// let c = Checksum::sha512(digest).unwrap();
+    /// assert!(Checksum::sha512("tooshort").is_err());
+    /// # }
+    /// ```
+    pub fn sha512(hex: impl Into<String>) -> Result<Self> {
+        let s = hex.into();
+        validate_hex_digest(&s, SHA512_HEX_LEN, "sha512")?;
+        Ok(Checksum::Sha512(s))
+    }
+
     /// The expected digest, hex encoded.
     fn expected(&self) -> &str {
         match self {
@@ -79,6 +124,27 @@ fn hash_file<D: Digest>(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex_encode(&hasher.finalize()))
+}
+
+/// Validate that `s` (after trimming) is a hex string of exactly `expected_len` nibbles.
+/// Returns `Err(Error::Config(_))` on length or non-hex character violations.
+fn validate_hex_digest(s: &str, expected_len: usize, algo: &str) -> Result<()> {
+    let trimmed = s.trim();
+    if trimmed.len() != expected_len {
+        return Err(Error::Config(format!(
+            "invalid {} digest: expected {} hex characters (got {})",
+            algo,
+            expected_len,
+            trimmed.len()
+        )));
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Config(format!(
+            "invalid {} digest: contains non-hex characters",
+            algo
+        )));
+    }
+    Ok(())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -159,6 +225,72 @@ mod tests {
                 "computed field must hold the actual file digest"
             );
         }
+    }
+
+    // A5: `Checksum::sha256` / `Checksum::sha512` validating constructors.
+
+    #[test]
+    fn sha256_constructor_accepts_valid_hex() {
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        Checksum::sha256(digest).expect("valid 64-char hex must be accepted by sha256()");
+        // Upper-case should also be accepted.
+        Checksum::sha256(digest.to_uppercase()).expect("uppercase hex must be accepted");
+    }
+
+    #[test]
+    fn sha256_constructor_rejects_wrong_length() {
+        let err = Checksum::sha256("abc").expect_err("too-short hex must be rejected");
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "wrong length must produce Error::Config, got {:?}",
+            err
+        );
+        // Too long is also rejected.
+        let too_long = "a".repeat(65);
+        let err2 = Checksum::sha256(too_long).expect_err("too-long hex must be rejected");
+        assert!(matches!(err2, crate::errors::Error::Config(_)));
+    }
+
+    #[test]
+    fn sha256_constructor_rejects_non_hex() {
+        // 64 chars but contains 'g' which is not a hex digit.
+        let non_hex = "g".repeat(64);
+        let err = Checksum::sha256(non_hex).expect_err("non-hex chars must be rejected");
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "non-hex chars must produce Error::Config, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn sha512_constructor_accepts_valid_hex() {
+        let digest = "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043";
+        Checksum::sha512(digest).expect("valid 128-char hex must be accepted by sha512()");
+    }
+
+    #[test]
+    fn sha512_constructor_rejects_wrong_length() {
+        // A SHA-256 digest (64 chars) is too short for SHA-512 (128 chars).
+        let sha256_len = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let err =
+            Checksum::sha512(sha256_len).expect_err("SHA-256 length must fail SHA-512 constructor");
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "wrong length must produce Error::Config, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn sha512_constructor_rejects_non_hex() {
+        let non_hex = "z".repeat(128);
+        let err = Checksum::sha512(non_hex).expect_err("non-hex chars must be rejected");
+        assert!(
+            matches!(err, crate::errors::Error::Config(_)),
+            "non-hex chars must produce Error::Config, got {:?}",
+            err
+        );
     }
 
     // The Display of ChecksumMismatch embeds the expected and computed digests.
