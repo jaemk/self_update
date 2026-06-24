@@ -95,8 +95,8 @@ use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
         .region("eu-west-2")
@@ -144,7 +144,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(asset.download_url())
-        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")?
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -197,6 +197,15 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Security note: unverified updates
+
+Without the `checksums` or `signatures` features (or without configuring them), the crate does
+**not** authenticate the downloaded artifact. An attacker that can intercept or manipulate the
+download will silently substitute an arbitrary payload. Always configure at least one of
+`verify_checksum` (known digest from a `SHA256SUMS` file) or `verifying_keys` (ed25519ph
+signatures) for production use. A `log::warn!` is emitted at install time when neither is
+configured so that server-side logs can catch misconfigured deployments.
 
 ### Checksum verification
 

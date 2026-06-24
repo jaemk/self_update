@@ -35,8 +35,36 @@ edition 2024 (MSRV unchanged at 1.85).
   setters, replacing the hardcoded 100-key cap and 300s presigned-URL TTL.
 - `retry_backoff(base, max)` on the `Update`/`ReleaseList` builders to configure the exponential
   retry backoff (default 100ms base, ~3.2s cap).
+- `Checksum::sha256(hex)` and `Checksum::sha512(hex)` constructors (`checksums` feature): return
+  `Result`, rejecting non-hex or wrong-length input at construction instead of at verify time. The
+  existing enum variants are unchanged.
+- `MAX_EXTRACT_BYTES` public constant (512 MiB): archive extraction now caps total extracted bytes
+  to mitigate decompression bombs; exceeding the cap is an error.
+- `#[must_use]` on `Extract`, `Move`, `Download`, and `Releases`.
+- `allow_insecure_http(bool)` shared setter (via `impl_common_builder_setters!`) on every backend
+  `Update` builder and the custom backend: a single opt-in that covers both endpoint validation at
+  `build()` time and the artifact download URL check inside `build_download`. `ReleaseList` builders
+  retain their own separate flag. The standalone `Download::allow_insecure_http` is unchanged.
+  By default the crate rejects non-HTTPS custom endpoints and artifact URLs across all backends
+  and the standalone `Download` (see Breaking Changes below).
 
 ### Changed
+- **BREAKING** GitLab and Gitea: the custom-endpoint setter `url(...)` is renamed to `host(...)`
+  on both the `Update` and `ReleaseList` builders. GitHub's `url(...)` is unchanged (it is the
+  full API base). Gitea's missing-host build error now names the field `"host"`. Migration: rename
+  `.url(...)` to `.host(...)` on any GitLab or Gitea builder.
+- **BREAKING** `S3 AccessKey`: the `access_key_id` and `secret_access_key` fields are now
+  private. Read them via the new `.access_key_id()` / `.secret_access_key()` accessors. The
+  `new` and `From` tuple constructors are unchanged. The `Debug` impl now redacts the secret.
+- **BREAKING** `Download::request_header(...)` now returns `&mut Self` (was
+  `Result<&mut Self>`). An invalid header name/value is deferred to download time as
+  `Error::InvalidHeader` (from `download_to` / `download_to_async`), matching the builders'
+  deferred-error behavior. Migration: drop the `?` or `match` on `request_header` call sites.
+- **BREAKING** Insecure (`http://`) custom endpoints are now rejected by default across all
+  backends and the standalone `Download`. Affected: GitHub `url(...)`, GitLab/Gitea `host(...)`,
+  S3 `Endpoint::Generic`, and `Download::from_url(...)`. To use a plain `http://` endpoint
+  (e.g. localhost testing), call `.allow_insecure_http(true)` on the relevant builder or
+  `Download`. Existing code that points at an `http://` endpoint will error until it opts in.
 - Edition 2024 (MSRV unchanged at 1.85).
 - Default features changed from `["reqwest", "default-tls"]` to
   `["reqwest", "rustls", "progress-bar", "github"]`: default TLS is now `rustls`, and only the
@@ -85,6 +113,23 @@ edition 2024 (MSRV unchanged at 1.85).
   follows `NextContinuationToken` so multi-page buckets list fully.
 - The `retries` budget now also covers the binary download's request-establishment phase (before
   any bytes stream); a mid-stream failure is still not retried.
+
+### Security
+- ZIP extraction now rejects path-traversal entries (zip-slip) via `enclosed_name` validation.
+- S3 debug logging now redacts the SigV4 presigned `X-Amz-Signature` and `X-Amz-Credential`
+  query params so credentials no longer appear in logs.
+- The `ureq` client no longer forwards the `Authorization` header across hosts on a redirect,
+  matching the `reqwest` client's behavior.
+- An update that installs with no checksum and no verifying keys now emits a `warn!` that the
+  update is unauthenticated. The crate docs note that without the `checksums` or `signatures`
+  features the downloaded artifact is unverified.
+- The public `HttpClient` / `AsyncHttpClient` traits now carry a documented security contract:
+  implementations must verify TLS and must not forward `Authorization` across hosts on redirect.
+
+### Fixed
+- Git backends now percent-encode `repo_owner` and `repo_name` consistently in request URLs.
+- SigV4 canonical host header now includes a non-default port, fixing signing for S3-compatible
+  endpoints on custom ports.
 
 ### Removed
 - The deprecated no-op s3 `auth_token` setter (use `.access_key((id, secret))` under `s3-auth`).
