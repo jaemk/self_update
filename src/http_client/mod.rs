@@ -95,14 +95,29 @@ pub trait AsyncHttpResponse: Send {
 /// The sync HTTP client the crate builds by default when none is injected. Selects reqwest when the
 /// `reqwest` feature is on (preferred when both are enabled), else ureq. A genuine no-client build
 /// is a `compile_error!`.
+///
+/// Test builds set [`DEFAULT_CLIENT_BACKEND`] before returning so tests can inspect which concrete
+/// type was actually constructed without needing a downcast.
 #[cfg(feature = "reqwest")]
 pub(crate) fn default_client() -> Box<dyn HttpClient> {
+    #[cfg(test)]
+    DEFAULT_CLIENT_BACKEND.with(|c| c.set("reqwest"));
     Box::new(ReqwestClient::default())
 }
 
 #[cfg(all(not(feature = "reqwest"), feature = "ureq"))]
 pub(crate) fn default_client() -> Box<dyn HttpClient> {
+    #[cfg(test)]
+    DEFAULT_CLIENT_BACKEND.with(|c| c.set("ureq"));
     Box::new(UreqClient::default())
+}
+
+// Records the backend name chosen by the most recent `default_client` call on this thread.
+// Only compiled in test builds; production code sees no overhead.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DEFAULT_CLIENT_BACKEND: std::cell::Cell<&'static str> =
+        const { std::cell::Cell::new("unset") };
 }
 
 // A genuine no-client build cannot service any request. Surface a readable diagnostic instead of a
@@ -121,48 +136,31 @@ pub(crate) fn default_async_client() -> Box<dyn AsyncHttpClient> {
 #[cfg(test)]
 mod tests {
     /// When BOTH `reqwest` and `ureq` are compiled in, `default_client()` must select the reqwest
-    /// impl (it is the documented default; the ureq arm is `cfg(all(not(feature="reqwest"),
-    /// feature="ureq"))`). A `Box<dyn HttpClient>` cannot be downcast, so prove the selection by
-    /// comparing the concrete `TypeId` the (private) selection would produce against `ReqwestClient`.
-    /// This fails if a future edit flips the cfg ordering so ureq wins when both are on.
+    /// impl (it is the documented default; the ureq arm requires `not(feature="reqwest")`).
+    ///
+    /// The test calls `super::default_client()` directly — not a duplicate of its cfg logic — and
+    /// reads [`super::DEFAULT_CLIENT_BACKEND`] to confirm which concrete type was instantiated. If a
+    /// future edit flips the cfg ordering so the ureq arm wins when both features are enabled, this
+    /// thread-local will read `"ureq"` and the assertion below fails.
     #[cfg(all(feature = "reqwest", feature = "ureq"))]
     #[test]
     fn default_client_prefers_reqwest_when_both_enabled() {
-        use std::any::TypeId;
+        // Reset the sentinel so a previous test run on this thread does not leak state.
+        super::DEFAULT_CLIENT_BACKEND.with(|c| c.set("unset"));
 
-        // Reproduce the EXACT cfg precedence `default_client()` uses, returning the concrete
-        // `TypeId` the boxed client would carry. The two arms below copy the module's own cfg
-        // guards verbatim (`feature="reqwest"` wins; the ureq arm requires
-        // `not(feature="reqwest")`), so if a future edit flips that ordering this helper's result
-        // flips with it and the assertion below fails.
-        fn selected_default_client_type() -> TypeId {
-            #[cfg(feature = "reqwest")]
-            {
-                TypeId::of::<super::ReqwestClient>()
-            }
-            #[cfg(all(not(feature = "reqwest"), feature = "ureq"))]
-            {
-                TypeId::of::<super::UreqClient>()
-            }
-        }
+        // Exercise the real `default_client()` — this is the function under test.
+        let _client: Box<dyn super::HttpClient> = super::default_client();
+
+        // Read what default_client() actually instantiated.
+        let backend = super::DEFAULT_CLIENT_BACKEND.with(|c| c.get());
 
         assert_eq!(
-            selected_default_client_type(),
-            TypeId::of::<super::ReqwestClient>(),
-            "with both clients enabled the default must select the reqwest client, not ureq"
+            backend, "reqwest",
+            "with both clients enabled default_client() must instantiate the reqwest backend, not ureq"
         );
         assert_ne!(
-            selected_default_client_type(),
-            TypeId::of::<super::UreqClient>(),
+            backend, "ureq",
             "the default must NOT be the ureq client when reqwest is also enabled"
         );
-        // Both concrete clients are distinct, coexisting `HttpClient` impls, and `default_client()`
-        // builds a working boxed client (no panic).
-        assert_ne!(
-            TypeId::of::<super::ReqwestClient>(),
-            TypeId::of::<super::UreqClient>(),
-            "reqwest and ureq are distinct coexisting client types"
-        );
-        let _client: Box<dyn super::HttpClient> = super::default_client();
     }
 }

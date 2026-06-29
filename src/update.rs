@@ -784,6 +784,12 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
 
         let target_asset = resolve_and_confirm(self, &release)?;
 
+        if !is_safe_asset_name(target_asset.name()) {
+            return Err(Error::InvalidAssetName {
+                name: target_asset.name().to_string(),
+            });
+        }
+
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -893,6 +899,20 @@ pub(crate) mod testing {
     ) -> Result<Option<Release>> {
         choose_latest_release(releases, current_version, false)
     }
+}
+
+/// Return `true` iff `name` is safe to use as a single filename component on the local filesystem.
+///
+/// Rejects names that are empty, that are `.` or `..`, that contain `/` or `\` path separators, or
+/// that are absolute paths (starting with `/` or a Windows drive letter such as `C:`). Any of those
+/// would let a server-supplied asset name escape the temporary directory via [`Path::join`].
+fn is_safe_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !std::path::Path::new(name).is_absolute()
 }
 
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
@@ -1115,6 +1135,12 @@ where
     };
 
     let target_asset = resolve_and_confirm(u, &release)?;
+
+    if !is_safe_asset_name(target_asset.name()) {
+        return Err(Error::InvalidAssetName {
+            name: target_asset.name().to_string(),
+        });
+    }
 
     let tmp_archive_dir = tempfile::TempDir::new()?;
     let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
@@ -2418,5 +2444,405 @@ mod tests {
             out, b"PARTIAL",
             "the destination must hold only the single pre-failure prefix, never a duplicated body"
         );
+    }
+
+    // --- Signature verification (embedded-key and rotation) ------------------------------------
+
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn make_tar_gz() -> Result<Vec<u8>> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Cursor;
+
+        let mut data = Cursor::new(Vec::<u8>::new());
+        {
+            let gz = GzEncoder::new(&mut data, Compression::default());
+            let mut tar = tar::Builder::new(gz);
+            let content = b"hello";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "hello.txt", content.as_slice())?;
+            tar.finish()?;
+        }
+        Ok(data.into_inner())
+    }
+
+    /// Sign `unsigned` bytes with the given signing keys, writing the signed archive to a new
+    /// tempfile. The tempfile is returned so the caller controls its lifetime.
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn sign_tar_gz(
+        unsigned: &[u8],
+        signing_keys: &[zipsign_api::SigningKey],
+    ) -> Result<tempfile::NamedTempFile> {
+        use std::io::Cursor;
+        use tempfile::Builder;
+
+        let signed_file = Builder::new().suffix(".tar.gz").tempfile()?;
+        let signed_path = signed_file.path();
+        let context = signed_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .as_bytes();
+
+        let mut unsigned_cursor = Cursor::new(unsigned);
+        zipsign_api::sign::copy_and_sign_tar(
+            &mut unsigned_cursor,
+            &mut signed_file.as_file(),
+            signing_keys,
+            Some(context),
+        )
+        .map_err(zipsign_api::ZipsignError::from)?;
+
+        Ok(signed_file)
+    }
+
+    /// A compile-time const seed (the embedded-key pattern) signs an archive and the derived
+    /// verifying key accepts it.
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn embedded_key_verification_const_seed_verifies() -> Result<()> {
+        const KEY_SEED: [u8; 32] = [42u8; 32];
+
+        let signing_key = zipsign_api::SigningKey::from_bytes(&KEY_SEED);
+        let vkey: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = signing_key.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
+
+        super::verify_signature(signed_file.path(), &[vkey])
+    }
+
+    /// An archive dual-signed with two keys verifies independently against each key.
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn embedded_key_verification_dual_signed_verifies_with_each_key() -> Result<()> {
+        let key_a = zipsign_api::SigningKey::from_bytes(&[1u8; 32]);
+        let key_b = zipsign_api::SigningKey::from_bytes(&[2u8; 32]);
+        let vkey_a: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = key_a.verifying_key().to_bytes();
+        let vkey_b: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = key_b.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[key_a, key_b])?;
+
+        super::verify_signature(signed_file.path(), &[vkey_a])?;
+        super::verify_signature(signed_file.path(), &[vkey_b])
+    }
+
+    /// A key that did not sign the archive must produce a Signature error.
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn embedded_key_verification_wrong_key_returns_error() -> Result<()> {
+        let key_a = zipsign_api::SigningKey::from_bytes(&[1u8; 32]);
+        let key_b = zipsign_api::SigningKey::from_bytes(&[2u8; 32]);
+        let vkey_b: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = key_b.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[key_a])?;
+
+        let err = super::verify_signature(signed_file.path(), &[vkey_b]).unwrap_err();
+        assert!(
+            matches!(err, crate::errors::Error::Signature(_)),
+            "expected Signature error, got: {err}"
+        );
+        Ok(())
+    }
+
+    /// Empty key set is a deliberate no-op: verification is skipped entirely and `Ok(())` is
+    /// returned *before* the archive is even opened. We point it at a path that does not exist to
+    /// prove no I/O or detection happens; if the short-circuit regressed, the missing file (or the
+    /// absent signature) would surface as an error instead of `Ok`.
+    #[test]
+    #[cfg(feature = "signatures")]
+    fn embedded_key_verification_empty_keys_is_noop() {
+        let missing = std::path::Path::new("/nonexistent/self_update/never_here.tar.gz");
+        let res = super::verify_signature(missing, &[]);
+        assert!(
+            res.is_ok(),
+            "empty key set must skip verification and return Ok without touching the file, got: {res:?}"
+        );
+    }
+
+    /// Key-rotation / embedded any-of semantics on the *verifier* side: an archive signed by a
+    /// single key must verify when that key appears anywhere in the caller's key list, even
+    /// alongside keys that did not sign it. This is the production embedded-key scenario (ship N
+    /// trusted keys, accept a release signed by any one of them).
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn embedded_key_verification_any_of_verifier_keys_accepts() -> Result<()> {
+        let signer = zipsign_api::SigningKey::from_bytes(&[7u8; 32]);
+        let wrong = zipsign_api::SigningKey::from_bytes(&[8u8; 32]);
+        let vkey_signer: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = signer.verifying_key().to_bytes();
+        let vkey_wrong: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = wrong.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[signer])?;
+
+        // The matching key is second in the list: a first-match-only or all-must-match
+        // implementation would reject this.
+        super::verify_signature(signed_file.path(), &[vkey_wrong, vkey_signer])?;
+        // ...and order-independence: matching key first.
+        super::verify_signature(signed_file.path(), &[vkey_signer, vkey_wrong])
+    }
+
+    /// An archive whose kind is real but unsupported for signing (a bare `.tar`, i.e.
+    /// `ArchiveKind::Tar(None)`, which is neither `.tar.gz` nor `.zip`) must fall through to
+    /// `Error::NoSignatures`, not silently pass. The file is opened successfully, so this exercises
+    /// the post-open match fall-through arm rather than an I/O error.
+    #[test]
+    #[cfg(all(feature = "signatures", feature = "archive-tar"))]
+    fn embedded_key_verification_unsupported_archive_kind_returns_no_signatures() -> Result<()> {
+        let vkey = zipsign_api::SigningKey::from_bytes(&[9u8; 32])
+            .verifying_key()
+            .to_bytes();
+
+        let f = tempfile::Builder::new().suffix(".tar").tempfile()?;
+        std::fs::write(
+            f.path(),
+            b"not really a tar, but the extension decides the kind",
+        )?;
+
+        let err = super::verify_signature(f.path(), &[vkey]).unwrap_err();
+        assert!(
+            matches!(err, crate::errors::Error::NoSignatures(_)),
+            "a bare .tar with non-empty keys must yield NoSignatures, got: {err}"
+        );
+        Ok(())
+    }
+
+    /// A non-UTF-8 archive filename cannot be used as signing context and must surface as
+    /// `Error::SignatureNonUTF8` (not a panic, not a generic Signature error). The error is raised
+    /// before the file is opened, so the path need not exist. Unix-only because constructing a
+    /// non-UTF-8 path is platform-specific.
+    #[test]
+    #[cfg(all(unix, feature = "signatures", feature = "archive-tar"))]
+    fn embedded_key_verification_non_utf8_filename_returns_non_utf8_error() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let vkey = zipsign_api::SigningKey::from_bytes(&[3u8; 32])
+            .verifying_key()
+            .to_bytes();
+
+        // Invalid UTF-8 bytes, but still a `.tar.gz` extension so `detect_archive` succeeds and we
+        // reach the filename-context step that rejects it.
+        let name = std::ffi::OsStr::from_bytes(b"\xff\xfe-bad.tar.gz");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+
+        let err = super::verify_signature(&path, &[vkey]).unwrap_err();
+        assert!(
+            matches!(err, crate::errors::Error::SignatureNonUTF8),
+            "a non-UTF-8 archive name must yield SignatureNonUTF8, got: {err}"
+        );
+    }
+
+    // --- ZIP signature verification ------------------------------------------------------------
+
+    /// Build a minimal in-memory `.zip` (stored, no compression) suitable for signing.
+    #[cfg(all(feature = "signatures", feature = "archive-zip"))]
+    fn make_zip() -> Result<Vec<u8>> {
+        use std::io::Cursor;
+        use std::io::Write;
+
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("hello.txt", options)
+                .expect("start zip file");
+            zip.write_all(b"hello").expect("write zip file");
+            zip.finish().expect("finish zip");
+        }
+        Ok(buf.into_inner())
+    }
+
+    /// Sign in-memory `.zip` bytes into a `.zip` tempfile whose own filename is the signing context.
+    #[cfg(all(feature = "signatures", feature = "archive-zip"))]
+    fn sign_zip(
+        unsigned: &[u8],
+        signing_keys: &[zipsign_api::SigningKey],
+    ) -> Result<tempfile::NamedTempFile> {
+        use std::io::Cursor;
+
+        let signed_file = tempfile::Builder::new().suffix(".zip").tempfile()?;
+        let context = signed_file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+
+        let mut unsigned_cursor = Cursor::new(unsigned.to_vec());
+        zipsign_api::sign::copy_and_sign_zip(
+            &mut unsigned_cursor,
+            &mut signed_file.as_file(),
+            signing_keys,
+            Some(&context),
+        )
+        .map_err(zipsign_api::ZipsignError::from)?;
+
+        Ok(signed_file)
+    }
+
+    /// The `.zip` branch of `verify_signature` must accept an archive signed with the matching key.
+    /// The tar tests never exercise the ZIP arm; this covers it independently.
+    #[test]
+    #[cfg(all(feature = "signatures", feature = "archive-zip"))]
+    fn embedded_key_verification_zip_const_seed_verifies() -> Result<()> {
+        const KEY_SEED: [u8; 32] = [55u8; 32];
+        let signing_key = zipsign_api::SigningKey::from_bytes(&KEY_SEED);
+        let vkey: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = signing_key.verifying_key().to_bytes();
+
+        let unsigned = make_zip()?;
+        let signed_file = sign_zip(&unsigned, &[signing_key])?;
+
+        super::verify_signature(signed_file.path(), &[vkey])
+    }
+
+    /// The `.zip` branch must reject a wrong key with a `Signature` error, mirroring the tar arm.
+    #[test]
+    #[cfg(all(feature = "signatures", feature = "archive-zip"))]
+    fn embedded_key_verification_zip_wrong_key_returns_error() -> Result<()> {
+        let key_a = zipsign_api::SigningKey::from_bytes(&[11u8; 32]);
+        let key_b = zipsign_api::SigningKey::from_bytes(&[12u8; 32]);
+        let vkey_b: [u8; zipsign_api::PUBLIC_KEY_LENGTH] = key_b.verifying_key().to_bytes();
+
+        let unsigned = make_zip()?;
+        let signed_file = sign_zip(&unsigned, &[key_a])?;
+
+        let err = super::verify_signature(signed_file.path(), &[vkey_b]).unwrap_err();
+        assert!(
+            matches!(err, crate::errors::Error::Signature(_)),
+            "expected Signature error for wrong zip key, got: {err}"
+        );
+        Ok(())
+    }
+
+    // --- asset-name path-traversal guard (J1) ------------------------------------------------
+
+    // A plain filename is safe.
+    #[test]
+    fn asset_name_valid_passes() {
+        assert!(
+            super::is_safe_asset_name("my-binary-v1.0.0-linux.tar.gz"),
+            "ordinary archive name must be accepted"
+        );
+    }
+
+    // A name with a parent-traversal prefix is rejected.
+    #[test]
+    fn asset_name_dot_dot_slash_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name("../evil"),
+            "../evil must be rejected"
+        );
+    }
+
+    // An absolute Unix path is rejected.
+    #[test]
+    fn asset_name_absolute_unix_path_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name("/etc/hosts"),
+            "/etc/hosts must be rejected"
+        );
+    }
+
+    // A bare `..` component is rejected.
+    #[test]
+    fn asset_name_dot_dot_alone_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name(".."),
+            ".. alone must be rejected"
+        );
+    }
+
+    // A bare `.` component is rejected.
+    #[test]
+    fn asset_name_dot_alone_is_rejected() {
+        assert!(!super::is_safe_asset_name("."), ". alone must be rejected");
+    }
+
+    // An empty string is rejected.
+    #[test]
+    fn asset_name_empty_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name(""),
+            "empty name must be rejected"
+        );
+    }
+
+    // A name containing `/` (embedded slash) is rejected.
+    #[test]
+    fn asset_name_with_slash_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name("sub/path"),
+            "name containing / must be rejected"
+        );
+    }
+
+    // A name containing `\` (Windows separator) is rejected.
+    #[test]
+    fn asset_name_with_backslash_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name("sub\\path"),
+            "name containing \\ must be rejected"
+        );
+    }
+
+    // `InvalidAssetName` error variant: Display carries the correct prefix and the name.
+    #[test]
+    fn invalid_asset_name_error_display() {
+        let err = crate::errors::Error::InvalidAssetName {
+            name: "../evil".to_string(),
+        };
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("InvalidAssetNameError: "),
+            "must carry the expected prefix, got: {shown}"
+        );
+        assert!(
+            shown.contains("../evil"),
+            "must embed the offending name, got: {shown}"
+        );
+    }
+
+    // `InvalidAssetName` has no HTTP status and no URL.
+    #[test]
+    fn invalid_asset_name_error_http_helpers_are_none() {
+        let err = crate::errors::Error::InvalidAssetName {
+            name: "../evil".to_string(),
+        };
+        assert_eq!(err.http_status(), None);
+        assert_eq!(err.url(), None);
     }
 }

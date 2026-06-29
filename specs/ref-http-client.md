@@ -77,21 +77,22 @@ and `TlsProvider::NativeTls` otherwise. This is what lets `cargo build
 The shared setters are emitted by `request_config_setters!`
 (`macros.rs:14-88`), writing into a `RequestConfig` (`backends/common.rs:29-40`)
 that holds `timeout`, `headers`, `retries`, an injected `client`
-(`ClientOverride`), and a deferred `header_error`.
+(`Option<Arc<dyn HttpClient>>` / `Option<Arc<dyn AsyncHttpClient>>`), and a deferred `header_error`.
 
 - `timeout` sets a per-request timeout, default none, applied to every request
   the builder makes including the download (`macros.rs:18-21`).
 - `request_header(name, value)` inserts one extra header; a repeated name
   overwrites. It is infallible at call time: an invalid name/value is stored as
   the first `header_error` (`backends/common.rs:46-72`) and surfaced from
-  `build()` as `Error::Config` via `check()` (`backends/common.rs:75-80`).
-- `retries` is the number of retries (default 0 = one attempt) for API requests
-  only; the binary download is not retried, and it is a no-op on the custom
-  backend (`macros.rs:41-54`).
+  `build()` as `Error::InvalidHeader` via `check()` (`backends/common.rs:75-80`).
+- `retries` is the number of retries (default 0 = one attempt); the download's
+  request-establishment phase is retried under the same budget, but mid-stream
+  transfer errors are not retried. It is a no-op on the custom backend
+  (`macros.rs:41-54`).
 
 The retry loop lives in `backends/mod.rs`, not in the http_client module.
 `send` (`backends/mod.rs:173-189`) merges `config.headers` over the backend's
-base headers, then calls `retry` with `http_client::get` as the attempt and a
+base headers, then calls `retry` with `client.get(...)` as the attempt and a
 closure that logs a warning and sleeps `backoff` ms between tries. `retry`
 (`backends/mod.rs:117-135`) runs the attempt, and on error returns immediately
 once `attempts >= retries`, otherwise sleeps `retry_backoff_ms(attempts)` and
@@ -195,8 +196,8 @@ status variants.
   `attempts >= retries` (one retry => two attempts).
 - Backoff sequence is 100/200/400/800/1600/3200 ms, capped at 3200 from attempt
   5 onward (`100 << attempt.min(5)`); the rising index is fed in-loop.
-- The binary download is not retried (`Download` has no `retries`; it calls
-  `http_client::get` directly, not `send`).
+- The binary download's request-establishment phase is retried under the `retries`
+  budget (via `send`); mid-stream transfer errors are not retried.
 - An injected client still honors `request_header` and `retries`; for a reqwest
   client it also honors the per-request `timeout`, for a ureq agent the timeout
   defers to the agent. Proxy-env and TLS defer to the injected client.

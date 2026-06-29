@@ -180,6 +180,15 @@ pub enum Error {
     /// to inspect the underlying error.
     #[cfg(feature = "signatures")]
     Signature(Box<dyn std::error::Error + Send + Sync>),
+    /// The release asset name contains path traversal components or separators.
+    ///
+    /// Returned when the server-supplied asset name is empty, is `.` or `..`, contains a `/` or
+    /// `\` path separator, or is an absolute path. The file would never be created in that case,
+    /// so callers do not need to clean up temporary state.
+    InvalidAssetName {
+        /// The offending asset name as received from the release listing.
+        name: String,
+    },
     /// Used when the path generated to store the repository archive
     /// contains non-UTF8 characters.
     #[cfg(feature = "signatures")]
@@ -288,6 +297,9 @@ impl std::fmt::Display for Error {
             ),
             #[cfg(feature = "signatures")]
             Signature(e) => write!(f, "SignatureError: {}", e),
+            InvalidAssetName { name } => {
+                write!(f, "InvalidAssetNameError: unsafe asset name: {:?}", name)
+            }
             #[cfg(feature = "signatures")]
             SignatureNonUTF8 => {
                 write!(

@@ -10,23 +10,23 @@ and the client/TLS selection rules. `reqwest` and `ureq` may coexist (the crate
 picks `reqwest` by default and lets a caller inject any `HttpClient`), and so may
 `native-tls` and `rustls` (`rustls` wins); only a no-client build or `async`
 without `reqwest` is a `compile_error!`. Source of truth: the `[features]` table in
-`Cargo.toml` (lines 67-92), the `compile_error!` guards in `src/lib.rs` and
+`Cargo.toml` (lines 76-106), the `compile_error!` guards in `src/lib.rs` and
 `src/http_client/mod.rs`, and the `#[cfg(feature = ...)]` sites across `src/`. The S3
 backend is gated behind the `s3` feature; `s3-auth` (private-bucket request
 signing) implies `s3`.
 
 ## Behavior
 
-All features and their wiring (`Cargo.toml:67-91`):
+All features and their wiring (`Cargo.toml:76-106`):
 
 | Feature | Enables (deps / sub-features) | Implies | Notes |
 |---------|------------------------------|---------|-------|
-| `default` | `reqwest`, `rustls`, `progress-bar`, `github` | client + TLS + progress + backend | the default feature set (`Cargo.toml:68`) |
+| `default` | `reqwest`, `rustls`, `progress-bar`, `github` | client + TLS + progress + backend | the default feature set (`Cargo.toml:77`) |
 | `reqwest` | `dep:reqwest` (blocking, json, http2) | an HTTP client | may coexist with `ureq`; `reqwest` is the default-picked client when both are on (`Cargo.toml:86`) |
 | `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | an HTTP client | to use `ureq` alone, set `--no-default-features` so `reqwest` (a default) is not pulled (`Cargo.toml:87`) |
 | `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | a TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
 | `rustls` | `reqwest?/rustls`, `ureq?/rustls` | a TLS backend | may coexist with `native-tls`; `rustls` wins when both are on (`Cargo.toml:84`) |
-| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | reqwest-only; incompatible with `ureq` (`Cargo.toml:80`) |
+| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | async update verbs; requires `reqwest` (`Cargo.toml:95`) |
 | `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
 | `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
 | `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:71`) |
@@ -39,7 +39,7 @@ All features and their wiring (`Cargo.toml:67-91`):
 | `gitlab` | `dep:...` (gitlab backend module) | - | gates the GitLab backend; off by default (`Cargo.toml:89`) |
 | `gitea` | `dep:...` (gitea backend module) | - | gates the Gitea backend; off by default (`Cargo.toml:90`) |
 | `s3` | `dep:quick-xml` (s3 backend module) | - | gates the S3 backend and the `quick-xml` dependency; off by default (`Cargo.toml:91`) |
-| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | `s3` | SigV4 request signing for private buckets; implies `s3` (`Cargo.toml:92`) |
+| `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | `s3` | SigV4 request signing for private buckets; implies `s3` (`Cargo.toml:106`) |
 
 Implication notes:
 
@@ -54,8 +54,8 @@ Implication notes:
   verification of a given archive kind is enabled only when both `signatures`
   and the matching archive feature are on (`Cargo.toml:70,73,75`;
   `update.rs:904-938`).
-- `async` requires the `reqwest` client plus `tokio` and `futures-util`, and is
-  incompatible with `ureq` (`Cargo.toml:80`, guard at `lib.rs:433-437`).
+- `async` requires the `reqwest` client plus `tokio` and `futures-util` (`Cargo.toml:95`);
+  `async` + `ureq` together is allowed (async drives the reqwest path, ureq serves sync).
 
 Client and TLS coexistence: `reqwest` and `ureq` may both be enabled, and so may
 `native-tls` and `rustls`; `cargo build --all-features` builds. When more than one
@@ -75,11 +75,11 @@ The only `compile_error!` guards that remain:
 
 MSRV / edition: `rust-version = "1.85"`, `edition = "2024"` (`Cargo.toml:12-13`).
 
-docs.rs feature set (`Cargo.toml:17-29`): `reqwest`, `rustls`,
+docs.rs feature set (`Cargo.toml:17-33`): `reqwest`, `native-tls`,
 `archive-zip`, `compression-zip-bzip2`, `compression-zip-deflate`,
 `archive-tar`, `compression-tar-gz`, `progress-bar`, `signatures`, `checksums`,
 `github`, `gitlab`, `gitea`, `s3`, `s3-auth`, `async`. This pins the documented
-client/TLS pair to `reqwest` + `rustls` for a stable rendered surface. The same
+client/TLS pair to `reqwest` + `native-tls` for a stable rendered surface. The same
 `[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
 (`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
 `doc_cfg` feature (`lib.rs:410`) and the gated public re-exports carry
@@ -130,7 +130,7 @@ message uses it instead of the `Debug` form. `detect_archive` returns
 - `native-tls` and `rustls` may both be on; the per-call client builders prefer
   `rustls` when both are set. Neither combination is a `compile_error!`.
 - `async` requires `reqwest`: a build with `async` but not `reqwest` is a
-  `compile_error!` (`lib.rs:434`). `async` force-enables `reqwest` (`Cargo.toml:91`),
+  `compile_error!` (`lib.rs:434`). `async` force-enables `reqwest` (`Cargo.toml:95`),
   so this only fires on a hand-edited inconsistent feature set.
 - `cargo build --all-features` MUST build: with both clients and both TLS backends
   coexisting, the only remaining guards are the no-client and async-without-reqwest
@@ -138,7 +138,7 @@ message uses it instead of the `Debug` form. `detect_archive` returns
   `--all-features` lane explicitly.
 - The s3 backend is gated behind the `s3` feature; `s3-auth` implies `s3` so
   enabling `s3-auth` is sufficient for private-bucket request signing
-  (`Cargo.toml:91-92`).
+  (`Cargo.toml:91,106`).
 - A signed archive of a given kind verifies only when both `signatures` and the
   matching `archive-*` feature are enabled (the `verify-*` sub-feature rides on
   the archive feature, `Cargo.toml:69,72,74`).

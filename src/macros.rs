@@ -58,8 +58,9 @@ macro_rules! request_config_setters {
 
         /// Configure the exponential retry backoff: `base` is the delay before the first retry and
         /// the delay doubles each subsequent attempt, clamped to never exceed `max`. Defaults to a
-        /// `100ms` base and a `~3.2s` cap. Only affects retried listing/lookup requests (see
-        /// [`retries`](Self::retries)); the binary download is not retried.
+        /// `100ms` base and a `~3.2s` cap. Applies to listing/lookup requests and to the binary
+        /// download's request-establishment phase (see [`retries`](Self::retries)); a mid-stream
+        /// transfer failure is not retried.
         pub fn retry_backoff(
             &mut self,
             base: std::time::Duration,

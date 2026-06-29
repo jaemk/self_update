@@ -44,7 +44,7 @@ Both delegate to the private `build_update()` helper (see below).
   `<host>/api/v1/repos/<owner>/<repo>/releases`.
 - Fetch-by-tag appends `/tags/{tag}` to that base, with the tag percent-encoded via
   `urlencoding::encode(ver)`: `<base>/tags/{encoded_tag}`
-  (`gitea.rs:376` sync, `gitea.rs:484` async).
+  (`gitea.rs:338` sync, `gitea.rs:484` async).
 - The custom host is set with `url(impl Into<String>)` on both builders. The setter
   carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped); it was
   renamed from `instance_url` / `with_host` in earlier work, but no alias remains.
@@ -67,10 +67,10 @@ Both delegate to the private `build_update()` helper (see below).
   (`gitea.rs:113-116`); on `UpdateBuilder` it comes through the common setters and is
   stored in `CommonConfig`.
 - Headers are built by the free function `api_headers(auth_token)`
-  (`gitea.rs:496-515`). It always sets `User-Agent: rust-reqwest/self-update`. When a
-  token is present it adds `Authorization: token <token>` (the Gitea `token` scheme,
-  not `Bearer`). A token that cannot parse into a header value maps to `Error::Config`
-  (`gitea.rs:510`).
+  (`gitea.rs:531`). It always sets `User-Agent: rust-reqwest/self-update`. Auth is
+  applied centrally by `apply_auth` (`common.rs`), which renders the token as
+  `Authorization: token <token>` (the Gitea `token` scheme, not `Bearer`). A token
+  that cannot parse into a header value surfaces as `Error::InvalidAuthToken`.
 - The `Update`'s `UpdateConfig` accessor override wires this same `api_headers`
   via `impl_update_config_accessors!` (`gitea.rs:387-391`), so the trait default
   (which sets no User-Agent) is not used.
@@ -78,8 +78,9 @@ Both delegate to the private `build_update()` helper (see below).
 ### Pagination and ordering
 
 - Listing follows Gitea's `Link: rel="next"` pagination via the sans-io core: `releases_plan(base,
-  auth, stop_at)` builds a `PageRequest<Release>` whose parser maps each page with
-  `Release::from_release_gitea` and follows `next_link(headers)`, driven by `run_paginated` /
+  auth, stop_at)` builds a `PageRequest<Release>` whose parser maps each page via
+  `release_array_page` (calling `ReleaseDto::into_release` per element) and follows
+  `next_link(headers)`, driven by `run_paginated` /
   `run_paginated_async` (`backends/mod.rs`) starting from `first_page_url(base)` (which appends
   `?per_page=100` when no query is present). Pagination is bounded by `MAX_RELEASE_PAGES` (100) in
   the driver.
@@ -94,33 +95,33 @@ Both delegate to the private `build_update()` helper (see below).
 
 ### JSON to model
 
-- `Release::from_release_gitea` (`gitea.rs:32-57`) maps one release object:
-  - `tag_name` (required, else `Error::Release`) -> `version` with a single leading
-    `v` stripped via `trim_start_matches('v')`.
-  - `created_at` (required, else `Error::Release`) -> `date`.
-  - `name` -> `name`, defaulting to the tag when absent (`gitea.rs:40`).
-  - `assets` (required array, else `Error::Release` "No assets found") -> each mapped
-    by `ReleaseAsset::from_asset_gitea`.
+- Each page is parsed by `release_array_page`, which calls `ReleaseDto::into_release` on
+  each element:
+  - `tag_name` (required, else `Error::MissingAssetField { field: "tag_name" }`) -> `version`
+    with a single leading `v` stripped via `trim_start_matches('v')`.
+  - `created_at` (required, else `Error::MissingAssetField { field: "created_at" }`) -> `date`.
+  - `name` -> `name`, defaulting to the tag when absent.
+  - `assets` (required array, else `Error::MissingAssetField { field: "assets" }`) -> each
+    mapped via asset DTO parsing.
   - `body` -> optional `body` (`None` when absent or non-string).
-- `ReleaseAsset::from_asset_gitea` (`gitea.rs:18-29`) requires `browser_download_url`
-  -> `download_url` and `name` -> `name`; either missing is `Error::Release`.
+  - `browser_download_url` and `name` on each asset are required; either missing is
+    `Error::MissingAssetField { field }`.
 - `get_release_version[_async]` parses the bare object returned by `/tags/{tag}`
   directly (not wrapped in an array) (`gitea.rs:383`, `gitea.rs:492`), while the list
   endpoints parse a JSON array.
 
 ### Errors
 
-- Missing/invalid host, owner, or name at build time -> `Error::Config`, with a
-  message that names the missing setter (e.g. "`url` required (gitea has no default
+- Missing host, owner, or name at build time -> `Error::MissingField { field }`, with
+  a message that names the missing setter (e.g. "`url` required (gitea has no default
   host; call `.url(...)`)") (`gitea.rs:127-146`, `gitea.rs:250-269`).
 - A deferred `request_header` conversion failure surfaces from `build()` via
-  `request.check()` / `CommonBuilderConfig::build` as `Error::Config`
+  `request.check()` / `CommonBuilderConfig::build` as `Error::InvalidHeader`
   (`gitea.rs:122`, `gitea.rs:271`).
-- A non-array list payload, an empty releases array, or any missing required JSON
-  key -> `Error::Release` (`gitea.rs:334-339`, `gitea.rs:456-461`, plus the parser
-  guards above).
-- A token that cannot parse into a header value -> `Error::Config`
-  (`gitea.rs:510`).
+- A non-array list payload or empty releases array -> `Error::NoReleaseFound { target: None }`
+  (`gitea.rs:334-339`, `gitea.rs:456-461`). A missing required JSON field ->
+  `Error::MissingAssetField { field }` (see JSON-to-model above).
+- A token that cannot parse into a header value -> `Error::InvalidAuthToken` (via `apply_auth`).
 - Transport/HTTP failures propagate from the shared `send` / `send_async` helpers.
 
 ### `build_update` helper
@@ -137,8 +138,8 @@ validate identically and cannot drift.
   - `ReleaseList::configure() -> ReleaseListBuilder`
   - `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`,
     `auth_token`, the `request_config_setters!` setters, `build`
-  - `ReleaseList::fetch() -> Result<Releases>` (filters by `target` when set; a bare listing whose
-    `current_version()` is `None`, recover the `Vec<Release>` with `into_vec()`)
+  - `ReleaseList::fetch() -> Result<Releases>` (filters by `target` when set; returns a `Releases` whose
+    `current_version()` is `None`, so recover the `Vec<Release>` with `into_vec()`)
 - `gitea::Update` (`#[non_exhaustive]`), `gitea::UpdateBuilder`
   - `Update::configure() -> UpdateBuilder`
   - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, common setters,
@@ -154,14 +155,14 @@ fields do not break downstream code; it is constructed only through the builder.
 ## Invariants and regression checklist
 
 - Tag is percent-encoded in the fetch-by-tag route via `urlencoding::encode`
-  (`gitea.rs:376`, `gitea.rs:484`).
+  (`gitea.rs:338`, `gitea.rs:484`).
 - Base route shape is exactly `<host>/api/v1/repos/<owner>/<repo>/releases`, shared by
   sync, async, and `ReleaseList` paths via `releases_url()` (`gitea.rs:314-319`).
 - "Latest" is `releases[0]` of the first page, depending on the endpoint's newest-first
   ordering; the latest path does not paginate (`gitea.rs:343`, `gitea.rs:462`).
-- Newer-release filtering is strict (`bump_is_greater`), runs after pagination, and
-  preserves source order.
-- `url` is required (no default host); missing it is `Error::Config`.
+- Newer-release filtering is strict (`bump_is_greater`), folded into the page parser via
+  `stop_at` / `Page::stop` (early-stop at the first non-newer release), and preserves source order.
+- `url` is required (no default host); missing it is `Error::MissingField { field: "url" }`.
 - Auth uses the `token <token>` scheme with a fixed `rust-reqwest/self-update`
   User-Agent.
 - `version` has a single leading `v` stripped; `name` defaults to the tag.

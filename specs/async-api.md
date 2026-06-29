@@ -33,4 +33,4 @@ boxed futures); `update_extended` is factored into shared helpers
 `finish_update_owned`) that the async orchestrator reuses.
 
 See the `async` feature in `Cargo.toml`, `src/http_client/`, `src/backends/`, and
-the CHANGELOG. Design notes are in `local/design-g1-async.md`.
+the CHANGELOG.

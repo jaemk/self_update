@@ -22,8 +22,8 @@ pub fn cmp_versions(a: &str, b: &str) -> Result<std::cmp::Ordering> {
 }
 
 /// Newest-first (descending) total order over two version strings, ordering an unparseable version
-/// deterministically **last**. Built on [`cmp_versions`]: a parseable pair compares by reversed
-/// semver order (so the larger version sorts first); if exactly one side is unparseable it sorts
+/// deterministically **last**. Mirrors the ordering of [`cmp_versions`] for parseable pairs: a
+/// parseable pair compares by reversed semver order (so the larger version sorts first); if exactly one side is unparseable it sorts
 /// after the parseable one; two unparseable versions compare `Equal` (a stable no-op).
 ///
 /// This is the shared release comparator the selection paths use (`choose_latest_release`,

@@ -28,7 +28,7 @@ use crate::http_client::header;
 /// for [`Token`](AuthScheme::Token) (github/gitea) and `Bearer <token>` for
 /// [`Bearer`](AuthScheme::Bearer) (gitlab). The scheme is a per-backend default carried in
 /// [`RequestConfig`]; it is applied by the shared header-derivation
-/// ([`RequestConfig::auth_header`]) on both the listing and the download paths, and is overridden
+/// ([`RequestConfig::apply_auth`]) on both the listing and the download paths, and is overridden
 /// when the user sets their own `Authorization` via `request_header`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AuthScheme {

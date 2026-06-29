@@ -400,8 +400,9 @@ impl Default for UpdateBuilder {
 }
 
 /// Transport-free plan to fetch the paginated `releases` array (GitLab format), parsing each page
-/// via the private `ReleaseDto` and following `Link: rel="next"`. See github's
-/// `releases_plan` for the `stop_at` early-stop contract.
+/// via the private `ReleaseDto` and following `Link: rel="next"`. `stop_at` filters per-item
+/// (releases not strictly newer are omitted but pagination continues); when `None` all pages are
+/// walked unfiltered.
 fn releases_plan(
     base_url: &str,
     auth_token: Option<&str>,
@@ -433,30 +434,31 @@ fn release_array_page(
             let dtos: Vec<ReleaseDto> =
                 serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
-            let mut stop = false;
             for dto in dtos {
                 let release = dto.into_release()?;
+                // Skip releases not strictly newer than the current version, but do NOT stop
+                // pagination. A backport release (older semver, newer creation date) must not
+                // halt the walk; a genuinely newer release on a later page must still be found.
                 if let Some(ref current) = stop_at {
                     if !bump_is_greater(current, release.version()).unwrap_or(false) {
-                        stop = true;
-                        break;
+                        continue;
                     }
                 }
                 items.push(release);
             }
-            let next = if stop {
-                None
-            } else {
-                next_link(resp_headers).map(|next_url| {
-                    release_array_page(
-                        next_url,
-                        api_headers(auth.as_deref()).unwrap_or_default(),
-                        auth.clone(),
-                        stop_at.clone(),
-                    )
-                })
-            };
-            Ok(Page { items, next, stop })
+            let next = next_link(resp_headers).map(|next_url| {
+                release_array_page(
+                    next_url,
+                    api_headers(auth.as_deref()).unwrap_or_default(),
+                    auth.clone(),
+                    stop_at.clone(),
+                )
+            });
+            Ok(Page {
+                items,
+                next,
+                stop: false,
+            })
         }),
     }
 }
@@ -1615,16 +1617,18 @@ mod tests {
         );
     }
 
-    // --- gitlab git release-scan early-stop (per-backend parser wiring) ----------------
+    // --- gitlab git release-scan pagination (per-backend parser wiring) -----------------
     //
-    // The early-stop lives in shared code, but the gitlab parser (`from_release_gitlab` +
-    // `release_array_page`) wires `stop_at` itself. These pin that wiring: the parser must set
-    // `Page::stop` on the first release NOT strictly newer than current and the driver must NOT
-    // request page 2 (advertised via a `rel="next"` Link header), and the early-stopped selection
-    // must match a full-walk selection.
+    // The gitlab parser (`release_array_page`) wires `stop_at` for per-item filtering without
+    // halting pagination. These pin that wiring: non-newer releases are omitted but the driver
+    // continues to subsequent pages, and the selection from a partial page must match a full walk.
 
     #[test]
-    fn get_latest_releases_early_stops_within_first_page_and_skips_page_two() {
+    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+        // Page 1 contains both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases.
+        // Non-newer releases must NOT halt pagination — page 2 is requested and its newer
+        // release (v3.0.0) is included in the result alongside the newer items from page 1.
+        // (The old early-stop bug would have returned only ["2.0.0", "1.5.0"] in 1 request.)
         let (base, captured) = stub_capturing(|base| {
             vec![
                 Resp {
@@ -1632,7 +1636,47 @@ mod tests {
                     link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
                     body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
                 },
-                // Page 2 must never be requested; if it were, the captured count would be 2.
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let upd = gl_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
+        // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
+        // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0", "3.0.0"],
+            "non-newer items are filtered per-item; page 2 is still fetched and its newer release included"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "non-newer releases must not halt pagination; both pages must be requested"
+        );
+    }
+
+    #[test]
+    fn get_latest_releases_finds_update_on_page_2_when_page_1_has_only_non_newer() {
+        // Backport scenario: page 1 contains only a release that is NOT newer than the current
+        // version (e.g. a backport patch with an older semver but a newer creation date).
+        // The old version-based early-stop would have halted after page 1 and silently missed
+        // the genuinely newer release on page 2. After the fix, pagination continues and v3.0.0
+        // is correctly found.
+        //
+        // This test would FAIL on the unfixed code (early-stop discards page 2) and PASS on the
+        // fixed code (per-item filter skips v0.5.0 but pagination continues to page 2).
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v0.5.0"]),
+                },
                 Resp {
                     status: "200 OK",
                     link: None,
@@ -1645,13 +1689,13 @@ mod tests {
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
-            vec!["2.0.0", "1.5.0"],
-            "only the strictly-newer items from page 1 are kept (v1.0.0/v0.9.0 dropped)"
+            vec!["3.0.0"],
+            "the newer release on page 2 must be found even when page 1 has only non-newer releases"
         );
         assert_eq!(
             captured.lock().unwrap().len(),
-            1,
-            "early-stop must halt within page 1; page 2 must never be requested"
+            2,
+            "both pages must be fetched: non-newer releases must not halt pagination"
         );
     }
 

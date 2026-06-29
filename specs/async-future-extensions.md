@@ -22,5 +22,4 @@ on the built-in backends, but a few async surfaces remain sync-only or inline.
 ## Why deferred
 
 All three are additive and non-blocking. The inline extract/install is fine for a
-one-shot CLI update, and the async listing path has no demand yet. Notes are in
-`local/design-g1-async.md` (phases 2 and 3 and the open questions).
+one-shot CLI update, and the async listing path has no demand yet.

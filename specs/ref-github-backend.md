@@ -25,8 +25,8 @@ doc-aliases were dropped, so `filter_target`, `url`, and the others carry no
 `#[doc(alias)]`. The string setters (`repo_owner`, `repo_name`, `url`,
 `filter_target`, `auth_token`, and the `Update` builder's common setters) take
 `impl Into<String>`. `build()` calls `self.request.check()` first (surfacing a
-deferred `request_header` conversion error as `Error::Config`), then requires
-`repo_owner` and `repo_name`, bailing `Error::Config` if either is missing, with
+deferred `request_header` conversion error as `Error::InvalidHeader`), then requires
+`repo_owner` and `repo_name`, bailing `Error::MissingField { field }` if either is missing, with
 a message that names the setter to call (e.g. "`repo_owner` required (call
 `.repo_owner(...)`)") (`github.rs:112-136`).
 
@@ -36,7 +36,7 @@ a message that names the setter to call (e.g. "`repo_owner` required (call
 common surface from `impl_common_builder_setters!()` (`github.rs:225`): target,
 bin name, current version, auth token, timeout, retries, request headers,
 progress, confirm, asset matcher, verify hook, checksum, injected HTTP clients,
-etc. `build_update()` requires `repo_owner`/`repo_name` (else `Error::Config`,
+etc. `build_update()` requires `repo_owner`/`repo_name` (else `Error::MissingField { field }`,
 with a message that names the setter, e.g. "`repo_owner` required (call
 `.repo_owner(...)`)") and calls `self.common.build()` (which validates and
 requires `current_version`/`bin_name`/`bin_path_in_archive`)
@@ -72,7 +72,7 @@ The list routes go through `first_page_url` (`common.rs:58`), which appends
 headers via `api_headers(auth_token)` (`github.rs:488-507`): it always sets
 `User-Agent: rust/self-update`, and when a token is present sets
 `Authorization: token {token}` (the GitHub legacy "token" scheme, not "Bearer").
-A token that fails to parse as a header value is surfaced as `Error::Config`
+A token that fails to parse as a header value is surfaced as `Error::InvalidAuthToken`
 (`github.rs:502`). There is no `GITHUB_TOKEN` environment-variable interplay
 in this backend; the token must be supplied explicitly via `auth_token(...)`. The
 `impl_update_config_accessors!` override arm wires github's `api_headers` into the
@@ -82,7 +82,8 @@ download path so the same User-Agent and token scheme are used there too
 ### Pagination
 
 The listing is described transport-free as a `PageRequest<Release>` via `releases_plan(base,
-auth, stop_at)`: its parser maps the JSON array with `Release::from_release`, follows GitHub's
+auth, stop_at)`: its parser maps the JSON array via `release_array_page` (calling
+`ReleaseDto::into_release` per element), follows GitHub's
 `Link: rel="next"` (`next_link`) into the next `PageRequest`, and sets `Page::stop` on the first
 release not strictly newer than `stop_at`. The sync `run_paginated` and async
 `run_paginated_async` drivers (`backends/mod.rs`) walk the chain, reusing the shared
@@ -96,19 +97,19 @@ passes `stop_at = Some(current_version)` (early-stop on the first not-newer rele
 
 ### JSON to model
 
-`Release::from_release` (`github.rs:33-58`) maps a release JSON object:
-- `tag_name` (required, else `Error::Release` "Release missing `tag_name`").
+Each page is parsed by `release_array_page`, which calls `ReleaseDto::into_release` on
+each element:
+- `tag_name` (required, else `Error::MissingAssetField { field: "tag_name" }`).
 - `created_at` (required) into `date`.
 - `name` (optional, falls back to `tag_name`).
 - `body` (optional `String`).
-- `assets` (required array, else `Error::Release` "No assets found"), each parsed
-  by `ReleaseAsset::from_asset`.
+- `assets` (required array, else `Error::MissingAssetField { field: "assets" }`), each parsed
+  via asset DTO parsing.
 - `version` is `tag_name` with a single leading `v` stripped via
-  `trim_start_matches('v')` (`github.rs:52`).
+  `trim_start_matches('v')`.
 
-`ReleaseAsset::from_asset` (`github.rs:14-31`) requires `url` (asset download URL,
-else `Error::Release` "Asset missing `url`") and `name` (else "Asset missing
-`name`").
+Asset DTO parsing requires `url` (download URL, else `Error::MissingAssetField { field: "url" }`)
+and `name` (else `Error::MissingAssetField { field: "name" }`).
 
 ### Ordering
 
@@ -126,8 +127,8 @@ identically for both clients: 404 -> `Error::NotFound`, 401/403 ->
 (`status_to_error`, `errors.rs:254`); a request that cannot complete
 (connection/TLS/timeout) is `Error::Transport` (see
 `fetch_all_releases_errors_on_http_error_status`, `github.rs:803-825`). A 200 body
-that is not a JSON array on a list route yields `Error::Release` "No releases
-found" (`github.rs:387`, `415`). Missing required JSON keys yield `Error::Release`
+that is not a JSON array on a list route yields `Error::NoReleaseFound { target: None }`
+(`github.rs:387`, `415`). Missing required JSON fields yield `Error::MissingAssetField { field }`
 (see JSON-to-model). Transport timeouts and retries are governed by `RequestConfig`
 through the shared `send` / `send_async` helpers (`common.rs:173`, `194`).
 
@@ -181,7 +182,7 @@ stub (no external network):
 - `fetch_all_releases_errors_on_http_error_status` (`github.rs:803`): a non-2xx is
   the structured status variant (`NotFound`/`Unauthorized`/`HttpStatus`).
 - `fetch_all_releases_errors_when_body_is_not_an_array` (`github.rs:827`):
-  `Error::Release`.
+  `Error::NoReleaseFound { target: None }`.
 - `get_latest_release_sync_wraps_single_object_into_one_element_releases`
   (`github.rs:692`) and `..._reports_not_available_when_newest_equals_current`
   (`github.rs:719`): the `/latest` single-object path.

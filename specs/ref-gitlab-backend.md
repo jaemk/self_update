@@ -22,7 +22,7 @@ pagination/transport helpers (`send`, the sans-io `PageRequest`/`Page` core and 
 `repo_owner`, `repo_name`, `filter_target`, `auth_token`, the shared
 `request_config_setters!(request)` setters (`gitlab.rs:117`), and `build()`
 (`gitlab.rs:120`). `build()` calls `self.request.check()` first (surfacing any deferred
-`request_header` error as `Error::Config`), then requires `repo_owner` and `repo_name`,
+`request_header` error as `Error::InvalidHeader`), then requires `repo_owner` and `repo_name`,
 each bailing `Error::Config` when unset (`gitlab.rs:124-139`). The required-field messages
 name the setter to call: `` `repo_owner` required (call `.repo_owner(...)`) `` and
 `` `repo_name` required (call `.repo_name(...)`) `` (`gitlab.rs:129`, `gitlab.rs:137`).
@@ -68,7 +68,7 @@ releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
 ```
 
 This route returns a single release *object* (not an array), parsed directly by
-`Release::from_release_gitlab`.
+`ReleaseDto::into_release` (called from `release_array_page`).
 
 Custom host: `url(impl Into<String>)` (`gitlab.rs:77`, `gitlab.rs:216`) overrides `host`. The
 setter was renamed from `instance_url`/`with_host` to `url`; it carries no `#[doc(alias)]`
@@ -84,7 +84,7 @@ common setters) take `impl Into<String>`.
 `api_headers(auth_token: Option<&str>)` (`gitlab.rs:492`) always sets
 `User-Agent: rust-reqwest/self-update` and, when a token is present, inserts
 `Authorization: Bearer <token>` (`gitlab.rs:501-508`). A token that cannot be parsed into a
-header value yields `Error::Config` ("Failed to parse auth token"). There is no
+header value yields `Error::InvalidHeader`. There is no
 `PRIVATE-TOKEN` header and no environment-variable lookup in this file; the token comes
 solely from the builder setter (`ReleaseListBuilder::auth_token`, `gitlab.rs:112`) or the
 common `auth_token` setter for `Update` (`self.common.auth_token`). The
@@ -98,8 +98,8 @@ Listing paths (`ReleaseList::fetch`, `get_latest_releases`, and the async
 `get_latest_releases_async`) build a transport-free `PageRequest<Release>` via
 `releases_plan(base, auth, stop_at)` and drive it with the sans-io `run_paginated` /
 `run_paginated_async` drivers (`backends/mod.rs`). The plan starts at `first_page_url(base_url)`
-(which appends `?per_page=100` when the URL has no query string), parses each page with
-`Release::from_release_gitlab`, and follows GitLab's `Link: rel="next"` (`next_link`).
+(which appends `?per_page=100` when the URL has no query string), parses each page via
+`release_array_page` (calling `ReleaseDto::into_release`), and follows GitLab's `Link: rel="next"` (`next_link`).
 `get_latest_releases` passes `stop_at = Some(current_version)` and the parser sets `Page::stop` on
 the first release not strictly newer than it (early-stop, relying on newest-first order), while
 `ReleaseList::fetch` passes `stop_at = None` and walks all pages. Pagination is bounded by
@@ -109,8 +109,8 @@ warning and stops.
 Single-newest ordering: `get_latest_release` / `get_latest_release_async` use `newest_plan`, which
 fetches just the first page and takes `releases[0]`. Unlike GitHub, GitLab has no dedicated
 `/releases/latest` endpoint, so "newest" relies on the list endpoint's default descending
-(newest-first) order. An empty array or a non-array payload yields `Error::Release` ("no releases
-found").
+(newest-first) order. An empty array yields `Error::NoReleaseFound { target: None }`; a non-array
+payload yields `Error::MissingAssetField { field }`.
 
 Newer-than filtering is folded into the plan: with `stop_at = Some(current_version)`, the parser
 keeps releases where `bump_is_greater(current_version, version)` is true and stops at the first that
@@ -119,15 +119,15 @@ release, so early-stop and a full walk pick identically.
 
 ### JSON to model
 
-`Release::from_release_gitlab` (`gitlab.rs:34`) maps a release object:
+`ReleaseDto::into_release` (called from `release_array_page`) maps a release object:
 `tag_name` -> required `version` with a leading `v` trimmed (`trim_start_matches('v')`,
 `gitlab.rs:52`); `created_at` -> required `date`; `name` -> `name`, defaulting to the tag
 when absent (`gitlab.rs:41`); `description` -> optional `body` (`gitlab.rs:45`). Assets are
 read from `assets.links` (not a bare `assets` array); a missing/non-array `assets.links`
-yields `Error::Release` ("No assets found") (`gitlab.rs:42-44`). Each asset is parsed by
+yields `Error::MissingAssetField { field }` (`gitlab.rs:42-44`). Each asset is parsed by
 `ReleaseAsset::from_asset_gitlab` (`gitlab.rs:19`), which requires `url` (-> `download_url`)
-and `name`, each bailing `Error::Release` when missing (`gitlab.rs:20-25`). Missing
-`tag_name` or `created_at` also yields `Error::Release`.
+and `name`, each bailing `Error::MissingAssetField { field }` when missing (`gitlab.rs:20-25`).
+Missing `tag_name` or `created_at` also yields `Error::MissingAssetField { field }`.
 
 ### Errors
 
@@ -135,10 +135,11 @@ A completed non-2xx response is rejected by `send` / `send_async` before any bod
 and mapped to a structured variant by status (`status_to_error`, `errors.rs:254`): 404 ->
 `Error::NotFound` (e.g. an unknown tag), 401/403 -> `Error::Unauthorized`, any other non-2xx
 -> `Error::HttpStatus` (e.g. a 500/503 listing failure). A request that cannot complete is
-`Error::Transport`. JSON shape and field problems (non-array listing payload, empty array on
-the latest path, missing `tag_name`/`created_at`/`assets.links`, missing asset `url`/`name`)
-surface as `Error::Release`. Builder/config problems (missing `repo_owner`/`repo_name`,
-deferred bad `request_header`, unparseable auth token) surface as `Error::Config`.
+`Error::Transport`. An empty array on the latest path yields `Error::NoReleaseFound { target: None }`;
+missing JSON fields (`tag_name`, `created_at`, `assets.links`, asset `url`/`name`) yield
+`Error::MissingAssetField { field }`. Builder/config problems (missing `repo_owner`/`repo_name`)
+surface as `Error::Config`; a deferred bad `request_header` or an unparseable auth token
+surfaces as `Error::InvalidHeader`.
 
 ## Public surface
 
@@ -181,7 +182,7 @@ pagination; empty-array and non-array error paths; missing `tag_name` and missin
 `assets.links` parser guards; non-2xx (404 -> `NotFound`, 500/503 -> `HttpStatus`);
 `releases_url_encodes_repo_owner_with_slash` asserting `%2F` (and absence of a literal
 `group/subgroup`) in the captured request line; `url`/`filter_target` setter existence;
-`api_headers` Bearer + User-Agent wiring; invalid-header `Error::Config` at build; and
+`api_headers` Bearer + User-Agent wiring; invalid-header `Error::InvalidHeader` at build; and
 `identifier`/`bin_name` wiring. Shared pagination/retry helpers are tested in
 `src/backends/mod.rs`.
 

@@ -57,5 +57,4 @@ Configuration refinements:
   convenience setters remain.
 
 See `src/http_client/`, `src/macros.rs` (`request_config_setters!`), and the
-CHANGELOG `[unreleased]` and `[1.0.0]` Added entries. Design notes are in
-`local/design-g2-phase2-client-injection.md`.
+CHANGELOG `[unreleased]` and `[1.0.0]` Added entries.

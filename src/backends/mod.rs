@@ -215,9 +215,9 @@ pub(crate) fn retry_backoff_ms(
 ) -> u64 {
     let base_ms = base.as_millis() as u64;
     let max_ms = max.as_millis() as u64;
-    // `base << attempt` can overflow for large attempts; saturate, then clamp to `max`.
-    let scaled = base_ms.checked_shl(attempt).unwrap_or(u64::MAX);
-    scaled.min(max_ms)
+    // Double `base` `attempt` times with saturation, then clamp to `max`.
+    let doubled = (0..attempt).fold(base_ms, |acc, _| acc.saturating_mul(2));
+    doubled.min(max_ms)
 }
 
 /// Run `attempt` until it succeeds or the retry budget is spent, invoking `on_retry(err, backoff)`

@@ -87,15 +87,13 @@ The `1.0.0` release stabilised the public surface; keep new code consistent with
 
 ---
 
-## HTTP client & TLS (mutually exclusive choices)
-Exactly **one** http client must be enabled:
-- `reqwest` (default)
-- `ureq` (`default-features = false, features = ["ureq", ...]`)
+## HTTP client & TLS
+Both `reqwest` and `ureq` may be enabled at the same time; the sync API prefers `reqwest`
+when both are on. To use `ureq` alone, set `default-features = false, features = ["ureq", ...]`.
+A build with **neither** client is a hard `compile_error!` in `src/http_client/mod.rs`.
 
-Enabling both, or neither, is a hard compile error with an explicit `compile_error!`
-diagnostic (in `src/lib.rs`). TLS is selected with `rustls` (default) **or** `native-tls`
-(native/OpenSSL); enabling both is likewise a `compile_error!`. To use `ureq` or `native-tls`,
-set `default-features = false` and pick one client + one TLS backend.
+TLS backends (`rustls` default, `native-tls`) may also coexist; `rustls` wins when both are
+enabled. `cargo build --all-features` (both clients + both TLS backends) builds.
 
 ---
 

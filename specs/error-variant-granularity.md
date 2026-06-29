@@ -29,7 +29,7 @@ mapping. Summary:
   `InvalidResponse { source }` (response parse failures: the S3 XML / regex sites whose
   source was previously discarded).
 - `Update(String)` -> `VerificationRejected { reason: Option<String> }` (the user-controlled
-  `verify_with` rejection) and `Internal { message, source }` (genuine invariant violations and
+  `verify_binary` rejection) and `Internal { message, source }` (genuine invariant violations and
   blocking-task join failures, with the tokio `JoinError` carried as `source`).
 
 The `source()`-chain breaks are fixed: the S3 regex build / XML parse, the

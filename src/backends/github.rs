@@ -393,10 +393,11 @@ impl_update_config_accessors!(Update, {
 /// Transport-free plan to fetch the paginated `releases` array, parsing each page with
 /// the private `ReleaseDto` and following GitHub's `Link: rel="next"` pagination.
 ///
-/// `stop_at` bounds the walk: when `Some(current_version)` the list is filtered to releases
-/// strictly newer than it, and the parser sets `Page::stop` as soon as it sees a release NOT
-/// strictly newer than `stop_at` (relying on the newest-first order) so older pages are never
-/// fetched. When `None` the listing is unfiltered and every page is walked (used by `ReleaseList`).
+/// `stop_at` filters per-item: when `Some(current_version)` each release that is not strictly
+/// newer than it is omitted from the collected list, but pagination continues to subsequent pages
+/// regardless (a backport release — older semver, newer creation date — must not halt the walk
+/// and cause a genuinely newer release on a later page to be missed). When `None` the listing is
+/// unfiltered and every page is walked (used by `ReleaseList`).
 fn releases_plan(
     base_url: &str,
     auth_token: Option<&str>,
@@ -429,32 +430,31 @@ fn release_array_page(
             let dtos: Vec<ReleaseDto> =
                 serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
-            let mut stop = false;
             for dto in dtos {
                 let release = dto.into_release()?;
+                // Skip releases not strictly newer than the current version, but do NOT stop
+                // pagination. A backport release (older semver, newer creation date) must not
+                // halt the walk; a genuinely newer release on a later page must still be found.
                 if let Some(ref current) = stop_at {
-                    // Early-stop on the first release not strictly newer than `current` (rely on
-                    // newest-first order); still-newer items already pushed are kept.
                     if !bump_is_greater(current, release.version()).unwrap_or(false) {
-                        stop = true;
-                        break;
+                        continue;
                     }
                 }
                 items.push(release);
             }
-            let next = if stop {
-                None
-            } else {
-                next_link(resp_headers).map(|next_url| {
-                    release_array_page(
-                        next_url,
-                        api_headers_for(&auth),
-                        auth.clone(),
-                        stop_at.clone(),
-                    )
-                })
-            };
-            Ok(Page { items, next, stop })
+            let next = next_link(resp_headers).map(|next_url| {
+                release_array_page(
+                    next_url,
+                    api_headers_for(&auth),
+                    auth.clone(),
+                    stop_at.clone(),
+                )
+            });
+            Ok(Page {
+                items,
+                next,
+                stop: false,
+            })
         }),
     }
 }
@@ -652,10 +652,11 @@ mod tests {
     // --- git release-scan early-stop (selection parity + page-2 never requested) -------
 
     #[test]
-    fn get_latest_releases_early_stops_within_first_page_and_skips_page_two() {
-        // Page 1 (newest-first) ends with a release NOT strictly newer than current (1.0.0): the
-        // parser must set Page::stop as soon as it hits v1.0.0, keeping the still-newer items
-        // already seen and NOT requesting page 2 (which it advertises via a `rel="next"` link).
+    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+        // Page 1 contains both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases.
+        // Non-newer releases must NOT halt pagination — page 2 is requested and its newer
+        // release (v3.0.0) is included in the result alongside the newer items from page 1.
+        // (The old early-stop bug would have returned only ["2.0.0", "1.5.0"] in 1 request.)
         let (base, captured) = stub_capturing(|base| {
             vec![
                 Resp {
@@ -663,8 +664,6 @@ mod tests {
                     link: Some(format!("{base}/repos/o/r/releases?page=2")),
                     body: releases_array_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
                 },
-                // Page 2 must never be requested; if it were, the test would consume this and the
-                // captured-request count would be 2.
                 Resp {
                     status: "200 OK",
                     link: None,
@@ -675,13 +674,13 @@ mod tests {
         let upd = github_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
-        // Only the strictly-newer items from page 1, in order; v1.0.0/v0.9.0 dropped by the filter,
-        // and v3.0.0 (page 2) never fetched.
-        assert_eq!(versions, vec!["2.0.0", "1.5.0"]);
+        // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
+        // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
+        assert_eq!(versions, vec!["2.0.0", "1.5.0", "3.0.0"]);
         assert_eq!(
             captured.lock().unwrap().len(),
-            1,
-            "early-stop must halt within page 1; page 2 must never be requested"
+            2,
+            "non-newer releases must not halt pagination; both pages must be requested"
         );
     }
 
@@ -928,7 +927,7 @@ mod tests {
         assert_eq!(
             sync_versions,
             vec!["2.0.0".to_string(), "1.5.0".to_string()],
-            "and both apply the strictly-newer early-stop filter"
+            "and both apply the strictly-newer per-item filter"
         );
     }
 

@@ -50,38 +50,46 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Features
 
-Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
-exclusive -- enabling both, or neither, is a compile error):
+At least one HTTP client must be selected; having zero clients is a compile error. Multiple
+clients and multiple TLS backends may coexist (reqwest is preferred when both are present):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
-* `native-tls` (default): native TLS for the selected client;
-* `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
+* `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
+* `native-tls`: opt-in native/OpenSSL TLS for the selected client;
 
-The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
-are _disabled_ by default; activate the one(s) your release files need:
+The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
+are enabled by default:
 
-* `archive-tar`: Support for _tar_ archive format;
-* `archive-zip`: Support for _zip_ archive format;
-* `compression-tar-gz`: Support for _gzip_ compression;
-* `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
-* `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
-* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
-* `checksums`: Verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
-* `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
-* `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
+* `github`: the GitHub Releases backend;
+* `progress-bar`: terminal download progress bar;
 
-The S3 backend needs **no feature** -- it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
+The following are opt-in; activate the one(s) your release files need:
+
+* `gitlab`: the GitLab Releases backend;
+* `gitea`: the Gitea Releases backend;
+* `s3`: the S3-compatible backend (Amazon S3, GCS, DigitalOcean Spaces, etc.);
+* `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
+* `archive-tar`: support for _tar_ archive format;
+* `archive-zip`: support for _zip_ archive format;
+* `compression-tar-gz`: support for _gzip_ compression;
+* `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
+* `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
+* `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
+* `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
+* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest handles async, ureq handles sync); see [Async](#async) below.
+
+`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
 
 ### Example
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
+`cargo run --example github --features "github signatures"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
+`cargo run --example gitlab --features "gitlab"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -95,8 +103,8 @@ use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
         .region("eu-west-2")
@@ -322,7 +330,8 @@ returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`
 `get_latest_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
 update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
 scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
-**tokio-only and reqwest-only** (ureq has no async story, so `async` is incompatible with `ureq`).
+**tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq
+handles sync); the only invalid configuration is `async` without `reqwest`.
 Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
 does not block the executor.
 
@@ -354,10 +363,14 @@ are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocki
 compiled client crate(s) are re-exported (`self_update::reqwest` / `self_update::ureq`) so you don't
 need a separate dependency to name the type. (Since the transport is a runtime trait seam, `reqwest`
 and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
-when both are present.)
+when both are present.) For test doubles or fully custom transport, inject any type that implements
+the object-safe trait directly via `.http_client(Arc<dyn HttpClient>)` (sync) or
+`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`self_update::http_client`] module
+for the trait definitions.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
-release-listing requests (the download is never retried), and for `reqwest` the per-request
+release-listing requests and to the download's request-establishment phase (a mid-stream failure
+is not retried, as that would corrupt the partially-written destination), and for `reqwest` the per-request
 `.timeout()` is layered on too; but `HTTP(S)_PROXY` env and the crate's TLS feature are left entirely
 to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does not apply to an
 injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and

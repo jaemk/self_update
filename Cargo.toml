@@ -71,6 +71,7 @@ bytes = { version = "1", optional = true }
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
 serde_json = "1"
+zipsign-api = { version = "0.1", default-features = false, features = ["sign-tar", "sign-zip"] }
 
 [features]
 default = ["reqwest", "rustls", "progress-bar", "github"]
@@ -109,7 +110,7 @@ s3-auth = ["s3", "dep:hmac", "dep:percent-encoding", "dep:sha2", "dep:url", "dep
 # example builds unconditionally (the custom backend is always compiled).
 [[example]]
 name = "github"
-required-features = ["github", "signatures"]
+required-features = ["github"]
 
 [[example]]
 name = "gitlab"
@@ -122,3 +123,7 @@ required-features = ["gitea"]
 [[example]]
 name = "s3"
 required-features = ["s3"]
+
+[[example]]
+name = "embedded_key"
+required-features = ["github", "signatures"]

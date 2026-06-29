@@ -32,7 +32,7 @@ ASYNC_FEATURES   = async github gitlab gitea s3 $(ARCHIVE_FEATURES)
 # The backends, one runnable example each. NOTE: unlike a typical example,
 # running one performs a REAL self-update (network + replaces the binary), so
 # the `examples` goals BUILD them rather than run them.
-SELF_UPDATE_EXAMPLES = github gitlab gitea s3 custom
+SELF_UPDATE_EXAMPLES = github gitlab gitea s3 custom embedded_key
 SELF_UPDATE_EXAMPLE_TARGETS = $(addprefix examples/, $(SELF_UPDATE_EXAMPLES))
 
 EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)

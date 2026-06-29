@@ -22,7 +22,7 @@ considered shape-final (`NotFound`, `ChecksumMismatch`) are not.
 | Variant | Produced by | Feature gate | Opaque/boxed? |
 | --- | --- | --- | --- |
 | `Internal { message: String, source: Option<Box<dyn Error + Send + Sync>> }` | Genuine internal invariants / task failures: extractor source has no file name (`lib.rs`), path not in archive, non-UTF-8 archive path (`lib.rs`), and blocking-task join failure (`custom.rs`, `update.rs`). The join sites carry the tokio `JoinError` as `source`; the invariant sites set `source: None`. `#[non_exhaustive]`. | none | source boxed when present |
-| `VerificationRejected { reason: Option<String> }` | The post-update `verify_with` callback returned `false`, so nothing was installed (`update.rs`). `reason` is reserved for a future caller-supplied message and is currently always `None`. `#[non_exhaustive]`. | none | no (struct fields) |
+| `VerificationRejected { reason: Option<String> }` | The post-update `verify_binary` callback returned `Err(..)`, so nothing was installed (`update.rs`). `reason` carries `Some(<error message>)` from the callback's returned error. `#[non_exhaustive]`. | none | no (struct fields) |
 | `ChecksumMismatch { expected: String, computed: String }` | The downloaded artifact's digest did not match the configured `Checksum` (`checksum.rs`). Both fields are lowercase hex-encoded digests. | `checksums` | no (struct fields) |
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. | none | no (struct fields) |
@@ -55,7 +55,7 @@ construction sites that stringified-and-discarded a real underlying error now ca
 
 `Update(String)` was split:
 
-- **`update.rs` `install_binary()`** (verify callback returned `false`) -> `VerificationRejected
+- **`update.rs` `install_binary()`** (verify callback returned `Err(..)`) -> `VerificationRejected
   { reason }`. A user-controlled rejection, not an internal failure.
 - **`lib.rs` extractor / extract helpers** (no file-name, path not in archive, non-UTF-8 path) ->
   `Internal { message, source: None }`. Internal invariants.
@@ -240,7 +240,7 @@ type directly, since `std::io::Error` is stable std.)
 - `Error::Internal` is reserved for genuine internal/invariant failures: extractor invariants,
   archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
   `source`).
-- A rejecting `verify_with` callback produces `Error::VerificationRejected { reason: None }`.
+- A rejecting `verify_binary` callback produces `Error::VerificationRejected { reason: Some(<error message>) }`.
 - The sites that previously stringified-and-discarded a source now chain it via `source()`: the
   S3 XML/regex parse (`InvalidResponse`), the auth-token header-value parse (`InvalidAuthToken`),
   and the tokio `JoinError` sites (`Internal`).
