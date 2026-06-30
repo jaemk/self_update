@@ -85,11 +85,11 @@ The following are opt-in; activate the one(s) your release files need:
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "github signatures"`.
+`cargo run --example github --features "signatures archive-tar compression-tar-gz"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "gitlab"`.
+`cargo run --example gitlab --features "gitlab archive-tar compression-tar-gz"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -396,11 +396,10 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Troubleshooting
 
-When using cross compilation tools such as cross if you want to use rustls and not openssl
-
-```toml
-self_update = { version = "1", features = ["rustls"], default-features = false }
-```
+**Cross-compilation (`cross` / `cargo-cross`).** `rustls` is the default TLS backend, so
+no additional configuration is needed for cross-compilation: a build on default features
+already uses rustls. If you have explicitly switched to `native-tls` and want to revert,
+remove the `native-tls` feature; `rustls` is active by default.
 
 **TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where

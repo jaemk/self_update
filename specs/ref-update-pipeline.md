@@ -30,7 +30,7 @@ the `TempDir` moved in by value. The sync `finish_update(&U, release, dir, archi
 from the updater and calls the owned twin inline (no spawn). The async path builds the same ctx,
 moves the `TempDir` into the closure, and runs `finish_update_owned` inside
 `tokio::task::spawn_blocking(move || ...)`, awaiting the join handle and mapping a `JoinError` to
-`Error::Update`. So the async update never blocks the executor on the verify/extract/replace work,
+`Error::Internal { message, source }`. So the async update never blocks the executor on the verify/extract/replace work,
 and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` parser is `+ Send`).
 
 ### Fetch and select
@@ -60,7 +60,7 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 application/octet-stream`, merges the user's `request_headers()` *after* (so a same-named
 user header overrides), forwards the injected HTTP client, per-request timeout, progress
 callback, and progress style. The download is driven by `download_to` (sync, `lib.rs:1305`)
-or `download_to_async` (`lib.rs:1375`). The download is never retried.
+or `download_to_async` (`lib.rs:1375`). The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried.
 
 ### Extract
 
@@ -93,14 +93,14 @@ In `finish_update`, before any extraction or replacement:
    implemented for `.tar.gz` and `.zip` assets, not gz files".
 
 Both run on the *downloaded archive bytes* and before extraction. The third hook,
-`verify_with`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
-immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_with ->
+`verify_binary`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
+immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_binary ->
 replace.
 
 ### Replace
 
-`install_binary` (`update.rs:867`): runs the `verify_with` hook first; `false` => bail
-`Error::Update` "post-update verification rejected the new binary" with nothing replaced. Then
+`install_binary` (`update.rs:867`): runs the `verify_binary` hook first; `Err(..)` => bail
+`Error::VerificationRejected { reason }` with nothing replaced. Then
 if `bin_install_path()` equals `std::env::current_exe()`, the swap goes through
 `self_replace::self_replace(new_exe)` (atomic in-place replace of the running exe,
 `update.rs:882`). Otherwise `Move::from_source(new_exe).to_dest(bin_install_path)`
@@ -164,13 +164,13 @@ via `into_version_status`.
 - `update::ReleaseStatus` (`#[non_exhaustive]`): `into_version_status`, `is_up_to_date`, `is_updated`.
 - `VersionStatus` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
 - `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
-  `progress_style`, `replace_headers`, `header`, `download_to`, `download_to_async`
-  (feature `async`), `reqwest_client`/`reqwest_async_client`/`ureq_agent` (client-gated).
-- `Extract<'a>`: `from_source`, `archive`, `extract_into`, `extract_file`.
+  `progress_style`, `replace_headers`, `request_header`, `download_to`, `download_to_async`
+  (feature `async`).
+- `Extract`: `from_source`, `archive`, `extract_into`, `extract_file`.
 - `ArchiveKind` (`#[non_exhaustive]`): `Plain(Option<Compression>)`, `Tar(...)` (feature
   `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`.
-- `Move<'a>`: `from_source`, `replace_using_temp`, `to_dest`.
-- `MoveAll<'a>` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
+- `Move`: `from_source`, `replace_using_temp`, `to_dest`.
+- `MoveAll` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
 
 Async `update_async` / `update_extended_async` are default methods on the public sealed
 `AsyncReleaseUpdate` trait, implemented by each backend's `Update` (and the custom `AsyncUpdate`)
@@ -179,7 +179,7 @@ under feature `async`; the free `update::update_extended_async` they route to is
 ## Invariants and regression checklist
 
 - Verify-before-replace: checksum and signature both run on the downloaded archive *before*
-  extraction; `verify_with` runs on the extracted binary *before* the swap. Nothing is
+  extraction; `verify_binary` runs on the extracted binary *before* the swap. Nothing is
   replaced if any of the three rejects (`update.rs:778-784`, `872-879`).
 - Order independence: `choose_latest_release` sorts candidates semver-descending and filters
   to strictly-newer, so a custom source's unordered/stale list selects correctly and never
@@ -191,7 +191,7 @@ under feature `async`; the free `update::update_extended_async` they route to is
   rollback failures are logged only. A second `commit` is a no-op.
 - The status block prints when `show_output || !no_confirm`; the prompt prints only when
   `!no_confirm`. Suppressing one does not suppress the other.
-- The download is never retried; user `request_headers` override the crate's ACCEPT/auth
+- The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
 - `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).

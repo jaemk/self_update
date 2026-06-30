@@ -21,7 +21,8 @@ variables.
 
 Phase 2 added user-provided client injection. The canonical seam is
 `http_client(Arc<dyn HttpClient>)` (and `http_client_async(Arc<dyn
-AsyncHttpClient>)` under `async`) on the builders and `Download`; the
+AsyncHttpClient>)` under `async`) on the `Update`/`ReleaseList` builders only;
+`Download`'s client is set internally by the builder (`pub(crate)` setter). The
 client-specific `reqwest_client`, `reqwest_async_client`, and `ureq_agent` setters
 are thin convenience wrappers that build a `ReqwestClient` / `ReqwestAsyncClient`
 / `UreqClient` and store it as the trait object. The injected

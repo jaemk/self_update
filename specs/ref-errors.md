@@ -34,7 +34,7 @@ considered shape-final (`NotFound`, `ChecksumMismatch`) are not.
 | `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name`/`url` (`github.rs`, `gitlab.rs`, `gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A builder request header (`request_header`) or the `Download::header` argument was not a valid HTTP header. Surfaced from `build()` via `common.rs` and directly from `Download::header` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
-| `Config(String)` | Residual configuration error that does not fit a more specific variant. Currently produced only by the S3 SigV4 host-extraction site when a host cannot be extracted from a signed URL (`s3.rs`). | `s3-auth` (only producer) | no (String) |
+| `Config(String)` | Residual configuration error that does not fit a more specific variant. Produced by: the S3 SigV4 host-extraction site when a host cannot be extracted from a signed URL (`s3.rs`, `s3-auth`); a root-certificate or HTTP client build failure in `RequestConfig::check()` (`common.rs`); and the same build failure in `Download::download_to` and `Download::download_to_async` (`lib.rs`). | none (producers span multiple features) | no (String) |
 | `Io(std::io::Error)` | Wraps a `std::io::Error`. Constructed directly and via `From<std::io::Error>`. | none | no (concrete `std::io::Error`) |
 | `Json(Box<dyn Error + Send + Sync>)` | `serde_json` failure, only via `From<serde_json::Error>`. | none | yes (boxed) |
 | `Transport(Box<dyn Error + Send + Sync>)` | The request could not be completed (connection/TLS/timeout/transport failure). Only via `From<reqwest::Error>` (`reqwest` feature) or `From<ureq::Error>` (`ureq` feature). A bare `?` on a client call lands here only when the error is not a status-code error. | none for the variant; the `From` impls are gated on `reqwest` / `ureq` | yes (boxed) |
@@ -83,8 +83,13 @@ construction sites that stringified-and-discarded a real underlying error now ca
 - **`github.rs` / `gitlab.rs` / `gitea.rs` / `update.rs` `api_headers`** (auth token not a valid
   header value) -> `InvalidAuthToken { source }`. The header-parse error is now carried as
   `source` (was previously stringified and discarded).
-- **`s3.rs` SigV4 host extraction** (`s3-auth`) -> residual `Config(String)`. The only remaining
-  `Config(String)` producer; it does not fit a more specific variant.
+- **`s3.rs` SigV4 host extraction** (`s3-auth`) -> residual `Config(String)`.
+- **`common.rs` `RequestConfig::check()`** (root-certificate/client-build failure) -> residual
+  `Config(String)`.
+- **`lib.rs` `Download::download_to` and `Download::download_to_async`** (same cert/build
+  failure when custom root CAs are supplied) -> residual `Config(String)`.
+
+These three sites share the same residual variant; none fits a more specific variant.
 
 Other (unchanged) reclassifications from the status work: a checksum mismatch is
 `ChecksumMismatch { expected, computed }` (`checksum.rs`), and a declined confirmation prompt is
@@ -244,7 +249,7 @@ type directly, since `std::io::Error` is stable std.)
 - The sites that previously stringified-and-discarded a source now chain it via `source()`: the
   S3 XML/regex parse (`InvalidResponse`), the auth-token header-value parse (`InvalidAuthToken`),
   and the tokio `JoinError` sites (`Internal`).
-- The only remaining `Config(String)` producer is the `s3-auth` SigV4 host-extraction site.
+- The remaining `Config(String)` producers are: the `s3-auth` SigV4 host-extraction site (`s3.rs`), a root-certificate/client-build failure in `RequestConfig::check()` (`common.rs`), and the same cert/build failure in `Download::download_to` and `Download::download_to_async` (`lib.rs`).
 - The signatures-gated unit variant is named `SignatureNonUTF8`; its Display is
   `"SignatureError: cannot verify signature of a file with a non-UTF-8 name"`.
 - `ArchiveNotEnabled` Display starts with `"ArchiveNotEnabledError: "`.

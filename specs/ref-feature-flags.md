@@ -26,7 +26,7 @@ All features and their wiring (`Cargo.toml:76-106`):
 | `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | an HTTP client | to use `ureq` alone, set `--no-default-features` so `reqwest` (a default) is not pulled (`Cargo.toml:87`) |
 | `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | a TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
 | `rustls` | `reqwest?/rustls`, `ureq?/rustls` | a TLS backend | may coexist with `native-tls`; `rustls` wins when both are on (`Cargo.toml:84`) |
-| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util` | `reqwest` | async update verbs; requires `reqwest` (`Cargo.toml:95`) |
+| `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util`, `dep:bytes` | `reqwest` | async update verbs; requires `reqwest` (`Cargo.toml:95`) |
 | `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
 | `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
 | `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:71`) |
@@ -35,9 +35,9 @@ All features and their wiring (`Cargo.toml:76-106`):
 | `progress-bar` | `dep:indicatif` | - | terminal progress bar in `Download`; the `progress_callback` byte hook is always-on and not gated (`Cargo.toml:77`) |
 | `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:75`) |
 | `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:76`) |
-| `github` | `dep:...` (github backend module) | - | gates the GitHub backend; default-on (`Cargo.toml:88`) |
-| `gitlab` | `dep:...` (gitlab backend module) | - | gates the GitLab backend; off by default (`Cargo.toml:89`) |
-| `gitea` | `dep:...` (gitea backend module) | - | gates the Gitea backend; off by default (`Cargo.toml:90`) |
+| `github` | - | - | gates the GitHub backend; default-on (`Cargo.toml:88`) |
+| `gitlab` | - | - | gates the GitLab backend; off by default (`Cargo.toml:89`) |
+| `gitea` | - | - | gates the Gitea backend; off by default (`Cargo.toml:90`) |
 | `s3` | `dep:quick-xml` (s3 backend module) | - | gates the S3 backend and the `quick-xml` dependency; off by default (`Cargo.toml:91`) |
 | `s3-auth` | `dep:hmac`, `dep:percent-encoding`, `dep:sha2`, `dep:url`, `dep:time` | `s3` | SigV4 request signing for private buckets; implies `s3` (`Cargo.toml:106`) |
 
@@ -156,10 +156,8 @@ four single-client feature sets (`Makefile` `tests` target):
   <archive set>"`.
 - `tests/async`: `async` + the full reqwest optional set.
 
-`make check/clippy` runs clippy separately for reqwest, ureq, and async because
-the clients cannot be combined. `make examples` builds each backend example
-(github, gitlab, gitea, s3, custom) with `REQWEST_FEATURES`. There is no lane
-that builds `--all-features` (by design it cannot compile).
+`make check/clippy` runs clippy separately for reqwest, ureq, and async. `make examples` builds each backend example
+(github, gitlab, gitea, s3, custom) with `REQWEST_FEATURES`. `--all-features` builds; `make ci` includes a `build/all-features` lane for this.
 
 ## Related
 

@@ -1,7 +1,7 @@
 /*!
 Example updating an executable to the latest version released via an S3-compatible bucket
 
-`cargo run --example s3 --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
+`cargo run --example s3 --features "s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 
 Works with Amazon S3, Google GCS, DigitalOcean Spaces, or any S3-compatible endpoint. Releases
 are matched by filename using the convention

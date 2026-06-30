@@ -47,7 +47,7 @@ compile where it is defined, not later at the spawn site (`update.rs:357-361`, `
 Implementors may still write the bodies as `async fn`; the compiler checks the resulting future
 is `Send`.
 
-On failure, both traits return public `Error` variants (`Error::Release`, `Error::Config`, or a
+On failure, both traits return public `Error` variants (`Error::NoReleaseFound`, `Error::MissingAssetField`, `Error::InvalidResponse` (for release failures), `Error::MissingField { field }` (for config failures), or a
 request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status, url }` /
 `Error::Transport`), which are constructible from a custom source (`update.rs:321-324`,
 `367-370`).
@@ -58,7 +58,7 @@ request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status,
 and a `CommonConfig`. It is built through `UpdateBuilder` (`custom.rs:143-185`): `.source(...)`
 takes `impl ReleaseSource + 'static` and boxes it into the `Arc` (`custom.rs:164-167`);
 `build()` (`custom.rs:175-184`) takes `&self`, clones the `Arc` source, and errors with
-`Error::Config("`source` required")` when no source was set, so a configured builder can be
+`Error::MissingField { field: "source" }` when no source was set, so a configured builder can be
 built repeatedly. `Update::configure()` returns a fresh `UpdateBuilder` (`custom.rs:205-207`).
 
 `AsyncUpdate<S>` (`custom.rs:303-306`, `#[non_exhaustive]`, `feature = "async"`) is generic over
@@ -127,11 +127,10 @@ builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `cu
 - `AsyncUpdate<S>` must not require `S: Clone` (it stores `Arc<S>`).
 - `Blocking`'s inner `source` field stays private; construction/inspection only via
   `new`/`into_inner`/`as_inner` (a tuple-struct literal must not compile from outside).
-- `build()` / `build_async()` take `&self` (repeatable) and error with `Error::Config` when no
-  source is set.
+- `build()` / `build_async()` take `&self` (repeatable) and error with `Error::MissingField { field: "source" }` when no source is set.
 - `Update` and `AsyncUpdate` carry `#[non_exhaustive]`.
 - `.retries()` has no effect; no `auth_token` setter; download honors injected clients.
-- A `Blocking` `JoinError` becomes `Error::Update`; the inner source error passes through.
+- A `Blocking` `JoinError` becomes `Error::Internal { message, source: Some(JoinError) }`; the inner JoinError is now chained via `source()`. The inner source error passes through.
 
 ## Tests
 

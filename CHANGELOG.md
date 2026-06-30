@@ -27,7 +27,7 @@ edition 2024 (MSRV unchanged at 1.85).
   `backends::<name>` module); `s3` also gates `quick-xml`.
 - `ProgressStyle` type (template + chars), passed to the `progress_style` setter so the two
   strings can't be transposed (under `progress-bar`).
-- `version::cmp_versions(a, b) -> Result<Ordering>`, a total-order semver comparison.
+- `version::cmp_versions(a, b) -> Result<Ordering>`, a total-order semver comparison. (`version::cmp_releases_newest_first` is crate-internal and not part of the public API.)
 - `ReleaseStatus::version() -> Option<&str>`, mirroring `VersionStatus::version` (`None` on the
   up-to-date arm).
 - `Releases::from_releases(..)` for constructing a `Releases` in downstream tests.
@@ -49,8 +49,10 @@ edition 2024 (MSRV unchanged at 1.85).
   features are on. `cargo build --all-features` builds. The only remaining guards are
   "at least one client" and "`async` requires `reqwest`".
 - `Error::Config(String)` is split into `Error::MissingField { field }`,
-  `Error::InvalidHeader { source }`, and `Error::InvalidAuthToken { source }` (a residual
-  `Config(String)` remains only for the s3-auth hostless-URL case).
+  `Error::InvalidHeader { source }`, and `Error::InvalidAuthToken { source }`. A residual
+  `Config(String)` remains for cases without a more specific variant: a root-certificate or
+  client-build failure in `RequestConfig::check()` and `Download::download_to[_async]`, and
+  the s3-auth SigV4 host-extraction site (`s3.rs`).
 - `Error::Release(String)` is split into `Error::NoReleaseFound { target }`,
   `Error::MissingAssetField { field }`, and `Error::InvalidResponse { source }`.
 - `Error::Update(String)` is split into `Error::VerificationRejected { reason }` and
@@ -80,9 +82,10 @@ edition 2024 (MSRV unchanged at 1.85).
 - An `auth_token` is now applied to both the release-listing and the binary-download requests; the
   scheme is per backend (`token` for github/gitea, `Bearer` for gitlab) and a user-set
   `Authorization` via `request_header` overrides it on both paths.
-- The github/gitlab/gitea listing during `update()` stops paginating at the first release not
-  newer than the current version (`ReleaseList::fetch` still walks every page); the s3 listing
-  follows `NextContinuationToken` so multi-page buckets list fully.
+- During `update()`, releases on each page that are not strictly newer than the current version
+  are filtered out per-item; pagination continues through all pages regardless. `ReleaseList::fetch`
+  walks every page unfiltered. The s3 listing follows `NextContinuationToken` so multi-page
+  buckets list fully.
 - The `retries` budget now also covers the binary download's request-establishment phase (before
   any bytes stream); a mid-stream failure is still not retried.
 

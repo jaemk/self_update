@@ -11,8 +11,9 @@ with the runtime's IO or cancellation.
 
 ## Decision
 
-An additive `async` feature (tokio-only, reqwest-only; enabling it with `ureq` is
-a `compile_error!`). Each built-in backend's `Update` builder gains `build_async()`
+An additive `async` feature (tokio-only; requires `reqwest` -- ureq and reqwest can
+coexist, reqwest handles async, ureq handles sync). Each built-in backend's `Update`
+builder gains `build_async()`
 returning a concrete `Update` implementing the public sealed `AsyncReleaseUpdate`
 trait, with the async verbs `update_async()`, `update_extended_async()`,
 `get_latest_release_async()`, `get_latest_releases_async()`, and

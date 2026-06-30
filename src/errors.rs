@@ -69,6 +69,7 @@ pub enum Error {
     /// A request completed and returned HTTP 401 or 403 (not authorized).
     ///
     /// `status` is the exact HTTP status code (401 or 403). `url` is the request URL.
+    #[non_exhaustive]
     Unauthorized {
         /// The HTTP status code (401 or 403).
         status: u16,
@@ -78,6 +79,7 @@ pub enum Error {
     /// A request completed and returned a non-2xx status other than 404, 401, or 403.
     ///
     /// `status` is the HTTP status code. `url` is the request URL.
+    #[non_exhaustive]
     HttpStatus {
         /// The HTTP status code.
         status: u16,
@@ -185,6 +187,7 @@ pub enum Error {
     /// Returned when the server-supplied asset name is empty, is `.` or `..`, contains a `/` or
     /// `\` path separator, or is an absolute path. The file would never be created in that case,
     /// so callers do not need to clean up temporary state.
+    #[non_exhaustive]
     InvalidAssetName {
         /// The offending asset name as received from the release listing.
         name: String,
@@ -1189,10 +1192,15 @@ mod tests {
         assert_eq!(classify(&Error::Aborted), "other");
     }
 
-    // the `#[non_exhaustive]` struct variants require a trailing `..` to destructure from a
+    // The `#[non_exhaustive]` struct variants require a trailing `..` to destructure from a
     // downstream perspective (adding a field stays non-breaking). A destructure that binds the
     // current fields plus `..` must compile and read them. This pins the struct-level
     // non_exhaustive contract that the enum-level wildcard test above does not exercise.
+    //
+    // Variants with `#[non_exhaustive]` on the variant itself (in addition to the enum-level
+    // `#[non_exhaustive]`): `Internal`, `VerificationRejected`, `NoReleaseFound`,
+    // `MissingAssetField`, `InvalidResponse`, `MissingField`, `InvalidHeader`,
+    // `InvalidAuthToken`, `Unauthorized`, `HttpStatus`, `InvalidAssetName`.
     #[test]
     fn non_exhaustive_struct_variants_destructure_with_rest() {
         // `Internal` carries `message` + `source`; bind `message`, ignore the rest via `..`.
@@ -1216,7 +1224,7 @@ mod tests {
             panic!("expected NoReleaseFound");
         }
 
-        // `Unauthorized` is `#[non_exhaustive]` too; `..` lets us read just `status`.
+        // `Unauthorized` is `#[non_exhaustive]`; `..` lets us read just `status`.
         let unauth = Error::Unauthorized {
             status: 401,
             url: "u".into(),
@@ -1226,6 +1234,131 @@ mod tests {
         } else {
             panic!("expected Unauthorized");
         }
+
+        // `HttpStatus` is `#[non_exhaustive]`; `..` lets us read just `status`.
+        let hs = Error::HttpStatus {
+            status: 503,
+            url: "u".into(),
+        };
+        if let Error::HttpStatus { status, .. } = &hs {
+            assert_eq!(*status, 503);
+        } else {
+            panic!("expected HttpStatus");
+        }
+
+        // `InvalidAssetName` is `#[non_exhaustive]`; `..` lets us read just `name`.
+        let ian = Error::InvalidAssetName {
+            name: "../etc/passwd".into(),
+        };
+        if let Error::InvalidAssetName { name, .. } = &ian {
+            assert_eq!(name, "../etc/passwd");
+        } else {
+            panic!("expected InvalidAssetName");
+        }
+    }
+
+    // Documents that `Unauthorized`, `HttpStatus`, and `InvalidAssetName` carry the
+    // `#[non_exhaustive]` attribute on the variant (not only at the enum level). This test
+    // asserts observable behaviour: the Display output and field values are accessible through
+    // a `..`-pattern, which is what downstream code must use. If any of these variants were
+    // removed or renamed, this test would fail to compile.
+    #[test]
+    fn unauthorized_http_status_invalid_asset_name_are_non_exhaustive_struct_variants() {
+        let unauth = Error::Unauthorized {
+            status: 403,
+            url: "https://api.example.com/releases".into(),
+        };
+        // Read `status` via the `..`-pattern (models the downstream requirement).
+        let Error::Unauthorized { status, .. } = unauth else {
+            panic!("expected Unauthorized");
+        };
+        assert_eq!(status, 403);
+
+        let hs = Error::HttpStatus {
+            status: 502,
+            url: "https://api.example.com/releases".into(),
+        };
+        let Error::HttpStatus { status, .. } = hs else {
+            panic!("expected HttpStatus");
+        };
+        assert_eq!(status, 502);
+
+        let ian = Error::InvalidAssetName {
+            name: "../../shadow".into(),
+        };
+        let Error::InvalidAssetName { name, .. } = ian else {
+            panic!("expected InvalidAssetName");
+        };
+        assert_eq!(name, "../../shadow");
+    }
+
+    // `Unauthorized` carries no chained source (field-only struct variant, no boxed inner error).
+    // The spec's source() table lists it under variants that return `None`.
+    #[test]
+    fn unauthorized_source_is_none() {
+        assert!(
+            Error::Unauthorized {
+                status: 401,
+                url: "https://example.com/api".to_string(),
+            }
+            .source()
+            .is_none(),
+            "Unauthorized must not expose a chained source()"
+        );
+        assert!(
+            Error::Unauthorized {
+                status: 403,
+                url: "https://example.com/api".to_string(),
+            }
+            .source()
+            .is_none(),
+            "Unauthorized (403) must not expose a chained source()"
+        );
+    }
+
+    // `HttpStatus` carries no chained source (field-only struct variant, no boxed inner error).
+    // The spec's source() table lists it under variants that return `None`.
+    #[test]
+    fn http_status_variant_source_is_none() {
+        assert!(
+            Error::HttpStatus {
+                status: 503,
+                url: "https://example.com/releases".to_string(),
+            }
+            .source()
+            .is_none(),
+            "HttpStatus must not expose a chained source()"
+        );
+    }
+
+    // `InvalidAssetName` Display: exact string with Debug-quoted name.
+    // The Display format uses `{:?}` on the name, which wraps it in double-quotes.
+    // This pins the full format, not just the prefix (unlike the update.rs version which only
+    // asserts the prefix and embedded substring).
+    #[test]
+    fn invalid_asset_name_display_exact_string() {
+        let err = Error::InvalidAssetName {
+            name: "../etc/passwd".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            r#"InvalidAssetNameError: unsafe asset name: "../etc/passwd""#,
+            "InvalidAssetName Display must match the spec string exactly"
+        );
+    }
+
+    // `InvalidAssetName` carries no chained source (field-only struct variant).
+    // The spec's source() table lists it under variants that return `None`.
+    #[test]
+    fn invalid_asset_name_source_is_none() {
+        assert!(
+            Error::InvalidAssetName {
+                name: "../evil".to_string(),
+            }
+            .source()
+            .is_none(),
+            "InvalidAssetName must not expose a chained source()"
+        );
     }
 
     // every variant has a non-panicking Display that keeps a sensible prefix and embeds its data.

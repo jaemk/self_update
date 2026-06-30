@@ -37,8 +37,8 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 (`common.rs:194-216`):
 
 - First calls `self.request.check()` (`common.rs:150`), surfacing any deferred
-  `request_header` conversion failure as `Error::Config`.
-- Required (each missing field yields an `Error::Config` whose message names the
+  `request_header` conversion failure as `Error::InvalidHeader { source }`.
+- Required (each missing field yields `Error::MissingField { field }` naming the
   setter to call): `current_version` (`common.rs:161`, ``"`current_version`
   required (call `.current_version(...)`)"``), `bin_name` (`common.rs:166`,
   ``"`bin_name` required (call `.bin_name(...)`)"``), `bin_path_in_archive`
@@ -55,7 +55,7 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 `RequestConfig` (`common.rs:29-40`) carries `timeout`, `headers`, `retries`,
 `client` (override), and `header_error`. `insert_header` (`common.rs:46-72`)
 stays infallible, recording the first bad name/value in `header_error`;
-`check` (`common.rs:75-80`) replays it as `Error::Config`.
+`check` (`common.rs:75-80`) replays it as `Error::InvalidHeader { source }`.
 
 ### Shared setter macro: impl_common_builder_setters!
 
@@ -84,8 +84,8 @@ The `@shared` vocabulary (`macros.rs:231-462`):
   `{{ target }}`, `{{ version }}` substitutions; sets `bin_path_in_archive_auto = false`
   so a later `bin_name` call will not overwrite it.
 - `show_download_progress(bool)` (`macros.rs:336`).
-- `progress_style(impl Into<String>, impl Into<String>)` (`macros.rs:342`) -
-  sets template and chars.
+- `progress_style(ProgressStyle)` (`macros.rs:342`) - sets template and chars via
+  the typed `ProgressStyle { template, chars }` newtype (`ProgressStyle::new(template, chars)`).
 - `show_output(bool)` (`macros.rs:358`).
 - `no_confirm(bool)` (`macros.rs:370`).
 - `unattended()` (`macros.rs:378`) - one-call CI/daemon configuration: sets
@@ -98,10 +98,10 @@ The `@shared` vocabulary (`macros.rs:231-462`):
 - `progress_callback(impl Fn(u64, Option<u64>) ...)` (`macros.rs:391`).
 - `asset_matcher(impl Fn(&[ReleaseAsset]) -> Option<ReleaseAsset> ...)`
   (`macros.rs:405`).
-- `verify_with(impl Fn(&Path) -> bool ...)` (`macros.rs:427`) - the post-update
+- `verify_binary(impl Fn(&Path) -> Result<()> ...)` (`macros.rs:427`) - the post-update
   hook on the extracted binary; its doc records the full verification order
-  (`verify_checksum` -> signature/`verify_keys` -> extract -> `verify_with` -> replace),
-  so it runs last.
+  (`verify_checksum` -> signature/`verify_keys` -> extract -> `verify_binary` -> replace),
+  so it runs last. `Err(..) => bail` with `Error::VerificationRejected { reason }`.
 - `verify_checksum(Checksum)` (`macros.rs:439`, under `checksums`).
 - `verify_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:455`, under
   `signatures`) - **replaces** the key set on each call (last call wins, unlike
@@ -167,8 +167,9 @@ largely `#[doc(hidden)]` plumbing.
 - `unattended()` sets `no_confirm(true)` + `show_output(false)` in one call; the
   default (`no_confirm == false`) blocks on stdin.
 - `build()` rejects a missing `current_version`, `bin_name`, or
-  `bin_path_in_archive` with an `Error::Config` whose message names the setter to
-  call, and replays any deferred `request_header` error before resolving defaults.
+  `bin_path_in_archive` with `Error::MissingField { field }` naming the setter to
+  call, and replays any deferred `request_header` error as `Error::InvalidHeader { source }`
+  before resolving defaults.
 - `target` defaults to `get_target()`, `bin_install_path` to
   `current_exe()`; `show_output` defaults `true`, the other toggles `false`.
 - The `()` form emits `auth_token`; `(no_auth_token)` omits it.

@@ -32,7 +32,7 @@ pub fn cmp_versions(a: &str, b: &str) -> Result<std::cmp::Ordering> {
 /// .unwrap_or(false)`) already drop unparseable versions before this runs in the sort case, so the
 /// unparseable handling here only matters for the `max_by` path, where it keeps a parseable release
 /// winning over a junk one.
-pub fn cmp_releases_newest_first(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn cmp_releases_newest_first(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (Version::parse(a), Version::parse(b)) {
         (Ok(a), Ok(b)) => b.cmp(&a),

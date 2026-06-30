@@ -934,7 +934,7 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
     if u.show_output() || prompt_confirmation {
         println!("\n{} release status:", u.bin_name());
         println!("  * Current exe: {:?}", u.bin_install_path());
-        println!("  * New exe release: {:?}", target_asset.name);
+        println!("  * New exe release: {:?}", target_asset.name());
         println!(
             "  * New exe download url: {:?}",
             target_asset.download_url()
@@ -977,6 +977,11 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
         #[cfg(feature = "async")]
         u.request_async_client(),
     );
+    // Forward any custom TLS root CA certificates so the download builds a client that trusts them
+    // (only used when no client was injected).
+    for cert in &u.request_config().root_certificates {
+        download.root_certificate(cert.clone());
+    }
     if let Some(timeout) = u.request_timeout() {
         download.timeout(timeout);
     }
@@ -2334,6 +2339,68 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             3,
             "the configured retry budget (3) must be forwarded to the download: two failures + success"
+        );
+    }
+
+    // CORP-1: a custom-backend updater configured with `root_certificate`(s) must forward them onto
+    // the `Download` built by `build_download`, so the download materializes a client that trusts
+    // them. We assert the count of forwarded certs matches what was configured on the builder.
+    #[test]
+    fn build_download_forwards_certs_to_download() {
+        use crate::http_client::header::HeaderMap;
+        use std::sync::Arc;
+
+        // Inject no-op client(s) so the builder's eager cert materialization is skipped (an injected
+        // client wins): this isolates the *forwarding* of `root_certificates` from cert validation,
+        // letting us use placeholder bytes while still exercising the build_download copy loop. Under
+        // the async feature `build_client` also materializes the async client, so inject that slot too.
+        struct NoopClient;
+        impl crate::http_client::HttpClient for NoopClient {
+            fn get(
+                &self,
+                _url: &str,
+                _headers: &HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> Result<Box<dyn crate::http_client::HttpResponse>> {
+                unreachable!("not called in this test")
+            }
+        }
+        #[cfg(feature = "async")]
+        struct NoopAsyncClient;
+        #[cfg(feature = "async")]
+        impl crate::http_client::AsyncHttpClient for NoopAsyncClient {
+            fn get<'a>(
+                &'a self,
+                _url: &'a str,
+                _headers: &'a HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<Box<dyn crate::http_client::AsyncHttpResponse>>,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
+
+        let mut builder = crate::backends::custom::Update::configure();
+        builder
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .http_client(Arc::new(NoopClient))
+            .add_root_certificate(crate::Certificate::from_pem(b"pem-bytes".to_vec()))
+            .add_root_certificate(crate::Certificate::from_der(b"der-bytes".to_vec()));
+        #[cfg(feature = "async")]
+        builder.http_client_async(Arc::new(NoopAsyncClient));
+        let upd = builder.build().unwrap();
+
+        let asset = super::ReleaseAsset::new("app.bin", "https://nonroutable.invalid/app.bin");
+        let download = super::build_download(&*upd, &asset).unwrap();
+        assert_eq!(
+            download.root_certificates().len(),
+            2,
+            "both configured root certificates must be forwarded onto the Download"
         );
     }
 

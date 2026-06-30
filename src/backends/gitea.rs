@@ -135,7 +135,13 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
-        self.request.check()?;
+        // Thread the auth token + gitea's `token` scheme (the default) into the request so the
+        // shared `apply_auth` applies it on the listing path (honoring a user override).
+        let mut request = self.request.clone();
+        request.auth_scheme = crate::backends::common::AuthScheme::Token;
+        request.auth_token = self.auth_token.clone();
+        request.build_client();
+        request.check()?;
         Ok(ReleaseList {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
@@ -155,15 +161,7 @@ impl ReleaseListBuilder {
                 return Err(Error::MissingField { field: "repo_name" });
             },
             target: self.target.clone(),
-            auth_token: self.auth_token.clone(),
-            // Thread the auth token + gitea's `token` scheme (the default) into the request so the
-            // shared `apply_auth` applies it on the listing path (honoring a user override).
-            request: {
-                let mut request = self.request.clone();
-                request.auth_scheme = crate::backends::common::AuthScheme::Token;
-                request.auth_token = self.auth_token.clone();
-                request
-            },
+            request,
         })
     }
 }
@@ -176,7 +174,6 @@ pub struct ReleaseList {
     repo_owner: String,
     repo_name: String,
     target: Option<String>,
-    auth_token: Option<String>,
     request: RequestConfig,
 }
 impl ReleaseList {
@@ -191,6 +188,9 @@ impl ReleaseList {
             request: RequestConfig::default(),
         }
     }
+    // Note: `auth_token` lives only in `ReleaseListBuilder` (to wire into `request.auth_token`
+    // during `build()`). The built `ReleaseList` does not carry it: auth is applied centrally
+    // by `apply_auth` on the request config during transport.
 
     /// Retrieve the available `Release`s as a [`Releases`].
     ///
@@ -205,10 +205,7 @@ impl ReleaseList {
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
-        let releases = run_paginated(
-            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
-            &self.request,
-        )?;
+        let releases = run_paginated(releases_plan(&api_url, None)?, &self.request)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -343,10 +340,7 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = run_paginated(
-            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
+        let releases = run_paginated(newest_plan(&self.releases_url())?, &self.common.request)?;
         let release = releases
             .into_iter()
             .next()
@@ -357,21 +351,14 @@ impl ReleaseUpdate for Update {
     fn get_latest_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
-            releases_plan(
-                &self.releases_url(),
-                self.common.auth_token.as_deref(),
-                Some(&current_version),
-            )?,
+            releases_plan(&self.releases_url(), Some(&current_version))?,
             &self.common.request,
         )?;
         Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let releases = run_paginated(
-            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
+        let releases = run_paginated(single_plan(self.tag_url(ver))?, &self.common.request)?;
         releases
             .into_iter()
             .next()
@@ -380,26 +367,26 @@ impl ReleaseUpdate for Update {
 }
 
 impl_update_config_accessors!(Update, {
-    fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
-        api_headers(auth_token)
+    fn api_headers(&self, _auth_token: Option<&str>) -> Result<header::HeaderMap> {
+        api_headers()
     }
 });
 
 /// Transport-free plan to fetch the paginated `releases` array (Gitea format), parsing each page
 /// via the private `ReleaseDto` and following `Link: rel="next"`. See github's
-/// `releases_plan` for the `stop_at` early-stop contract.
-fn releases_plan(
-    base_url: &str,
-    auth_token: Option<&str>,
-    stop_at: Option<&str>,
-) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
-    let auth = auth_token.map(str::to_owned);
+/// `releases_plan` for the `stop_at` per-item filter contract.
+///
+/// `stop_at` filters per-item: when `Some(current_version)` each release that is not strictly
+/// newer than it is omitted from the collected list, but pagination continues to subsequent pages
+/// regardless (a backport release -- older semver, newer creation date -- must not halt the walk
+/// and cause a genuinely newer release on a later page to be missed). When `None` the listing is
+/// unfiltered and every page is walked (used by `ReleaseList`).
+fn releases_plan(base_url: &str, stop_at: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     let stop_at = stop_at.map(str::to_owned);
     Ok(release_array_page(
         first_page_url(base_url),
         headers,
-        auth,
         stop_at,
     ))
 }
@@ -407,7 +394,6 @@ fn releases_plan(
 fn release_array_page(
     url: String,
     headers: HeaderMap,
-    auth: Option<String>,
     stop_at: Option<String>,
 ) -> PageRequest<Release> {
     PageRequest {
@@ -419,38 +405,34 @@ fn release_array_page(
             let dtos: Vec<ReleaseDto> =
                 serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
             let mut items = Vec::new();
-            let mut stop = false;
             for dto in dtos {
                 let release = dto.into_release()?;
+                // Skip releases not strictly newer than the current version, but do NOT stop
+                // pagination. A backport release (older semver, newer creation date) must not
+                // halt the walk; a genuinely newer release on a later page must still be found.
                 if let Some(ref current) = stop_at {
                     if !bump_is_greater(current, release.version()).unwrap_or(false) {
-                        stop = true;
-                        break;
+                        continue;
                     }
                 }
                 items.push(release);
             }
-            let next = if stop {
-                None
-            } else {
-                next_link(resp_headers).map(|next_url| {
-                    release_array_page(
-                        next_url,
-                        api_headers(auth.as_deref()).unwrap_or_default(),
-                        auth.clone(),
-                        stop_at.clone(),
-                    )
-                })
-            };
-            Ok(Page { items, next, stop })
+            let next = next_link(resp_headers).map(|next_url| {
+                release_array_page(next_url, api_headers().unwrap_or_default(), stop_at.clone())
+            });
+            Ok(Page {
+                items,
+                next,
+                stop: false,
+            })
         }),
     }
 }
 
 /// Transport-free plan for the newest release: Gitea has no `/releases/latest`, so the listing's
 /// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
-fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     Ok(PageRequest {
         url: first_page_url(base_url),
         headers,
@@ -467,8 +449,8 @@ fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<R
 }
 
 /// Transport-free plan to fetch a single release *object* (the `.../releases/tags/{ver}` endpoint).
-fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+fn single_plan(url: String) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     Ok(PageRequest {
         url,
         headers,
@@ -484,11 +466,8 @@ impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = run_paginated_async(
-            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )
-        .await?;
+        let releases =
+            run_paginated_async(newest_plan(&self.releases_url())?, &self.common.request).await?;
         let release = releases
             .into_iter()
             .next()
@@ -500,11 +479,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
-            releases_plan(
-                &self.releases_url(),
-                self.common.auth_token.as_deref(),
-                Some(&current_version),
-            )?,
+            releases_plan(&self.releases_url(), Some(&current_version))?,
             &self.common.request,
         )
         .await?;
@@ -513,11 +488,8 @@ impl crate::update::AsyncReleaseUpdate for Update {
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
         use crate::backends::run_paginated_async;
-        let releases = run_paginated_async(
-            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )
-        .await?;
+        let releases =
+            run_paginated_async(single_plan(self.tag_url(ver))?, &self.common.request).await?;
         releases
             .into_iter()
             .next()
@@ -528,7 +500,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 /// Build gitea's base request headers (its User-Agent). The Authorization header is applied
 /// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
 /// gitea's `token` scheme on both the listing and download paths, honoring a user override.
-fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
+fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -551,11 +523,9 @@ mod tests {
     #[cfg(feature = "async")]
     async fn fetch_all_releases_async(
         base_url: &str,
-        auth_token: Option<&str>,
         req: &crate::backends::common::RequestConfig,
     ) -> crate::errors::Result<Vec<super::Release>> {
-        crate::backends::run_paginated_async(super::releases_plan(base_url, auth_token, None)?, req)
-            .await
+        crate::backends::run_paginated_async(super::releases_plan(base_url, None)?, req).await
     }
 
     use std::io::{Read, Write};
@@ -842,7 +812,11 @@ mod tests {
     // must match a full-walk selection.
 
     #[test]
-    fn get_latest_releases_early_stops_within_first_page_and_skips_page_two() {
+    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+        // Page 1 has both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases, with
+        // a link to page 2. Non-newer releases must NOT halt pagination -- page 2 must be fetched
+        // and its newer release (v3.0.0) returned alongside the newer items from page 1.
+        // (The old early-stop bug would have returned only ["2.0.0", "1.5.0"] in 1 request.)
         let (base, captured) = stub_capturing(|base| {
             vec![
                 Resp {
@@ -850,7 +824,6 @@ mod tests {
                     link: Some(format!("{base}/api/v1/repos/o/r/releases?page=2")),
                     body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
                 },
-                // Page 2 must never be requested; if it were, the captured count would be 2.
                 Resp {
                     status: "200 OK",
                     link: None,
@@ -861,33 +834,34 @@ mod tests {
         let upd = gitea_update_sync(&base, "1.0.0");
         let releases = upd.get_latest_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
-        assert_eq!(
-            versions,
-            vec!["2.0.0", "1.5.0"],
-            "only the strictly-newer items from page 1 are kept (v1.0.0/v0.9.0 dropped)"
-        );
+        // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
+        // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
+        assert_eq!(versions, vec!["2.0.0", "1.5.0", "3.0.0"]);
         assert_eq!(
             captured.lock().unwrap().len(),
-            1,
-            "early-stop must halt within page 1; page 2 must never be requested"
+            2,
+            "non-newer releases must not halt pagination; both pages must be requested"
         );
     }
 
     #[test]
     fn early_stop_selects_same_release_as_a_full_walk() {
-        // Selection parity: the early-stopped `get_latest_releases` must let the orchestrator pick
-        // the SAME release a full unfiltered walk would, driven through `choose_latest_release`.
+        // Regression test for the per-item-filter pagination bug:
+        // Page 1 has ONLY non-newer releases (v1.0.0, v0.9.0); page 2 has a newer release
+        // (v1.5.0). With the old bug, pagination halted at v1.0.0 on page 1 and page 2 was never
+        // fetched, so early = [] and early_choice = None -- not matching full_choice = Some(v1.5.0).
+        // With the fix, page 2 is followed, v1.5.0 is included, and both choices agree.
         let (base, _captured) = stub_capturing(|base| {
             vec![
                 Resp {
                     status: "200 OK",
                     link: Some(format!("{base}/api/v1/repos/o/r/releases?page=2")),
-                    body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+                    body: releases_json(&["v1.0.0", "v0.9.0"]),
                 },
                 Resp {
                     status: "200 OK",
                     link: None,
-                    body: releases_json(&["v0.5.0"]),
+                    body: releases_json(&["v1.5.0"]),
                 },
             ]
         });
@@ -896,7 +870,9 @@ mod tests {
         let early_choice =
             crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
 
-        let full: Vec<_> = ["2.0.0", "1.5.0", "1.0.0", "0.9.0", "0.5.0"]
+        // Full unfiltered walk includes all releases from both pages; the selection algorithm
+        // must pick the same release as the per-item-filtered walk.
+        let full: Vec<_> = ["1.0.0", "0.9.0", "1.5.0"]
             .iter()
             .map(|v| {
                 crate::update::Release::builder()
@@ -910,7 +886,7 @@ mod tests {
         assert_eq!(
             early_choice.map(|r| r.version().to_string()),
             full_choice.map(|r| r.version().to_string()),
-            "early-stop must select the same release as a full walk"
+            "per-item filter must select the same release as a full unfiltered walk"
         );
     }
 
@@ -1402,7 +1378,6 @@ mod tests {
         });
         let releases = fetch_all_releases_async(
             &format!("{base}/api/v1/repos/o/r/releases"),
-            None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await
@@ -1636,6 +1611,373 @@ mod tests {
             ),
             "non-array payload must surface as Error::Release, got {:?}",
             res
+        );
+    }
+
+    // --- gap A: async backport regression ---------------------------------------------------------
+    //
+    // The sync regression tests (`early_stop_selects_same_release_as_a_full_walk` and
+    // `get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two`) pin the fix on
+    // the sync path. This pins it on the async path: when page 1 has ONLY non-newer releases, the
+    // async driver must still follow the Link header to page 2 and return the newer release there.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_backport_regression_page_one_all_non_newer_finds_newer_on_page_two() {
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v1/repos/o/r/releases?page=2")),
+                    body: releases_json(&["v1.0.0", "v0.9.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v1.5.0"]),
+                },
+            ]
+        });
+        let upd = gitea_update(&base, "1.0.0");
+        let releases = upd.get_latest_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["1.5.0"],
+            "async: newer release on page 2 must be found when page 1 has only non-newer releases"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "async: both pages must be fetched; the old early-stop bug fetched only one"
+        );
+    }
+
+    // --- gap B: ReleaseList auth_token removed from struct -- verify token still reaches the wire -
+    //
+    // The dead `auth_token` field was removed from `ReleaseList`; auth now flows exclusively via
+    // `request.auth_token`. This test verifies end-to-end: `ReleaseListBuilder::auth_token` must
+    // cause `Authorization: token <secret>` to appear in the actual HTTP request.
+    #[test]
+    fn release_list_auth_token_transmitted_in_http_request() {
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v1.0.0"]),
+            }]
+        });
+        super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token("secret")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one request must be made");
+        let auth_header = reqs[0]
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("authorization:"));
+        assert!(
+            auth_header.is_some_and(|l| l.contains("token secret")),
+            "ReleaseList::fetch must transmit `Authorization: token secret`; \
+             auth_token was removed from the ReleaseList struct and now only flows via \
+             request.auth_token. header: {:?}",
+            reqs[0]
+                .lines()
+                .find(|l| l.to_lowercase().starts_with("authorization:"))
+        );
+    }
+
+    // --- gap C: newest_plan auth parameter removed -- verify token still reaches the wire --------
+    //
+    // `newest_plan` no longer takes an `auth_token` parameter; auth flows via
+    // `common.request.auth_token -> apply_auth`. This verifies that `get_latest_release`
+    // actually sends the Authorization header when an auth token is configured.
+    #[test]
+    fn get_latest_release_sync_transmits_auth_token_via_request_config() {
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_json("v2.0.0"),
+            }]
+        });
+        let upd = Update::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("1.0.0")
+            .auth_token("mytoken")
+            .build()
+            .unwrap();
+        upd.get_latest_release().unwrap();
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one request for get_latest_release");
+        let auth_header = reqs[0]
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("authorization:"));
+        assert!(
+            auth_header.is_some_and(|l| l.contains("token mytoken")),
+            "get_latest_release must transmit `Authorization: token mytoken`; \
+             newest_plan's auth param was removed so the token must flow via \
+             common.request -> apply_auth. header: {:?}",
+            auth_header
+        );
+    }
+
+    // --- gap D: sync path for non-array payload (async already covered) -------------------------
+    #[test]
+    fn sync_non_array_payload_routes_to_no_release_found_exactly() {
+        // A top-level `{}` object cannot be deserialized as `Vec<ReleaseDto>`, so the parse branch
+        // returns `Error::NoReleaseFound`. This is the sync mirror of the async test above.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "{}".to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::NoReleaseFound { target }) => {
+                assert_eq!(target, None, "non-array payload carries no asset target");
+            }
+            other => panic!(
+                "non-array payload must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // --- gap E: DTO field error paths -----------------------------------------------------------
+    //
+    // The populated-payload test covers the happy path. These pin the exact error variant and field
+    // name for each of the four `ok_or(MissingAssetField)` calls in `into_release` / `into_asset`.
+
+    #[test]
+    fn dto_missing_created_at_surfaces_as_missing_asset_field() {
+        // `created_at` absent -> `MissingAssetField { field: "created_at" }` (not tag_name, not assets).
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v1.0.0","assets":[]}]"#.to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(field, "created_at", "must name the absent field exactly");
+            }
+            other => panic!(
+                "missing created_at must be MissingAssetField {{ field: \"created_at\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn dto_missing_assets_field_surfaces_as_missing_asset_field() {
+        // `assets` absent -> `MissingAssetField { field: "assets" }`.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v1.0.0","created_at":"2020-01-01T00:00:00Z"}]"#.to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(field, "assets", "must name the absent field exactly");
+            }
+            other => panic!(
+                "missing assets must be MissingAssetField {{ field: \"assets\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn dto_asset_missing_download_url_surfaces_as_missing_asset_field() {
+        // `browser_download_url` is checked first in `into_asset`; its absence must surface before
+        // the `name` check. A release with one asset that is missing the download URL is the
+        // minimal case.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v1.0.0","created_at":"2020-01-01T00:00:00Z","assets":[{"name":"app.tar.gz"}]}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(
+                    field, "browser_download_url",
+                    "must name the absent asset field exactly"
+                );
+            }
+            other => panic!(
+                "missing browser_download_url must be MissingAssetField, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn dto_asset_missing_name_surfaces_as_missing_asset_field() {
+        // `browser_download_url` is present but `name` is absent; the second field check fires.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v1.0.0","created_at":"2020-01-01T00:00:00Z","assets":[{"browser_download_url":"https://example.com/app"}]}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(field, "name", "must name the absent asset field exactly");
+            }
+            other => panic!(
+                "missing asset name must be MissingAssetField {{ field: \"name\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // --- gap F: ReleaseList builder validates repo_owner and repo_name --------------------------
+    //
+    // `release_list_build_requires_url` only tests the `url` guard; these pin the other two
+    // required fields, which have the same `MissingField` error path.
+    #[test]
+    fn release_list_build_requires_repo_owner_and_repo_name() {
+        let res = super::ReleaseList::configure()
+            .url("https://gitea.example.com")
+            .repo_name("r")
+            .build();
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::MissingField {
+                    field: "repo_owner"
+                })
+            ),
+            "missing repo_owner must surface as MissingField {{ field: \"repo_owner\" }}, got {:?}",
+            res
+        );
+
+        let res = super::ReleaseList::configure()
+            .url("https://gitea.example.com")
+            .repo_owner("o")
+            .build();
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::MissingField { field: "repo_name" })
+            ),
+            "missing repo_name must surface as MissingField {{ field: \"repo_name\" }}, got {:?}",
+            res
+        );
+    }
+
+    // --- gap G: name=null falls back to the raw tag_name ----------------------------------------
+    //
+    // `ReleaseDto::into_release` uses `self.name.unwrap_or_else(|| tag.clone())` where `tag` is the
+    // raw `tag_name` value (e.g. "v1.2.3"). The version is separately stripped of a leading 'v'.
+    // None of the existing tests supply `name: null`; this pins the fallback path.
+    #[test]
+    fn dto_null_name_falls_back_to_raw_tag_name() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v1.2.3","created_at":"2020-01-01T00:00:00Z","name":null,"assets":[]}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        let releases = upd.get_latest_release().unwrap();
+        let rel = releases.latest().unwrap();
+        assert_eq!(
+            rel.version(),
+            "1.2.3",
+            "version() must strip the leading 'v'"
+        );
+        assert_eq!(
+            rel.name(),
+            "v1.2.3",
+            "null name must fall back to the raw tag_name (the 'v' prefix is preserved in name)"
+        );
+    }
+
+    // --- gap H: tag without a leading 'v' -------------------------------------------------------
+    //
+    // `tag.trim_start_matches('v')` is a no-op when the tag has no 'v' prefix; the version must
+    // equal the tag verbatim. All existing tests use "v<ver>" tags.
+    #[test]
+    fn tag_without_leading_v_version_is_preserved() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"1.2.3","created_at":"2020-01-01T00:00:00Z","name":"Release 1.2.3","assets":[]}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gitea_update_sync(&base, "0.1.0");
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(
+            releases.latest().unwrap().version(),
+            "1.2.3",
+            "a tag without a leading 'v' must not be mangled by trim_start_matches"
+        );
+    }
+
+    // --- gap I: filter_target actually filters releases ------------------------------------------
+    //
+    // `url_and_filter_target_setters_exist_on_release_list_builder` only verifies the builder
+    // compiles and builds; it does not verify that `filter_target` actually drops releases.
+    // This test makes two releases available, only one of which has an asset matching the target.
+    #[test]
+    fn filter_target_drops_releases_without_matching_asset() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: concat!(
+                    r#"[{"tag_name":"v2.0.0","created_at":"2020-01-01T00:00:00Z","name":"v2.0.0","assets":[{"name":"app-x86_64-linux.tar.gz","browser_download_url":"https://example.com/2.0.0"}]},"#,
+                    r#"{"tag_name":"v1.0.0","created_at":"2019-01-01T00:00:00Z","name":"v1.0.0","assets":[{"name":"app-windows.zip","browser_download_url":"https://example.com/1.0.0"}]}]"#
+                ).to_string(),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .filter_target("x86_64-linux")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        assert_eq!(
+            releases.len(),
+            1,
+            "filter_target must drop releases with no matching asset; \
+             only the x86_64-linux release must survive"
+        );
+        assert_eq!(
+            releases[0].version(),
+            "2.0.0",
+            "the surviving release must be the one whose asset name contains the target"
         );
     }
 }

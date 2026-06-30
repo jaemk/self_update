@@ -41,6 +41,9 @@ pub trait HttpClient: Send + Sync {
 /// `json_value`/`text` borrow `&mut self` (they may consume the body internally), and `body` /
 /// `body_buffered` consume `self` to hand back a streaming reader. There are no generic methods, so
 /// the trait stays object-safe.
+///
+/// Call at most one of `json_value`, `text`, `body`, or `body_buffered` per response --
+/// implementations consume the body on the first call.
 pub trait HttpResponse {
     /// The response headers.
     fn headers(&self) -> &HeaderMap<HeaderValue>;
@@ -110,6 +113,35 @@ pub(crate) fn default_client() -> Box<dyn HttpClient> {
     #[cfg(test)]
     DEFAULT_CLIENT_BACKEND.with(|c| c.set("ureq"));
     Box::new(UreqClient::default())
+}
+
+/// Build a sync HTTP client pre-configured with custom root CA certificates.
+/// Returns Err(msg) if the cert bytes are invalid or the client cannot be built.
+/// When both `reqwest` and `ureq` are enabled, reqwest is preferred (same priority as default_client).
+pub(crate) fn client_with_root_certs(
+    certs: &[crate::tls::Certificate],
+) -> std::result::Result<std::sync::Arc<dyn HttpClient>, String> {
+    #[cfg(feature = "reqwest")]
+    {
+        crate::http_client::ReqwestClient::build_with_certs(certs)
+    }
+    #[cfg(all(feature = "ureq", not(feature = "reqwest")))]
+    {
+        crate::http_client::UreqClient::build_with_certs(certs)
+    }
+    #[cfg(not(any(feature = "reqwest", feature = "ureq")))]
+    {
+        let _ = certs;
+        Err("no HTTP client feature enabled".to_string())
+    }
+}
+
+/// Async sibling of [`client_with_root_certs`]. Only reqwest is supported (async is reqwest-only).
+#[cfg(feature = "async")]
+pub(crate) fn async_client_with_root_certs(
+    certs: &[crate::tls::Certificate],
+) -> std::result::Result<std::sync::Arc<dyn AsyncHttpClient>, String> {
+    crate::http_client::ReqwestAsyncClient::build_async_with_certs(certs)
 }
 
 // Records the backend name chosen by the most recent `default_client` call on this thread.

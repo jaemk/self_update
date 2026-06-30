@@ -37,14 +37,15 @@ can be built). Keep each row's status current with `spec.py set`.
 | Post-update Verify | done | [post-update-verify.md](post-update-verify.md) |
 | Release Tag URL Encoding | done | [release-tag-url-encoding.md](release-tag-url-encoding.md) |
 | Error Network vs HTTP Semantics | done | [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) |
-| Error Variant Granularity | pending | [error-variant-granularity.md](error-variant-granularity.md) |
-| S3 Max Keys Configurable | pending | [s3-max-keys-configurable.md](s3-max-keys-configurable.md) |
+| Error Variant Granularity | done | [error-variant-granularity.md](error-variant-granularity.md) |
+| S3 Max Keys Configurable | done | [s3-max-keys-configurable.md](s3-max-keys-configurable.md) |
 | Async Future Extensions | pending | [async-future-extensions.md](async-future-extensions.md) |
 | Checksum from Asset | pending | [checksum-from-asset.md](checksum-from-asset.md) |
-| Update Config Internal Accessors | research | [update-config-internal-accessors.md](update-config-internal-accessors.md) |
-| Releases Test Constructor | research | [releases-test-constructor.md](releases-test-constructor.md) |
-| Choose Latest Release Sort | research | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
+| Update Config Internal Accessors | done | [update-config-internal-accessors.md](update-config-internal-accessors.md) |
+| Releases Test Constructor | done | [releases-test-constructor.md](releases-test-constructor.md) |
+| Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
 | Embedded Key Verification | pending | [embedded-key-verification.md](embedded-key-verification.md) |
+| Corporate Network Config | research | [corporate-network-config.md](corporate-network-config.md) |
 
 ## Conventions
 

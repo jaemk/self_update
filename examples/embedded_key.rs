@@ -26,8 +26,6 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
 
     #[cfg(feature = "signatures")]
     rel_builder.repo_owner("Kijewski");
-    #[cfg(not(feature = "signatures"))]
-    rel_builder.repo_owner("jaemk");
 
     let releases = rel_builder.repo_name("self_update").build()?.fetch()?;
     println!("found releases:");
@@ -39,8 +37,6 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     status_builder
         .repo_owner("Kijewski")
         .verify_keys([VERIFYING_KEY]);
-    #[cfg(not(feature = "signatures"))]
-    status_builder.repo_owner("jaemk");
 
     let status = status_builder
         .repo_name("self_update")

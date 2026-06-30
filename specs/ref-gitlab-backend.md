@@ -23,7 +23,7 @@ pagination/transport helpers (`send`, the sans-io `PageRequest`/`Page` core and 
 `request_config_setters!(request)` setters (`gitlab.rs:117`), and `build()`
 (`gitlab.rs:120`). `build()` calls `self.request.check()` first (surfacing any deferred
 `request_header` error as `Error::InvalidHeader`), then requires `repo_owner` and `repo_name`,
-each bailing `Error::Config` when unset (`gitlab.rs:124-139`). The required-field messages
+each bailing `Error::MissingField { field }` when unset (`gitlab.rs:124-139`). The required-field messages
 name the setter to call: `` `repo_owner` required (call `.repo_owner(...)`) `` and
 `` `repo_name` required (call `.repo_name(...)`) `` (`gitlab.rs:129`, `gitlab.rs:137`).
 `repo_owner`/`repo_name` are stored `Option<String>` on the builder and resolved to
@@ -40,7 +40,7 @@ options come from `impl_common_builder_setters!()` (`gitlab.rs:233`). `build()` 
 `Box<dyn ReleaseUpdate>` (`gitlab.rs:262`); under the `async` feature `build_async()`
 returns the concrete `Update` so the inherent `*_async` methods are reachable
 (`gitlab.rs:271`). Both delegate to `build_update()` (`gitlab.rs:235`), which requires
-`repo_owner`/`repo_name` (each bailing `Error::Config` with the same setter-naming messages,
+`repo_owner`/`repo_name` (each bailing `Error::MissingField { field }` with the same setter-naming messages,
 `gitlab.rs:243`, `gitlab.rs:251`) and calls `self.common.build()` (which runs the
 deferred-header `check` and validates `current_version`, `bin_name`, `bin_path_in_archive`).
 `UpdateBuilder::default()` seeds `host` to `https://gitlab.com` (`gitlab.rs:378-386`).
@@ -84,7 +84,7 @@ common setters) take `impl Into<String>`.
 `api_headers(auth_token: Option<&str>)` (`gitlab.rs:492`) always sets
 `User-Agent: rust-reqwest/self-update` and, when a token is present, inserts
 `Authorization: Bearer <token>` (`gitlab.rs:501-508`). A token that cannot be parsed into a
-header value yields `Error::InvalidHeader`. There is no
+header value yields `Error::InvalidAuthToken`. There is no
 `PRIVATE-TOKEN` header and no environment-variable lookup in this file; the token comes
 solely from the builder setter (`ReleaseListBuilder::auth_token`, `gitlab.rs:112`) or the
 common `auth_token` setter for `Update` (`self.common.auth_token`). The
@@ -138,8 +138,8 @@ and mapped to a structured variant by status (`status_to_error`, `errors.rs:254`
 `Error::Transport`. An empty array on the latest path yields `Error::NoReleaseFound { target: None }`;
 missing JSON fields (`tag_name`, `created_at`, `assets.links`, asset `url`/`name`) yield
 `Error::MissingAssetField { field }`. Builder/config problems (missing `repo_owner`/`repo_name`)
-surface as `Error::Config`; a deferred bad `request_header` or an unparseable auth token
-surfaces as `Error::InvalidHeader`.
+surface as `Error::MissingField { field }`; a deferred bad `request_header` surfaces as
+`Error::InvalidHeader`; an unparseable auth token surfaces as `Error::InvalidAuthToken`.
 
 ## Public surface
 

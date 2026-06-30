@@ -53,7 +53,7 @@ Both delegate to the private `build_update()` helper (see below).
   only (scheme + host, no trailing slash and no `/api/v1`): the crate appends the
   `/api/v1/...` path itself (`gitea.rs:71-77`, `gitea.rs:218-224`). Gitea has no
   canonical public host, so `url` is required: `build()` / `build_update()` `bail!`
-  with `Error::Config` when it is unset, with a message that names the setter
+  with `Error::MissingField { field: "url" }` when it is unset, with a message that names the setter
   ("`url` required (gitea has no default host; call `.url(...)`)")
   (`gitea.rs:127-130`, `gitea.rs:250-253`). The string setters (`url`, `repo_owner`,
   `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's common
@@ -177,7 +177,7 @@ In `src/backends/gitea.rs` `mod tests` (`gitea.rs:517-1186`), backed by a loopba
   (`gitea.rs:628-754`).
 - Builder shape: `url`/`filter_target` exist on `ReleaseListBuilder`; `ReleaseList`
   and `Update` builds require `url`, `repo_owner`, `repo_name`; invalid header surfaces
-  as `Error::Config`; `releases_url` shape; identifier and `bin_name` wiring
+  as `Error::InvalidHeader`; `releases_url` shape; identifier and `bin_name` wiring
   (`gitea.rs:756-976`).
 - `api_headers` override uses the Gitea User-Agent and `token` scheme
   (`gitea.rs:779-809`).

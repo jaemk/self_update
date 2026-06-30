@@ -40,12 +40,12 @@ Two builders, each reached through a `configure()` entry point:
 asset (`s3.rs:144`, via `has_target_asset` in `fetch`, `s3.rs:234`); the `Update`
 `target` (a common setter) selects which asset of the chosen release to download.
 
-Both `build` paths require `bucket_name`, bailing `Error::Config` with
+Both `build` paths require `bucket_name`, bailing `Error::MissingField { field }` with
 "`bucket_name` required" otherwise (`s3.rs:177`, `s3.rs:323`). They also validate
 the endpoint/region pairing up front via `check_endpoint_region` (`s3.rs:78`),
 called from `ReleaseListBuilder::build` (`s3.rs:171`) and
 `UpdateBuilder::build_update` (`s3.rs:317`), so a missing required region is an
-`Error::Config` from `build()` rather than from the first request. All the string
+`Error::MissingField { field }` from `build()` rather than from the first request. All the string
 setters (`bucket_name`, `asset_prefix`, `region`, `filter_target`, and the common
 setters) take `impl Into<String>`.
 
@@ -65,8 +65,8 @@ from `end_point`). `build_s3_api_url` returns `(download_base_url, api_url)`:
 
 `region` is `Option<String>`. The three host-interpolating endpoints (`S3`,
 `S3DualStack`, `DigitalOceanSpaces`) require it (`endpoint_requires_region`,
-`s3.rs:69`): a missing region surfaces as `Error::Config("`region` required for the
-S3, S3DualStack, and DigitalOceanSpaces endpoints; call `.region(...)`")`. This is
+`s3.rs:69`): a missing region surfaces as `Error::MissingField { field }` (field `region`,
+for the S3, S3DualStack, and DigitalOceanSpaces endpoints). This is
 now validated at `build()` time via `check_endpoint_region` (`s3.rs:78`), not
 deferred to URL construction. `GCS` and `Generic` never read the region and build
 without it (under `s3-auth`, SigV4 still defaults the signing region to `us-east-1`
@@ -121,7 +121,7 @@ A single case-insensitive regex parses object keys (`s3.rs:834`):
 The key must contain a `name-[v]<major>.<minor>.<patch>-<suffix>` shape: `name`
 becomes the release name and the dotted triple becomes the version, with any
 leading `v` stripped (`s3.rs:874`). Keys lacking this shape produce no release.
-Regex construction failure surfaces as `Error::Release` (`s3.rs:836`).
+Regex construction failure surfaces as `Error::InvalidResponse` (`s3.rs:836`).
 
 `ReleaseUpdate` selection helpers operate on the parsed list: `pick_latest`
 (`s3.rs:406`) picks the highest version (ignoring unparseable ones, erroring
@@ -170,17 +170,17 @@ body: `send` / `http_client::get` bail on any non-2xx status before returning
 variant by status: 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`,
 any other non-2xx -> `Error::HttpStatus` (`status_to_error`, `errors.rs:254`); a
 request that cannot complete (connection/TLS/timeout) is `Error::Transport`. XML
-parse errors surface as `Error::Release` with the buffer position (`s3.rs:904`).
+parse errors surface as `Error::InvalidResponse` with the buffer position (`s3.rs:904`).
 Missing region (for the region-requiring endpoints) and missing bucket are both
-`Error::Config`, now raised from `build()` rather than the first request.
+`Error::MissingField { field }`, now raised from `build()` rather than the first request.
 
 ## Public surface
 
-- `s3::EndPoint` (`#[non_exhaustive]`, `Default = S3`) with variants `S3`,
-  `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic { end_point }`; plus
+- `s3::Endpoint` (`#[non_exhaustive]`, `Default = S3`) with variants `S3`,
+  `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic(String)`; plus
   `From<&str>` / `From<String>` -> `Generic`.
 - `s3::ReleaseList`, `s3::ReleaseListBuilder` (setters: `bucket_name`,
-  `asset_prefix`, `region`, `end_point`, `filter_target`, `access_key` [s3-auth],
+  `asset_prefix`, `region`, `endpoint`, `filter_target`, `access_key` [s3-auth],
   request-config setters, `build`).
 - `s3::UpdateBuilder`, `s3::Update` (`#[non_exhaustive]`); `Update::configure`,
   `build` -> `Box<dyn ReleaseUpdate>`, `build_async` -> `Update` [async].
@@ -189,9 +189,9 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 
 ## Invariants and regression checklist
 
-- `bucket_name` required on both builders -> `Error::Config`.
+- `bucket_name` required on both builders -> `Error::MissingField { field }`.
 - Region required for `S3`/`S3DualStack`/`DigitalOceanSpaces`; ignored for
-  `GCS`/`Generic`. Missing required region -> `Error::Config`.
+  `GCS`/`Generic`. Missing required region -> `Error::MissingField { field }`.
 - S3-family and Generic listing query uses `list-type=2&max-keys=<max_keys>` (default 1000); GCS
   uses `max-keys=<max_keys>` only (no `list-type=2`). `max_keys` clamps to `1..=1000`.
 - A truncated listing (`<IsTruncated>true</IsTruncated>` + `<NextContinuationToken>`) is followed
@@ -207,8 +207,7 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 - Public buckets (no access key) emit unsigned URLs; with `s3-auth` + access key,
   both listing and asset URLs are SigV4-signed (TTL 300s), region defaulting to
   `us-east-1`.
-- `auth_token` exists on the s3 builders only as a `#[deprecated]` no-op that does
-  nothing (use `.access_key(...)` to authenticate); `api_headers` sets no `User-Agent`.
+- the `auth_token` setter was removed from the s3 builders; use `access_key((id, secret))` under `s3-auth` to authenticate.
 - `EndPoint`, `Update`, and `AccessKey` are `#[non_exhaustive]`.
 
 ## Tests
@@ -223,11 +222,7 @@ loopback-TCP stub tests for the sync and async `ReleaseUpdate` fetch methods
 `build_s3_api_url` shape tests per endpoint (S3, dual-stack, DigitalOcean, GCS,
 Generic), prefix append, and missing-region error; and (under `s3-auth`)
 `s3_signature_v4` structural invariants, region default, listing-URL signing, and
-asset-URL signing, plus `AccessKey` re-export/tuple-`From` coverage. The deprecated
-`auth_token` no-op shim is covered by `release_list_builder_auth_token_is_a_noop`
-(`s3.rs:2109`) and `update_builder_auth_token_is_a_noop` (`s3.rs:2124`), both
-`#[allow(deprecated)]`, asserting the shim compiles, accepts a token, and leaves
-`build` succeeding.
+asset-URL signing, plus `AccessKey` re-export/tuple-`From` coverage.
 
 ## Related
 
