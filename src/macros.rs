@@ -171,6 +171,18 @@ macro_rules! request_config_setters {
             self.$($path).+.auth_hosts.push(host.into());
             self
         }
+
+        /// Allow the auth token to be forwarded over plain `http` (not just `https`) to a
+        /// host-matched request.
+        ///
+        /// The token is still only attached to the configured API host or an
+        /// [`allow_auth_host`](Self::allow_auth_host) entry; this only lifts the `https` scheme
+        /// requirement. It transmits the credential in cleartext, so use it only for a trusted
+        /// internal network you control. Off by default.
+        pub fn dangerously_allow_non_https_auth_forwarding(&mut self) -> &mut Self {
+            self.$($path).+.allow_insecure_auth = true;
+            self
+        }
     };
 }
 

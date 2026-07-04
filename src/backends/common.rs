@@ -113,6 +113,9 @@ pub(crate) struct RequestConfig {
     /// Additional hosts the user has explicitly authorized to receive the auth token, via
     /// `allow_auth_host`. Checked alongside [`auth_base_host`](Self::auth_base_host).
     pub(crate) auth_hosts: Vec<String>,
+    /// When `true`, the auth token may be attached over plain `http` (not just `https`) to a
+    /// host-matched request. Off by default; set via `dangerously_allow_non_https_auth_forwarding`.
+    pub(crate) allow_insecure_auth: bool,
 }
 
 /// Default base delay for the exponential retry backoff (attempt 0).
@@ -138,6 +141,7 @@ impl Default for RequestConfig {
             cert_error: None,
             auth_base_host: None,
             auth_hosts: Vec::new(),
+            allow_insecure_auth: false,
         }
     }
 }
@@ -281,7 +285,7 @@ impl RequestConfig {
                 .parse::<std::net::IpAddr>()
                 .map(|ip| ip.is_loopback())
                 .unwrap_or(false);
-        uri.scheme_str() == Some("https") || is_loopback
+        uri.scheme_str() == Some("https") || is_loopback || self.allow_insecure_auth
     }
 
     /// Materialize a pre-configured HTTP client from `root_certificates` if set and no client was
@@ -1004,6 +1008,47 @@ mod tests {
                 .get(crate::http_client::header::AUTHORIZATION)
                 .is_some(),
             "an allow_auth_host entry must receive the token"
+        );
+    }
+
+    #[test]
+    fn apply_auth_over_http_when_insecure_forwarding_allowed() {
+        // With the escape hatch set, the token is attached over plain http to a host-matched
+        // (non-loopback) request.
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("internal.example.com".to_string()),
+            allow_insecure_auth: true,
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("http://internal.example.com/x", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_some(),
+            "the escape hatch must allow the token over http to a host-matched request"
+        );
+    }
+
+    #[test]
+    fn apply_auth_insecure_flag_still_requires_host_match() {
+        // The escape hatch only lifts the https requirement; a cross-origin host still gets no token.
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("internal.example.com".to_string()),
+            allow_insecure_auth: true,
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("http://evil.example.com/x", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_none(),
+            "the escape hatch must not attach the token to a cross-origin host"
         );
     }
 

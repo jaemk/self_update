@@ -74,7 +74,7 @@ serde_json = "1"
 zipsign-api = { version = "0.1", default-features = false, features = ["sign-tar", "sign-zip"] }
 
 [features]
-default = ["reqwest", "rustls", "progress-bar", "github"]
+default = ["reqwest", "rustls", "progress-bar", "github", "archive-tar", "compression-tar-gz"]
 
 archive-zip = ["zip", "zipsign-api?/verify-zip"]
 compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
