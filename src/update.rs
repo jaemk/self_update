@@ -299,10 +299,11 @@ impl Releases {
     }
 
     /// Construct a `Releases` from a fetched (newest-first) release list with no associated current
-    /// version, as returned by the backends' `ReleaseList::fetch`. `current_version()` is `None` and
-    /// `is_update_available()` errors with [`Error::MissingField`], since there is nothing to
-    /// compare against.
-    pub(crate) fn from_listing(releases: Vec<Release>) -> Self {
+    /// version, mirroring the bare-listing state the backends' `ReleaseList::fetch` returns.
+    /// `current_version()` is `None` and `is_update_available()` errors with
+    /// [`Error::MissingField`], since there is nothing to compare against. Use
+    /// [`from_releases`](Self::from_releases) when you have a current version to compare.
+    pub fn from_listing(releases: Vec<Release>) -> Self {
         Self {
             releases,
             current_version: None,
@@ -1660,6 +1661,24 @@ mod tests {
         // And the not-available case agrees.
         let up_to_date = super::Releases::from_releases(vec![rel("1.0.0")], "1.0.0");
         assert!(!up_to_date.is_update_available().unwrap());
+    }
+
+    // `Releases::from_listing` builds the bare-listing state (no current version), matching what
+    // `ReleaseList::fetch` returns: `current_version()` is None and `is_update_available()` errors.
+    #[test]
+    fn releases_from_listing_has_no_current_version() {
+        let listing = super::Releases::from_listing(vec![rel("2.0.0"), rel("1.0.0")]);
+        assert_eq!(listing.current_version(), None);
+        assert_eq!(listing.latest().unwrap().version(), "2.0.0");
+        assert!(
+            matches!(
+                listing.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "a bare listing must error on is_update_available"
+        );
     }
 
     // --- `ReleaseStatus::version()` -----------------------------------------------------

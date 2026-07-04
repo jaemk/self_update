@@ -112,8 +112,8 @@ impl ReleaseListBuilder {
     /// Set the per-request `max-keys` page size for the bucket listing (default `1000`). Clamped
     /// to `1..=1000` (the ListObjectsV2 cap). The listing follows continuation tokens, so a
     /// truncated page is still fully walked across multiple requests; this only tunes the page size.
-    pub fn max_keys(&mut self, max_keys: impl Into<u16>) -> &mut Self {
-        self.max_keys = clamp_max_keys(max_keys.into());
+    pub fn max_keys(&mut self, max_keys: u16) -> &mut Self {
+        self.max_keys = clamp_max_keys(max_keys);
         self
     }
 
@@ -313,8 +313,8 @@ impl UpdateBuilder {
     /// Set the per-request `max-keys` page size for the bucket listing (default `1000`). Clamped
     /// to `1..=1000` (the ListObjectsV2 cap). The listing follows continuation tokens, so a
     /// truncated page is still fully walked across multiple requests; this only tunes the page size.
-    pub fn max_keys(&mut self, max_keys: impl Into<u16>) -> &mut Self {
-        self.max_keys = clamp_max_keys(max_keys.into());
+    pub fn max_keys(&mut self, max_keys: u16) -> &mut Self {
+        self.max_keys = clamp_max_keys(max_keys);
         self
     }
 

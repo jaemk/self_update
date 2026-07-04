@@ -845,7 +845,8 @@ impl Extract {
     /// Extract an entire source archive into a specified path. If the source is a single compressed
     /// file and not an archive, it will be extracted into a file with the same name inside of
     /// `into_dir`.
-    pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
+    pub fn extract_into(&self, into_dir: impl AsRef<path::Path>) -> Result<()> {
+        let into_dir = into_dir.as_ref();
         let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
@@ -947,9 +948,10 @@ impl Extract {
     /// in the specified `into_dir`.
     pub fn extract_file<T: AsRef<path::Path>>(
         &self,
-        into_dir: &path::Path,
+        into_dir: impl AsRef<path::Path>,
         file_to_extract: T,
     ) -> Result<()> {
+        let into_dir = into_dir.as_ref();
         let file_to_extract = file_to_extract.as_ref();
         let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
