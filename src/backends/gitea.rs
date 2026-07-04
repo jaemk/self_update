@@ -359,7 +359,7 @@ impl ReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
             releases_plan(&self.releases_url(), Some(&current_version))?,
@@ -492,7 +492,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// A JSON array of several releases (one object per `tag`), used by the
-    /// `get_latest_releases_async` filtering test.
+    /// `get_newer_releases_async` filtering test.
     fn releases_json(tags: &[&str]) -> String {
         let objs = tags
             .iter()
@@ -677,8 +677,8 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_sync_returns_releases_and_filters_to_newer() {
-        // `get_latest_releases` (sync) follows pagination, filters to strictly-newer releases,
+    fn get_newer_releases_sync_returns_releases_and_filters_to_newer() {
+        // `get_newer_releases` (sync) follows pagination, filters to strictly-newer releases,
         // wraps them in a `Releases`, and the returned `Releases` agrees on availability with the
         // list path.
         let base = stub(|_| {
@@ -689,7 +689,7 @@ mod tests {
             }]
         });
         let upd = gitea_update_sync(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_sync_reports_no_update_when_up_to_date() {
+    fn get_newer_releases_sync_reports_no_update_when_up_to_date() {
         // gap #4 (sync, gitea): when nothing is strictly newer, the strictly-newer-filtered list
         // path is empty and `is_update_available()` must report false (no panic, no error).
         let base = stub(|_| {
@@ -715,7 +715,7 @@ mod tests {
             }]
         });
         let upd = gitea_update_sync(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         assert!(releases.all().is_empty(), "no newer release => empty list");
         assert!(
             !releases.is_update_available().unwrap(),
@@ -727,7 +727,7 @@ mod tests {
     fn get_latest_release_sync_agrees_with_list_path_when_newest_equals_current() {
         // gap #4 (sync, gitea): the one-element `get_latest_release` path wraps the newest tag even
         // when it equals current, so its `is_update_available()` must report false; the
-        // strictly-newer-filtered `get_latest_releases` path must agree (empty => false). Both
+        // strictly-newer-filtered `get_newer_releases` path must agree (empty => false). Both
         // paths must answer "not available" off the same stubbed listing.
         let make_body = || {
             // get_latest_release reads the FIRST element; place the newest (equal to current) first.
@@ -757,24 +757,24 @@ mod tests {
             }]
         });
         let upd = gitea_update_sync(&base, "1.0.0");
-        let list = upd.get_latest_releases().unwrap();
+        let list = upd.get_newer_releases().unwrap();
         // F1 distinction: the RAW `get_latest_release` path keeps the newest tag (latest() is
-        // Some, above), but the strictly-newer-FILTERED `get_latest_releases` path drops it
+        // Some, above), but the strictly-newer-FILTERED `get_newer_releases` path drops it
         // entirely — so here the list is empty and `latest()` is None, not merely "not newer".
         // Asserting emptiness (not just `!is_update_available()`) pins the filter: a regression
         // that stopped filtering would still report `!is_update_available()` but would leave
         // latest() == Some("1.0.0"), which this catches.
         assert!(
             list.all().is_empty(),
-            "get_latest_releases: nothing strictly newer => filtered list is empty"
+            "get_newer_releases: nothing strictly newer => filtered list is empty"
         );
         assert!(
             list.latest().is_none(),
-            "get_latest_releases: empty filtered list => latest() is None"
+            "get_newer_releases: empty filtered list => latest() is None"
         );
         assert!(
             !list.is_update_available().unwrap(),
-            "get_latest_releases: nothing strictly newer => not available (agrees with single path)"
+            "get_newer_releases: nothing strictly newer => not available (agrees with single path)"
         );
     }
 
@@ -827,7 +827,7 @@ mod tests {
     // must match a full-walk selection.
 
     #[test]
-    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+    fn get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two() {
         // Page 1 has both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases, with
         // a link to page 2. Non-newer releases must NOT halt pagination -- page 2 must be fetched
         // and its newer release (v3.0.0) returned alongside the newer items from page 1.
@@ -847,7 +847,7 @@ mod tests {
             ]
         });
         let upd = gitea_update_sync(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
         // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
@@ -881,7 +881,7 @@ mod tests {
             ]
         });
         let upd = gitea_update_sync(&base, "1.0.0");
-        let early = upd.get_latest_releases().unwrap().into_vec();
+        let early = upd.get_newer_releases().unwrap().into_vec();
         let early_choice =
             crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
 
@@ -1517,9 +1517,9 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_filters_to_newer_only() {
+    async fn get_newer_releases_async_filters_to_newer_only() {
         // The single-page payload mixes releases newer than, equal to, and older than the current
-        // version. `get_latest_releases_async` must keep only the strictly-newer ones, preserving
+        // version. `get_newer_releases_async` must keep only the strictly-newer ones, preserving
         // source order.
         let base = stub(|_| {
             vec![Resp {
@@ -1529,7 +1529,7 @@ mod tests {
             }]
         });
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_empty_when_all_older_or_equal() {
+    async fn get_newer_releases_async_empty_when_all_older_or_equal() {
         // When no release is newer than the current version, the filtered result is empty
         // (this is the "up to date" signal the higher-level async update flow relies on).
         let base = stub(|_| {
@@ -1551,7 +1551,7 @@ mod tests {
             }]
         });
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         assert!(
             releases.all().is_empty(),
             "no release newer than current => empty list, got {:?}",
@@ -1561,7 +1561,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_accumulates_across_pages_then_filters() {
+    async fn get_newer_releases_async_accumulates_across_pages_then_filters() {
         // Pagination must accumulate across pages: a newer release living on page 2 (reached via
         // the `Link: rel="next"` header) must be retained alongside page 1's. The listing is
         // newest-first, so page 1 carries the newest releases and page 2 the next-newest; the
@@ -1582,7 +1582,7 @@ mod tests {
             ]
         });
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -1638,7 +1638,7 @@ mod tests {
     // --- gap A: async backport regression ---------------------------------------------------------
     //
     // The sync regression tests (`early_stop_selects_same_release_as_a_full_walk` and
-    // `get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two`) pin the fix on
+    // `get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two`) pin the fix on
     // the sync path. This pins it on the async path: when page 1 has ONLY non-newer releases, the
     // async driver must still follow the Link header to page 2 and return the newer release there.
     #[cfg(feature = "async")]
@@ -1659,7 +1659,7 @@ mod tests {
             ]
         });
         let upd = gitea_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,

@@ -238,7 +238,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 To check whether a newer release exists without downloading or installing anything, fetch the
 releases once and query the returned `Releases`. The updater no longer has an
-`is_update_available()` method; instead call `get_latest_releases()` (the full candidate list) or
+`is_update_available()` method; instead call `get_newer_releases()` (the full candidate list) or
 `get_latest_release()` (a one-element list with just the newest release), then ask the result:
 `.is_update_available()` compares the newest fetched release against the configured
 `current_version`, and `.latest()` / `.all()` expose the releases themselves. The fetch happens
@@ -252,7 +252,7 @@ fn check() -> Result<(), Box<dyn std::error::Error>> {
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
         .build()?
-        .get_latest_releases()?;
+        .get_newer_releases()?;
 
     if releases.is_update_available()? {
         if let Some(latest) = releases.latest() {
@@ -332,7 +332,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
 returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
 (`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
-`get_latest_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
+`get_newer_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
 update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
 scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
 **tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq

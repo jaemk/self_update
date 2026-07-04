@@ -222,7 +222,7 @@ impl ReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = self.source.get_latest_releases()?;
         Ok(Releases::new(releases, current_version))
@@ -342,7 +342,7 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncReleaseUpdate for
         let release = self.source.get_latest_release().await?;
         Ok(Releases::new(vec![release], current_version))
     }
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = self.source.get_latest_releases().await?;
         Ok(Releases::new(releases, current_version))
@@ -495,7 +495,7 @@ mod tests {
             "get_latest_release yields one element"
         );
 
-        let rels = upd.get_latest_releases().unwrap();
+        let rels = upd.get_newer_releases().unwrap();
         assert_eq!(rels.all().len(), 1);
 
         let tagged = upd.get_release_version("1.5.0").unwrap();
@@ -521,7 +521,7 @@ mod tests {
         // current_version 1.0.0 an update is available.
         let upd = configured(Arc::new(AtomicUsize::new(0)));
         assert!(
-            upd.get_latest_releases()
+            upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -543,7 +543,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(
-            !upd.get_latest_releases()
+            !upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -792,7 +792,7 @@ mod tests {
             assert_eq!(rel.version(), "2.0.0");
             assert_eq!(rel.assets.len(), 1);
 
-            let rels = AsyncReleaseUpdate::get_latest_releases_async(&upd)
+            let rels = AsyncReleaseUpdate::get_newer_releases_async(&upd)
                 .await
                 .unwrap();
             assert_eq!(rels.all().len(), 1);
@@ -852,7 +852,7 @@ mod tests {
                 "3.0.0"
             );
             assert_eq!(
-                AsyncReleaseUpdate::get_latest_releases_async(&upd)
+                AsyncReleaseUpdate::get_newer_releases_async(&upd)
                     .await
                     .unwrap()
                     .all()
@@ -1191,7 +1191,7 @@ mod tests {
 
         #[tokio::test]
         async fn is_update_available_async_true_then_false() {
-            // the pre-check is `get_latest_releases_async().await?.is_update_available()`.
+            // the pre-check is `get_newer_releases_async().await?.is_update_available()`.
             // The native source's latest is 2.0.0, so an update is available from 1.0.0 but not
             // from 2.0.0.
             let mk = |cur: &str| {
@@ -1209,7 +1209,7 @@ mod tests {
             };
             assert!(
                 mk("1.0.0")
-                    .get_latest_releases_async()
+                    .get_newer_releases_async()
                     .await
                     .unwrap()
                     .is_update_available()
@@ -1218,7 +1218,7 @@ mod tests {
             );
             assert!(
                 !mk("2.0.0")
-                    .get_latest_releases_async()
+                    .get_newer_releases_async()
                     .await
                     .unwrap()
                     .is_update_available()

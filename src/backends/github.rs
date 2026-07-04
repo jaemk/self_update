@@ -377,7 +377,7 @@ impl ReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
             releases_plan(
@@ -522,7 +522,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
@@ -678,7 +678,7 @@ mod tests {
     // --- git release-scan early-stop (selection parity + page-2 never requested) -------
 
     #[test]
-    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+    fn get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two() {
         // Page 1 contains both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases.
         // Non-newer releases must NOT halt pagination — page 2 is requested and its newer
         // release (v3.0.0) is included in the result alongside the newer items from page 1.
@@ -698,7 +698,7 @@ mod tests {
             ]
         });
         let upd = github_update_sync(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
         // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn early_stop_selects_same_release_as_a_full_walk() {
-        // Selection parity: the early-stopped `get_latest_releases` must let the updater select the
+        // Selection parity: the early-stopped `get_newer_releases` must let the updater select the
         // SAME release as a full unfiltered walk would. Drive the choice via the same
         // `choose_latest_release` the orchestrator uses, comparing the early-stop list against a
         // full-walk list of the identical releases.
@@ -732,7 +732,7 @@ mod tests {
             ]
         });
         let upd = github_update_sync(&base, "1.0.0");
-        let early = upd.get_latest_releases().unwrap().into_vec();
+        let early = upd.get_newer_releases().unwrap().into_vec();
         let early_choice =
             crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
 
@@ -894,7 +894,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn sync_and_async_get_latest_releases_agree_on_identical_responses() {
+    async fn sync_and_async_get_newer_releases_agree_on_identical_responses() {
         // Both paths share `releases_plan` + the parser + the early-stop filter, so for the SAME
         // stubbed body they must yield the IDENTICAL filtered, ordered release list. Drive the sync
         // fetch and the async fetch against two separate stubs serving the same body, and compare.
@@ -912,7 +912,7 @@ mod tests {
                 }]
             });
             github_update_sync(&sync_base, "1.0.0")
-                .get_latest_releases()
+                .get_newer_releases()
                 .unwrap()
                 .all()
                 .iter()
@@ -938,7 +938,7 @@ mod tests {
             .build_async()
             .unwrap();
         let async_versions: Vec<String> = upd
-            .get_latest_releases_async()
+            .get_newer_releases_async()
             .await
             .unwrap()
             .all()
@@ -1040,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_sync_returns_releases_and_precheck() {
-        // D1 (sync, github): `get_latest_releases()` returns a `Releases` carrying the configured
+    fn get_newer_releases_sync_returns_releases_and_precheck() {
+        // D1 (sync, github): `get_newer_releases()` returns a `Releases` carrying the configured
         // current version; `.is_update_available()` / `.latest()` work off it without a 2nd fetch.
         // The stub lists v2.0.0 and v0.9.0; with current 1.0.0 only 2.0.0 is newer.
         let base = stub(|_| {
@@ -1059,7 +1059,7 @@ mod tests {
             .api_base_url(&base)
             .build()
             .unwrap();
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(versions, vec!["2.0.0"], "only strictly-newer releases kept");
         assert_eq!(releases.latest().unwrap().version(), "2.0.0");

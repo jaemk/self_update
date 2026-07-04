@@ -273,7 +273,7 @@ impl ReleaseBuilder {
 /// current version.
 ///
 /// Returned by [`ReleaseUpdate::get_latest_release`] (a one-element list holding the single newest
-/// release) and [`ReleaseUpdate::get_latest_releases`] (the full candidate list). Use it for a
+/// release) and [`ReleaseUpdate::get_newer_releases`] (the full candidate list). Use it for a
 /// lightweight pre-check: a single listing request fetches the releases, then
 /// [`is_update_available`](Self::is_update_available), [`latest`](Self::latest), and
 /// [`all`](Self::all) answer "is there anything newer?" / "what is it?" without downloading or
@@ -540,9 +540,9 @@ pub trait AsyncReleaseUpdate: UpdateConfig + UpdateInternals {
         &self,
     ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
 
-    /// Async sibling of [`ReleaseUpdate::get_latest_releases`]: fetch the candidate releases as a
+    /// Async sibling of [`ReleaseUpdate::get_newer_releases`]: fetch the candidate releases as a
     /// [`Releases`] (newest-first, filtered to strictly-newer for the built-in backends).
-    fn get_latest_releases_async(
+    fn get_newer_releases_async(
         &self,
     ) -> impl std::future::Future<Output = Result<Releases>> + Send + '_;
 
@@ -733,7 +733,7 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
     /// (carrying the configured current version). Because the newest release is always present,
     /// `.latest()` is always `Some`, and `.is_update_available()` returns `false` when that newest
     /// release is not strictly newer than the configured current version. This differs from
-    /// [`get_latest_releases`](Self::get_latest_releases), whose list is filtered to strictly-newer
+    /// [`get_newer_releases`](Self::get_newer_releases), whose list is filtered to strictly-newer
     /// releases (there, `.latest()` is `None` when up to date and any present entry is a genuine
     /// update).
     fn get_latest_release(&self) -> Result<Releases>;
@@ -744,7 +744,7 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
     /// The list is filtered to releases strictly newer than the configured current version, so it
     /// is empty (`.latest()` is `None`) when already up to date, and any entry present is a genuine
     /// update.
-    fn get_latest_releases(&self) -> Result<Releases>;
+    fn get_newer_releases(&self) -> Result<Releases>;
 
     /// Fetch details of the release matching the specified version
     fn get_release_version(&self, ver: &str) -> Result<Release>;
@@ -770,7 +770,7 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
         let release = match self.release_tag() {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
-                let releases = self.get_latest_releases()?;
+                let releases = self.get_newer_releases()?;
                 match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                     Some(release) => release,
                     None => return Ok(ReleaseStatus::UpToDate),
@@ -1153,7 +1153,7 @@ where
     let release = match u.release_tag() {
         None => {
             print_flush(show_output, "Checking latest released version... ")?;
-            let releases = u.get_latest_releases_async().await?;
+            let releases = u.get_newer_releases_async().await?;
             match choose_latest_release(releases.into_vec(), current_version, show_output)? {
                 Some(release) => release,
                 None => return Ok(ReleaseStatus::UpToDate),

@@ -501,7 +501,7 @@ impl ReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = sort_newer(self.fetch_releases()?, &current_version);
         Ok(Releases::new(releases, current_version))
@@ -524,7 +524,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = sort_newer(self.fetch_releases_async().await?, &current_version);
         Ok(Releases::new(releases, current_version))
@@ -2010,7 +2010,7 @@ mod tests {
             },
         ]);
         let upd = s3_update_sync(&base, "0.1.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(
@@ -2053,7 +2053,7 @@ mod tests {
             },
         ]);
         let upd = s3_update(&base, "0.1.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(
@@ -2110,7 +2110,7 @@ mod tests {
             .access_key(("AKIA", "secret"))
             .build()
             .unwrap();
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let mut versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         versions.sort_unstable();
         assert_eq!(versions, vec!["1.0.0", "2.0.0"]);
@@ -2173,7 +2173,7 @@ mod tests {
             body,
         }]);
         let upd = s3_update_sync(&base, "0.1.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         assert_eq!(releases.all().len(), 1);
         assert_eq!(
             captured.lock().unwrap().len(),
@@ -2213,7 +2213,7 @@ mod tests {
             .max_keys(250u16)
             .build()
             .unwrap();
-        let _ = upd.get_latest_releases().unwrap();
+        let _ = upd.get_newer_releases().unwrap();
         let request = captured.lock().unwrap()[0].clone();
         assert!(
             request.contains("max-keys=250"),
@@ -2237,7 +2237,7 @@ mod tests {
             .max_keys(5000u16)
             .build()
             .unwrap();
-        let _ = upd.get_latest_releases().unwrap();
+        let _ = upd.get_newer_releases().unwrap();
         let request = captured.lock().unwrap()[0].clone();
         assert!(
             request.contains("max-keys=1000") && !request.contains("max-keys=5000"),
@@ -2250,7 +2250,7 @@ mod tests {
     //
     // The s3 stub harness is otherwise only exercised by the async tests above. These pin the
     // *sync* `ReleaseUpdate` fetch methods on the same loopback stub: the one-element
-    // `get_latest_release` wrap, the strictly-newer-filtered `get_latest_releases` list, the
+    // `get_latest_release` wrap, the strictly-newer-filtered `get_newer_releases` list, the
     // current_version carry, and `is_update_available()` agreement between the two paths.
 
     #[test]
@@ -2282,8 +2282,8 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_sync_filters_to_newer_and_prechecks() {
-        // `get_latest_releases` (sync) returns a `Releases` of strictly-newer releases (newest
+    fn get_newer_releases_sync_filters_to_newer_and_prechecks() {
+        // `get_newer_releases` (sync) returns a `Releases` of strictly-newer releases (newest
         // first); `.is_update_available()` / `.latest()` work off it without a second fetch.
         let xml = list_bucket_xml(&[
             "myapp-0.9.0-x86_64-linux",
@@ -2296,7 +2296,7 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update_sync(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -2356,7 +2356,7 @@ mod tests {
     fn sync_is_update_available_agrees_between_paths_when_up_to_date() {
         // when the bucket's newest release equals the current version, the
         // one-element `get_latest_release` path (which keeps the newest even if equal) and the
-        // strictly-newer-filtered `get_latest_releases` path must BOTH report not-available.
+        // strictly-newer-filtered `get_newer_releases` path must BOTH report not-available.
         let xml = || {
             list_bucket_xml(&[
                 "myapp-2.0.0-x86_64-linux",
@@ -2382,14 +2382,14 @@ mod tests {
             body: xml(),
         }]);
         let upd = s3_update_sync(&base, "2.0.0");
-        let list = upd.get_latest_releases().unwrap();
+        let list = upd.get_newer_releases().unwrap();
         assert!(
             list.all().is_empty(),
             "nothing strictly newer than 2.0.0 => empty list"
         );
         assert!(
             !list.is_update_available().unwrap(),
-            "get_latest_releases agrees: not available"
+            "get_newer_releases agrees: not available"
         );
     }
 
@@ -2459,14 +2459,14 @@ mod tests {
         // error body), on the sync lane of whichever http client is built in.
         assert_status_err(fetch_with_status("404 Not Found"), 404);
 
-        // `get_latest_releases` shares the same fetch path; a fresh stub is required because the
+        // `get_newer_releases` shares the same fetch path; a fresh stub is required because the
         // loopback server serves one response per connection.
         let base = stub(vec![Resp {
             status: "404 Not Found",
             body: "<Error><Code>NoSuchBucket</Code></Error>".to_string(),
         }]);
         let upd = s3_update_sync(&base, "0.1.0");
-        assert_status_err(upd.get_latest_releases(), 404);
+        assert_status_err(upd.get_newer_releases(), 404);
     }
 
     #[test]
@@ -2537,7 +2537,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_filters_to_newer_only() {
+    async fn get_newer_releases_async_filters_to_newer_only() {
         // A ListBucketResult with releases at versions 0.9.0, 1.0.0, 1.5.0, and 2.0.0.
         // With current_version=1.0.0, only 1.5.0 and 2.0.0 should survive (newest-first).
         let xml = list_bucket_xml(&[
@@ -2551,7 +2551,7 @@ mod tests {
             body: xml,
         }]);
         let upd = s3_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,

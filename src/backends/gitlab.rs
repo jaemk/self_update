@@ -361,7 +361,7 @@ impl ReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
             releases_plan(
@@ -522,7 +522,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
@@ -882,9 +882,9 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_filters_to_newer_only() {
+    async fn get_newer_releases_async_filters_to_newer_only() {
         // The payload mixes releases newer than, equal to, and older than the current version.
-        // `get_latest_releases_async` must keep only strictly-newer ones, preserving order.
+        // `get_newer_releases_async` must keep only strictly-newer ones, preserving order.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -894,7 +894,7 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -905,7 +905,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_empty_when_all_older_or_equal() {
+    async fn get_newer_releases_async_empty_when_all_older_or_equal() {
         // When no release is newer than the current version, the result is empty.
         let base = stub(|_| {
             vec![Resp {
@@ -916,7 +916,7 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         assert!(
             releases.all().is_empty(),
             "no release newer than current => empty list, got {:?}",
@@ -926,7 +926,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_accumulates_across_pages_then_filters() {
+    async fn get_newer_releases_async_accumulates_across_pages_then_filters() {
         // Pagination must accumulate across pages: a newer release on page 2 (reached via a
         // `Link: rel="next"` header) must be retained alongside page 1's. The listing is
         // newest-first, so page 1 carries the newest releases and page 2 the next-newest; the
@@ -948,7 +948,7 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -1487,9 +1487,9 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_sync_filters_to_newer_only() {
+    fn get_newer_releases_sync_filters_to_newer_only() {
         // The payload mixes releases newer than, equal to, and older than the current version.
-        // `get_latest_releases` (sync) must keep only strictly-newer ones, preserving order.
+        // `get_newer_releases` (sync) must keep only strictly-newer ones, preserving order.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -1498,7 +1498,7 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -1545,7 +1545,7 @@ mod tests {
 
     #[test]
     fn is_update_available_sync_true_when_latest_is_newer() {
-        // D1 (sync): the pre-check is now `get_latest_releases()?.is_update_available()`. The stub's
+        // D1 (sync): the pre-check is now `get_newer_releases()?.is_update_available()`. The stub's
         // newest release is 2.5.0, so an update is available from 0.1.0.
         let base = stub(|_| {
             vec![Resp {
@@ -1556,7 +1556,7 @@ mod tests {
         });
         let upd = gl_update(&base, "0.1.0");
         assert!(
-            upd.get_latest_releases()
+            upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn is_update_available_sync_false_when_latest_not_newer() {
         // D1 complement: when the current version is at/above the latest release, no update is
-        // available. `get_latest_releases` returns the single newer-filtered list (empty here);
+        // available. `get_newer_releases` returns the single newer-filtered list (empty here);
         // current is 2.5.0, so nothing is newer.
         let base = stub(|_| {
             vec![Resp {
@@ -1578,7 +1578,7 @@ mod tests {
         });
         let upd = gl_update(&base, "2.5.0");
         assert!(
-            !upd.get_latest_releases()
+            !upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -1589,7 +1589,7 @@ mod tests {
     #[test]
     fn is_update_available_sync_propagates_non_2xx_error() {
         // D1 (sync): a backend HTTP failure (500) during the listing request must propagate out
-        // of `get_latest_releases`, not be hidden as "no update available".
+        // of `get_newer_releases`, not be hidden as "no update available".
         let base = stub(|_| {
             vec![Resp {
                 status: "500 Internal Server Error",
@@ -1598,11 +1598,11 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "0.1.0");
-        let res = upd.get_latest_releases();
+        let res = upd.get_newer_releases();
         assert!(
             res.is_err(),
             "a non-2xx listing response must propagate as an error out of \
-             get_latest_releases, got {:?}",
+             get_newer_releases, got {:?}",
             res
         );
     }
@@ -1637,7 +1637,7 @@ mod tests {
     // continues to subsequent pages, and the selection from a partial page must match a full walk.
 
     #[test]
-    fn get_latest_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+    fn get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two() {
         // Page 1 contains both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases.
         // Non-newer releases must NOT halt pagination — page 2 is requested and its newer
         // release (v3.0.0) is included in the result alongside the newer items from page 1.
@@ -1657,7 +1657,7 @@ mod tests {
             ]
         });
         let upd = gl_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
         // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
@@ -1674,7 +1674,7 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_releases_finds_update_on_page_2_when_page_1_has_only_non_newer() {
+    fn get_newer_releases_finds_update_on_page_2_when_page_1_has_only_non_newer() {
         // Backport scenario: page 1 contains only a release that is NOT newer than the current
         // version (e.g. a backport patch with an older semver but a newer creation date).
         // The old version-based early-stop would have halted after page 1 and silently missed
@@ -1698,7 +1698,7 @@ mod tests {
             ]
         });
         let upd = gl_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
+        let releases = upd.get_newer_releases().unwrap();
         let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn early_stop_selects_same_release_as_a_full_walk() {
-        // Selection parity: the early-stopped `get_latest_releases` must let the orchestrator pick
+        // Selection parity: the early-stopped `get_newer_releases` must let the orchestrator pick
         // the SAME release a full unfiltered walk would, driven through `choose_latest_release`.
         let (base, _captured) = stub_capturing(|base| {
             vec![
@@ -1731,7 +1731,7 @@ mod tests {
             ]
         });
         let upd = gl_update(&base, "1.0.0");
-        let early = upd.get_latest_releases().unwrap().into_vec();
+        let early = upd.get_newer_releases().unwrap().into_vec();
         let early_choice =
             crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
 

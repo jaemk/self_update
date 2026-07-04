@@ -341,9 +341,9 @@ macro_rules! impl_sync_update_verbs {
             }
 
             /// Fetch the releases newer than the current version. See
-            /// [`ReleaseUpdate::get_latest_releases`](crate::ReleaseUpdate::get_latest_releases).
-            pub fn get_latest_releases(&self) -> crate::Result<crate::Releases> {
-                <Self as crate::ReleaseUpdate>::get_latest_releases(self)
+            /// [`ReleaseUpdate::get_newer_releases`](crate::ReleaseUpdate::get_newer_releases).
+            pub fn get_newer_releases(&self) -> crate::Result<crate::Releases> {
+                <Self as crate::ReleaseUpdate>::get_newer_releases(self)
             }
 
             /// Fetch details of the release matching `ver`. See
@@ -354,10 +354,10 @@ macro_rules! impl_sync_update_verbs {
 
             /// Whether a release newer than the current version is available, returning it if so.
             ///
-            /// A convenience over [`get_latest_releases`](Self::get_latest_releases): returns the
+            /// A convenience over [`get_newer_releases`](Self::get_newer_releases): returns the
             /// newest strictly-newer [`Release`](crate::Release), or `None` when already up to date.
             pub fn is_update_available(&self) -> crate::Result<Option<crate::Release>> {
-                Ok(self.get_latest_releases()?.into_vec().into_iter().next())
+                Ok(self.get_newer_releases()?.into_vec().into_iter().next())
             }
         }
     };
