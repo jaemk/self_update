@@ -104,7 +104,7 @@ impl ReleaseListBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn api_base_url(&mut self, url: impl Into<String>) -> &mut Self {
         self.custom_url = Some(url.into());
         self
     }
@@ -246,7 +246,7 @@ impl UpdateBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn api_base_url(&mut self, url: impl Into<String>) -> &mut Self {
         self.custom_url = Some(url.into());
         self
     }
@@ -780,7 +780,7 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .api_base_url(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -818,7 +818,7 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .api_base_url(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -924,7 +924,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("1.0.0")
-            .url(&async_base)
+            .api_base_url(&async_base)
             .build_async()
             .unwrap();
         let async_versions: Vec<String> = upd
@@ -995,7 +995,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .url(&base)
+            .api_base_url(&base)
             .build_async()
             .unwrap();
         let releases = upd.get_latest_release_async().await.unwrap();
@@ -1020,7 +1020,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("2.0.0")
-            .url(&base)
+            .api_base_url(&base)
             .no_confirm(true)
             .show_output(false)
             .build_async()
@@ -1046,7 +1046,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("1.0.0")
-            .url(&base)
+            .api_base_url(&base)
             .build()
             .unwrap();
         let releases = upd.get_latest_releases().unwrap();
@@ -1068,7 +1068,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version(current_version)
-            .url(base)
+            .api_base_url(base)
             .build()
             .unwrap()
     }
@@ -1140,7 +1140,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("2.0.0")
-            .url(&base)
+            .api_base_url(&base)
             .no_confirm(true)
             .show_output(false)
             .build()
@@ -1286,7 +1286,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .url(&base)
+            .api_base_url(&base)
             .build()
             .unwrap();
         let rel = upd.get_release_version("v1.0.0+build.5").unwrap();
@@ -1946,7 +1946,7 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .api_base_url(&base)
             .repo_owner("o")
             .repo_name("r")
             .retries(1)
@@ -2009,7 +2009,7 @@ mod tests {
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
-            .verify_keys([key_bytes])
+            .verifying_keys([key_bytes])
             .build()
             .unwrap();
         assert_eq!(

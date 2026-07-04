@@ -552,7 +552,7 @@ macro_rules! impl_common_builder_setters {
         /// This **replaces** the key set on each call (unlike [`request_header`](Self::request_header),
         /// which appends); the last call wins.
         #[cfg(feature = "signatures")]
-        pub fn verify_keys(
+        pub fn verifying_keys(
             &mut self,
             keys: impl Into<Vec<crate::VerifyingKey>>,
         ) -> &mut Self {

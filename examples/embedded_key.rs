@@ -36,7 +36,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     #[cfg(feature = "signatures")]
     status_builder
         .repo_owner("Kijewski")
-        .verify_keys([VERIFYING_KEY]);
+        .verifying_keys([VERIFYING_KEY]);
 
     let status = status_builder
         .repo_name("self_update")

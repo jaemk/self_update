@@ -96,7 +96,7 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
     }
@@ -246,7 +246,7 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
     }
@@ -705,7 +705,7 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitlab_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -718,7 +718,7 @@ mod tests {
     /// Available under both sync transports (reqwest blocking and ureq).
     fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1101,7 +1101,7 @@ mod tests {
         });
 
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("group/subgroup")
             .repo_name("r")
             .bin_name("app")
@@ -1290,7 +1290,7 @@ mod tests {
         // The renamed `url` / `filter_target` setters must exist on the gitlab
         // `ReleaseListBuilder` and the builder must still build.
         let _list = super::ReleaseList::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1302,7 +1302,7 @@ mod tests {
     fn url_setter_exists_on_update_builder() {
         // The renamed `url` setter must exist on the gitlab `UpdateBuilder`.
         let _upd = Update::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1769,7 +1769,7 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1839,7 +1839,7 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()

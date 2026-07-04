@@ -91,7 +91,7 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = Some(url.into());
         self
     }
@@ -150,7 +150,7 @@ impl ReleaseListBuilder {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                return Err(Error::MissingField { field: "url" });
+                return Err(Error::MissingField { field: "host" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -247,7 +247,7 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = Some(url.into());
         self
     }
@@ -272,7 +272,7 @@ impl UpdateBuilder {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
             } else {
-                return Err(Error::MissingField { field: "url" });
+                return Err(Error::MissingField { field: "host" });
             },
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -620,7 +620,7 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitea_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -635,7 +635,7 @@ mod tests {
         current_version: &str,
     ) -> Box<dyn crate::update::ReleaseUpdate> {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -924,7 +924,7 @@ mod tests {
             ]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -993,7 +993,7 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .build()
@@ -1083,7 +1083,7 @@ mod tests {
         // The renamed `url` / `filter_target` setters must exist on the gitea
         // `ReleaseListBuilder` and the builder must still build (gitea requires `url`).
         let _list = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1100,7 +1100,7 @@ mod tests {
             .build();
         assert!(matches!(
             res,
-            Err(crate::errors::Error::MissingField { field: "url" })
+            Err(crate::errors::Error::MissingField { field: "host" })
         ));
     }
 
@@ -1110,7 +1110,7 @@ mod tests {
         // the trait default (which sets no User-Agent). The auth scheme/token is applied centrally
         // by `apply_auth`, not baked here.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1142,7 +1142,7 @@ mod tests {
         #[allow(unused_imports)]
         use crate::update::UpdateInternals;
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1165,7 +1165,7 @@ mod tests {
 
         // A user AUTHORIZATION override wins.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1194,7 +1194,7 @@ mod tests {
         // `request.check()` with `Error::Config`, not panic. (The header check runs before the
         // host check, so a valid host is supplied to isolate the header failure.)
         let res = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .request_header("inva lid", "ok")
@@ -1209,7 +1209,7 @@ mod tests {
     fn update_build_surfaces_invalid_header() {
         // Same deferred-header check via `CommonBuilderConfig::build` on the gitea UpdateBuilder.
         let res = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1237,14 +1237,14 @@ mod tests {
     #[test]
     fn build_requires_repo_owner_and_name() {
         let missing_owner = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_name("repo")
             .current_version("0.1.0")
             .build();
         assert!(missing_owner.is_err(), "build must fail without repo_owner");
 
         let missing_name = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .current_version("0.1.0")
             .build();
@@ -1256,7 +1256,7 @@ mod tests {
         // `build_update` yields the concrete `Update` so we can check the shared base URL that both
         // the sync and async fetch paths build on.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
@@ -1272,7 +1272,7 @@ mod tests {
     #[test]
     fn identifier_is_wired() {
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("owner")
             .repo_name("repo")
             .bin_name("app")
@@ -1288,7 +1288,7 @@ mod tests {
         // `bin_name` auto-populates `bin_path_in_archive` (with the platform exe suffix).
         let expected = format!("app{}", std::env::consts::EXE_SUFFIX);
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1299,7 +1299,7 @@ mod tests {
 
         // An explicit `bin_path_in_archive` set before `bin_name` is NOT overwritten.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_path_in_archive("custom/path")
@@ -1318,7 +1318,7 @@ mod tests {
         // from `b`, not `a`: the second call re-derives because the first was an auto-derive.
         let expected_b = format!("b{}", std::env::consts::EXE_SUFFIX);
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("a")
@@ -1343,7 +1343,7 @@ mod tests {
         // Calling `.bin_path_in_archive("x")` then `.bin_name("b")` must keep `"x"` — the
         // explicit set is sticky and a later `bin_name` re-derive must not overwrite it.
         let upd = Update::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_path_in_archive("x")
@@ -1371,7 +1371,7 @@ mod tests {
             }]
         });
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1688,7 +1688,7 @@ mod tests {
             }]
         });
         super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .auth_token("secret")
@@ -1727,7 +1727,7 @@ mod tests {
             }]
         });
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1880,7 +1880,7 @@ mod tests {
     #[test]
     fn release_list_build_requires_repo_owner_and_repo_name() {
         let res = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_name("r")
             .build();
         assert!(
@@ -1895,7 +1895,7 @@ mod tests {
         );
 
         let res = super::ReleaseList::configure()
-            .url("https://gitea.example.com")
+            .host("https://gitea.example.com")
             .repo_owner("o")
             .build();
         assert!(
@@ -1979,7 +1979,7 @@ mod tests {
             }]
         });
         let releases = super::ReleaseList::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-linux")
