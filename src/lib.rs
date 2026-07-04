@@ -605,7 +605,12 @@ fn confirm(msg: &str) -> Result<()> {
     print_flush!("{}", msg);
 
     let mut s = String::new();
-    io::stdin().read_line(&mut s)?;
+    // EOF (closed stdin: a daemon, `</dev/null`, CI) reads zero bytes. Treat it as a decline, not a
+    // blank-line "yes", so an unattended caller that forgot `no_confirm` aborts rather than silently
+    // proceeding with a self-replacement.
+    if io::stdin().read_line(&mut s)? == 0 {
+        return Err(Error::Aborted);
+    }
     let s = s.trim().to_lowercase();
     if !s.is_empty() && s != "y" {
         return Err(Error::Aborted);
@@ -880,7 +885,20 @@ impl Extract {
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
 
-                    let output_path = into_dir.join(file.name());
+                    // Reject entries whose name would escape `into_dir` (zip-slip). `enclosed_name`
+                    // returns `None` for an absolute path or one containing `..`.
+                    let Some(rel_path) = file.enclosed_name() else {
+                        return Err(Error::Internal {
+                            message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                            source: None,
+                        });
+                    };
+                    let output_path = into_dir.join(rel_path);
+
+                    if file.is_dir() {
+                        fs::create_dir_all(&output_path)?;
+                        continue;
+                    }
                     if let Some(parent_dir) = output_path.parent() {
                         if let Err(e) = fs::create_dir_all(parent_dir) {
                             if e.kind() != io::ErrorKind::AlreadyExists {
@@ -889,8 +907,15 @@ impl Extract {
                         }
                     }
 
-                    let mut output = fs::File::create(output_path)?;
+                    let mut output = fs::File::create(&output_path)?;
                     io::copy(&mut file, &mut output)?;
+                    // Preserve the archived unix permission mode (notably the executable bit) so a
+                    // binary extracted from a zip is runnable when installed to a custom path.
+                    #[cfg(unix)]
+                    if let Some(mode) = file.unix_mode() {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                    }
                 }
             }
         };
@@ -993,7 +1018,13 @@ impl Extract {
                 })?;
                 let mut file = archive.by_name(file_name)?;
 
-                let output_path = into_dir.join(file.name());
+                let Some(rel_path) = file.enclosed_name() else {
+                    return Err(Error::Internal {
+                        message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                        source: None,
+                    });
+                };
+                let output_path = into_dir.join(rel_path);
                 if let Some(parent_dir) = output_path.parent() {
                     if let Err(e) = fs::create_dir_all(parent_dir) {
                         if e.kind() != io::ErrorKind::AlreadyExists {
@@ -1002,8 +1033,14 @@ impl Extract {
                     }
                 }
 
-                let mut output = fs::File::create(output_path)?;
+                let mut output = fs::File::create(&output_path)?;
                 io::copy(&mut file, &mut output)?;
+                // Preserve the archived unix permission mode so the extracted binary is runnable.
+                #[cfg(unix)]
+                if let Some(mode) = file.unix_mode() {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                }
             }
         };
         Ok(())
@@ -1067,10 +1104,41 @@ impl Move {
             }
             // No temp set, or nothing to preserve at `dest`: just move source into place.
             _ => {
-                fs::rename(&self.source, dest)?;
+                rename_or_copy(&self.source, dest)?;
             }
         };
         Ok(())
+    }
+}
+
+/// Rename `source` onto `dest`, falling back to copy when the two are on different filesystems.
+///
+/// The extraction temp dir is often a tmpfs on Linux while `bin_install_path` lives on the root
+/// filesystem, so a plain `fs::rename` returns `CrossesDevices` (EXDEV). On that error the source is
+/// copied to a temporary file beside `dest` (same filesystem, so the following rename is atomic),
+/// renamed over `dest`, and the original source removed. `fs::copy` preserves the source's
+/// permission mode.
+fn rename_or_copy(source: &path::Path, dest: &path::Path) -> Result<()> {
+    match fs::rename(source, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            let tmp = match dest.file_name() {
+                Some(name) => {
+                    let mut n = name.to_os_string();
+                    n.push(".self_update.tmp");
+                    dest.with_file_name(n)
+                }
+                None => return Err(Error::from(e)),
+            };
+            fs::copy(source, &tmp)?;
+            if let Err(rename_err) = fs::rename(&tmp, dest) {
+                let _ = fs::remove_file(&tmp);
+                return Err(Error::from(rename_err));
+            }
+            let _ = fs::remove_file(source);
+            Ok(())
+        }
+        Err(e) => Err(Error::from(e)),
     }
 }
 
@@ -1566,14 +1634,12 @@ impl Download {
         let mut downloaded: u64 = 0;
         #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
+            let style = IndicatifProgressStyle::default_bar()
+                .template(&self.progress_template)
+                .map_err(|e| Error::Config(format!("invalid progress bar template: {e}")))?
+                .progress_chars(&self.progress_chars);
             let pb = ProgressBar::new(size);
-            pb.set_style(
-                IndicatifProgressStyle::default_bar()
-                    .template(&self.progress_template)
-                    .expect("set ProgressStyle template failed")
-                    .progress_chars(&self.progress_chars),
-            );
-
+            pb.set_style(style);
             Some(pb)
         } else {
             None
@@ -1670,13 +1736,12 @@ impl Download {
         let mut downloaded: u64 = 0;
         #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
+            let style = IndicatifProgressStyle::default_bar()
+                .template(&self.progress_template)
+                .map_err(|e| Error::Config(format!("invalid progress bar template: {e}")))?
+                .progress_chars(&self.progress_chars);
             let pb = ProgressBar::new(size);
-            pb.set_style(
-                IndicatifProgressStyle::default_bar()
-                    .template(&self.progress_template)
-                    .expect("set ProgressStyle template failed")
-                    .progress_chars(&self.progress_chars),
-            );
+            pb.set_style(style);
             Some(pb)
         } else {
             None
@@ -2758,6 +2823,67 @@ mod tests {
         let out_file = out_path.join("inner_archive/temp2.txt");
         assert!(out_file.exists());
         cmp_content(&out_file, "This is a second test!");
+    }
+
+    // A zip whose entry name escapes the output dir (`../escape.txt`) must be rejected, and nothing
+    // may be written outside `into_dir`. Guards against zip-slip.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn extract_into_rejects_zip_slip() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("evil.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("../escape.txt", options).expect("start");
+            zip.write_all(b"pwned").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let out_dir = out_tmp.path().join("into");
+        fs::create_dir_all(&out_dir).expect("mkdir");
+
+        let res = Extract::from_source(&archive_path).extract_into(&out_dir);
+        assert!(res.is_err(), "a zip-slip entry must be rejected");
+        assert!(
+            !out_tmp.path().join("escape.txt").exists(),
+            "nothing must be written outside the extraction dir"
+        );
+    }
+
+    // A zip entry carrying an executable unix mode must extract with that mode preserved, so a
+    // binary installed from a zip to a custom path stays runnable.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_preserves_zip_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("app.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            zip.start_file("app", options).expect("start");
+            zip.write_all(b"#!/bin/sh\n").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        let mode = fs::metadata(out_tmp.path().join("app"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "the executable bit must be preserved, got mode {:o}",
+            mode
+        );
     }
 
     fn build_test_archive<T: AsRef<Path>>(

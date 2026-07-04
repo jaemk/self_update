@@ -235,11 +235,14 @@ impl RequestConfig {
             );
             return Ok(());
         }
-        let value = format!("{} {}", self.auth_scheme.prefix(), token)
+        let mut value = format!("{} {}", self.auth_scheme.prefix(), token)
             .parse::<header::HeaderValue>()
             .map_err(|err| Error::InvalidAuthToken {
                 source: Box::new(err),
             })?;
+        // Mark the value sensitive so it renders as `Sensitive` in any `Debug` (e.g. a `Download`'s)
+        // and is kept out of logs by the HTTP client.
+        value.set_sensitive(true);
         headers.insert(header::AUTHORIZATION, value);
         Ok(())
     }
