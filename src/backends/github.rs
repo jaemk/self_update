@@ -129,6 +129,11 @@ impl ReleaseListBuilder {
         let mut request = self.request.clone();
         request.auth_scheme = crate::backends::common::AuthScheme::Token;
         request.auth_token = self.auth_token.clone();
+        request.auth_base_host = crate::backends::common::host_of(
+            self.custom_url
+                .as_deref()
+                .unwrap_or("https://api.github.com"),
+        );
         request.build_client();
         request.check()?;
         Ok(ReleaseList {
@@ -263,7 +268,17 @@ impl UpdateBuilder {
                 return Err(Error::MissingField { field: "repo_name" });
             },
             custom_url: self.custom_url.clone(),
-            common: self.common.build()?,
+            common: {
+                let mut resolved = self.common.build()?;
+                // The github API host (asset download URLs are on the same host) receives the token;
+                // a server-supplied URL on any other host does not.
+                resolved.request.auth_base_host = crate::backends::common::host_of(
+                    self.custom_url
+                        .as_deref()
+                        .unwrap_or("https://api.github.com"),
+                );
+                resolved
+            },
         })
     }
 
@@ -1378,7 +1393,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = HeaderMap::new();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://api.github.com/repos/o/r/releases/assets/1",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "token secret",
@@ -1396,7 +1416,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = upd.request_config().headers.clone();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://api.github.com/repos/o/r/releases/assets/1",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer user-override",
@@ -1422,7 +1447,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         let err = upd
             .request_config()
-            .apply_auth(&mut headers)
+            .apply_auth(
+                "https://api.github.com/repos/o/r/releases/assets/1",
+                &mut headers,
+            )
             .expect_err("an unencodable auth token must error");
         assert!(
             matches!(err, crate::errors::Error::InvalidAuthToken { .. }),

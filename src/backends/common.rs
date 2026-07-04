@@ -50,6 +50,16 @@ impl AuthScheme {
         }
     }
 }
+
+/// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
+/// available, no `url` crate needed). Returns `None` when the URL has no host.
+pub(crate) fn host_of(url: &str) -> Option<String> {
+    url.parse::<http::Uri>().ok()?.host().map(|h| {
+        h.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase()
+    })
+}
 #[cfg(feature = "progress-bar")]
 use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 
@@ -94,6 +104,15 @@ pub(crate) struct RequestConfig {
     /// (invalid cert bytes or a client-build failure). Deferred like [`header_error`](Self::header_error)
     /// and surfaced from [`check`](Self::check) as an `Error::Config`.
     pub(crate) cert_error: Option<String>,
+    /// The host of the backend's configured API base (e.g. `api.github.com`, `gitlab.com`, the
+    /// gitea host). The derived [`auth_token`](Self::auth_token) is only attached to a request whose
+    /// host matches this (or an [`auth_hosts`](Self::auth_hosts) entry), so a server-supplied asset
+    /// `download_url` or `Link` next-page URL pointing at a different host does not receive the
+    /// token. Set by each backend at `build()` time; `None` disables the token entirely.
+    pub(crate) auth_base_host: Option<String>,
+    /// Additional hosts the user has explicitly authorized to receive the auth token, via
+    /// `allow_auth_host`. Checked alongside [`auth_base_host`](Self::auth_base_host).
+    pub(crate) auth_hosts: Vec<String>,
 }
 
 /// Default base delay for the exponential retry backoff (attempt 0).
@@ -117,6 +136,8 @@ impl Default for RequestConfig {
             header_error: None,
             root_certificates: Vec::new(),
             cert_error: None,
+            auth_base_host: None,
+            auth_hosts: Vec::new(),
         }
     }
 }
@@ -193,20 +214,71 @@ impl RequestConfig {
     ///
     /// A token that does not encode as a header value surfaces as
     /// [`Error::InvalidAuthToken`](crate::errors::Error::InvalidAuthToken).
-    pub(crate) fn apply_auth(&self, headers: &mut HeaderMap) -> Result<()> {
+    ///
+    /// The token is attached only when [`auth_allowed_for`](Self::auth_allowed_for) permits it for
+    /// `url` (same host as the configured API base or an `allow_auth_host` entry, over https).
+    /// A server-supplied asset `download_url` or `Link` next-page URL pointing at a different host
+    /// gets no token, so a malicious release server cannot harvest the credential.
+    pub(crate) fn apply_auth(&self, url: &str, headers: &mut HeaderMap) -> Result<()> {
         // A user-supplied Authorization header (via `request_header`) always wins.
         if self.headers.contains_key(header::AUTHORIZATION) {
             return Ok(());
         }
-        if let Some(token) = self.auth_token.as_deref() {
-            let value = format!("{} {}", self.auth_scheme.prefix(), token)
-                .parse::<header::HeaderValue>()
-                .map_err(|err| Error::InvalidAuthToken {
-                    source: Box::new(err),
-                })?;
-            headers.insert(header::AUTHORIZATION, value);
+        let Some(token) = self.auth_token.as_deref() else {
+            return Ok(());
+        };
+        if !self.auth_allowed_for(url) {
+            log::warn!(
+                "self_update: not attaching the auth token to {url}: its host is not the configured \
+                 API host and is not in the allow_auth_host set (or the scheme is not https). The \
+                 request proceeds without authorization."
+            );
+            return Ok(());
         }
+        let value = format!("{} {}", self.auth_scheme.prefix(), token)
+            .parse::<header::HeaderValue>()
+            .map_err(|err| Error::InvalidAuthToken {
+                source: Box::new(err),
+            })?;
+        headers.insert(header::AUTHORIZATION, value);
         Ok(())
+    }
+
+    /// Whether the derived auth token may be attached to a request to `url`.
+    ///
+    /// The host must match the configured [`auth_base_host`](Self::auth_base_host) or an
+    /// [`auth_hosts`](Self::auth_hosts) entry, and the scheme must be `https` -- except for loopback
+    /// hosts (`localhost`, `127.0.0.1`, `::1`), which are allowed over plain http so a local mirror
+    /// and the loopback test stubs keep working.
+    fn auth_allowed_for(&self, url: &str) -> bool {
+        let uri = match url.parse::<http::Uri>() {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let host = match uri.host() {
+            Some(h) => h
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase(),
+            None => return false,
+        };
+        let host_matches = self
+            .auth_base_host
+            .as_deref()
+            .is_some_and(|b| b.eq_ignore_ascii_case(&host))
+            || self
+                .auth_hosts
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(&host));
+        if !host_matches {
+            return false;
+        }
+        let is_loopback = host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
+        uri.scheme_str() == Some("https") || is_loopback
     }
 
     /// Materialize a pre-configured HTTP client from `root_certificates` if set and no client was
@@ -763,7 +835,8 @@ mod tests {
         // With no auth_token set, apply_auth must not insert any Authorization header.
         let req = RequestConfig::default();
         let mut headers = crate::http_client::HeaderMap::new();
-        req.apply_auth(&mut headers).unwrap();
+        req.apply_auth("https://api.example.com/x", &mut headers)
+            .unwrap();
         assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
@@ -775,13 +848,15 @@ mod tests {
     #[test]
     fn apply_auth_token_scheme_inserts_authorization_header() {
         // With auth_token set and the default Token scheme, apply_auth must insert
-        // "Authorization: token <token>".
+        // "Authorization: token <token>" for a request to the configured API host.
         let req = RequestConfig {
             auth_token: Some("mytoken".to_string()),
+            auth_base_host: Some("api.example.com".to_string()),
             ..Default::default()
         };
         let mut headers = crate::http_client::HeaderMap::new();
-        req.apply_auth(&mut headers).unwrap();
+        req.apply_auth("https://api.example.com/x", &mut headers)
+            .unwrap();
         let auth = headers
             .get(crate::http_client::header::AUTHORIZATION)
             .expect("apply_auth must insert an Authorization header when a token is set");
@@ -805,7 +880,8 @@ mod tests {
             "custom my-custom-token",
         );
         let mut out_headers = crate::http_client::HeaderMap::new();
-        req.apply_auth(&mut out_headers).unwrap();
+        req.apply_auth("https://api.example.com/x", &mut out_headers)
+            .unwrap();
         assert!(
             out_headers
                 .get(crate::http_client::header::AUTHORIZATION)
@@ -822,10 +898,12 @@ mod tests {
         let req = RequestConfig {
             auth_token: Some("mytoken".to_string()),
             auth_scheme: super::AuthScheme::Bearer,
+            auth_base_host: Some("api.example.com".to_string()),
             ..Default::default()
         };
         let mut headers = crate::http_client::HeaderMap::new();
-        req.apply_auth(&mut headers).unwrap();
+        req.apply_auth("https://api.example.com/x", &mut headers)
+            .unwrap();
         let auth = headers
             .get(crate::http_client::header::AUTHORIZATION)
             .expect("apply_auth must insert an Authorization header");
@@ -841,16 +919,99 @@ mod tests {
         // header value. apply_auth must surface this as Error::InvalidAuthToken, not panic.
         let req = RequestConfig {
             auth_token: Some("bad\ntoken".to_string()),
+            auth_base_host: Some("api.example.com".to_string()),
             ..Default::default()
         };
         let mut headers = crate::http_client::HeaderMap::new();
-        match req.apply_auth(&mut headers) {
+        match req.apply_auth("https://api.example.com/x", &mut headers) {
             Err(crate::errors::Error::InvalidAuthToken { .. }) => {}
             other => panic!(
                 "expected Error::InvalidAuthToken for a token with a newline, got {:?}",
                 other
             ),
         }
+    }
+
+    #[test]
+    fn apply_auth_not_attached_to_cross_origin_url() {
+        // The token must NOT be attached to a request whose host differs from the configured API
+        // host. A malicious release server that sets the asset download_url (or a Link next-page
+        // URL) to its own host must not receive the credential.
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("api.github.com".to_string()),
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("https://evil.example.com/x.tar.gz", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_none(),
+            "the token must not be attached to a cross-origin URL"
+        );
+    }
+
+    #[test]
+    fn apply_auth_not_attached_over_plaintext_http() {
+        // The token must NOT be sent over plaintext http to a non-loopback host, even when the host
+        // matches the configured API host (guards against a downgraded/misconfigured URL).
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("api.example.com".to_string()),
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("http://api.example.com/x", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_none(),
+            "the token must not be sent over plaintext http to a non-loopback host"
+        );
+    }
+
+    #[test]
+    fn apply_auth_attached_to_allow_auth_host() {
+        // A host the user explicitly authorized via allow_auth_host receives the token even though
+        // it differs from the API base host.
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("api.example.com".to_string()),
+            auth_hosts: vec!["cdn.example.com".to_string()],
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("https://cdn.example.com/x", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_some(),
+            "an allow_auth_host entry must receive the token"
+        );
+    }
+
+    #[test]
+    fn apply_auth_attached_to_loopback_over_http() {
+        // Loopback hosts may use plain http (local mirrors and the loopback test stubs), provided
+        // the host matches the configured base.
+        let req = RequestConfig {
+            auth_token: Some("secret".to_string()),
+            auth_base_host: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("http://127.0.0.1:8080/x", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_some(),
+            "a loopback host matching the base must receive the token over http"
+        );
     }
 
     // --- build() auth propagation ------------------------------------------------------------

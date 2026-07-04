@@ -290,8 +290,10 @@ pub(crate) fn send(
     config: &common::RequestConfig,
 ) -> Result<Box<dyn http_client::HttpResponse>> {
     // Apply the backend's derived Authorization first (scheme + token), unless the user set their
-    // own Authorization via `request_header` (honored below when `config.headers` is merged).
-    config.apply_auth(&mut base)?;
+    // own Authorization via `request_header` (honored below when `config.headers` is merged). The
+    // token is attached only for a same-host request, so a malicious `Link` next-page URL pointing
+    // at another host does not receive it.
+    config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
@@ -324,7 +326,7 @@ pub(crate) async fn send_async(
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
 ) -> Result<Box<dyn http_client::AsyncHttpResponse>> {
-    config.apply_auth(&mut base)?;
+    config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
@@ -1033,6 +1035,7 @@ mod test {
         let config = RequestConfig {
             auth_scheme: AuthScheme::Token,
             auth_token: Some("secret".to_string()),
+            auth_base_host: crate::backends::common::host_of(&base),
             ..Default::default()
         };
         let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
@@ -1051,6 +1054,7 @@ mod test {
         let config = RequestConfig {
             auth_scheme: AuthScheme::Bearer,
             auth_token: Some("secret".to_string()),
+            auth_base_host: crate::backends::common::host_of(&base),
             ..Default::default()
         };
         let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();

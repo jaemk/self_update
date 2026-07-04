@@ -152,6 +152,19 @@ macro_rules! request_config_setters {
             self.$($path).+.root_certificates.push(cert);
             self
         }
+
+        /// Authorize an additional host to receive the auth token.
+        ///
+        /// By default the token set via `auth_token` is sent only to the backend's own API host, so
+        /// a server-supplied asset `download_url` or pagination `Link` pointing at a different host
+        /// does not receive the credential. If your release assets are served from a separate host
+        /// (a CDN or artifact mirror) that legitimately needs the token, authorize it here. Call
+        /// multiple times to add more than one. Matching is by host, case-insensitive; the request
+        /// must still use `https` (loopback hosts may use http).
+        pub fn allow_auth_host(&mut self, host: impl Into<String>) -> &mut Self {
+            self.$($path).+.auth_hosts.push(host.into());
+            self
+        }
     };
 }
 

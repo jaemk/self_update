@@ -963,8 +963,11 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     let mut headers = u.api_headers(u.auth_token())?;
     headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
     // Apply the backend's derived Authorization (scheme + token), skipped when the user supplied
-    // their own Authorization via `request_header`.
-    u.request_config().apply_auth(&mut headers)?;
+    // their own Authorization via `request_header`. The token is attached only when the asset
+    // download URL is on the configured API host (or an allow_auth_host entry), so a server-supplied
+    // download_url pointing at another host does not receive the credential.
+    u.request_config()
+        .apply_auth(target_asset.download_url(), &mut headers)?;
     // Apply the user's extra request headers to the download too. This runs after the ACCEPT and
     // auth headers set above, so a user-supplied header of the same name overrides them here.
     for (name, value) in u.request_headers() {
@@ -2171,7 +2174,39 @@ mod tests {
     #[cfg(feature = "github")]
     #[test]
     fn download_path_applies_github_token_scheme() {
-        // github resolves to the `token` scheme; the download GET must carry `token secret`.
+        // github resolves to the `token` scheme; the download GET must carry `token secret`. The
+        // asset is served from the loopback stub, a different host than the github API, so the host
+        // is authorized via `allow_auth_host` for the token to be attached.
+        let (base, captured) = download_auth_capture_stub();
+        let host = crate::backends::common::host_of(&base).unwrap();
+        let upd = crate::backends::github::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .allow_auth_host(host)
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
+        let download = super::build_download(&*upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        assert_eq!(out, b"payload", "the download streamed the stub body");
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_download_authorization(&lines),
+            Some("token secret".to_string()),
+            "the download path must send github's derived `token` auth header to an authorized host"
+        );
+    }
+
+    #[cfg(feature = "github")]
+    #[test]
+    fn download_path_drops_auth_for_cross_origin_asset_url() {
+        // A server-supplied asset download_url on a host other than the github API (and not in the
+        // allow_auth_host set) must NOT receive the token. This is the SEC-1 credential-exfiltration
+        // guard: a malicious release server cannot harvest the user's PAT via the download URL.
         let (base, captured) = download_auth_capture_stub();
         let upd = crate::backends::github::Update::configure()
             .repo_owner("o")
@@ -2185,12 +2220,11 @@ mod tests {
         let download = super::build_download(&*upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
-        assert_eq!(out, b"payload", "the download streamed the stub body");
         let lines = captured.lock().unwrap().clone();
         assert_eq!(
             captured_download_authorization(&lines),
-            Some("token secret".to_string()),
-            "the download path must send github's derived `token` auth header"
+            None,
+            "the token must not be sent to a cross-origin asset download URL"
         );
     }
 
@@ -2228,12 +2262,14 @@ mod tests {
         // gitlab resolves to the `Bearer` scheme; the download GET must carry `Bearer secret`,
         // proving the per-backend default scheme is threaded all the way to the download wire.
         let (base, captured) = download_auth_capture_stub();
+        let host = crate::backends::common::host_of(&base).unwrap();
         let upd = crate::backends::gitlab::Update::configure()
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
             .auth_token("secret")
+            .allow_auth_host(host)
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
@@ -2244,7 +2280,7 @@ mod tests {
         assert_eq!(
             captured_download_authorization(&lines),
             Some("Bearer secret".to_string()),
-            "the download path must send gitlab's derived `Bearer` auth header"
+            "the download path must send gitlab's derived `Bearer` auth header to an authorized host"
         );
     }
 

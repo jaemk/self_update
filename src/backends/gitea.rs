@@ -140,6 +140,10 @@ impl ReleaseListBuilder {
         let mut request = self.request.clone();
         request.auth_scheme = crate::backends::common::AuthScheme::Token;
         request.auth_token = self.auth_token.clone();
+        request.auth_base_host = self
+            .host
+            .as_deref()
+            .and_then(crate::backends::common::host_of);
         request.build_client();
         request.check()?;
         Ok(ReleaseList {
@@ -282,7 +286,14 @@ impl UpdateBuilder {
             } else {
                 return Err(Error::MissingField { field: "repo_name" });
             },
-            common: self.common.build()?,
+            common: {
+                let mut resolved = self.common.build()?;
+                resolved.request.auth_base_host = self
+                    .host
+                    .as_deref()
+                    .and_then(crate::backends::common::host_of);
+                resolved
+            },
         })
     }
 
@@ -1136,7 +1147,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = HeaderMap::new();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://gitea.example.com/api/v1/repos/o/r/releases",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "token secret",
@@ -1155,7 +1171,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = upd.request_config().headers.clone();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://gitea.example.com/api/v1/repos/o/r/releases",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer user-override",

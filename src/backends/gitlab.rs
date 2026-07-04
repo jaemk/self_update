@@ -145,6 +145,7 @@ impl ReleaseListBuilder {
         let mut request = self.request.clone();
         request.auth_scheme = crate::backends::common::AuthScheme::Bearer;
         request.auth_token = self.auth_token.clone();
+        request.auth_base_host = crate::backends::common::host_of(&self.host);
         request.build_client();
         request.check()?;
         Ok(ReleaseList {
@@ -284,7 +285,11 @@ impl UpdateBuilder {
                 // shared `apply_auth` renders `Bearer <token>` on both listing and download.
                 let mut common = self.common.clone();
                 common.auth_scheme = crate::backends::common::AuthScheme::Bearer;
-                common.build()?
+                let mut resolved = common.build()?;
+                // Only the gitlab host receives the token; a server-supplied external asset link
+                // (gitlab allows arbitrary asset URLs) does not.
+                resolved.request.auth_base_host = crate::backends::common::host_of(&self.host);
+                resolved
             },
         })
     }
@@ -1356,7 +1361,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = HeaderMap::new();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://gitlab.com/api/v4/projects/o%2Fr/releases",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer secret",
@@ -1374,7 +1384,12 @@ mod tests {
             .build()
             .unwrap();
         let mut headers = upd.request_config().headers.clone();
-        upd.request_config().apply_auth(&mut headers).unwrap();
+        upd.request_config()
+            .apply_auth(
+                "https://gitlab.com/api/v4/projects/o%2Fr/releases",
+                &mut headers,
+            )
+            .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "token user-override",
