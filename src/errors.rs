@@ -185,8 +185,16 @@ pub enum Error {
     /// `semver` implementation evolves. Use [`std::error::Error::source`] to inspect the
     /// underlying error.
     SemVer(Box<dyn std::error::Error + Send + Sync>),
-    /// Used when the `archive-zip` feature is not enabled.
+    /// Used when the archive container feature (`archive-tar` / `archive-zip`) for the detected
+    /// asset is not enabled. The string is the archive token (`"tar"` / `"zip"`).
     ArchiveNotEnabled(String),
+    /// The asset is compressed with a codec whose feature is not enabled.
+    ///
+    /// The string is the codec token (`"gz"`). Enable the matching feature (`compression-tar-gz`
+    /// for gzip) to decode it. Distinct from [`ArchiveNotEnabled`](Error::ArchiveNotEnabled), which
+    /// concerns the container format; without this, a gzip asset would install its still-compressed
+    /// bytes as the binary.
+    CompressionNotEnabled(String),
     /// Used when the repository archive does not contain any signatures to verify with.
     #[cfg(feature = "signatures")]
     NoSignatures(crate::ArchiveKind),
@@ -343,6 +351,11 @@ impl std::fmt::Display for Error {
                 f,
                 "ArchiveNotEnabledError: Archive extension '{}' not supported, please enable 'archive-{}' feature!",
                 s, s
+            ),
+            CompressionNotEnabled(s) => write!(
+                f,
+                "CompressionNotEnabledError: '{}' compression not supported, please enable the 'compression-tar-gz' feature (a `.tar.gz` also needs 'archive-tar')",
+                s
             ),
             #[cfg(feature = "signatures")]
             NoSignatures(kind) => write!(

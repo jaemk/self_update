@@ -738,10 +738,14 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
             }
         }
         Some(extension) if extension == std::ffi::OsStr::new("tgz") => {
-            #[cfg(feature = "archive-tar")]
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
             {
                 debug!("Detected .tgz archive");
                 Ok(ArchiveKind::Tar(Some(Compression::Gz)))
+            }
+            #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+            {
+                Err(Error::CompressionNotEnabled("gz".to_string()))
             }
             #[cfg(not(feature = "archive-tar"))]
             {
@@ -754,17 +758,33 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
             .and_then(|f| f.extension())
         {
             Some(extension) if extension == std::ffi::OsStr::new("tar") => {
-                #[cfg(feature = "archive-tar")]
+                #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
                 {
                     debug!("Detected .tar.gz archive");
                     Ok(ArchiveKind::Tar(Some(Compression::Gz)))
+                }
+                #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+                {
+                    Err(Error::CompressionNotEnabled("gz".to_string()))
                 }
                 #[cfg(not(feature = "archive-tar"))]
                 {
                     Err(Error::ArchiveNotEnabled("tar".to_string()))
                 }
             }
-            _ => Ok(ArchiveKind::Plain(Some(Compression::Gz))),
+            // A plain `.gz` single-file asset: decoding the gzip layer requires the
+            // `compression-tar-gz` feature. Without it, refuse rather than installing the still
+            // compressed bytes as the binary.
+            _ => {
+                #[cfg(feature = "compression-tar-gz")]
+                {
+                    Ok(ArchiveKind::Plain(Some(Compression::Gz)))
+                }
+                #[cfg(not(feature = "compression-tar-gz"))]
+                {
+                    Err(Error::CompressionNotEnabled("gz".to_string()))
+                }
+            }
         },
         _ => Ok(ArchiveKind::Plain(None)),
     };
@@ -2544,6 +2564,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn detect_plain_gz() {
         assert_eq!(
@@ -2552,19 +2573,40 @@ mod tests {
         );
     }
 
+    // Without the gzip feature, a plain `.gz` asset must be rejected with `CompressionNotEnabled`,
+    // not silently detected as a decodable archive (which would install the compressed bytes).
+    #[cfg(not(feature = "compression-tar-gz"))]
+    #[test]
+    fn detect_plain_gz_without_feature_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.exe.gz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
+    }
+
     #[cfg(not(feature = "archive-tar"))]
     #[test]
     #[ignore]
     fn detect_tar_gz() {
         println!("WARNING: Please enable 'archive-tar' feature!");
     }
-    #[cfg(feature = "archive-tar")]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn detect_tar_gz() {
         assert_eq!(
             ArchiveKind::Tar(Some(Compression::Gz)),
             detect_archive(&PathBuf::from("Something.tar.gz")).unwrap()
         );
+    }
+    // `.tar.gz` with the tar container but no gzip codec must error, not fall through to an opaque
+    // failure inside the tar reader.
+    #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+    #[test]
+    fn detect_tar_gz_without_compression_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.tar.gz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
     }
 
     #[cfg(not(feature = "archive-tar"))]
