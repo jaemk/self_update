@@ -23,6 +23,39 @@ impl From<reqwest::blocking::Client> for ReqwestClient {
     }
 }
 
+impl ReqwestClient {
+    /// Build a ReqwestClient with custom root CA certificates baked in.
+    /// Uses the same TLS backend selection (rustls wins over native-tls) as the per-call path.
+    pub(crate) fn build_with_certs(
+        certs: &[crate::tls::Certificate],
+    ) -> std::result::Result<std::sync::Arc<dyn crate::http_client::HttpClient>, String> {
+        let mut builder = reqwest::blocking::ClientBuilder::new();
+        #[cfg(feature = "rustls")]
+        {
+            builder = builder.use_rustls_tls();
+        }
+        #[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+        {
+            builder = builder.use_native_tls();
+        }
+        builder = builder.http2_adaptive_window(true);
+        for cert in certs {
+            let c = if cert.is_pem() {
+                reqwest::Certificate::from_pem(cert.bytes())
+                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
+            } else {
+                reqwest::Certificate::from_der(cert.bytes())
+                    .map_err(|e| format!("invalid DER certificate: {e}"))?
+            };
+            builder = builder.tls_certs_merge([c]);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        Ok(std::sync::Arc::new(ReqwestClient::from(client)))
+    }
+}
+
 impl HttpClient for ReqwestClient {
     fn get(
         &self,
@@ -104,6 +137,41 @@ pub struct ReqwestAsyncClient(Option<reqwest::Client>);
 impl From<reqwest::Client> for ReqwestAsyncClient {
     fn from(client: reqwest::Client) -> Self {
         Self(Some(client))
+    }
+}
+
+#[cfg(feature = "async")]
+impl ReqwestAsyncClient {
+    /// Async sibling of [`ReqwestClient::build_with_certs`]: build a `ReqwestAsyncClient` with
+    /// custom root CA certificates baked in, using `reqwest::ClientBuilder` (async) and the same
+    /// TLS backend selection.
+    pub(crate) fn build_async_with_certs(
+        certs: &[crate::tls::Certificate],
+    ) -> std::result::Result<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>, String> {
+        let mut builder = reqwest::ClientBuilder::new();
+        #[cfg(feature = "rustls")]
+        {
+            builder = builder.use_rustls_tls();
+        }
+        #[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+        {
+            builder = builder.use_native_tls();
+        }
+        builder = builder.http2_adaptive_window(true);
+        for cert in certs {
+            let c = if cert.is_pem() {
+                reqwest::Certificate::from_pem(cert.bytes())
+                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
+            } else {
+                reqwest::Certificate::from_der(cert.bytes())
+                    .map_err(|e| format!("invalid DER certificate: {e}"))?
+            };
+            builder = builder.tls_certs_merge([c]);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        Ok(std::sync::Arc::new(ReqwestAsyncClient::from(client)))
     }
 }
 
@@ -285,6 +353,38 @@ mod tests {
         assert_eq!(
             sink, "",
             "the placeholder left in self after json_value carries no data"
+        );
+    }
+
+    /// A PEM block carrying a CERTIFICATE marker but a body that decodes to bytes which are not a
+    /// valid X.509 DER certificate. reqwest's TLS backend accepts the PEM framing but rejects this
+    /// at client-build time, exercising the deferred-validation path (the `from_*` constructors are
+    /// infallible). `bm90IGEgdmFsaWQgY2VydA==` is base64 for "not a valid cert".
+    const BAD_PEM: &[u8] =
+        b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn build_with_certs_rejects_garbage_pem() {
+        // A PEM-framed but non-certificate body must surface a config-time `Err` from
+        // `build_with_certs` (the parse is deferred to here from the infallible
+        // `Certificate::from_pem` constructor) rather than panicking or building a usable client.
+        let res =
+            ReqwestClient::build_with_certs(&[crate::tls::Certificate::from_pem(BAD_PEM.to_vec())]);
+        assert!(
+            res.is_err(),
+            "garbage PEM must be rejected at build time, got Ok"
+        );
+    }
+
+    #[test]
+    fn build_with_certs_rejects_garbage_der() {
+        // Same as the PEM case for the DER decoder: invalid DER bytes must produce an `Err`.
+        let res = ReqwestClient::build_with_certs(&[crate::tls::Certificate::from_der(
+            b"not der".to_vec(),
+        )]);
+        assert!(
+            res.is_err(),
+            "garbage DER must be rejected at build time, got Ok"
         );
     }
 

@@ -23,6 +23,46 @@ impl From<Agent> for UreqClient {
     }
 }
 
+// `client_with_root_certs` only dispatches to the ureq builder when reqwest is NOT also enabled
+// (reqwest wins, exactly like `default_client`), so this is dead in a both-features lib build. Gate
+// it to the lanes that actually reach it (and to `test`, where the ureq cert test exercises it).
+#[cfg(any(not(feature = "reqwest"), test))]
+impl UreqClient {
+    /// Build a UreqClient with custom root CA certificates via RootCerts::Specific.
+    /// Note: this replaces the default WebPki root store. Callers needing WebPki + custom CA
+    /// should inject a ureq::Agent with PlatformVerifier instead.
+    pub(crate) fn build_with_certs(
+        certs: &[crate::tls::Certificate],
+    ) -> std::result::Result<std::sync::Arc<dyn crate::http_client::HttpClient>, String> {
+        use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+        #[cfg(feature = "rustls")]
+        let provider = TlsProvider::Rustls;
+        #[cfg(not(feature = "rustls"))]
+        let provider = TlsProvider::NativeTls;
+
+        let mut ureq_certs = Vec::with_capacity(certs.len());
+        for cert in certs {
+            let c = if cert.is_pem() {
+                ureq::tls::Certificate::from_pem(cert.bytes())
+                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
+            } else {
+                ureq::tls::Certificate::from_der(cert.bytes())
+            };
+            ureq_certs.push(c.to_owned());
+        }
+        let tls = TlsConfig::builder()
+            .provider(provider)
+            .root_certs(RootCerts::Specific(std::sync::Arc::new(ureq_certs)))
+            .build();
+        let config = ureq::Agent::config_builder()
+            .tls_config(tls)
+            .http_status_as_error(false)
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+        Ok(std::sync::Arc::new(UreqClient::from(agent)))
+    }
+}
+
 impl HttpClient for UreqClient {
     fn get(
         &self,
@@ -171,6 +211,21 @@ mod tests {
             .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
+    }
+
+    #[test]
+    fn build_with_certs_rejects_non_pem() {
+        // ureq's `tls::Certificate::from_pem` validates the PEM framing eagerly and errors when the
+        // bytes contain no PEM certificate, so `build_with_certs` must surface a config-time `Err`
+        // (the parse is deferred to here from the infallible `Certificate::from_pem` constructor)
+        // rather than panicking or building an agent over garbage.
+        let res = UreqClient::build_with_certs(&[crate::tls::Certificate::from_pem(
+            b"not a pem certificate".to_vec(),
+        )]);
+        assert!(
+            res.is_err(),
+            "bytes with no PEM certificate must be rejected at build time, got Ok"
+        );
     }
 
     #[test]

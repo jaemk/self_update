@@ -124,7 +124,13 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
-        self.request.check()?;
+        // Thread the auth token + github's `token` scheme into the request so the shared
+        // `apply_auth` applies it on the listing path (honoring a user override).
+        let mut request = self.request.clone();
+        request.auth_scheme = crate::backends::common::AuthScheme::Token;
+        request.auth_token = self.auth_token.clone();
+        request.build_client();
+        request.check()?;
         Ok(ReleaseList {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -141,14 +147,7 @@ impl ReleaseListBuilder {
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
             custom_url: self.custom_url.clone(),
-            // Thread the auth token + github's `token` scheme into the request so the shared
-            // `apply_auth` applies it on the listing path (honoring a user override).
-            request: {
-                let mut request = self.request.clone();
-                request.auth_scheme = crate::backends::common::AuthScheme::Token;
-                request.auth_token = self.auth_token.clone();
-                request
-            },
+            request,
         })
     }
 }

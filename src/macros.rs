@@ -132,6 +132,26 @@ macro_rules! request_config_setters {
                 crate::http_client::UreqClient::from(agent),
             ))
         }
+
+        /// Trust an additional TLS root CA certificate for every request (release listing and the
+        /// download). Call multiple times to add more than one. Use this to reach a server behind a
+        /// private/internal CA without injecting a whole pre-built client. The certificate bytes are
+        /// validated when the client is built; a malformed certificate surfaces as an
+        /// [`Error::Config`](crate::errors::Error::Config) from [`build()`](Self::build). Ignored when
+        /// a client is injected via [`http_client`](Self::http_client) (that client owns its TLS
+        /// config). Construct the argument with
+        /// [`Certificate::from_pem`](crate::Certificate::from_pem) or
+        /// [`Certificate::from_der`](crate::Certificate::from_der).
+        ///
+        /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
+        /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply
+        /// all CA certificates you need, including any public roots. If you need the Mozilla set plus
+        /// a custom CA, inject a pre-built `ureq::Agent` via [`ureq_agent`](Self::ureq_agent)
+        /// configured with `RootCerts::PlatformVerifier` or a merged root set instead.
+        pub fn add_root_certificate(&mut self, cert: crate::Certificate) -> &mut Self {
+            self.$($path).+.root_certificates.push(cert);
+            self
+        }
     };
 }
 

@@ -176,7 +176,9 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
-        self.request.check()?;
+        let mut request = self.request.clone();
+        request.build_client();
+        request.check()?;
         check_endpoint_region(&self.endpoint, &self.region)?;
         Ok(ReleaseList {
             endpoint: self.endpoint.clone(),
@@ -195,7 +197,7 @@ impl ReleaseListBuilder {
             signature_ttl: self.signature_ttl,
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
-            request: self.request.clone(),
+            request,
         })
     }
 }

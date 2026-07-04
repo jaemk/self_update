@@ -84,11 +84,11 @@ The following are opt-in; activate the one(s) your release files need:
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "github signatures"`.
+`cargo run --example github --features "signatures archive-tar compression-tar-gz"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "gitlab"`.
+`cargo run --example gitlab --features "gitlab archive-tar compression-tar-gz"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -404,11 +404,10 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Troubleshooting
 
-When using cross compilation tools such as cross if you want to use rustls and not openssl
-
-```toml
-self_update = { version = "1", features = ["rustls"], default-features = false }
-```
+**Cross-compilation (`cross` / `cargo-cross`).** `rustls` is the default TLS backend, so
+no additional configuration is needed for cross-compilation: a build on default features
+already uses rustls. If you have explicitly switched to `native-tls` and want to revert,
+remove the `native-tls` feature; `rustls` is active by default.
 
 **TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
@@ -521,8 +520,16 @@ pub mod backends;
 mod checksum;
 pub mod errors;
 pub mod http_client;
+mod tls;
 pub mod update;
 pub mod version;
+
+/// An opaque TLS root CA certificate, supplied to a backend builder or a [`Download`] via the
+/// `root_certificate` setter so the crate-built HTTP client trusts a private/internal CA. Construct
+/// with [`Certificate::from_pem`](crate::Certificate::from_pem) or
+/// [`Certificate::from_der`](crate::Certificate::from_der); the bytes are validated when the client
+/// is built, not at construction.
+pub use tls::Certificate;
 
 /// Re-export the crate's [`Error`](errors::Error) and [`Result`](errors::Result) at the crate root,
 /// so consumers (and `ReleaseSource` implementors) can write `self_update::Result<T>` /
@@ -1295,6 +1302,9 @@ pub struct Download {
     /// Optional user-supplied async HTTP client; `None` => crate default. Async is reqwest-only.
     #[cfg(feature = "async")]
     async_client: Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>,
+    /// Custom TLS root CA certificates to bake into the crate-built client when no client was
+    /// injected (see [`root_certificate`](Self::root_certificate)).
+    root_certificates: Vec<Certificate>,
 }
 
 impl std::fmt::Debug for Download {
@@ -1316,6 +1326,10 @@ impl std::fmt::Debug for Download {
         s.field(
             "async_client",
             &self.async_client.as_ref().map(|_| "<async_http_client>"),
+        );
+        s.field(
+            "root_certificates",
+            &format_args!("<{} root_certificates>", self.root_certificates.len()),
         );
         s.finish()
     }
@@ -1340,6 +1354,7 @@ impl Download {
             client: None,
             #[cfg(feature = "async")]
             async_client: None,
+            root_certificates: vec![],
         }
     }
 
@@ -1427,6 +1442,29 @@ impl Download {
         self
     }
 
+    /// Add a custom TLS root CA certificate the crate-built HTTP client will trust. Call multiple
+    /// times to add more than one. Ignored when an HTTP client is injected via
+    /// [`set_http_client`](Self::set_http_client) (the injected client owns its own TLS config). The
+    /// certificate bytes are validated when the download's client is built; a malformed certificate
+    /// surfaces as an [`Error::Config`](errors::Error::Config) from
+    /// [`download_to`](Self::download_to).
+    ///
+    /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
+    /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply all
+    /// CA certificates you need, including any public roots, or inject a `ureq::Agent` via
+    /// [`set_http_client`](Self::set_http_client) with a merged root set instead.
+    pub fn root_certificate(&mut self, cert: Certificate) -> &mut Self {
+        self.root_certificates.push(cert);
+        self
+    }
+
+    /// Internal: the configured custom root CA certificates (used by tests to confirm cert
+    /// forwarding). Empty unless [`root_certificate`](Self::root_certificate) was called.
+    #[cfg(test)]
+    pub(crate) fn root_certificates(&self) -> &[Certificate] {
+        &self.root_certificates
+    }
+
     /// Set a download request header, inserting into the existing `HeaderMap`. To add a single
     /// header without discarding the others; to replace the whole map use
     /// [`replace_headers`](Self::replace_headers).
@@ -1479,8 +1517,16 @@ impl Download {
         }
 
         let default;
+        let built;
         let client: &dyn http_client::HttpClient = match self.client.as_deref() {
             Some(c) => c,
+            None if !self.root_certificates.is_empty() => {
+                // No injected client but custom root CAs were supplied: build a client that trusts
+                // them. A malformed cert / build failure surfaces here as an `Error::Config`.
+                built = http_client::client_with_root_certs(&self.root_certificates)
+                    .map_err(Error::Config)?;
+                &*built
+            }
             None => {
                 default = http_client::default_client();
                 &*default
@@ -1577,8 +1623,16 @@ impl Download {
         }
 
         let default;
+        let built;
         let client: &dyn http_client::AsyncHttpClient = match self.async_client.as_deref() {
             Some(c) => c,
+            None if !self.root_certificates.is_empty() => {
+                // No injected async client but custom root CAs were supplied: build one that trusts
+                // them. A malformed cert / build failure surfaces here as an `Error::Config`.
+                built = http_client::async_client_with_root_certs(&self.root_certificates)
+                    .map_err(Error::Config)?;
+                &*built
+            }
             None => {
                 default = http_client::default_async_client();
                 &*default
