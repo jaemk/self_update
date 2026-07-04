@@ -282,12 +282,16 @@ impl UpdateBuilder {
         })
     }
 
-    /// Confirm config and create a ready-to-use `Update`
+    /// Confirm config and create a ready-to-use `Update`.
+    ///
+    /// Returns the concrete [`Update`], which is `Send` (so it can move to a worker thread) and
+    /// exposes the update verbs (`update`, `update_extended`, `get_latest_release`, ...) as inherent
+    /// methods.
     ///
     /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        Ok(Box::new(self.build_update()?))
+    ///     * Invalid `Update` configuration
+    pub fn build(&self) -> Result<Update> {
+        self.build_update()
     }
 
     /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
@@ -397,6 +401,8 @@ impl ReleaseUpdate for Update {
             .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
+
+impl_sync_update_verbs!(Update);
 
 impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<HeaderMap> {
@@ -572,6 +578,10 @@ mod tests {
     // resolve.
     #[allow(unused_imports)]
     use crate::update::UpdateInternals;
+
+    // The public config accessors (`api_headers`, `no_confirm`, `show_output`, ...) live on the
+    // sealed `UpdateConfig` trait; bring it into scope so they resolve on the concrete `Update`.
+    use crate::update::UpdateConfig;
 
     // The async verbs are methods on the public sealed `AsyncReleaseUpdate` trait; bring it into
     // scope so `upd.get_latest_release_async()` / `update_extended_async()` resolve in these tests.
@@ -1059,10 +1069,7 @@ mod tests {
         );
     }
 
-    fn github_update_sync(
-        base: &str,
-        current_version: &str,
-    ) -> Box<dyn crate::update::ReleaseUpdate> {
+    fn github_update_sync(base: &str, current_version: &str) -> super::Update {
         super::Update::configure()
             .repo_owner("o")
             .repo_name("r")
@@ -1994,6 +2001,28 @@ mod tests {
             !upd.show_output(),
             "unattended() must set show_output to false"
         );
+    }
+
+    // `build()` returns a concrete `Update` that is `Send`, so it can move to a worker thread
+    // (`std::thread::spawn(move || updater.update())`). A regression that made `Update` `!Send`
+    // (e.g. an `Rc` field) would fail to compile here.
+    #[test]
+    fn built_update_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::Update>();
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        // Move it into a thread to exercise the `Send` bound end to end.
+        std::thread::spawn(move || {
+            let _ = &upd;
+        })
+        .join()
+        .unwrap();
     }
 
     // --- verify_keys builder setter and accessor -----------------------------------

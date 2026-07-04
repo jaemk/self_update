@@ -294,12 +294,12 @@ impl UpdateBuilder {
         })
     }
 
-    /// Confirm config and create a ready-to-use `Update`
+    /// Confirm config and create a ready-to-use `Update`.
     ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        Ok(Box::new(self.build_update()?))
+    /// Returns the concrete [`Update`], which is `Send` and exposes the update verbs as inherent
+    /// methods.
+    pub fn build(&self) -> Result<Update> {
+        self.build_update()
     }
 
     /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
@@ -385,6 +385,8 @@ impl ReleaseUpdate for Update {
             .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
+
+impl_sync_update_verbs!(Update);
 
 impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
@@ -566,6 +568,7 @@ fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
 #[cfg(test)]
 mod tests {
     use super::Update;
+    use crate::update::UpdateConfig;
 
     #[cfg(feature = "async")]
     use crate::update::AsyncReleaseUpdate;
@@ -714,9 +717,9 @@ mod tests {
             .unwrap()
     }
 
-    /// Convenience: build a `Box<dyn ReleaseUpdate>` pointed at the loopback stub.
+    /// Convenience: build a sync `Update` pointed at the loopback stub.
     /// Available under both sync transports (reqwest blocking and ureq).
-    fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
+    fn gl_update(base: &str, current_version: &str) -> Update {
         Update::configure()
             .host(base)
             .repo_owner("o")

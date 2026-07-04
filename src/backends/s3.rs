@@ -390,12 +390,12 @@ impl UpdateBuilder {
         })
     }
 
-    /// Confirm config and create a ready-to-use `Update`
+    /// Confirm config and create a ready-to-use `Update`.
     ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        Ok(Box::new(self.build_update()?))
+    /// Returns the concrete [`Update`], which is `Send` and exposes the update verbs as inherent
+    /// methods.
+    pub fn build(&self) -> Result<Update> {
+        self.build_update()
     }
 
     /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
@@ -511,6 +511,8 @@ impl ReleaseUpdate for Update {
         find_version(&self.fetch_releases()?, ver)
     }
 }
+
+impl_sync_update_verbs!(Update);
 
 impl_update_config_accessors!(Update);
 
@@ -1552,7 +1554,7 @@ fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
 #[cfg(test)]
 mod tests {
     use super::Update;
-    use crate::update::{Release, ReleaseUpdate};
+    use crate::update::{Release, UpdateConfig};
     use std::time::Duration;
 
     #[cfg(feature = "async")]
@@ -1939,9 +1941,9 @@ mod tests {
             .unwrap()
     }
 
-    /// Sync sibling of [`s3_update`]: a `Box<dyn ReleaseUpdate>` pointed at the loopback stub via a
+    /// Sync sibling of [`s3_update`]: a sync `Update` pointed at the loopback stub via a
     /// `Generic` endpoint (no region required).
-    fn s3_update_sync(base_url: &str, current_version: &str) -> Box<dyn ReleaseUpdate> {
+    fn s3_update_sync(base_url: &str, current_version: &str) -> Update {
         Update::configure()
             .endpoint(super::Endpoint::Generic(base_url.to_owned()))
             .bucket_name("test-bucket")
@@ -2813,7 +2815,7 @@ mod tests {
         assert!(super::find_version(&releases, "9.9.9").is_err());
     }
 
-    fn configured() -> Box<dyn ReleaseUpdate> {
+    fn configured() -> Update {
         Update::configure()
             .bucket_name("bucket")
             .asset_prefix("prefix")

@@ -171,17 +171,20 @@ impl UpdateBuilder {
 
     /// Confirm config and create a ready-to-use `Update`.
     ///
+    /// Returns the concrete [`Update`], which is `Send` and exposes the update verbs as inherent
+    /// methods.
+    ///
     /// * Errors:
-    ///     * Config - no `source` was set, or an invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
+    ///     * `MissingField` - no `source` was set, or an invalid `Update` configuration
+    pub fn build(&self) -> Result<Update> {
         let source = self
             .source
             .clone()
             .ok_or(Error::MissingField { field: "source" })?;
-        Ok(Box::new(Update {
+        Ok(Update {
             source,
             common: self.common.build()?,
-        }))
+        })
     }
 }
 
@@ -229,6 +232,8 @@ impl ReleaseUpdate for Update {
         self.source.get_release_version(ver)
     }
 }
+
+impl_sync_update_verbs!(Update);
 
 /// Builder for an [`AsyncUpdate`].
 ///
@@ -410,7 +415,7 @@ impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for B
 #[cfg(test)]
 mod tests {
     use super::Update;
-    use crate::update::{Release, ReleaseAsset, ReleaseSource, ReleaseUpdate};
+    use crate::update::{Release, ReleaseAsset, ReleaseSource, UpdateConfig};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -438,7 +443,7 @@ mod tests {
         }
     }
 
-    fn configured(calls: Arc<AtomicUsize>) -> Box<dyn ReleaseUpdate> {
+    fn configured(calls: Arc<AtomicUsize>) -> super::Update {
         Update::configure()
             .source(FakeSource {
                 latest_calls: calls,

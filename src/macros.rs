@@ -313,6 +313,56 @@ macro_rules! impl_update_config_accessors {
 
 /// Emit the backend-independent `UpdateBuilder` setters shared by every backend.
 ///
+/// Emit the inherent sync update verbs on a backend `Update`.
+///
+/// `build()` returns the concrete `Update` (not `Box<dyn ReleaseUpdate>`), so these inherent methods
+/// let callers write `.build()?.update()?` without importing the sealed
+/// [`ReleaseUpdate`](crate::ReleaseUpdate) trait. Each forwards to the trait impl.
+macro_rules! impl_sync_update_verbs {
+    ($t:ty) => {
+        impl $t {
+            /// Display release information and update the current binary to the latest release,
+            /// pending confirmation. Returns a [`VersionStatus`](crate::VersionStatus). See
+            /// [`ReleaseUpdate::update`](crate::ReleaseUpdate::update).
+            pub fn update(&self) -> crate::Result<crate::VersionStatus> {
+                <Self as crate::ReleaseUpdate>::update(self)
+            }
+
+            /// Same as [`update`](Self::update) but returns a [`ReleaseStatus`](crate::ReleaseStatus)
+            /// with the full release details.
+            pub fn update_extended(&self) -> crate::Result<crate::ReleaseStatus> {
+                <Self as crate::ReleaseUpdate>::update_extended(self)
+            }
+
+            /// Fetch the single newest release (raw, unfiltered). See
+            /// [`ReleaseUpdate::get_latest_release`](crate::ReleaseUpdate::get_latest_release).
+            pub fn get_latest_release(&self) -> crate::Result<crate::Releases> {
+                <Self as crate::ReleaseUpdate>::get_latest_release(self)
+            }
+
+            /// Fetch the releases newer than the current version. See
+            /// [`ReleaseUpdate::get_latest_releases`](crate::ReleaseUpdate::get_latest_releases).
+            pub fn get_latest_releases(&self) -> crate::Result<crate::Releases> {
+                <Self as crate::ReleaseUpdate>::get_latest_releases(self)
+            }
+
+            /// Fetch details of the release matching `ver`. See
+            /// [`ReleaseUpdate::get_release_version`](crate::ReleaseUpdate::get_release_version).
+            pub fn get_release_version(&self, ver: &str) -> crate::Result<crate::Release> {
+                <Self as crate::ReleaseUpdate>::get_release_version(self, ver)
+            }
+
+            /// Whether a release newer than the current version is available, returning it if so.
+            ///
+            /// A convenience over [`get_latest_releases`](Self::get_latest_releases): returns the
+            /// newest strictly-newer [`Release`](crate::Release), or `None` when already up to date.
+            pub fn is_update_available(&self) -> crate::Result<Option<crate::Release>> {
+                Ok(self.get_latest_releases()?.into_vec().into_iter().next())
+            }
+        }
+    };
+}
+
 /// Every backend's `UpdateBuilder` embeds a `common:
 /// crate::backends::common::CommonBuilderConfig` field; these setters write through it, so
 /// the shared configuration surface (target, identifier, bin name/path, version, progress

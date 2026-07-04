@@ -1838,13 +1838,13 @@ mod tests {
             .build()
             .unwrap();
 
-        let (bin, target) = accessor_via_release_update_bound(&*upd);
+        let (bin, target) = accessor_via_release_update_bound(&upd);
         assert_eq!(bin, "app");
         assert_eq!(target, "x86_64-unknown-linux-gnu");
-        assert_eq!(accessor_via_dyn_release_update(&*upd), "1.0.0");
-        assert_eq!(accessor_via_update_config_bound(&*upd), "app");
+        assert_eq!(accessor_via_dyn_release_update(&upd), "1.0.0");
+        assert_eq!(accessor_via_update_config_bound(&upd), "app");
         // B1: the internal accessor is reachable through the `UpdateInternals` bound.
-        assert_eq!(internal_accessor_via_update_internals_bound(&*upd), 0);
+        assert_eq!(internal_accessor_via_update_internals_bound(&upd), 0);
     }
 
     // --- F2: public async `get_release_version_async` ----------------------------------------
@@ -2057,7 +2057,7 @@ mod tests {
 
     // Build a custom-backend `Update` carrying `checksum`, to drive `finish_update` directly.
     #[cfg(feature = "checksums")]
-    fn update_with_checksum(checksum: crate::Checksum) -> Box<dyn ReleaseUpdate> {
+    fn update_with_checksum(checksum: crate::Checksum) -> crate::backends::custom::Update {
         crate::backends::custom::Update::configure()
             .source(BoundSource)
             .bin_name("app")
@@ -2083,7 +2083,7 @@ mod tests {
         let upd = update_with_checksum(crate::Checksum::Sha256("00".repeat(32)));
         let release = Release::builder().version("1.2.3").build().unwrap();
 
-        let err = super::finish_update(&*upd, release, dir, &archive_path)
+        let err = super::finish_update(&upd, release, dir, &archive_path)
             .expect_err("a mismatched checksum must abort the update");
         let msg = err.to_string();
         assert!(
@@ -2113,7 +2113,7 @@ mod tests {
         let upd = update_with_checksum(crate::Checksum::Sha256(digest.to_string()));
         let release = Release::builder().version("1.2.3").build().unwrap();
 
-        let err = super::finish_update(&*upd, release, dir, &archive_path)
+        let err = super::finish_update(&upd, release, dir, &archive_path)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
@@ -2244,7 +2244,7 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         assert_eq!(out, b"payload", "the download streamed the stub body");
@@ -2272,7 +2272,7 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         let lines = captured.lock().unwrap().clone();
@@ -2300,7 +2300,7 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         let lines = captured.lock().unwrap().clone();
@@ -2328,7 +2328,7 @@ mod tests {
             .build()
             .unwrap();
         let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         let lines = captured.lock().unwrap().clone();
@@ -2422,7 +2422,7 @@ mod tests {
             .unwrap();
 
         let asset = super::ReleaseAsset::new("app.bin", "https://nonroutable.invalid/app.bin");
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         let mut out = Vec::new();
         download.download_to(&mut out).unwrap();
         assert_eq!(out, b"after-retry", "the download succeeds after retrying");
@@ -2487,7 +2487,7 @@ mod tests {
         let upd = builder.build().unwrap();
 
         let asset = super::ReleaseAsset::new("app.bin", "https://nonroutable.invalid/app.bin");
-        let download = super::build_download(&*upd, &asset).unwrap();
+        let download = super::build_download(&upd, &asset).unwrap();
         assert_eq!(
             download.root_certificates().len(),
             2,
