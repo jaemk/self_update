@@ -155,7 +155,7 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
     self_update::Download::from_url(asset.download_url())
-        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")?
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -1391,8 +1391,12 @@ pub struct Download {
     #[cfg(feature = "async")]
     async_client: Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>,
     /// Custom TLS root CA certificates to bake into the crate-built client when no client was
-    /// injected (see [`root_certificate`](Self::root_certificate)).
+    /// injected (see [`add_root_certificate`](Self::add_root_certificate)).
     root_certificates: Vec<Certificate>,
+    /// First error from a `request_header(name, value)` argument that wasn't a valid HTTP header.
+    /// Deferred like the builders' `request_header` so the setter stays infallible; surfaced from
+    /// [`download_to`](Self::download_to) as an `Error::InvalidHeader`.
+    header_error: Option<String>,
 }
 
 impl std::fmt::Debug for Download {
@@ -1443,6 +1447,7 @@ impl Download {
             #[cfg(feature = "async")]
             async_client: None,
             root_certificates: vec![],
+            header_error: None,
         }
     }
 
@@ -1558,28 +1563,39 @@ impl Download {
     /// [`replace_headers`](Self::replace_headers).
     ///
     /// Accepts anything that converts into a header name/value, so both typed values and plain
-    /// strings work: `.request_header("X-Foo", "bar")?` or
-    /// `.request_header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or
-    /// value that is not a valid HTTP header returns an
-    /// [`Error::InvalidHeader`](errors::Error::InvalidHeader) rather than panicking. Matches the
-    /// builders' `request_header` verb.
-    pub fn request_header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
+    /// strings work: `.request_header("X-Foo", "bar")` or
+    /// `.request_header(self_update::http::header::ACCEPT, "application/octet-stream")`. The setter
+    /// is infallible; a name or value that is not a valid HTTP header is deferred and surfaced from
+    /// [`download_to`](Self::download_to) as an
+    /// [`Error::InvalidHeader`](errors::Error::InvalidHeader), matching the builders'
+    /// `request_header` verb.
+    pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
     where
         N: ::core::convert::TryInto<http_client::header::HeaderName>,
         V: ::core::convert::TryInto<http_client::header::HeaderValue>,
     {
-        let name = name.try_into().map_err(|_| Error::InvalidHeader {
-            source: Box::new(errors::MessageError(
-                "invalid HTTP header name passed to `request_header`".to_string(),
-            )),
-        })?;
-        let value = value.try_into().map_err(|_| Error::InvalidHeader {
-            source: Box::new(errors::MessageError(
-                "invalid HTTP header value passed to `request_header`".to_string(),
-            )),
-        })?;
-        self.headers.insert(name, value);
-        Ok(self)
+        match (name.try_into(), value.try_into()) {
+            (Ok(name), Ok(value)) => {
+                self.headers.insert(name, value);
+            }
+            _ => {
+                if self.header_error.is_none() {
+                    self.header_error =
+                        Some("invalid HTTP header passed to `request_header`".to_string());
+                }
+            }
+        }
+        self
+    }
+
+    /// Surface a deferred `request_header` conversion failure as an `Error::InvalidHeader`.
+    fn check_header_error(&self) -> Result<()> {
+        if let Some(msg) = &self.header_error {
+            return Err(Error::InvalidHeader {
+                source: Box::new(errors::MessageError(msg.clone())),
+            });
+        }
+        Ok(())
     }
 
     /// Download the file behind the given `url` into the specified `dest`.
@@ -1594,6 +1610,7 @@ impl Download {
     ///     * Writing from `BufReader`-buffer to `File`
     pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use io::BufRead;
+        self.check_header_error()?;
         let mut headers = self.headers.clone();
         if !headers.contains_key(header::USER_AGENT) {
             headers.insert(
@@ -1700,6 +1717,7 @@ impl Download {
     pub async fn download_to_async<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use futures_util::StreamExt;
 
+        self.check_header_error()?;
         let mut headers = self.headers.clone();
         if !headers.contains_key(header::USER_AGENT) {
             headers.insert(
@@ -1904,8 +1922,7 @@ mod tests {
     fn download_header_accepts_str_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // Plain string literals must convert into a valid name/value.
-        dl.request_header("x-custom-header", "custom-value")
-            .expect("valid str header should be accepted");
+        dl.request_header("x-custom-header", "custom-value");
         let stored = dl
             .headers
             .get("x-custom-header")
@@ -1917,8 +1934,7 @@ mod tests {
     fn download_header_accepts_typed_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // The typed `HeaderName` / `&str` value form still works.
-        dl.request_header(http_client::header::ACCEPT, "application/octet-stream")
-            .expect("typed name + str value should be accepted");
+        dl.request_header(http_client::header::ACCEPT, "application/octet-stream");
         assert_eq!(
             dl.headers.get(http_client::header::ACCEPT).unwrap(),
             "application/octet-stream"
@@ -1930,8 +1946,8 @@ mod tests {
         // B5: `header()` inserts into the existing map. Calling it twice with the same name must
         // keep the *last* value (insert semantics), not append or keep the first.
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.request_header("x-dup", "first").unwrap();
-        dl.request_header("x-dup", "second").unwrap();
+        dl.request_header("x-dup", "first");
+        dl.request_header("x-dup", "second");
         // `get` returns the (single) value; `get_all` must contain exactly one entry.
         assert_eq!(dl.headers.get("x-dup").unwrap(), "second");
         assert_eq!(
@@ -1946,8 +1962,8 @@ mod tests {
         // B5: after building up headers with `header()`, `replace_headers` must discard them all
         // and install only the supplied map (it is a whole-map setter, not a merge).
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.request_header("x-old-a", "a").unwrap();
-        dl.request_header("x-old-b", "b").unwrap();
+        dl.request_header("x-old-a", "a");
+        dl.request_header("x-old-b", "b");
 
         let mut fresh = http_client::header::HeaderMap::new();
         fresh.insert("x-new", "n".parse().unwrap());
@@ -1966,7 +1982,7 @@ mod tests {
         );
 
         // And `header()` still works after a replace, inserting into the new map.
-        dl.request_header("x-after", "y").unwrap();
+        dl.request_header("x-after", "y");
         assert_eq!(dl.headers.get("x-after").unwrap(), "y");
         assert_eq!(dl.headers.get("x-new").unwrap(), "n");
     }
@@ -1974,33 +1990,38 @@ mod tests {
     #[test]
     fn download_header_rejects_invalid_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        // A newline is not a valid header value -> conversion fails -> Err, no panic.
+        // A newline is not a valid header value. The setter is infallible (deferred): the bad
+        // header is not inserted, and the error surfaces from `download_to`.
+        dl.request_header("x-ok", "bad\nvalue");
+        assert!(
+            dl.headers.get("x-ok").is_none(),
+            "the bad header must not be inserted"
+        );
         let err = dl
-            .request_header("x-ok", "bad\nvalue")
-            .expect_err("invalid header value must be rejected");
+            .download_to(Vec::<u8>::new())
+            .expect_err("a deferred invalid header must surface from download_to");
         assert!(
             matches!(err, Error::InvalidHeader { .. }),
             "expected Error::InvalidHeader, got {:?}",
             err
         );
-        // The bad header must not have been inserted.
-        assert!(dl.headers.get("x-ok").is_none());
     }
 
     #[test]
     fn download_header_rejects_invalid_name() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        // A space is not valid in a header name -> conversion fails -> Err, no panic.
-        let err = dl
-            .request_header("inva lid", "ok")
-            .expect_err("invalid header name must be rejected");
-        assert!(matches!(err, Error::InvalidHeader { .. }));
-        // The invalid name is rejected before any value insertion, so the map stays empty: no
-        // partial entry is left behind (the value "ok" must not leak in under some other key).
+        // A space is not valid in a header name. The setter is infallible (deferred); the invalid
+        // name is rejected before any value insertion, so the map stays empty and the error
+        // surfaces from download_to.
+        dl.request_header("inva lid", "ok");
         assert!(
             dl.headers.is_empty(),
             "an invalid header name must not leave a partial value inserted"
         );
+        let err = dl
+            .download_to(Vec::<u8>::new())
+            .expect_err("a deferred invalid header name must surface from download_to");
+        assert!(matches!(err, Error::InvalidHeader { .. }));
     }
 
     #[test]
