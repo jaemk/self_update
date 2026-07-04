@@ -220,6 +220,31 @@ impl ReleaseList {
         };
         Ok(Releases::from_listing(releases))
     }
+
+    /// Async sibling of [`fetch`](Self::fetch).
+    #[cfg(feature = "async")]
+    pub async fn fetch_async(&self) -> Result<Releases> {
+        let api_url = format!(
+            "{}/api/v4/projects/{}%2F{}/releases",
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            self.repo_name
+        );
+        // An unfiltered listing must walk ALL pages: `stop_at = None`.
+        let releases = crate::backends::run_paginated_async(
+            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
+            &self.request,
+        )
+        .await?;
+        let releases = match self.target {
+            None => releases,
+            Some(ref target) => releases
+                .into_iter()
+                .filter(|r| r.has_target_asset(target))
+                .collect::<Vec<_>>(),
+        };
+        Ok(Releases::from_listing(releases))
+    }
 }
 
 /// `gitlab::Update` builder
@@ -1848,6 +1873,55 @@ mod tests {
             .build()
             .unwrap()
             .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on a listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.0.0"],
+            "into_vec() recovers the parsed releases, newest-first"
+        );
+    }
+
+    // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // from `is_update_available()`, `into_vec()` recovers the releases).
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn release_list_fetch_async_returns_listing_releases_without_current_version() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch_async()
+            .await
             .unwrap();
         assert_eq!(
             releases.current_version(),

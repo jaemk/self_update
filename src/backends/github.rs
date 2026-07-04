@@ -210,6 +210,33 @@ impl ReleaseList {
         };
         Ok(Releases::from_listing(releases))
     }
+
+    /// Async sibling of [`fetch`](Self::fetch).
+    #[cfg(feature = "async")]
+    pub async fn fetch_async(&self) -> Result<Releases> {
+        let api_url = format!(
+            "{}/repos/{}/{}/releases",
+            self.custom_url
+                .as_ref()
+                .unwrap_or(&"https://api.github.com".to_string()),
+            self.repo_owner,
+            self.repo_name
+        );
+        // An unfiltered listing must walk ALL pages: `stop_at = None`.
+        let releases = crate::backends::run_paginated_async(
+            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
+            &self.request,
+        )
+        .await?;
+        let releases = match self.target {
+            None => releases,
+            Some(ref target) => releases
+                .into_iter()
+                .filter(|r| r.has_target_asset(target))
+                .collect::<Vec<_>>(),
+        };
+        Ok(Releases::from_listing(releases))
+    }
 }
 
 /// `github::Update` builder
@@ -834,6 +861,43 @@ mod tests {
             .build()
             .unwrap()
             .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            releases.is_update_available().is_err(),
+            "a listing with no current version cannot answer is_update_available()"
+        );
+        let recovered = releases.into_vec();
+        let versions: Vec<&str> = recovered.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["2.0.0", "1.0.0"]);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn release_list_fetch_async_returns_releases_and_into_vec_recovers_them() {
+        // Async sibling of `release_list_fetch_returns_releases_and_into_vec_recovers_them`:
+        // `ReleaseList::fetch_async` returns a `Releases` carrying NO current version
+        // (a bare listing), so `current_version()` is `None` and `is_update_available()` errors;
+        // `into_vec()` recovers the underlying `Vec<Release>` in listing order.
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_array_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .api_base_url(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch_async()
+            .await
             .unwrap();
         assert_eq!(
             releases.current_version(),

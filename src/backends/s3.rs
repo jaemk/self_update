@@ -265,6 +265,31 @@ impl ReleaseList {
         };
         Ok(Releases::from_listing(releases))
     }
+
+    /// Async sibling of [`fetch`](Self::fetch).
+    #[cfg(feature = "async")]
+    pub async fn fetch_async(&self) -> Result<Releases> {
+        let plan = s3_listing_plan(
+            &self.endpoint,
+            &self.bucket_name,
+            &self.region,
+            &self.asset_prefix,
+            self.max_keys,
+            #[cfg(feature = "s3-auth")]
+            self.signature_ttl,
+            #[cfg(feature = "s3-auth")]
+            &self.access_key,
+        )?;
+        let releases = crate::backends::run_paginated_async(plan, &self.request).await?;
+        let releases = match self.target {
+            None => releases,
+            Some(ref target) => releases
+                .into_iter()
+                .filter(|r| r.has_target_asset(target))
+                .collect::<Vec<_>>(),
+        };
+        Ok(Releases::from_listing(releases))
+    }
 }
 
 /// `s3::Update` builder
@@ -2317,6 +2342,53 @@ mod tests {
             .build()
             .unwrap()
             .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare s3 listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on an s3 listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let mut versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        versions.sort();
+        assert_eq!(
+            versions,
+            vec!["1.0.0".to_string(), "2.0.0".to_string()],
+            "into_vec() recovers the parsed releases"
+        );
+    }
+
+    // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // from `is_update_available()`, `into_vec()` recovers the releases).
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn release_list_fetch_async_returns_listing_releases_without_current_version() {
+        let xml = list_bucket_xml(&["myapp-2.0.0-x86_64-linux", "myapp-1.0.0-x86_64-linux"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let releases = super::ReleaseList::configure()
+            .endpoint(super::Endpoint::Generic(base.clone()))
+            .bucket_name("test-bucket")
+            .build()
+            .unwrap()
+            .fetch_async()
+            .await
             .unwrap();
         assert_eq!(
             releases.current_version(),
