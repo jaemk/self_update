@@ -433,26 +433,79 @@ impl From<time::error::ComponentRange> for Error {
 /// Map an HTTP status code and URL to the appropriate structured error variant.
 ///
 /// 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`, else -> `Error::HttpStatus`.
+///
+/// The URL is stored redacted (see [`redact_url`]) so an s3 presigned request URL does not carry a
+/// live `X-Amz-Signature` or the `X-Amz-Credential` access-key id into error messages, logs, or the
+/// `url()` accessor.
 pub(crate) fn status_to_error(status: u16, url: &str) -> Error {
+    let url = redact_url(url);
     match status {
-        404 => Error::NotFound {
-            url: url.to_string(),
-        },
-        401 | 403 => Error::Unauthorized {
-            status,
-            url: url.to_string(),
-        },
-        _ => Error::HttpStatus {
-            status,
-            url: url.to_string(),
-        },
+        404 => Error::NotFound { url },
+        401 | 403 => Error::Unauthorized { status, url },
+        _ => Error::HttpStatus { status, url },
     }
+}
+
+/// Redact sensitive query-parameter values from a URL for display/logging. Blanks the value of any
+/// `X-Amz-Signature` (a live capability until expiry) and `X-Amz-Credential` (the access-key id) so
+/// a presigned s3 URL is safe to surface. Non-s3 URLs are returned unchanged.
+pub(crate) fn redact_url(url: &str) -> String {
+    let mut out = url.to_string();
+    for key in ["X-Amz-Signature", "X-Amz-Credential"] {
+        let needle = format!("{key}=");
+        if let Some(start) = out.find(&needle) {
+            let val_start = start + needle.len();
+            let val_end = out[val_start..]
+                .find('&')
+                .map(|i| val_start + i)
+                .unwrap_or(out.len());
+            out.replace_range(val_start..val_end, "REDACTED");
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Error, MessageError};
     use std::error::Error as _;
+
+    #[test]
+    fn redact_url_blanks_amz_signature_and_credential() {
+        let url = "https://bucket.s3.amazonaws.com/app.tar.gz?X-Amz-Credential=AKIAEXAMPLE%2F20260101\
+                   &X-Amz-Expires=300&X-Amz-Signature=deadbeefcafe&X-Amz-SignedHeaders=host";
+        let red = super::redact_url(url);
+        assert!(
+            !red.contains("deadbeefcafe"),
+            "the signature value must be redacted: {red}"
+        );
+        assert!(
+            !red.contains("AKIAEXAMPLE"),
+            "the credential value must be redacted: {red}"
+        );
+        assert!(
+            red.contains("X-Amz-Expires=300"),
+            "non-sensitive params must be preserved: {red}"
+        );
+    }
+
+    #[test]
+    fn redact_url_leaves_plain_url_unchanged() {
+        let url = "https://api.github.com/repos/o/r/releases/assets/1";
+        assert_eq!(super::redact_url(url), url);
+    }
+
+    #[test]
+    fn status_to_error_stores_redacted_url() {
+        let err = super::status_to_error(
+            403,
+            "https://bucket.s3.amazonaws.com/x?X-Amz-Signature=secretsig",
+        );
+        assert!(
+            !err.url().unwrap().contains("secretsig"),
+            "status_to_error must store a redacted url"
+        );
+    }
 
     /// Produce a real `serde_json::Error` by parsing malformed JSON.
     fn json_error() -> serde_json::Error {

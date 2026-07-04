@@ -960,7 +960,7 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
         println!("  * New exe release: {:?}", target_asset.name());
         println!(
             "  * New exe download url: {:?}",
-            target_asset.download_url()
+            crate::errors::redact_url(target_asset.download_url())
         );
         println!(
             "\nThe new release will be downloaded/extracted and the existing binary will be replaced."
