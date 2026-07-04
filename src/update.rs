@@ -1,6 +1,5 @@
 use regex::Regex;
 use std::borrow::Cow;
-use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::sync::Arc;
 
@@ -160,29 +159,30 @@ impl Release {
     }
 
     /// Return the first `ReleaseAsset` for the current release who's name
-    /// contains the specified `target` and possibly `identifier`
+    /// contains the specified `target` and possibly `identifier`.
+    ///
+    /// Matching is tried in order: (1) the asset name contains the full `target` (and `identifier`
+    /// if set); (2) it contains the arch and os tokens derived from `target` (and `identifier`);
+    /// (3) it contains just the `identifier`. The arch/os fallback is derived from the `target`
+    /// argument, not the build host, so an explicitly configured cross-target selects correctly.
     pub fn asset_for(&self, target: &str, identifier: Option<&str>) -> Option<ReleaseAsset> {
+        let has_identifier =
+            |asset: &&ReleaseAsset| identifier.is_none_or(|i| asset.name.contains(i));
         self.assets
             .iter()
             // first look specifically for a target with identifier
-            .find(|asset| {
-                asset.name.contains(target)
-                    && if let Some(i) = identifier {
-                        asset.name.contains(i)
-                    } else {
-                        true
-                    }
-            })
-            // otherwise look for a target for the current arch/os with identifier
+            .find(|asset| asset.name.contains(target) && has_identifier(asset))
+            // otherwise look for a target for the configured arch/os with identifier
             .or_else(|| {
-                self.assets.iter().find(|asset| {
-                    (asset.name.contains(OS) && asset.name.contains(ARCH))
-                        && if let Some(i) = identifier {
-                            asset.name.contains(i)
-                        } else {
-                            true
-                        }
-                })
+                let (arch, os) = target_arch_os(target);
+                match (arch, os) {
+                    (Some(arch), Some(os)) => self.assets.iter().find(|asset| {
+                        asset.name.contains(arch)
+                            && asset.name.contains(os)
+                            && has_identifier(asset)
+                    }),
+                    _ => None,
+                }
             })
             // otherwise just with the identifier if set
             .or_else(|| {
@@ -784,12 +784,6 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
 
         let target_asset = resolve_and_confirm(self, &release)?;
 
-        if !is_safe_asset_name(target_asset.name()) {
-            return Err(Error::InvalidAssetName {
-                name: target_asset.name().to_string(),
-            });
-        }
-
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -901,18 +895,38 @@ pub(crate) mod testing {
     }
 }
 
+/// Derive the (arch, os) substrings used for the fallback asset match from a target triple such as
+/// `x86_64-unknown-linux-gnu` or `aarch64-apple-darwin`. The arch is the first triple component; the
+/// os is the recognized platform token. Both come from the target string, not the build host, so an
+/// explicitly configured cross-target still matches its own assets (and `darwin`-named macOS assets
+/// match, which the build-host `std::env::consts::OS` value `"macos"` never did).
+fn target_arch_os(target: &str) -> (Option<&str>, Option<&str>) {
+    let arch = target.split('-').next().filter(|s| !s.is_empty());
+    let os = [
+        "linux", "darwin", "windows", "freebsd", "netbsd", "openbsd", "android", "ios", "wasm",
+    ]
+    .into_iter()
+    .find(|os| target.contains(os));
+    (arch, os)
+}
+
 /// Return `true` iff `name` is safe to use as a single filename component on the local filesystem.
 ///
-/// Rejects names that are empty, that are `.` or `..`, that contain `/` or `\` path separators, or
-/// that are absolute paths (starting with `/` or a Windows drive letter such as `C:`). Any of those
-/// would let a server-supplied asset name escape the temporary directory via [`Path::join`].
+/// The name must resolve to exactly one normal path component: no `/` or `\` separators, no `.` or
+/// `..`, no root, and no path prefix. The prefix case covers a Windows drive designator such as
+/// `C:evil`, which is drive-*relative* (so `Path::is_absolute` is `false`) yet `Path::join` treats
+/// as a disk-qualified path, letting a server-supplied asset name escape the temporary directory.
+/// `\` and `:` are only special on Windows, so they are rejected explicitly rather than relying on
+/// component parsing (which does not treat them as special when the crate is built for unix).
 fn is_safe_asset_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !std::path::Path::new(name).is_absolute()
+    if name.contains('\\') || name.contains(':') {
+        return false;
+    }
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
 }
 
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
@@ -929,6 +943,15 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
     .ok_or_else(|| Error::NoReleaseFound {
         target: Some(target.to_string()),
     })?;
+
+    // Reject a traversal-unsafe asset name before printing it or prompting, so the user is never
+    // asked to confirm (and the terminal never echoes) a server-supplied name that validation then
+    // rejects. Nothing touches the filesystem before this point.
+    if !is_safe_asset_name(target_asset.name()) {
+        return Err(Error::InvalidAssetName {
+            name: target_asset.name().to_string(),
+        });
+    }
 
     let prompt_confirmation = !u.no_confirm();
     if u.show_output() || prompt_confirmation {
@@ -1144,12 +1167,6 @@ where
 
     let target_asset = resolve_and_confirm(u, &release)?;
 
-    if !is_safe_asset_name(target_asset.name()) {
-        return Err(Error::InvalidAssetName {
-            name: target_asset.name().to_string(),
-        });
-    }
-
     let tmp_archive_dir = tempfile::TempDir::new()?;
     let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
     let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -1190,12 +1207,24 @@ fn install_binary(
         })?;
     }
     let current_exe = std::env::current_exe()?;
-    if bin_install_path == current_exe.as_path() {
+    if same_file(bin_install_path, &current_exe) {
         self_replace::self_replace(new_exe)?;
     } else {
         Move::from_source(new_exe).to_dest(bin_install_path)?;
     }
     Ok(())
+}
+
+/// Whether two paths refer to the same file. Compares canonicalized paths (resolving symlinks and
+/// `..`), falling back to a raw comparison when canonicalization fails (for example when a path does
+/// not yet exist). `current_exe()` is symlink-resolved on some platforms while a user-supplied
+/// `bin_install_path` is not, so a raw `==` can miss that both name the running executable and route
+/// a self-update through the plain `Move` path instead of `self_replace`.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 // Print out message based on provided flag and flush the output buffer
@@ -1502,6 +1531,32 @@ mod tests {
         assert!(
             up_to_date.into_updated_release().is_none(),
             "UpToDate => into_updated_release() None"
+        );
+    }
+
+    // The arch/os fallback in `asset_for` derives its tokens from the `target` argument, not the
+    // build host. A cross-target selection (target != host) must pick the asset named for the
+    // configured target, and `darwin`-named macOS assets must match a `*-apple-darwin` target.
+    #[test]
+    fn asset_for_fallback_uses_configured_target_not_build_host() {
+        let release = super::Release::builder()
+            .name("v1")
+            .version("1.0.0")
+            .assets([
+                super::ReleaseAsset::new("app-x86_64-linux", "https://host/linux"),
+                super::ReleaseAsset::new("app-aarch64-darwin", "https://host/darwin"),
+            ])
+            .build()
+            .unwrap();
+        // The full triple is not in either asset name, so selection falls back to arch+os tokens
+        // derived from the target string.
+        let chosen = release
+            .asset_for("aarch64-apple-darwin", None)
+            .expect("must select the darwin asset for an apple-darwin target");
+        assert_eq!(
+            chosen.download_url(),
+            "https://host/darwin",
+            "the fallback must use the configured target's arch/os, not the build host's"
         );
     }
 
@@ -2919,6 +2974,25 @@ mod tests {
         assert!(
             !super::is_safe_asset_name("sub\\path"),
             "name containing \\ must be rejected"
+        );
+    }
+
+    // A Windows drive-relative name (`C:evil`) has no separator and is not absolute, but `Path::join`
+    // would treat the disk designator as a drive-qualified path and escape the temp dir. It must be
+    // rejected on every platform (the crate may be built for Windows).
+    #[test]
+    fn asset_name_with_windows_drive_prefix_is_rejected() {
+        assert!(
+            !super::is_safe_asset_name("C:evil"),
+            "a Windows drive-relative name must be rejected"
+        );
+        assert!(
+            !super::is_safe_asset_name("C:"),
+            "a bare drive designator must be rejected"
+        );
+        assert!(
+            !super::is_safe_asset_name("C:\\evil"),
+            "a drive-absolute name must be rejected"
         );
     }
 
