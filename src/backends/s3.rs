@@ -695,9 +695,12 @@ mod auth {
             None => return Ok(url_str.to_owned()),
         };
         let url = Url::parse(url_str)?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url_str)))?;
+        let host = url.host_str().ok_or_else(|| {
+            Error::S3Auth(Box::new(crate::errors::MessageError(format!(
+                "Cannot extract host from {:?}",
+                url_str
+            ))))
+        })?;
         let canonical_uri = if url.path().is_empty() {
             "/"
         } else {
@@ -775,9 +778,12 @@ mod auth {
         let access_key_id = &access_key.access_key_id;
         let secret_access_key = &access_key.secret_access_key;
         let url = Url::parse(url_str)?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::Config(format!("Cannot extract host from {:?}", url_str)))?;
+        let host = url.host_str().ok_or_else(|| {
+            Error::S3Auth(Box::new(crate::errors::MessageError(format!(
+                "Cannot extract host from {:?}",
+                url_str
+            ))))
+        })?;
         let canonical_uri = if url.path().is_empty() {
             "/"
         } else {
@@ -3193,28 +3199,27 @@ mod tests {
         );
     }
 
-    // variant-routing: the residual `Config(String)` site is the SigV4 host-extraction failure
-    // in `s3_signature_v4` (~line 699). A URL that parses but has no authority/host (a non-special
-    // scheme such as `mailto:`) reaches `url.host_str() == None` and must route to EXACTLY
-    // `Error::Config`, with the offending URL embedded in the message. This pins the only remaining
-    // `Config` producer, which had no variant-identity test.
+    // variant-routing: the SigV4 host-extraction failure in `s3_signature_v4` (~line 699). A URL
+    // that parses but has no authority/host (a non-special scheme such as `mailto:`) reaches
+    // `url.host_str() == None` and must route to EXACTLY `Error::S3Auth`, with the offending URL
+    // embedded in the source message.
     #[cfg(feature = "s3-auth")]
     #[test]
-    fn s3_signature_v4_hostless_url_routes_to_config() {
+    fn s3_signature_v4_hostless_url_routes_to_s3auth() {
         let key: super::AccessKey = ("AKIA", "secret").into();
         // `mailto:` parses (so we get past `Url::parse`) but has no host, so `host_str()` is None
-        // and the `ok_or_else` fires the `Config` branch.
+        // and the `ok_or_else` fires the `S3Auth` branch.
         let res = super::auth::s3_signature_v4("mailto:nobody@example.com", &None, &Some(key), 300);
         match res {
-            Err(crate::errors::Error::Config(msg)) => {
+            Err(crate::errors::Error::S3Auth(source)) => {
                 assert!(
-                    msg.contains("mailto:nobody@example.com"),
-                    "Config message must embed the offending URL, got: {}",
-                    msg
+                    source.to_string().contains("mailto:nobody@example.com"),
+                    "S3Auth source must embed the offending URL, got: {}",
+                    source
                 );
             }
             other => panic!(
-                "a hostless signed URL must route to Error::Config, got {:?}",
+                "a hostless signed URL must route to Error::S3Auth, got {:?}",
                 other
             ),
         }

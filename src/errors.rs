@@ -138,11 +138,26 @@ pub enum Error {
         /// The underlying header-conversion error.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// A configuration error that does not fit a more specific variant.
+    /// A custom TLS root certificate could not be parsed, or the HTTP client that would trust it
+    /// could not be built.
     ///
-    /// Currently produced only by the S3 backend when a host cannot be extracted from a signed
-    /// URL (`s3-auth`).
-    Config(String),
+    /// Produced from `build()` (via a backend builder's `add_root_certificate`) or from a
+    /// [`Download`](crate::Download) with a `root_certificate`. Wraps the underlying error, surfaced
+    /// via [`std::error::Error::source`].
+    #[non_exhaustive]
+    InvalidCertificate {
+        /// The underlying certificate-parse / client-build error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// A progress-bar template string was not valid (`progress-bar`).
+    ///
+    /// Wraps the underlying `indicatif` template error, surfaced via [`std::error::Error::source`].
+    #[cfg(feature = "progress-bar")]
+    #[non_exhaustive]
+    InvalidProgressStyle {
+        /// The underlying template-parse error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A wrapper over a `std::io::Error`.
     Io(std::io::Error),
     /// A wrapper over a zip archive error (`archive-zip`).
@@ -227,6 +242,38 @@ impl Error {
             _ => None,
         }
     }
+
+    // --- constructors for custom `ReleaseSource` implementors --------------------------------
+    //
+    // The release-flow variants are `#[non_exhaustive]`, so downstream code cannot build them with
+    // a struct literal. These constructors let a custom source return the canonical error for a
+    // condition (no release, a malformed response, a bad status) instead of an opaque catch-all.
+
+    /// Construct a [`NoReleaseFound`](Error::NoReleaseFound) error. `target` is the requested target
+    /// triple when the lookup was asset-scoped, else `None`.
+    pub fn no_release_found(target: Option<String>) -> Error {
+        Error::NoReleaseFound { target }
+    }
+
+    /// Construct a [`MissingAssetField`](Error::MissingAssetField) error for a release/asset payload
+    /// missing a required field.
+    pub fn missing_asset_field(field: &'static str) -> Error {
+        Error::MissingAssetField { field }
+    }
+
+    /// Construct an [`InvalidResponse`](Error::InvalidResponse) error wrapping the underlying parse
+    /// error.
+    pub fn invalid_response(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
+        Error::InvalidResponse {
+            source: source.into(),
+        }
+    }
+
+    /// Construct the HTTP status error for a completed non-2xx response: `NotFound` for 404,
+    /// `Unauthorized` for 401/403, else `HttpStatus`.
+    pub fn http_status_error(status: u16, url: impl Into<String>) -> Error {
+        status_to_error(status, &url.into())
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -279,7 +326,13 @@ impl std::fmt::Display for Error {
             InvalidAuthToken { source } => {
                 write!(f, "ConfigError: failed to parse auth token: {}", source)
             }
-            Config(s) => write!(f, "ConfigError: {}", s),
+            InvalidCertificate { source } => {
+                write!(f, "ConfigError: invalid root certificate: {}", source)
+            }
+            #[cfg(feature = "progress-bar")]
+            InvalidProgressStyle { source } => {
+                write!(f, "ConfigError: invalid progress bar template: {}", source)
+            }
             Io(e) => write!(f, "IoError: {}", e),
             Json(e) => write!(f, "JsonError: {}", e),
             Transport(e) => write!(f, "TransportError: {}", e),
@@ -326,6 +379,9 @@ impl std::error::Error for Error {
             Error::InvalidResponse { ref source } => &**source,
             Error::InvalidHeader { ref source } => &**source,
             Error::InvalidAuthToken { ref source } => &**source,
+            Error::InvalidCertificate { ref source } => &**source,
+            #[cfg(feature = "progress-bar")]
+            Error::InvalidProgressStyle { ref source } => &**source,
             Error::Io(ref e) => e,
             Error::Json(ref e) => &**e,
             Error::Transport(ref e) => &**e,

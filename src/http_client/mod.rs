@@ -115,12 +115,16 @@ pub(crate) fn default_client() -> Box<dyn HttpClient> {
     Box::new(UreqClient::default())
 }
 
+/// A boxed error used by the cert-client builders, so the underlying certificate-parse / client
+/// build failure is preserved as a `source` chain rather than stringified.
+pub(crate) type ClientBuildError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Build a sync HTTP client pre-configured with custom root CA certificates.
-/// Returns Err(msg) if the cert bytes are invalid or the client cannot be built.
+/// Returns `Err` if the cert bytes are invalid or the client cannot be built.
 /// When both `reqwest` and `ureq` are enabled, reqwest is preferred (same priority as default_client).
 pub(crate) fn client_with_root_certs(
     certs: &[crate::tls::Certificate],
-) -> std::result::Result<std::sync::Arc<dyn HttpClient>, String> {
+) -> std::result::Result<std::sync::Arc<dyn HttpClient>, ClientBuildError> {
     #[cfg(feature = "reqwest")]
     {
         crate::http_client::ReqwestClient::build_with_certs(certs)
@@ -132,7 +136,7 @@ pub(crate) fn client_with_root_certs(
     #[cfg(not(any(feature = "reqwest", feature = "ureq")))]
     {
         let _ = certs;
-        Err("no HTTP client feature enabled".to_string())
+        Err("no HTTP client feature enabled".into())
     }
 }
 
@@ -140,7 +144,7 @@ pub(crate) fn client_with_root_certs(
 #[cfg(feature = "async")]
 pub(crate) fn async_client_with_root_certs(
     certs: &[crate::tls::Certificate],
-) -> std::result::Result<std::sync::Arc<dyn AsyncHttpClient>, String> {
+) -> std::result::Result<std::sync::Arc<dyn AsyncHttpClient>, ClientBuildError> {
     crate::http_client::ReqwestAsyncClient::build_async_with_certs(certs)
 }
 

@@ -1006,7 +1006,7 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     // Forward any custom TLS root CA certificates so the download builds a client that trusts them
     // (only used when no client was injected).
     for cert in &u.request_config().root_certificates {
-        download.root_certificate(cert.clone());
+        download.add_root_certificate(cert.clone());
     }
     if let Some(timeout) = u.request_timeout() {
         download.timeout(timeout);

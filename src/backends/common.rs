@@ -102,7 +102,7 @@ pub(crate) struct RequestConfig {
     pub(crate) root_certificates: Vec<crate::tls::Certificate>,
     /// First error produced materializing a client from [`root_certificates`](Self::root_certificates)
     /// (invalid cert bytes or a client-build failure). Deferred like [`header_error`](Self::header_error)
-    /// and surfaced from [`check`](Self::check) as an `Error::Config`.
+    /// and surfaced from [`check`](Self::check) as an `Error::InvalidCertificate`.
     pub(crate) cert_error: Option<String>,
     /// The host of the backend's configured API base (e.g. `api.github.com`, `gitlab.com`, the
     /// gitea host). The derived [`auth_token`](Self::auth_token) is only attached to a request whose
@@ -288,35 +288,33 @@ impl RequestConfig {
     /// injected. On success, stores the client in `self.client` (and the async sibling). On failure,
     /// records the error in `self.cert_error` (first error wins, mirroring `header_error`).
     ///
-    /// If any client slot (sync or async) already holds a user-injected client, the entire
-    /// cert-build section is skipped. A cert-build failure in an unchosen slot must not surface as
-    /// a `cert_error` and reject an otherwise valid injected-client configuration.
+    /// Each client slot is materialized independently: the sync client is built from the certs only
+    /// when the sync slot is empty, and the async client only when the async slot is empty. So
+    /// injecting a client for one transport does not drop the custom roots for the other (the
+    /// injected client owns its own TLS; the auto-built one still trusts the certs). A cert-build
+    /// failure for a slot that will actually be built is recorded in `cert_error`.
     pub(crate) fn build_client(&mut self) {
         if self.root_certificates.is_empty() {
             return;
         }
-        // If any client slot was filled by the user, skip cert-based construction entirely.
-        if self.client.is_some() {
-            return;
-        }
-        #[cfg(feature = "async")]
-        if self.async_client.is_some() {
-            return;
-        }
-        match crate::http_client::client_with_root_certs(&self.root_certificates) {
-            Ok(c) => self.client = Some(c),
-            Err(e) => {
-                if self.cert_error.is_none() {
-                    self.cert_error = Some(e);
+        if self.client.is_none() {
+            match crate::http_client::client_with_root_certs(&self.root_certificates) {
+                Ok(c) => self.client = Some(c),
+                Err(e) => {
+                    if self.cert_error.is_none() {
+                        self.cert_error = Some(e.to_string());
+                    }
                 }
             }
         }
         #[cfg(feature = "async")]
-        match crate::http_client::async_client_with_root_certs(&self.root_certificates) {
-            Ok(c) => self.async_client = Some(c),
-            Err(e) => {
-                if self.cert_error.is_none() {
-                    self.cert_error = Some(e);
+        if self.async_client.is_none() {
+            match crate::http_client::async_client_with_root_certs(&self.root_certificates) {
+                Ok(c) => self.async_client = Some(c),
+                Err(e) => {
+                    if self.cert_error.is_none() {
+                        self.cert_error = Some(e.to_string());
+                    }
                 }
             }
         }
@@ -324,7 +322,7 @@ impl RequestConfig {
 
     /// Surface any deferred config error: a `request_header` conversion failure as
     /// `Error::InvalidHeader` (checked first, so it takes precedence), then a root-certificate /
-    /// client-build failure as `Error::Config`.
+    /// client-build failure as `Error::InvalidCertificate`.
     pub(crate) fn check(&self) -> Result<()> {
         if let Some(msg) = &self.header_error {
             return Err(Error::InvalidHeader {
@@ -332,7 +330,9 @@ impl RequestConfig {
             });
         }
         if let Some(msg) = &self.cert_error {
-            return Err(Error::Config(msg.clone()));
+            return Err(Error::InvalidCertificate {
+                source: Box::new(crate::errors::MessageError(msg.clone())),
+            });
         }
         Ok(())
     }
@@ -496,6 +496,14 @@ pub(crate) struct CommonConfig {
 #[cfg(test)]
 mod tests {
     use super::{CommonBuilderConfig, RequestConfig};
+
+    /// A PEM-framed certificate whose body is not valid X.509 DER (base64 of "not a valid cert").
+    /// reqwest accepts the PEM framing but rejects it at client-build time, so it reliably produces
+    /// a cert-build error. Used by the per-slot cert tests, which are `async`-gated (async implies
+    /// reqwest).
+    #[cfg(feature = "async")]
+    const BAD_PEM_CERT: &[u8] =
+        b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
 
     #[test]
     fn insert_header_records_invalid_value_error() {
@@ -688,7 +696,11 @@ mod tests {
     // cert_error even though the injected sync client was valid.
     #[cfg(feature = "async")]
     #[test]
-    fn build_client_injected_sync_skips_async_cert_build() {
+    fn build_client_injected_sync_still_builds_async_from_certs() {
+        // Per-slot cert materialization: injecting a sync client does NOT skip the async slot's
+        // cert-build. The injected sync client is kept as-is, but the async client is still built
+        // from the custom roots (so async listing trusts the CA). With garbage cert bytes the async
+        // build fails, which is recorded in cert_error -- proving the async slot ran.
         struct DummyClient;
         impl crate::http_client::HttpClient for DummyClient {
             fn get(
@@ -705,19 +717,15 @@ mod tests {
             ..Default::default()
         };
         req.root_certificates
-            .push(crate::tls::Certificate::from_pem(b"garbage".to_vec()));
+            .push(crate::tls::Certificate::from_pem(BAD_PEM_CERT.to_vec()));
         req.build_client();
         assert!(
-            req.cert_error.is_none(),
-            "injecting a sync client must prevent the async cert-build from setting cert_error"
+            req.cert_error.is_some(),
+            "the async slot must attempt the cert-build even when a sync client is injected"
         );
         assert!(
             req.client.is_some(),
-            "the injected sync client must be kept"
-        );
-        assert!(
-            req.async_client.is_none(),
-            "no async client should be materialized when cert-build is skipped"
+            "the injected sync client must be kept as-is"
         );
     }
 
@@ -757,9 +765,9 @@ mod tests {
     }
 
     #[test]
-    fn check_surfaces_cert_error_as_config() {
-        // A recorded `cert_error` (and no header error) surfaces from `check()` as `Error::Config`
-        // carrying the stored message.
+    fn check_surfaces_cert_error_as_invalid_certificate() {
+        // A recorded `cert_error` (and no header error) surfaces from `check()` as
+        // `Error::InvalidCertificate` carrying the stored message via `source()`.
         let req = RequestConfig {
             cert_error: Some("boom".to_string()),
             ..Default::default()
@@ -768,8 +776,10 @@ mod tests {
             .check()
             .expect_err("cert_error must surface from check()")
         {
-            crate::errors::Error::Config(msg) => assert_eq!(msg, "boom"),
-            other => panic!("expected Error::Config, got {:?}", other),
+            crate::errors::Error::InvalidCertificate { source } => {
+                assert_eq!(source.to_string(), "boom")
+            }
+            other => panic!("expected Error::InvalidCertificate, got {:?}", other),
         }
     }
 
@@ -1047,12 +1057,12 @@ mod tests {
 
     // --- Symmetric async-only injected client ------------------------------------------------
 
-    // When only an async client is injected (sync slot empty) and cert bytes are garbage,
-    // build_client must NOT attempt a sync cert-build and must NOT set cert_error. The
-    // async-client guard fires and the entire cert-build section is skipped.
+    // Per-slot: injecting only an async client leaves the sync slot empty, so build_client still
+    // builds the sync client from the custom roots (garbage cert -> cert_error set). The injected
+    // async client is kept as-is.
     #[cfg(feature = "async")]
     #[test]
-    fn build_client_injected_async_only_skips_cert_build() {
+    fn build_client_injected_async_only_still_builds_sync_from_certs() {
         struct DummyAsyncClient;
         impl crate::http_client::AsyncHttpClient for DummyAsyncClient {
             fn get<'a>(
@@ -1072,29 +1082,25 @@ mod tests {
             ..Default::default()
         };
         req.root_certificates
-            .push(crate::tls::Certificate::from_pem(b"garbage".to_vec()));
+            .push(crate::tls::Certificate::from_pem(BAD_PEM_CERT.to_vec()));
         req.build_client();
         assert!(
-            req.cert_error.is_none(),
-            "injecting an async client must prevent the cert-build from setting cert_error"
+            req.cert_error.is_some(),
+            "the sync slot must attempt the cert-build even when an async client is injected"
         );
         assert!(
             req.async_client.is_some(),
-            "the injected async client must be kept"
-        );
-        assert!(
-            req.client.is_none(),
-            "no sync client should be materialized when cert-build is skipped"
+            "the injected async client must be kept as-is"
         );
     }
 
-    // --- End-to-end: CommonBuilderConfig::build with injected client + garbage cert ----------
+    // --- End-to-end: CommonBuilderConfig::build with all slots injected + garbage cert ----------
 
     #[test]
-    fn common_builder_config_build_with_injected_client_skips_cert_error() {
-        // CommonBuilderConfig::build() calls build_client() internally. When a sync client is
-        // injected and cert bytes are present, build_client short-circuits and the garbage cert
-        // must not produce a cert_error that would cause build() to return Err.
+    fn common_builder_config_build_with_injected_clients_skips_cert_error() {
+        // CommonBuilderConfig::build() calls build_client() internally. When every compiled client
+        // slot is injected, no slot needs building, so a garbage cert produces no cert_error and
+        // build() succeeds.
         struct DummyClient;
         impl crate::http_client::HttpClient for DummyClient {
             fn get(
@@ -1106,6 +1112,22 @@ mod tests {
                 unreachable!("not called in this test")
             }
         }
+        #[cfg(feature = "async")]
+        struct DummyAsyncClient;
+        #[cfg(feature = "async")]
+        impl crate::http_client::AsyncHttpClient for DummyAsyncClient {
+            fn get<'a>(
+                &'a self,
+                _url: &'a str,
+                _headers: &'a crate::http_client::HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                crate::Result<Box<dyn crate::http_client::AsyncHttpResponse>>,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
         let mut builder = CommonBuilderConfig {
             current_version: Some("0.1.0".to_string()),
             bin_name: Some("app".to_string()),
@@ -1113,17 +1135,21 @@ mod tests {
             ..Default::default()
         };
         builder.request.client = Some(std::sync::Arc::new(DummyClient));
+        #[cfg(feature = "async")]
+        {
+            builder.request.async_client = Some(std::sync::Arc::new(DummyAsyncClient));
+        }
         builder
             .request
             .root_certificates
             .push(crate::tls::Certificate::from_pem(b"garbage".to_vec()));
-        // build() must succeed because the injected client prevents cert parsing.
+        // build() must succeed because every compiled client slot is injected.
         let config = builder
             .build()
-            .expect("injected client must prevent cert_error from blocking build");
+            .expect("injected clients must prevent cert_error from blocking build");
         assert!(
             config.request.cert_error.is_none(),
-            "cert_error must be None when a client was injected"
+            "cert_error must be None when all client slots were injected"
         );
         assert!(
             config.request.client.is_some(),

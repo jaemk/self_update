@@ -28,7 +28,10 @@ impl ReqwestClient {
     /// Uses the same TLS backend selection (rustls wins over native-tls) as the per-call path.
     pub(crate) fn build_with_certs(
         certs: &[crate::tls::Certificate],
-    ) -> std::result::Result<std::sync::Arc<dyn crate::http_client::HttpClient>, String> {
+    ) -> std::result::Result<
+        std::sync::Arc<dyn crate::http_client::HttpClient>,
+        crate::http_client::ClientBuildError,
+    > {
         let mut builder = reqwest::blocking::ClientBuilder::new();
         #[cfg(feature = "rustls")]
         {
@@ -39,6 +42,10 @@ impl ReqwestClient {
             builder = builder.use_native_tls();
         }
         builder = builder.http2_adaptive_window(true);
+        // Collect all certs and merge in a single call: `tls_certs_merge` accumulates the passed
+        // certs onto the trust store, so one call with the whole set is equivalent to (and clearer
+        // than) one call per cert.
+        let mut collected = Vec::with_capacity(certs.len());
         for cert in certs {
             let c = if cert.is_pem() {
                 reqwest::Certificate::from_pem(cert.bytes())
@@ -47,8 +54,9 @@ impl ReqwestClient {
                 reqwest::Certificate::from_der(cert.bytes())
                     .map_err(|e| format!("invalid DER certificate: {e}"))?
             };
-            builder = builder.tls_certs_merge([c]);
+            collected.push(c);
         }
+        builder = builder.tls_certs_merge(collected);
         let client = builder
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
@@ -147,7 +155,10 @@ impl ReqwestAsyncClient {
     /// TLS backend selection.
     pub(crate) fn build_async_with_certs(
         certs: &[crate::tls::Certificate],
-    ) -> std::result::Result<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>, String> {
+    ) -> std::result::Result<
+        std::sync::Arc<dyn crate::http_client::AsyncHttpClient>,
+        crate::http_client::ClientBuildError,
+    > {
         let mut builder = reqwest::ClientBuilder::new();
         #[cfg(feature = "rustls")]
         {
@@ -158,6 +169,7 @@ impl ReqwestAsyncClient {
             builder = builder.use_native_tls();
         }
         builder = builder.http2_adaptive_window(true);
+        let mut collected = Vec::with_capacity(certs.len());
         for cert in certs {
             let c = if cert.is_pem() {
                 reqwest::Certificate::from_pem(cert.bytes())
@@ -166,8 +178,9 @@ impl ReqwestAsyncClient {
                 reqwest::Certificate::from_der(cert.bytes())
                     .map_err(|e| format!("invalid DER certificate: {e}"))?
             };
-            builder = builder.tls_certs_merge([c]);
+            collected.push(c);
         }
+        builder = builder.tls_certs_merge(collected);
         let client = builder
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
