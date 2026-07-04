@@ -614,6 +614,18 @@ mod auth {
         utf8_percent_encode(input, set)
     }
 
+    /// Rebuild a URL's scheme + host + optional port + path (no query) from the parsed `Url`, using
+    /// the parser's percent-encoded `path()`. The signed URL is formed from this so its wire path is
+    /// byte-identical to the canonical URI used for signing.
+    fn sig_base_url(url: &Url) -> String {
+        let mut base = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+        if let Some(port) = url.port() {
+            base.push_str(&format!(":{port}"));
+        }
+        base.push_str(url.path());
+        base
+    }
+
     fn hex_sha256(data: &[u8]) -> String {
         let hash = Sha256::digest(data);
         hash.iter().map(|b| format!("{b:02x}")).collect()
@@ -725,10 +737,13 @@ mod auth {
             .collect::<Vec<_>>()
             .join("&");
 
-        let canonical_request = format!(
-            "GET\n{}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD",
-            uri_encode(canonical_uri, false),
-        );
+        // The canonical URI is `url.path()` used verbatim (already percent-encoded once by the URL
+        // parser). S3 does not re-encode the request path, so double-encoding it here (the old
+        // `uri_encode(canonical_uri, ..)`) produced a signature that did not match for any key with
+        // a reserved character (a space, `+`, unicode). The signed URL below is rebuilt from the
+        // same `url.path()`, so the canonical URI and the wire path are identical by construction.
+        let canonical_request =
+            format!("GET\n{canonical_uri}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD",);
 
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
@@ -741,7 +756,7 @@ mod auth {
             .map(|b| format!("{b:02x}"))
             .collect();
 
-        let base = &url_str[..url_str.find('?').unwrap_or(url_str.len())];
+        let base = sig_base_url(&url);
         Ok(format!("{base}?{canonical_qs}&X-Amz-Signature={signature}"))
     }
 
@@ -798,10 +813,8 @@ mod auth {
             .collect::<Vec<_>>()
             .join("&");
 
-        let canonical_request = format!(
-            "GET\n{}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD",
-            uri_encode(canonical_uri, false),
-        );
+        let canonical_request =
+            format!("GET\n{canonical_uri}\n{canonical_qs}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD",);
 
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
@@ -897,6 +910,37 @@ mod auth {
         // The presigned GET-object example fixes the signing instant at 2013-05-24T00:00:00Z.
         // 2013-05-24T00:00:00Z == 1369353600 Unix seconds.
         const EXAMPLE_NOW_SECS: u64 = 1369353600;
+
+        // An object key containing a space must be percent-encoded exactly once in both the
+        // canonical URI and the signed URL path. The old code re-encoded the URL-parser's already
+        // encoded path, producing `%2520` in the canonical request and a signature S3 rejects.
+        #[test]
+        fn spaced_object_key_is_single_encoded_and_consistent() {
+            let key = AccessKey::new(EXAMPLE_ACCESS_KEY_ID, EXAMPLE_SECRET);
+            let parts = s3_signature_v4_parts(
+                "https://examplebucket.s3.amazonaws.com/my key.txt",
+                &Some("us-east-1".to_owned()),
+                &key,
+                86400,
+                EXAMPLE_NOW_SECS,
+            )
+            .unwrap();
+            assert!(
+                parts.canonical_request.contains("/my%20key.txt"),
+                "canonical URI must be single-encoded: {}",
+                parts.canonical_request
+            );
+            assert!(
+                !parts.canonical_request.contains("%2520"),
+                "canonical URI must not be double-encoded: {}",
+                parts.canonical_request
+            );
+            assert!(
+                parts.signed_url.contains("/my%20key.txt?"),
+                "signed URL wire path must be single-encoded to match the canonical URI: {}",
+                parts.signed_url
+            );
+        }
 
         /// Known-answer test for the WHOLE presigned-query signing flow.
         ///
@@ -1202,7 +1246,7 @@ fn build_s3_api_url(
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
 ) -> Result<(String, String)> {
     let prefix = match asset_prefix {
-        Some(prefix) => format!("&prefix={}", prefix),
+        Some(prefix) => format!("&prefix={}", urlencoding::encode(prefix)),
         None => "".to_string(),
     };
     let continuation = match continuation_token {
@@ -2894,8 +2938,9 @@ mod tests {
 
     #[test]
     fn build_s3_api_url_appends_asset_prefix() {
-        // A configured asset_prefix is appended as `&prefix=<value>` to the listing query; with
-        // no prefix the segment is absent.
+        // A configured asset_prefix is appended as `&prefix=<value>` to the listing query,
+        // percent-encoded (so reserved characters do not corrupt the query or the signed form);
+        // with no prefix the segment is absent.
         let (_base, with_prefix) = api_url(
             super::Endpoint::S3,
             "b",
@@ -2904,8 +2949,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            with_prefix.ends_with("&prefix=releases/"),
-            "prefix must be appended: {}",
+            with_prefix.ends_with("&prefix=releases%2F"),
+            "prefix must be appended percent-encoded: {}",
             with_prefix
         );
         let (_base, no_prefix) =
