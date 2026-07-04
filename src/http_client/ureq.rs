@@ -162,14 +162,6 @@ impl HttpResponse for Response<Body> {
         Response::headers(self)
     }
 
-    fn json_value(&mut self) -> Result<serde_json::Value> {
-        Ok(self.body_mut().read_json::<serde_json::Value>()?)
-    }
-
-    fn text(&mut self) -> Result<String> {
-        Ok(self.body_mut().read_to_string()?)
-    }
-
     fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
         Box::new((*self).into_body().into_reader())
     }

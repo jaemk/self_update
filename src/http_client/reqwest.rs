@@ -111,28 +111,9 @@ impl HttpResponse for Response {
         Response::headers(self)
     }
 
-    fn json_value(&mut self) -> Result<serde_json::Value> {
-        // `Response::json` consumes `self`; replace this response with a placeholder we can take by
-        // value. (The body has not been read yet, so this is the first and only consumer.)
-        let resp = std::mem::replace(self, dummy_response());
-        Ok(resp.json::<serde_json::Value>()?)
-    }
-
-    fn text(&mut self) -> Result<String> {
-        let resp = std::mem::replace(self, dummy_response());
-        Ok(resp.text()?)
-    }
-
     fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
         self
     }
-}
-
-/// A throwaway `reqwest::blocking::Response` used only to satisfy `std::mem::replace` when
-/// consuming the real response from behind `&mut self` in the object-safe `json_value`/`text`. It
-/// is never read.
-fn dummy_response() -> Response {
-    Response::from(http::Response::new(Vec::new()))
 }
 
 /// Async [`super::AsyncHttpClient`] backed by a `reqwest::Client`. Mirrors [`ReqwestClient`]:
@@ -279,7 +260,8 @@ mod tests {
     }
 
     /// Serve a single `200 OK` response with the given `body` (a known content type), then close.
-    /// Returns the base URL. Used by the body-consumption tests below.
+    /// Returns the base URL. Used by the async JSON-mapping test below.
+    #[cfg(feature = "async")]
     fn stub_ok(body: &'static str, content_type: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
@@ -298,75 +280,6 @@ mod tests {
             }
         });
         base
-    }
-
-    /// Fetch a `200 OK` body through the trait and return the boxed response handle.
-    fn ok_response(body: &'static str, content_type: &'static str) -> Box<dyn HttpResponse> {
-        let client = ReqwestClient::default();
-        let base = stub_ok(body, content_type);
-        client
-            .get(&base, &HeaderMap::new(), None)
-            .expect("200 must be Ok")
-    }
-
-    #[test]
-    fn json_value_then_text_after_body_taken_does_not_panic_or_return_real_data() {
-        // `json_value`/`text` `std::mem::replace` the live response with `dummy_response()` to move
-        // the body out from behind `&mut self`. The author flagged that the placeholder must never
-        // surface as observable data. After the body has been consumed once, a *second* consuming
-        // call sees only the empty placeholder: it must return cleanly (Ok empty / parse-Err), never
-        // panic and never hand back the original body or bogus content.
-        let mut resp = ok_response("{\"k\":\"v\"}", "application/json");
-        let first = resp
-            .json_value()
-            .expect("first json_value parses the real body");
-        assert_eq!(first["k"], "v", "first consumer sees the real body");
-
-        // Second consumer (text) now reads the dummy. The placeholder is an empty-body response, so
-        // `text` must yield the empty string (NOT the original JSON, NOT a panic).
-        let second = resp
-            .text()
-            .expect("text on the drained response must not error/panic");
-        assert_eq!(
-            second, "",
-            "after the body was taken, the dummy placeholder yields an empty body, not stale data"
-        );
-    }
-
-    #[test]
-    fn text_then_json_value_after_body_taken_is_defined() {
-        // Mirror of the above with the order swapped: `text` consumes the real body, then
-        // `json_value` reads the empty placeholder. Parsing empty bytes as JSON is a clean `Err`
-        // (`Error::Transport` from reqwest's json layer or `Error::Json`), never a panic and never
-        // the original object.
-        let mut resp = ok_response("hello world", "text/plain");
-        let body = resp.text().expect("first text reads the real body");
-        assert_eq!(body, "hello world");
-
-        // Empty placeholder body is not valid JSON; the result must be an Err, not a panic.
-        let res = resp.json_value();
-        assert!(
-            res.is_err(),
-            "json_value on the drained (empty) placeholder must be a clean Err, got {:?}",
-            res
-        );
-    }
-
-    #[test]
-    fn body_after_json_value_streams_the_empty_placeholder_not_stale_data() {
-        // After `json_value` takes the real body, consuming `body()` (which returns `self`, now the
-        // placeholder) must stream the placeholder's empty body, proving the swapped-in dummy is
-        // what remains in `self` and carries no leftover bytes.
-        let mut resp = ok_response("{\"a\":1}", "application/json");
-        let _ = resp.json_value().expect("json parses");
-        let mut sink = String::new();
-        resp.body()
-            .read_to_string(&mut sink)
-            .expect("reading the placeholder body must not error");
-        assert_eq!(
-            sink, "",
-            "the placeholder left in self after json_value carries no data"
-        );
     }
 
     /// A PEM block carrying a CERTIFICATE marker but a body that decodes to bytes which are not a

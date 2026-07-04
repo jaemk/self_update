@@ -1831,12 +1831,6 @@ mod tests {
             // Leak a fresh empty map so the borrow lives long enough; never read in this test.
             Box::leak(Box::new(crate::http_client::HeaderMap::new()))
         }
-        fn json_value(&mut self) -> crate::errors::Result<serde_json::Value> {
-            unreachable!("s3 never parses JSON")
-        }
-        fn text(&mut self) -> crate::errors::Result<String> {
-            Ok(String::from_utf8_lossy(&self.body).into_owned())
-        }
         fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
             Box::new(std::io::Cursor::new(self.body))
         }

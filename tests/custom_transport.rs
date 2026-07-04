@@ -23,12 +23,6 @@ impl HttpResponse for CannedResponse {
     fn headers(&self) -> &HeaderMap {
         &self.headers
     }
-    fn json_value(&mut self) -> self_update::Result<serde_json::Value> {
-        Ok(serde_json::from_str(&self.body)?)
-    }
-    fn text(&mut self) -> self_update::Result<String> {
-        Ok(self.body.clone())
-    }
     fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
         Box::new(std::io::Cursor::new(self.body.into_bytes()))
     }

@@ -38,22 +38,13 @@ pub trait HttpClient: Send + Sync {
 
 /// Object-safe response handle returned by [`HttpClient::get`].
 ///
-/// `json_value`/`text` borrow `&mut self` (they may consume the body internally), and `body` /
-/// `body_buffered` consume `self` to hand back a streaming reader. There are no generic methods, so
-/// the trait stays object-safe.
-///
-/// Call at most one of `json_value`, `text`, `body`, or `body_buffered` per response --
-/// implementations consume the body on the first call.
+/// The whole surface is `headers` plus a body reader: [`body`](Self::body) (and its buffered
+/// sibling [`body_buffered`](Self::body_buffered)) consume `self: Box<Self>`, so single-use is
+/// enforced at the type level. A custom transport implements `headers` + `body`; the crate parses
+/// JSON/XML from the reader itself. There are no generic methods, so the trait stays object-safe.
 pub trait HttpResponse {
     /// The response headers.
     fn headers(&self) -> &HeaderMap<HeaderValue>;
-
-    /// Parse the body as a `serde_json::Value`. This replaces the old generic `json::<T>()` — every
-    /// call site requests `serde_json::Value`, so a single non-generic method keeps object safety.
-    fn json_value(&mut self) -> Result<serde_json::Value>;
-
-    /// Read the whole body as a `String`.
-    fn text(&mut self) -> Result<String>;
 
     /// Consume the response and return its body as a streaming reader.
     fn body(self: Box<Self>) -> Box<dyn std::io::Read>;

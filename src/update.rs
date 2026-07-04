@@ -2405,12 +2405,6 @@ mod tests {
                 static EMPTY: std::sync::OnceLock<HeaderMap> = std::sync::OnceLock::new();
                 EMPTY.get_or_init(HeaderMap::new)
             }
-            fn json_value(&mut self) -> Result<serde_json::Value> {
-                unreachable!()
-            }
-            fn text(&mut self) -> Result<String> {
-                Ok(String::from_utf8_lossy(&self.body).into_owned())
-            }
             fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
                 Box::new(std::io::Cursor::new(self.body))
             }
@@ -2551,12 +2545,6 @@ mod tests {
         impl crate::http_client::HttpResponse for MidStreamResponse {
             fn headers(&self) -> &HeaderMap {
                 &self.headers
-            }
-            fn json_value(&mut self) -> Result<serde_json::Value> {
-                unreachable!()
-            }
-            fn text(&mut self) -> Result<String> {
-                unreachable!()
             }
             fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
                 Box::new(FailingMidStream {

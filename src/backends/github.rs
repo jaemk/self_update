@@ -1734,12 +1734,6 @@ mod tests {
         fn headers(&self) -> &crate::http_client::HeaderMap {
             &self.headers
         }
-        fn json_value(&mut self) -> crate::errors::Result<serde_json::Value> {
-            Ok(serde_json::from_str(&self.body)?)
-        }
-        fn text(&mut self) -> crate::errors::Result<String> {
-            Ok(self.body.clone())
-        }
         fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
             Box::new(std::io::Cursor::new(self.body.into_bytes()))
         }

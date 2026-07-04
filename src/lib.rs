@@ -2202,12 +2202,6 @@ mod tests {
         fn headers(&self) -> &http_client::header::HeaderMap {
             &self.headers
         }
-        fn json_value(&mut self) -> Result<serde_json::Value> {
-            unreachable!("download_to never parses JSON")
-        }
-        fn text(&mut self) -> Result<String> {
-            Ok(String::from_utf8_lossy(&self.body).into_owned())
-        }
         fn body(self: Box<Self>) -> Box<dyn io::Read> {
             Box::new(io::Cursor::new(self.body))
         }
