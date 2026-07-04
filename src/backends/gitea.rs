@@ -414,7 +414,9 @@ fn release_array_page(
             // Deserialize the page directly into the private DTO vec (no intermediate
             // `serde_json::Value` tree), then convert each into a public `Release`.
             let dtos: Vec<ReleaseDto> =
-                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
             let mut items = Vec::new();
             for dto in dtos {
                 let release = dto.into_release()?;
@@ -449,7 +451,9 @@ fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
         headers,
         parse: Box::new(|body, _resp_headers| {
             let dtos: Vec<ReleaseDto> =
-                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
             let first = dtos
                 .into_iter()
                 .next()
@@ -1625,12 +1629,8 @@ mod tests {
         let upd = gitea_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(
-                res,
-                Err(crate::errors::Error::NoReleaseFound { .. }
-                    | crate::errors::Error::MissingAssetField { .. })
-            ),
-            "non-array payload must surface as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "non-array payload must surface as Error::InvalidResponse, got {:?}",
             res
         );
     }
@@ -1752,9 +1752,10 @@ mod tests {
 
     // --- gap D: sync path for non-array payload (async already covered) -------------------------
     #[test]
-    fn sync_non_array_payload_routes_to_no_release_found_exactly() {
+    fn sync_non_array_payload_routes_to_invalid_response_exactly() {
         // A top-level `{}` object cannot be deserialized as `Vec<ReleaseDto>`, so the parse branch
-        // returns `Error::NoReleaseFound`. This is the sync mirror of the async test above.
+        // returns `Error::InvalidResponse` (a malformed listing body, distinct from a valid empty
+        // `[]` which is `NoReleaseFound`). Sync mirror of the async test above.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -1764,11 +1765,9 @@ mod tests {
         });
         let upd = gitea_update_sync(&base, "0.1.0");
         match upd.get_latest_release() {
-            Err(crate::errors::Error::NoReleaseFound { target }) => {
-                assert_eq!(target, None, "non-array payload carries no asset target");
-            }
+            Err(crate::errors::Error::InvalidResponse { .. }) => {}
             other => panic!(
-                "non-array payload must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                "non-array payload must be Error::InvalidResponse, got {:?}",
                 other
             ),
         }

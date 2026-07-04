@@ -436,7 +436,9 @@ fn release_array_page(
             // Deserialize the page directly into the private DTO vec (no intermediate
             // `serde_json::Value` tree), then convert each into a public `Release`.
             let dtos: Vec<ReleaseDto> =
-                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
             let mut items = Vec::new();
             for dto in dtos {
                 let release = dto.into_release()?;
@@ -476,7 +478,9 @@ fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<R
         headers,
         parse: Box::new(|body, _resp_headers| {
             let dtos: Vec<ReleaseDto> =
-                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
             let first = dtos
                 .into_iter()
                 .next()
@@ -990,12 +994,8 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(
-                res,
-                Err(crate::errors::Error::NoReleaseFound { .. }
-                    | crate::errors::Error::MissingAssetField { .. })
-            ),
-            "non-array payload must surface as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "non-array payload must surface as Error::InvalidResponse, got {:?}",
             res
         );
     }
@@ -1219,12 +1219,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(
-                res,
-                Err(crate::errors::Error::NoReleaseFound { .. }
-                    | crate::errors::Error::MissingAssetField { .. })
-            ),
-            "non-array body on fetch_all_releases_async must surface as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "non-array body on fetch_all_releases_async must surface as Error::InvalidResponse, got {:?}",
             res
         );
     }

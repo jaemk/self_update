@@ -442,7 +442,9 @@ fn release_array_page(
             // Deserialize the page directly into the private DTO vec (no intermediate
             // `serde_json::Value` tree), then convert each into a public `Release`.
             let dtos: Vec<ReleaseDto> =
-                serde_json::from_slice(body).map_err(|_| Error::NoReleaseFound { target: None })?;
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
             let mut items = Vec::new();
             for dto in dtos {
                 let release = dto.into_release()?;
@@ -1220,11 +1222,11 @@ mod tests {
             None,
             &crate::backends::common::RequestConfig::default(),
         );
-        assert!(matches!(
-            res,
-            Err(crate::errors::Error::NoReleaseFound { .. }
-                | crate::errors::Error::MissingAssetField { .. })
-        ));
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "a non-array listing body must surface as Error::InvalidResponse, got {:?}",
+            res
+        );
     }
 
     /// Like [`stub`], but also captures each incoming raw request so tests can assert on what
