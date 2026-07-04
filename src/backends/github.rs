@@ -1451,6 +1451,39 @@ mod tests {
         );
     }
 
+    // A malformed root certificate supplied via `add_root_certificate` surfaces end to end as
+    // `Error::InvalidCertificate` from `build()` on both the Update and ReleaseList builders (the
+    // deferred cert-build error is materialized by `build_client` and surfaced by `check`). The
+    // reqwest client rejects a PEM-framed body that is not valid X.509 DER at client-build time.
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn add_root_certificate_bad_cert_surfaces_from_build() {
+        const BAD_PEM: &[u8] =
+            b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
+        let res = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .add_root_certificate(crate::Certificate::from_pem(BAD_PEM.to_vec()))
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidCertificate { .. })),
+            "a bad cert must surface as InvalidCertificate from Update build(), got {:?}",
+            res.map(|_| "Ok")
+        );
+        let res = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .add_root_certificate(crate::Certificate::from_pem(BAD_PEM.to_vec()))
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidCertificate { .. })),
+            "a bad cert must surface as InvalidCertificate from ReleaseList build(), got {:?}",
+            res.map(|_| "Ok")
+        );
+    }
+
     // github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
     // config that BOTH the listing and download paths consume. A configured auth_token renders as
     // `token <token>`; a user `request_header(AUTHORIZATION, ..)` override wins on both paths.

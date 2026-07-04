@@ -1111,7 +1111,11 @@ fn finish_update_owned(
     // Variable format: `{{ var }}`
     fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
         let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
-        Regex::new(&format).unwrap().replace_all(str, val)
+        // `NoExpand` so a `$` in `val` (e.g. a bin name or version containing `$`) is inserted
+        // literally, not interpreted as a regex capture-group reference.
+        Regex::new(&format)
+            .unwrap()
+            .replace_all(str, regex::NoExpand(val))
     }
 
     let bin_path_str = substitute(&bin_path_str, "version", ctx.release.version());
