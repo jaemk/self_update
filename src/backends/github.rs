@@ -484,10 +484,10 @@ fn release_array_page(
                 // Skip releases not strictly newer than the current version, but do NOT stop
                 // pagination. A backport release (older semver, newer creation date) must not
                 // halt the walk; a genuinely newer release on a later page must still be found.
-                if let Some(ref current) = stop_at {
-                    if !bump_is_greater(current, release.version()).unwrap_or(false) {
-                        continue;
-                    }
+                if let Some(ref current) = stop_at
+                    && !bump_is_greater(current, release.version()).unwrap_or(false)
+                {
+                    continue;
                 }
                 items.push(release);
             }

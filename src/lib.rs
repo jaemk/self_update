@@ -912,12 +912,11 @@ impl Extract {
                         fs::create_dir_all(&output_path)?;
                         continue;
                     }
-                    if let Some(parent_dir) = output_path.parent() {
-                        if let Err(e) = fs::create_dir_all(parent_dir) {
-                            if e.kind() != io::ErrorKind::AlreadyExists {
-                                return Err(Error::Io(e));
-                            }
-                        }
+                    if let Some(parent_dir) = output_path.parent()
+                        && let Err(e) = fs::create_dir_all(parent_dir)
+                        && e.kind() != io::ErrorKind::AlreadyExists
+                    {
+                        return Err(Error::Io(e));
                     }
 
                     let mut output = fs::File::create(&output_path)?;
@@ -1039,12 +1038,11 @@ impl Extract {
                     });
                 };
                 let output_path = into_dir.join(rel_path);
-                if let Some(parent_dir) = output_path.parent() {
-                    if let Err(e) = fs::create_dir_all(parent_dir) {
-                        if e.kind() != io::ErrorKind::AlreadyExists {
-                            return Err(Error::Io(e));
-                        }
-                    }
+                if let Some(parent_dir) = output_path.parent()
+                    && let Err(e) = fs::create_dir_all(parent_dir)
+                    && e.kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(Error::Io(e));
                 }
 
                 let mut output = fs::File::create(&output_path)?;
@@ -1254,15 +1252,15 @@ impl MoveAll {
             // Move the new file into place.
             if let Err(e) = fs::rename(source, dest) {
                 // Undo this step's stash before rolling back the earlier ones.
-                if let Some(stash) = &stash {
-                    if let Err(restore_err) = fs::rename(stash, dest) {
-                        log::error!(
-                            "failed to restore {:?} from stash {:?} during rollback: {}",
-                            dest,
-                            stash,
-                            restore_err
-                        );
-                    }
+                if let Some(stash) = &stash
+                    && let Err(restore_err) = fs::rename(stash, dest)
+                {
+                    log::error!(
+                        "failed to restore {:?} from stash {:?} during rollback: {}",
+                        dest,
+                        stash,
+                        restore_err
+                    );
                 }
                 rollback(&applied);
                 return Err(Error::from(e));

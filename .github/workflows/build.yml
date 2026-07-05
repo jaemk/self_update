@@ -46,8 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.85.0
-    # Pin the declared MSRV: the full reqwest feature set must build on 1.85.
+    - uses: dtolnay/rust-toolchain@1.88.0
+    # Pin the declared MSRV: the full reqwest feature set must build on 1.88 (zip 8 requires 1.88).
     - run: cargo build --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 
   windows:

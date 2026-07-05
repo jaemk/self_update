@@ -6,7 +6,7 @@
 Further breaking changes finalizing the 1.0 surface (still in release-candidate). They make the
 HTTP transport an injectable object-safe trait, restructure the error type, finalize the release
 model, reshape the feature surface, and change several builder signatures. The crate moves to
-edition 2024 (MSRV unchanged at 1.85).
+edition 2024 and raises the MSRV to 1.88 (the `zip` 8 dependency requires it).
 
 > These changes are folded into the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)
 > (and its [agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling).
@@ -56,7 +56,8 @@ edition 2024 (MSRV unchanged at 1.85).
   retry backoff (default 100ms base, ~3.2s cap).
 
 ### Changed
-- Edition 2024 (MSRV unchanged at 1.85).
+- Edition 2024. MSRV raised from 1.85 to 1.88 (required by the `zip` 8 dependency, pulled by the
+  `archive-zip` and `signatures` features; default-feature builds still compile on 1.85).
 - Default features changed from `["reqwest", "default-tls"]` to
   `["reqwest", "rustls", "progress-bar", "github", "archive-tar", "compression-tar-gz"]`: default
   TLS is now `rustls`, only the `github` backend is on by default (gitlab/gitea/s3 opt-in), and the

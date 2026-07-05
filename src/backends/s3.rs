@@ -575,7 +575,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 #[cfg(feature = "s3-auth")]
 mod auth {
     use crate::errors::*;
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_encode};
     use sha2::{Digest, Sha256};
     use std::{
@@ -1143,7 +1143,7 @@ mod auth {
         /// regresses, the known-answer signature can no longer be reproduced and this fails.
         #[test]
         fn signing_key_reproduces_documented_signature() {
-            use hmac::{Hmac, Mac};
+            use hmac::{Hmac, KeyInit, Mac};
             use sha2::Sha256;
 
             let signing_key = derive_signing_key(EXAMPLE_SECRET, "20130524", "us-east-1").unwrap();
