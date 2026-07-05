@@ -236,30 +236,22 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Checking for an update without installing
 
-To check whether a newer release exists without downloading or installing anything, fetch the
-releases once and query the returned `Releases`. The updater no longer has an
-`is_update_available()` method; instead call `get_newer_releases()` (the full candidate list) or
-`get_latest_release()` (a one-element list with just the newest release), then ask the result:
-`.is_update_available()` compares the newest fetched release against the configured
-`current_version`, and `.latest()` / `.all()` expose the releases themselves. The fetch happens
-once; every query reads the already-fetched data.
+To check whether a newer release exists without downloading or installing anything, call
+`is_update_available()` on the built updater. It fetches the release listing and returns the newest
+strictly-newer `Release` (or `None` when up to date):
 
 ```rust
 fn check() -> Result<(), Box<dyn std::error::Error>> {
-    let releases = self_update::backends::github::Update::configure()
+    let update = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
-        .build()?
-        .get_newer_releases()?;
+        .build()?;
 
-    if releases.is_update_available()? {
-        if let Some(latest) = releases.latest() {
-            println!("update available: {}", latest.version());
-        }
-    } else {
-        println!("already up to date");
+    match update.is_update_available()? {
+        Some(release) => println!("update available: {}", release.version()),
+        None => println!("already up to date"),
     }
     Ok(())
 }
@@ -525,8 +517,8 @@ pub mod update;
 pub mod version;
 
 /// An opaque TLS root CA certificate, supplied to a backend builder or a [`Download`] via the
-/// `root_certificate` setter so the crate-built HTTP client trusts a private/internal CA. Construct
-/// with [`Certificate::from_pem`](crate::Certificate::from_pem) or
+/// `add_root_certificate` setter so the crate-built HTTP client trusts a private/internal CA.
+/// Construct with [`Certificate::from_pem`](crate::Certificate::from_pem) or
 /// [`Certificate::from_der`](crate::Certificate::from_der); the bytes are validated when the client
 /// is built, not at construction.
 pub use tls::Certificate;
@@ -1554,7 +1546,7 @@ impl Download {
     }
 
     /// Internal: the configured custom root CA certificates (used by tests to confirm cert
-    /// forwarding). Empty unless [`root_certificate`](Self::root_certificate) was called.
+    /// forwarding). Empty unless [`add_root_certificate`](Self::add_root_certificate) was called.
     #[cfg(test)]
     pub(crate) fn root_certificates(&self) -> &[Certificate] {
         &self.root_certificates
