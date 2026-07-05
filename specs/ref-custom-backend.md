@@ -78,16 +78,19 @@ construct or inspect it are the three methods (`custom.rs:362-377`):
 
 `impl AsyncReleaseSource for Blocking<S> where S: ReleaseSource + Clone + 'static`
 (`custom.rs:380-401`) runs each sync fetch on `tokio::task::spawn_blocking`, cloning the inner
-source into the blocking task; a `JoinError` is mapped to `Error::Update("blocking task
-failed: ...")`. The inner source's own error is returned unchanged.
+source into the blocking task; a `JoinError` is mapped to `Error::Internal { message, source }`
+(the `JoinError` chained via `source()`). The inner source's own error is returned unchanged.
 
 ### Integration with the pipeline
 
-`Update` implements the sealed `ReleaseUpdate` trait (`custom.rs:214-230`) by delegating its
+`Update` implements the sealed `ReleaseUpdate` trait (`custom.rs:214-234`) by delegating its
 three fetch methods to the source. `get_latest_release` wraps the single release in a
 one-element `Releases` carrying the configured `current_version` (so `is_update_available()`
-works without a second fetch); `get_latest_releases` wraps the source's `Vec` likewise;
-`get_release_version` returns the source's `Release` directly. Shared config accessors come from
+works without a second fetch); the trait's `get_newer_releases` wraps the `Vec` from the
+source's `get_latest_releases` likewise (the source method keeps its name);
+`get_release_version` returns the source's `Release` directly. The inherent update verbs
+(including `is_update_available`) come from `impl_sync_update_verbs!(Update)`
+(`custom.rs:236`). Shared config accessors come from
 `impl_update_config_accessors!(Update)` (`custom.rs:212`), and the sealed marker is
 `impl sealed::Sealed for Update` (`custom.rs:210`). From there the crate runs its usual
 compare -> select-asset -> download -> verify -> extract -> install flow over the source's

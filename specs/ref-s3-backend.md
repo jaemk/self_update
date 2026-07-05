@@ -19,7 +19,8 @@ canonical reference; it does not propose changes.
 Two builders, each reached through a `configure()` entry point:
 
 - `ReleaseList` / `ReleaseListBuilder` (`s3.rs:91`, `s3.rs:151`): queries a bucket
-  and returns a `Releases` via `ReleaseList::fetch` (`s3.rs:220`). The result is a bare listing
+  and returns a `Releases` via `ReleaseList::fetch` (`s3.rs:257`) or, under the
+  `async` feature, `ReleaseList::fetch_async` (`s3.rs:282`). The result is a bare listing
   (`current_version()` is `None`); recover the `Vec<Release>` with `into_vec()`.
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
   `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`, and (under `s3-auth`)
@@ -27,10 +28,10 @@ Two builders, each reached through a `configure()` entry point:
   There is **no** `auth_token` setter on this builder (the deprecated no-op was removed);
   the credential setter is `access_key`.
 - `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
-  implementation. `Update::configure` (`s3.rs:371`) returns an `UpdateBuilder`.
-  `build` returns `Box<dyn ReleaseUpdate>` (`s3.rs:337`); `build_async` (under
-  `async`) returns the concrete `Update` so the inherent `*_async` methods are
-  reachable (`s3.rs:346`). Backend setters mirror the list builder
+  implementation. `Update::configure` returns an `UpdateBuilder`.
+  `build` (`s3.rs:433`) and `build_async` (under `async`, `s3.rs:442`) both return
+  the concrete `Update` (which is `Send` and exposes the update verbs as inherent
+  methods, so no trait import is needed). Backend setters mirror the list builder
   (`endpoint`, `bucket_name`, `asset_prefix`, `region`, `access_key`); the common
   setters come from `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`).
   As on the list builder, there is **no** `auth_token` setter (the deprecated shim was
@@ -75,7 +76,7 @@ when none is set).
 ### Listing + max_keys + continuation + prefix
 
 `max_keys` is a `u16` field on the `Update` / `ReleaseList` builders, defaulting to 1000 (the
-ListObjectsV2 cap). The `max_keys(impl Into<u16>)` setter clamps to `1..=1000` via
+ListObjectsV2 cap). The `max_keys(u16)` setter clamps to `1..=1000` via
 `clamp_max_keys`. The listing query string is appended to the download base:
 
 - S3 / S3DualStack / DigitalOceanSpaces / Generic:
@@ -90,7 +91,9 @@ reads `<IsTruncated>true</IsTruncated>` and `<NextContinuationToken>`, and when 
 `Page::next` as a fresh `PageRequest` with `&continuation-token=<token>` in the query, which the
 same driver follows. So a >1000-key bucket is walked across multiple requests, not truncated. Under
 `s3-auth` each continuation URL is freshly SigV4-signed. The `signature_ttl(Duration)` setter
-(default 300s) sets the `X-Amz-Expires` of signed listing and download URLs.
+(default 300s, clamped to AWS's `X-Amz-Expires` range of 1s..=7d via
+`clamp_signature_ttl`, `s3.rs:39`) sets the `X-Amz-Expires` of signed listing and
+download URLs.
 
 ### XML to model
 
@@ -124,12 +127,13 @@ leading `v` stripped (`s3.rs:874`). Keys lacking this shape produce no release.
 Regex construction failure surfaces as `Error::InvalidResponse` (`s3.rs:836`).
 
 `ReleaseUpdate` selection helpers operate on the parsed list: `pick_latest`
-(`s3.rs:406`) picks the highest version (ignoring unparseable ones, erroring
-"No release was found" when empty); `sort_newer` (`s3.rs:428`) filters to strictly
-newer-than-current, newest-first; `find_version` (`s3.rs:449`) matches an exact
-version, erroring `Error::Release` when absent. These back `get_latest_release`,
-`get_latest_releases`, and `get_release_version` (`s3.rs:475`) and their `async`
-siblings (`s3.rs:484`).
+(`s3.rs:498`) picks the highest version (ignoring unparseable ones, erroring
+`Error::NoReleaseFound` when empty); `sort_newer` (`s3.rs:513`) filters to strictly
+newer-than-current, newest-first; `find_version` (`s3.rs:524`) matches an exact
+version, erroring `Error::NoReleaseFound` when absent. These back
+`get_latest_release`, `get_newer_releases`, and `get_release_version`
+(`s3.rs:534`) and their `async` siblings, all also exposed as inherent methods on
+`Update` alongside `is_update_available`.
 
 ### Signing under s3-auth
 
@@ -180,10 +184,13 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
   `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic(String)`; plus
   `From<&str>` / `From<String>` -> `Generic`.
 - `s3::ReleaseList`, `s3::ReleaseListBuilder` (setters: `bucket_name`,
-  `asset_prefix`, `region`, `endpoint`, `filter_target`, `access_key` [s3-auth],
-  request-config setters, `build`).
+  `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`,
+  `access_key` / `signature_ttl` [s3-auth], request-config setters, `build`);
+  `ReleaseList::fetch` and `fetch_async` [async].
 - `s3::UpdateBuilder`, `s3::Update` (`#[non_exhaustive]`); `Update::configure`,
-  `build` -> `Box<dyn ReleaseUpdate>`, `build_async` -> `Update` [async].
+  `build` -> `Update`, `build_async` -> `Update` [async]. `Update` is `Send` with
+  the inherent verbs (`update`, `update_extended`, `get_latest_release`,
+  `get_newer_releases`, `get_release_version`, `is_update_available`).
 - `s3::AccessKey` [s3-auth], re-exported, `#[non_exhaustive]`, `AccessKey::new`
   plus tuple `From` impls.
 
@@ -208,7 +215,8 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
   both listing and asset URLs are SigV4-signed (TTL 300s), region defaulting to
   `us-east-1`.
 - the `auth_token` setter was removed from the s3 builders; use `access_key((id, secret))` under `s3-auth` to authenticate.
-- `EndPoint`, `Update`, and `AccessKey` are `#[non_exhaustive]`.
+- `Endpoint`, `Update`, and `AccessKey` are `#[non_exhaustive]`.
+- `max_keys` takes a `u16`; `signature_ttl` clamps to 1s..=7d.
 
 ## Tests
 
@@ -216,7 +224,7 @@ In-module tests (`s3.rs:938`): `parse_s3_response` cases (single/multi asset,
 v-prefix strip, multiple releases, non-matching-key skip, path-stripped filename,
 malformed-XML error, empty body); `add_to_releases_list` empty-name/version drop;
 loopback-TCP stub tests for the sync and async `ReleaseUpdate` fetch methods
-(`get_latest_release`, `get_latest_releases`, `get_release_version`,
+(`get_latest_release`, `get_newer_releases`, `get_release_version`,
 `is_update_available`, multi-asset merge); the non-2xx error contract
 (`assert_non_2xx_err`); `pick_latest`/`sort_newer`/`find_version` unit tests;
 `build_s3_api_url` shape tests per endpoint (S3, dual-stack, DigitalOcean, GCS,

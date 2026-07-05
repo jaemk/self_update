@@ -34,11 +34,12 @@ ureq; a genuine no-client build is a `compile_error!`. `send`/`download_to` call
 `config.client.as_deref().unwrap_or(&default).get(...)`.
 
 Responses are abstracted by the `HttpResponse` trait (`http_client/mod.rs`):
-`headers() -> &HeaderMap<HeaderValue>`, `json_value(&mut self) ->
-serde_json::Value` (replacing the old generic `json::<T>()`, which made the trait
-non-object-safe), `text(&mut self)`, `body(self: Box<Self>) -> Box<dyn Read>`,
-and a `body_buffered` default wrapping `body()` in a `BufReader`. It is
-implemented for `reqwest::blocking::Response` and ureq's `Response<Body>`.
+`headers() -> &HeaderMap<HeaderValue>`, `body(self: Box<Self>) -> Box<dyn Read>`,
+and a `body_buffered` default wrapping `body()` in a `BufReader`. The former
+`json_value` / `text` methods are removed: the crate parses JSON/XML from the
+body reader itself, so a custom transport implements only `headers()` +
+`body()`. It is implemented for `reqwest::blocking::Response` and ureq's
+`Response<Body>`.
 
 The async path (reqwest + tokio only) has the sibling object-safe traits
 `AsyncHttpClient`/`AsyncHttpResponse` (`http_client/mod.rs`). `AsyncHttpResponse`
@@ -106,6 +107,24 @@ backoff (not just index 0). `send_async` / `retry_async`
 (`backends/mod.rs:141-211`) are the async siblings, using `tokio::time::sleep`;
 the log runs synchronously between tries so the error is never held across the
 await.
+
+### Root certificates and auth-token scope
+
+`self_update::Certificate` is an opaque root-CA certificate (PEM or DER).
+`add_root_certificate(Certificate)` on the `Update`/`ReleaseList` builders and on
+`Download` adds it to the per-call client's trust store, so a private/internal CA
+can be trusted without injecting a whole pre-built client. A malformed
+certificate (or a client that cannot be built with it) surfaces as
+`Error::InvalidCertificate { source }` from `build()` or `download_to` /
+`download_to_async`. Each client slot is materialized independently
+(`RequestConfig::build_client`, `backends/common.rs`): the certs build a client
+only for a slot with no injected client, so an injected client keeps its own TLS
+trust and the other slot still trusts the added certs.
+
+The `auth_token` is sent only to requests whose host matches the backend's
+configured API host (or an `allow_auth_host(host)` entry), over https.
+`dangerously_allow_non_https_auth_forwarding()` drops the https requirement for a
+host-matched request.
 
 ### Proxy
 
@@ -176,9 +195,12 @@ status variants.
   `http_client::HeaderMap`.
 - `self_update::reqwest` / `self_update::ureq` (re-export of each compiled client
   crate; both may be present).
-- Builder/`Download` setters: `timeout`, `request_header` / `header`, `retries`,
-  `http_client` / `http_client_async`, and the convenience `reqwest_client`,
-  `reqwest_async_client`, `ureq_agent`.
+- Builder/`Download` setters: `timeout`, `request_header`, `retries`,
+  `http_client` / `http_client_async`, `add_root_certificate`, and the
+  convenience `reqwest_client`, `reqwest_async_client`, `ureq_agent`; plus
+  `allow_auth_host` and `dangerously_allow_non_https_auth_forwarding` on the
+  builders.
+- `self_update::Certificate` (opaque PEM/DER root CA).
 - `HttpClient` / `HttpResponse` traits and their async siblings
   `AsyncHttpClient` / `AsyncHttpResponse`; the concrete `ReqwestClient`,
   `ReqwestAsyncClient`, `UreqClient` impls.
@@ -189,7 +211,8 @@ status variants.
   both clients can coexist. `async` requires reqwest (auto-satisfied by the
   feature implication).
 - The seam traits are **object-safe** (`Box<dyn HttpClient>` / `Box<dyn
-  HttpResponse>`); `json_value` replaces the old generic `json::<T>()`.
+  HttpResponse>`); the sync `HttpResponse` surface is `headers()` + `body()`
+  (plus the defaulted `body_buffered()`), with no `json_value` / `text`.
 - TLS is feature-selected; when both TLS features are on, rustls wins, so
   `cargo build --all-features` builds.
 - `retries == 0` means exactly one attempt; the exhaustion boundary is
@@ -218,7 +241,8 @@ status variants.
 - `backends/common.rs`: `insert_header` records invalid name/value, first-error
   wins, valid-then-invalid keeps the valid header.
 - `http_client/{reqwest,ureq}.rs`: per-client status-mapping tests, exercised
-  through the trait `get`/`json_value`/`text` methods.
+  through the trait `get` method; `build_with_certs_rejects_non_pem` for the
+  certificate path.
 - `backends/github.rs`: `injected_fake_http_client_drives_a_backend_through_the_trait`
   (a `FakeClient` test double injected via `.http_client(Arc::new(...))` records
   the URL and returns a canned `Box<dyn HttpResponse>`), and

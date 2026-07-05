@@ -10,11 +10,12 @@ its own root store and does not read the OS trust store, so any connection throu
 proxy fails with a certificate verification error unless the caller injects a
 pre-configured `reqwest` client with the custom CA added manually.
 
-Today there is no first-class API for either concern:
+CORP-1 has shipped; CORP-2 and CORP-3 remain open:
 
-- **Custom root CA (CORP-1)**: callers must pull in `reqwest` or `ureq` directly, build
-  a client with the CA wired in, and inject it via `.reqwest_client()` / `.http_client()`.
-  There is no builder setter that accepts a certificate.
+- **Custom root CA (CORP-1)**: shipped. `self_update::Certificate` plus
+  `add_root_certificate` on every builder and on `Download`; a malformed
+  certificate surfaces as `Error::InvalidCertificate` from `build()` /
+  `download_to`. See CORP-1 below and `ref-http-client.md`.
 
 - **OS trust store (CORP-2)**: the default reqwest + rustls setup in 0.13.4 already uses
   the platform verifier (OS trust store) via `rustls-platform-verifier`. The gap is the
@@ -24,12 +25,13 @@ Today there is no first-class API for either concern:
   for unauthenticated proxies, but any proxy requiring credentials must be configured on
   an injected client. There is no `.proxy(url)` setter on the builders.
 
-All three gaps force corporate users to add `reqwest` or `ureq` as a direct dependency
-solely to unlock transport config that belongs on the `self_update` builder surface.
+The remaining gaps (CORP-2, CORP-3) force corporate users to add `reqwest` or `ureq` as
+a direct dependency solely to unlock transport config that belongs on the `self_update`
+builder surface.
 
 ---
 
-## CORP-1: custom root CA (designed)
+## CORP-1: custom root CA (done)
 
 ### `self_update::Certificate` type
 
@@ -61,9 +63,9 @@ certs are not replaced.
 CORP-1-6. `RequestConfig` (src/backends/common.rs) gets a new field:
 `root_certificates: Vec<Certificate>` defaulting to `vec![]`.
 
-CORP-1-7. `Download` (src/lib.rs) gets a `root_certificate(cert: Certificate) -> &mut Self`
-setter and a private `root_certificates: Vec<Certificate>` field, forwarded from
-`build_download()` alongside the existing client forward.
+CORP-1-7. `Download` (src/lib.rs) gets an `add_root_certificate(cert: Certificate) -> &mut Self`
+setter (same name as the builder setter) and a private `root_certificates: Vec<Certificate>`
+field, forwarded from `build_download()` alongside the existing client forward.
 
 ### Application at `build()` time
 
@@ -77,9 +79,11 @@ made, the injected client wins and `root_certificates` has no effect (consistent
 how proxy-env and the TLS feature defer to an injected client today). Documented on the
 setter.
 
-CORP-1-10. Certificate parse/conversion errors surface as `Error::Config` from `build()`.
+CORP-1-10. Certificate parse/conversion errors surface as
+`Error::InvalidCertificate { source }` from `build()` (`Error::Config` no longer exists).
 A `cert_error: Option<String>` field is added to `RequestConfig`, populated on conversion
-failure, and surfaced by `RequestConfig::check()` alongside `header_error`.
+failure, and surfaced by `RequestConfig::check()` alongside `header_error` (the header
+error takes precedence).
 
 ### reqwest path
 

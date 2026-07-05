@@ -60,10 +60,11 @@ features turn on the matching zipsign verify backends:
 `archive-tar = ["tar", "zipsign-api?/verify-tar"]` (`Cargo.toml:72`).
 
 A caller supplies ed25519ph public keys with the builder method
-`verify_keys(impl Into<Vec<VerifyingKey>>)` (`src/macros.rs:455`), stored on
-the common config (`src/macros.rs:459`). The accessor is
-`UpdateConfig::verify_keys` (`src/update.rs:541`), which defaults to an empty
-slice (`src/update.rs:542`, `src/macros.rs:196`).
+`verifying_keys(impl Into<Vec<VerifyingKey>>)` (`src/macros.rs:617`, renamed
+from `verify_keys`), stored on the common config's `verifying_keys` field
+(`src/macros.rs:621`). The doc-hidden accessor keeps the old name:
+`UpdateConfig::verify_keys` (`src/update.rs:710`, `src/macros.rs:260`), which
+defaults to an empty slice.
 
 `verify_signature(archive_path, keys)` (`src/update.rs:933`):
 - If no keys are supplied it is a no-op returning `Ok(())`
@@ -101,11 +102,12 @@ Inside `finish_update` (`src/update.rs:798`), in order:
    `verify_signature` runs; any failure returns via `?`.
 3. Archive extraction of the target binary (`src/update.rs:830`).
 4. Install via `install_binary` (`src/update.rs:837`), which first runs the
-   post-update `verify_with` callback (`src/update.rs:900`-`907`) and only then
-   replaces / moves the binary (`src/update.rs:909`-`912`).
+   post-update `verify_binary` callback (renamed from `verify_with`;
+   `src/update.rs:900`-`907`) and only then replaces / moves the binary
+   (`src/update.rs:909`-`912`).
 
 So the full verification order is: checksum, then signature, then (after
-extraction) the `verify_with` hook, then the binary replacement. The same
+extraction) the `verify_binary` hook, then the binary replacement. The same
 `finish_update` tail is shared by both the sync and async flows
 (`src/update.rs:889`).
 
@@ -119,8 +121,8 @@ extraction) the `verify_with` hook, then the binary replacement. The same
   re-exported under `signatures` (`src/lib.rs:470`).
 - `self_update::zipsign_api` re-export of the underlying crate, under
   `signatures` (`src/lib.rs:462`).
-- `verify_keys(impl Into<Vec<VerifyingKey>>)` builder method
-  (`src/macros.rs:455`).
+- `verifying_keys(impl Into<Vec<VerifyingKey>>)` builder method
+  (`src/macros.rs:617`); the doc-hidden `verify_keys()` accessor keeps its name.
 - Errors: `Error::ChecksumMismatch { expected, computed }` (checksum mismatch,
   `src/errors.rs:29`), `Error::Signature` (wrapped `ZipsignError`,
   `src/errors.rs:110`), `Error::SignatureNonUTF8` (`src/errors.rs:114`),
@@ -140,8 +142,8 @@ extraction) the `verify_with` hook, then the binary replacement. The same
   (`src/checksum.rs:56`, `src/checksum.rs:58`).
 - A SHA-256 hex passed as a `Sha512` (or vice versa) does not match: lengths and
   contents differ.
-- Empty `verify_keys` means signature verification is skipped, not an error
-  (`src/update.rs:937`).
+- An empty `verifying_keys` set means signature verification is skipped, not an
+  error (`src/update.rs:937`).
 - Only `.tar.gz` and `.zip` archives are signature-verifiable; any other kind
   yields `Error::NoSignatures` (`src/update.rs:974`).
 - A non-UTF-8 archive file name yields `Error::SignatureNonUTF8`

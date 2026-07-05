@@ -21,7 +21,7 @@ All features and their wiring (`Cargo.toml:76-106`):
 
 | Feature | Enables (deps / sub-features) | Implies | Notes |
 |---------|------------------------------|---------|-------|
-| `default` | `reqwest`, `rustls`, `progress-bar`, `github` | client + TLS + progress + backend | the default feature set (`Cargo.toml:77`) |
+| `default` | `reqwest`, `rustls`, `progress-bar`, `github`, `archive-tar`, `compression-tar-gz` | client + TLS + progress + backend + tar/gzip | the default feature set (`Cargo.toml:77`) |
 | `reqwest` | `dep:reqwest` (blocking, json, http2) | an HTTP client | may coexist with `ureq`; `reqwest` is the default-picked client when both are on (`Cargo.toml:86`) |
 | `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | an HTTP client | to use `ureq` alone, set `--no-default-features` so `reqwest` (a default) is not pulled (`Cargo.toml:87`) |
 | `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | a TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
@@ -100,8 +100,8 @@ Feature-gated public items:
   `s3.rs`, `custom.rs`, `update.rs`).
 - `signatures`: re-export `pub use zipsign_api` and the
   `pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH]` alias
-  (`lib.rs:460-470`), plus the `verify_keys` builder setter (`macros.rs:455`)
-  and accessor (`macros.rs:195-197`).
+  (`lib.rs:460-470`), plus the `verifying_keys` builder setter (`macros.rs:617`)
+  and the doc-hidden `verify_keys()` accessor (`macros.rs:260`).
 - `checksums`: `pub use checksum::Checksum` (`lib.rs:498-500`) and the
   `verify_checksum` builder setter (`macros.rs:438-442`) and accessor
   (`macros.rs:191`).
@@ -149,7 +149,8 @@ message uses it instead of the `Debug` form. `detect_archive` returns
 CI (`.github/workflows/build.yml`) runs `make tests`, which builds and tests
 four single-client feature sets (`Makefile` `tests` target):
 
-- `tests/default`: `cargo test` (default = reqwest + rustls + progress-bar + github).
+- `tests/default`: `cargo test` (default = reqwest + rustls + progress-bar +
+  github + archive-tar + compression-tar-gz).
 - `tests/reqwest`: full optional set on reqwest (`REQWEST_FEATURES` =
   archives + compression + signatures + checksums + s3-auth).
 - `tests/ureq`: `--no-default-features --features "ureq native-tls

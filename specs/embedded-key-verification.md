@@ -1,6 +1,6 @@
 # Embedded Key Verification
 
-Status: pending
+Status: done
 
 Compile-time public key embedding and key rotation for signature verification.
 
@@ -64,7 +64,7 @@ feature, showing:
 const VERIFYING_KEY: self_update::VerifyingKey = *include_bytes!("my_key.pub");
 
 // in the update builder:
-.verify_keys(vec![VERIFYING_KEY])
+.verifying_keys(vec![VERIFYING_KEY])
 ```
 
 Note that the file at `my_key.pub` must be exactly 32 raw bytes. If the size does
@@ -85,7 +85,7 @@ Add or extend an example under `examples/` (alongside the existing `github`
 example) that demonstrates:
 
 - Declaring a compile-time `VerifyingKey` constant via `include_bytes!`.
-- Passing it to `verify_keys()` in a GitHub backend builder.
+- Passing it to `verifying_keys()` in a GitHub backend builder.
 
 ## Implementation notes
 
@@ -94,13 +94,14 @@ example) that demonstrates:
 - The `signatures` feature must be enabled for the example to compile
   (`#[cfg(feature = "signatures")]` or a dedicated example with the feature in
   `Cargo.toml`).
-- `verify_keys` already accepts `impl Into<Vec<VerifyingKey>>`, so a single
+- `verifying_keys` already accepts `impl Into<Vec<VerifyingKey>>`, so a single
   constant or a `vec!` of multiple constants both work without any API change.
 
 ## Tests
 
-- Static `const` key accepted: pass a compile-time constant through `verify_keys`
-  against a test archive signed with the matching key; verify `Ok`.
+- Static `const` key accepted: pass a compile-time constant through
+  `verifying_keys` against a test archive signed with the matching key; verify
+  `Ok`.
 - Rotation: create a test archive dual-signed with key A and key B; verify that
   passing only key A succeeds and passing only key B also succeeds.
 - Wrong key: verify that passing a key that did not sign the archive yields

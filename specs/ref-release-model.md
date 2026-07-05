@@ -9,7 +9,7 @@ The release data model and the sealed fetch traits in `src/update.rs`: the
 `Releases` collection type and its query/ordering semantics; the sealed-trait
 design (`ReleaseUpdate: UpdateConfig: sealed::Sealed`); and the exact contract
 of each backend fetch method, including the `get_latest_release` vs
-`get_latest_releases` distinction and async parity. The custom-backend
+`get_newer_releases` distinction and async parity. The custom-backend
 `ReleaseSource` / `AsyncReleaseSource` traits are covered only for the
 fetch-method contract they document; the orchestration helpers
 (`choose_latest_release`, `finish_update`, etc.) are out of scope.
@@ -68,8 +68,9 @@ Constructors:
 
 - `Releases::new(releases, current_version: String)` is `pub(crate)`: the updater
   path's constructor, storing `Some(current_version)`.
-- `Releases::from_listing(releases)` is `pub(crate)`: the `ReleaseList::fetch`
-  constructor, storing `None` for the current version.
+- `Releases::from_listing(releases)` is **public** (`update.rs:306`): the
+  `ReleaseList::fetch` constructor, storing `None` for the current version. It
+  also lets downstream tests build the bare-listing state.
 - `Releases::from_releases(releases, current_version: impl Into<String>)` is the
   **public** test constructor (the type is `#[non_exhaustive]` with a crate-private
   primary constructor, so downstream code cannot build one with a struct literal).
@@ -124,15 +125,21 @@ The seal is `sealed::Sealed` (`src/update.rs:445-447`), a `pub(crate)` empty
 trait implemented only inside the crate. `UpdateConfig: sealed::Sealed`
 (`:462`) is the shared configuration/accessor surface (current version, target,
 release tag, asset identifier, bin name/install path/path-in-archive, progress
-and output flags, progress template/chars, auth token, request timeout/headers/
-client, progress and verify callbacks, asset matcher, and feature-gated
-`verify_checksum` / `verify_keys`), plus the provided `api_headers` helper
-(`:546-561`). `ReleaseUpdate: UpdateConfig` (`:578`) adds the fetch methods and
+and output flags, progress template/chars, auth token), plus the provided
+`api_headers` helper. The crate-private plumbing accessors (request
+timeout/headers/client, callbacks, matcher, checksum, keys) live on the
+`pub(crate) trait UpdateInternals` (see `update-config-internal-accessors.md`).
+`ReleaseUpdate: UpdateConfig` adds the fetch methods and
 the provided `update` / `update_extended` flow. Because the supertrait chain
 requires `sealed::Sealed`, neither trait can be implemented for a foreign type:
-downstream code can *call* these traits (every backend `build()` returns a
-`Box<dyn ReleaseUpdate>`) but cannot *implement* them, leaving the crate free to
-evolve the surface without a breaking change.
+downstream code can *call* these traits but cannot *implement* them, leaving the
+crate free to evolve the surface without a breaking change. Each backend
+`build()` returns the concrete `Update` (not `Box<dyn ReleaseUpdate>`); the
+`Update` is `Send` and exposes the verbs (`update`, `update_extended`,
+`get_latest_release`, `get_newer_releases`, `get_release_version`, plus the
+convenience `is_update_available() -> Result<Option<Release>>`, the newest
+strictly-newer release or `None` when up to date) as inherent methods, so
+`.build()?.update()?` needs no trait import.
 
 The accessors live on `UpdateConfig` (the supertrait), not on `ReleaseUpdate`,
 so they resolve on a `dyn ReleaseUpdate` value, on a generic `R: ReleaseUpdate`,
@@ -150,25 +157,31 @@ implementable counterpart to the sealed `ReleaseUpdate`.
 
 `ReleaseUpdate` exposes three sync fetch methods:
 
-- `get_latest_release(&self) -> Result<Releases>` (`:588`): a one-element
+- `get_latest_release(&self) -> Result<Releases>`: a one-element
   `Releases` wrapping the **raw** newest release, unfiltered, carrying the
   configured current version. Because the newest release is always present,
   `latest()` is always `Some`, and `is_update_available()` returns `false` when
   that newest release is not strictly newer than the current version.
-- `get_latest_releases(&self) -> Result<Releases>` (`:596`): the candidate list
+- `get_newer_releases(&self) -> Result<Releases>` (renamed from
+  `get_latest_releases`): the candidate list
   as a `Releases`, newest-first, **filtered to releases strictly newer** than the
   configured current version. It is therefore empty (`latest()` is `None`) when
   already up to date, and any entry present is a genuine update. This is the
   documented distinction from `get_latest_release`: raw-newest vs
   strictly-newer-filtered.
-- `get_release_version(&self, ver) -> Result<Release>` (`:599`): the single
+- `get_release_version(&self, ver) -> Result<Release>`: the single
   `Release` matching an explicit tag/version (returns a bare `Release`, not a
   `Releases`).
+
+The concrete backend `Update` types also expose the inherent
+`is_update_available(&self) -> Result<Option<Release>>`, a convenience over
+`get_newer_releases` returning the newest strictly-newer release (or `None` when
+up to date).
 
 The async counterparts are methods on the public sealed `AsyncReleaseUpdate` trait
 (`cfg(feature = "async")`), used only through generics (never as a trait object) so its RPITIT
 `async fn`s need no boxing: `get_latest_release_async() -> Result<Releases>`,
-`get_latest_releases_async() -> Result<Releases>`, and
+`get_newer_releases_async() -> Result<Releases>`, and
 `get_release_version_async(ver) -> Result<Release>`. Each returns `impl Future<Output = ...> +
 Send`, mirroring the sync method of the same name and the same raw-newest vs
 strictly-newer-filtered distinction. The trait also carries default `update_async` /
@@ -210,13 +223,16 @@ with `into_vec()`.
   `assets() -> &[ReleaseAsset]`.
 - `pub struct Releases` `#[non_exhaustive]`; `all`, `len`, `is_empty`,
   `current_version() -> Option<&str>`, `latest`, `into_vec`, `is_update_available`;
-  owned and borrowed `IntoIterator`. `Releases::new` / `Releases::from_listing` are
-  `pub(crate)`; `Releases::from_releases(releases, current_version)` is public.
+  owned and borrowed `IntoIterator`. `Releases::new` is
+  `pub(crate)`; `Releases::from_releases(releases, current_version)` and
+  `Releases::from_listing(releases)` are public.
 - `ReleaseStatus::version() -> Option<&str>` (alongside `into_version_status`,
   `is_up_to_date`, `is_updated`, `updated_release`, `into_updated_release`).
 - `pub trait UpdateConfig: sealed::Sealed` (accessors + `api_headers`).
 - `pub trait ReleaseUpdate: UpdateConfig` (`get_latest_release`,
-  `get_latest_releases`, `get_release_version`, `update`, `update_extended`).
+  `get_newer_releases`, `get_release_version`, `update`, `update_extended`).
+- Each backend's concrete `Update` is `Send` and exposes the verbs plus
+  `is_update_available() -> Result<Option<Release>>` as inherent methods.
 - `pub trait ReleaseSource: Send + Sync` and (async) `AsyncReleaseSource` (not
   sealed). `pub trait AsyncReleaseUpdate: UpdateConfig` (async, sealed) and `pub(crate) mod sealed`.
 
@@ -224,8 +240,8 @@ with `into_vec()`.
 
 - `ReleaseAsset` and `Release` and `Releases` stay `#[non_exhaustive]` with
   encapsulated (`pub(crate)`) fields; outside construction goes through
-  `ReleaseAsset::new` / `Release::builder` / `Releases::from_releases` (and the
-  crate-internal `Releases::new` / `Releases::from_listing`). Reads go through the
+  `ReleaseAsset::new` / `Release::builder` / `Releases::from_releases` /
+  `Releases::from_listing` (and the crate-internal `Releases::new`). Reads go through the
   getters (`name`/`version`/`date`/`body`/`assets`, `download_url`), which return
   borrows.
 - `Release` / `ReleaseAsset` string fields are `Arc<str>`, so `Clone` shares the
@@ -242,8 +258,10 @@ with `into_vec()`.
   parse error of the first release reached that fails to parse.
 - Owned and borrowed iteration both follow `all()` order.
 - `get_latest_release` is raw newest (always `latest().is_some()`);
-  `get_latest_releases` is strictly-newer-filtered (empty when up to date). Async
-  siblings preserve this.
+  `get_newer_releases` is strictly-newer-filtered (empty when up to date). Async
+  siblings (`get_newer_releases_async`) preserve this. The custom-source
+  `ReleaseSource::get_latest_releases` keeps its name (an unfiltered candidate
+  list; the updater filters downstream).
 - Accessors live on `UpdateConfig` and borrow; the trait chain stays sealed via
   `sealed::Sealed` so `ReleaseUpdate` / `UpdateConfig` cannot be implemented
   downstream, while `ReleaseSource` / `AsyncReleaseSource` remain implementable.

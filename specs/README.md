@@ -44,8 +44,8 @@ can be built). Keep each row's status current with `spec.py set`.
 | Update Config Internal Accessors | done | [update-config-internal-accessors.md](update-config-internal-accessors.md) |
 | Releases Test Constructor | done | [releases-test-constructor.md](releases-test-constructor.md) |
 | Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
-| Embedded Key Verification | pending | [embedded-key-verification.md](embedded-key-verification.md) |
-| Corporate Network Config | research | [corporate-network-config.md](corporate-network-config.md) |
+| Embedded Key Verification | done | [embedded-key-verification.md](embedded-key-verification.md) |
+| Corporate Network Config | pending | [corporate-network-config.md](corporate-network-config.md) |
 
 ## Conventions
 

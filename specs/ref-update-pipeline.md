@@ -37,9 +37,9 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 
 1. Print the target-arch / current-version header (`print_check_header`, `update.rs:620`),
    gated on `show_output`.
-2. If `release_tag()` is set, fetch exactly that tag via `get_release_version` (`update.rs:600`).
-   Otherwise fetch the candidate list via `get_latest_releases()` and run
-   `choose_latest_release` (`update.rs:595`, `631`), which: filters to releases strictly newer
+2. If `release_tag()` is set, fetch exactly that tag via `get_release_version`.
+   Otherwise fetch the candidate list via `get_newer_releases()` and run
+   `choose_latest_release`, which: filters to releases strictly newer
    than the current version (`bump_is_greater`), sorts them semver-descending so selection is
    order-independent, prefers the newest semver-*compatible* release, else falls back to the
    newest available (flagged "*NOT* compatible"), else returns `Ok(None)` => `UpToDate`
@@ -48,8 +48,10 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 3. `resolve_and_confirm` (`update.rs:716`) selects the asset: a custom `asset_matcher()` closure
    if present, otherwise `Release::asset_for(target, asset_identifier())`
    (`update.rs:86`), which matches by `target` substring (optionally `identifier`), then by
-   `OS`+`ARCH` substring, then by `identifier` alone. No match => `Error::Release`
-   "No asset found for target".
+   `OS`+`ARCH` substring, then by `identifier` alone. No match =>
+   `Error::NoReleaseFound { target: Some(...) }`. A server-supplied asset name that is empty,
+   `.`/`..`, contains a path separator, or is absolute =>
+   `Error::InvalidAssetName { name }` before any file is created.
 
 ### Download
 
@@ -152,11 +154,12 @@ via `into_version_status`.
 
 - `update::ReleaseUpdate` (sealed): `update(&self) -> Result<VersionStatus>`,
   `update_extended(&self) -> Result<ReleaseStatus>`, plus `get_latest_release`,
-  `get_latest_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
-  supertrait.
+  `get_newer_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
+  supertrait. Each backend `build()` returns the concrete `Update` (`Send`), which
+  exposes these verbs plus `is_update_available` as inherent methods.
 - `update::AsyncReleaseUpdate` (sealed via `UpdateConfig: sealed::Sealed`, feature `async`): the
   async counterpart of `ReleaseUpdate`. Fetch verbs `get_latest_release_async`,
-  `get_latest_releases_async`, `get_release_version_async`, plus default-bodied `update_async` (->
+  `get_newer_releases_async`, `get_release_version_async`, plus default-bodied `update_async` (->
   `VersionStatus`) and `update_extended_async` (-> `ReleaseStatus`) that route to the free
   `update::update_extended_async`. Its methods are RPITIT (`impl Future<Output = ...> + Send`), so
   the trait is not object-safe (nameable and usable as a generic bound, like `AsyncReleaseSource`,
@@ -166,7 +169,9 @@ via `into_version_status`.
 - `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
   `progress_style`, `replace_headers`, `request_header`, `download_to`, `download_to_async`
   (feature `async`).
-- `Extract`: `from_source`, `archive`, `extract_into`, `extract_file`.
+- `Extract`: `from_source`, `archive`, `extract_into`, `extract_file`; the path
+  arguments take `impl AsRef<Path>` (as do `Move` / `MoveAll`), with no lifetime
+  parameter on the types.
 - `ArchiveKind` (`#[non_exhaustive]`): `Plain(Option<Compression>)`, `Tar(...)` (feature
   `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`.
 - `Move`: `from_source`, `replace_using_temp`, `to_dest`.
@@ -219,7 +224,7 @@ download/extract/replace and `MoveAll` flows.
 
 - `ref-signatures-and-checksums.md` (verify primitives), `checksum-verification.md`,
   `checksum-from-asset.md`
-- `post-update-verify.md` (the `verify_with` hook)
+- `post-update-verify.md` (the `verify_binary` hook)
 - `multi-file-install.md` (`MoveAll`)
 - `progress-callback.md` (download progress)
 - `custom-asset-matching.md` (the `asset_matcher` override)

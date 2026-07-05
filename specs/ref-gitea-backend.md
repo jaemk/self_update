@@ -30,12 +30,16 @@ Two builders exist, each reached through a `configure()` constructor:
 
 `UpdateBuilder` exposes two terminal methods:
 
-- `build()` returns `Box<dyn ReleaseUpdate>` for the sync API (`gitea.rs:279-281`).
-- `build_async()` (feature `async`) returns the concrete `Update` so the inherent
-  `*_async` methods are reachable (`gitea.rs:287-290`). This is the "AsyncUpdate"
-  entry point; there is no separate async builder type.
+- `build()` returns the concrete `Update` (`gitea.rs:326`).
+- `build_async()` (feature `async`) also returns the concrete `Update`, with the
+  inherent `*_async` methods reachable (`gitea.rs:335`). There is no separate async
+  builder type.
 
-Both delegate to the private `build_update()` helper (see below).
+`Update` is `Send` and exposes the update verbs as inherent methods (`update`,
+`update_extended`, `get_latest_release`, `get_newer_releases`, `get_release_version`,
+`is_update_available`), so no trait import is needed. Both terminal methods delegate
+to the private `build_update()` helper (see below). `ReleaseList` has `fetch` and,
+under `async`, `fetch_async` (`gitea.rs:225`), both returning `Result<Releases>`.
 
 ### Route shapes and host
 
@@ -45,17 +49,16 @@ Both delegate to the private `build_update()` helper (see below).
 - Fetch-by-tag appends `/tags/{tag}` to that base, with the tag percent-encoded via
   `urlencoding::encode(ver)`: `<base>/tags/{encoded_tag}`
   (`gitea.rs:338` sync, `gitea.rs:484` async).
-- The custom host is set with `url(impl Into<String>)` on both builders. The setter
+- The custom host is set with `host(impl Into<String>)` on both builders
+  (`gitea.rs:94`, `gitea.rs:272`). The setter
   carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped); it was
-  renamed from `instance_url` / `with_host` in earlier work, but no alias remains.
-  The setter's parameter is named `url` (matching the github/gitlab `url(url)` signature;
-  behavior unchanged: it still writes `self.host`). Its doc states the instance host
+  renamed `url` -> `host` (and earlier `instance_url` / `with_host` -> `url`), but no
+  alias remains. Its doc states the instance host
   only (scheme + host, no trailing slash and no `/api/v1`): the crate appends the
-  `/api/v1/...` path itself (`gitea.rs:71-77`, `gitea.rs:218-224`). Gitea has no
-  canonical public host, so `url` is required: `build()` / `build_update()` `bail!`
-  with `Error::MissingField { field: "url" }` when it is unset, with a message that names the setter
-  ("`url` required (gitea has no default host; call `.url(...)`)")
-  (`gitea.rs:127-130`, `gitea.rs:250-253`). The string setters (`url`, `repo_owner`,
+  `/api/v1/...` path itself. Gitea has no
+  canonical public host, so `host` is required: `build()` / `build_update()` return
+  `Error::MissingField { field: "host" }` when it is unset
+  (`gitea.rs:153`, `gitea.rs:297`). The string setters (`host`, `repo_owner`,
   `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's common
   setters) take `impl Into<String>`.
 - Unlike GitHub, Gitea has no dedicated `/releases/latest` endpoint, so "latest" is
@@ -66,10 +69,14 @@ Both delegate to the private `build_update()` helper (see below).
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`
   (`gitea.rs:113-116`); on `UpdateBuilder` it comes through the common setters and is
   stored in `CommonConfig`.
-- Headers are built by the free function `api_headers(auth_token)`
-  (`gitea.rs:531`). It always sets `User-Agent: rust-reqwest/self-update`. Auth is
+- Headers are built by the free function `api_headers(auth_token)`.
+  It always sets `User-Agent: rust-reqwest/self-update`. Auth is
   applied centrally by `apply_auth` (`common.rs`), which renders the token as
-  `Authorization: token <token>` (the Gitea `token` scheme, not `Bearer`). A token
+  `Authorization: token <token>` (the Gitea `token` scheme, not `Bearer`). The token
+  is host-gated: it is only attached to requests whose host matches the configured
+  instance host (or an `allow_auth_host` entry), over https;
+  `dangerously_allow_non_https_auth_forwarding()` relaxes the https requirement, and a
+  user-set `Authorization` via `request_header` overrides it. A token
   that cannot parse into a header value surfaces as `Error::InvalidAuthToken`.
 - The `Update`'s `UpdateConfig` accessor override wires this same `api_headers`
   via `impl_update_config_accessors!` (`gitea.rs:387-391`), so the trait default
@@ -87,11 +94,11 @@ Both delegate to the private `build_update()` helper (see below).
 - "Single newest" is `releases[0]` of the first page via `newest_plan`; the code relies on the
   list endpoint's default descending (newest-first) order rather than sorting. The latest path does
   not paginate; it reads only the first response.
-- The newer-releases paths fold the strictly-newer filter into the plan: with `stop_at =
-  Some(current_version)`, the parser keeps releases where `bump_is_greater(current, version)` is
-  true and sets `Page::stop` at the first that is not (early-stop, relying on newest-first order),
-  preserving source order. `ReleaseList::fetch` passes `stop_at = None` and walks all pages. The
-  downstream `choose_latest_release` re-sort still selects the same release as a full walk.
+- The newer-releases paths (`get_newer_releases` / `get_newer_releases_async`) fold the
+  strictly-newer filter into the plan: with `stop_at = Some(current_version)`, the parser keeps
+  releases where `bump_is_greater(current, version)` is true and drops the rest per-item,
+  preserving source order; pagination continues through all pages regardless.
+  `ReleaseList::fetch` passes `stop_at = None` and walks all pages unfiltered.
 
 ### JSON to model
 
@@ -112,14 +119,13 @@ Both delegate to the private `build_update()` helper (see below).
 
 ### Errors
 
-- Missing host, owner, or name at build time -> `Error::MissingField { field }`, with
-  a message that names the missing setter (e.g. "`url` required (gitea has no default
-  host; call `.url(...)`)") (`gitea.rs:127-146`, `gitea.rs:250-269`).
+- Missing host, owner, or name at build time -> `Error::MissingField { field }` with
+  `field` naming the missing setter (`"host"`, `"repo_owner"`, `"repo_name"`).
 - A deferred `request_header` conversion failure surfaces from `build()` via
-  `request.check()` / `CommonBuilderConfig::build` as `Error::InvalidHeader`
-  (`gitea.rs:122`, `gitea.rs:271`).
-- A non-array list payload or empty releases array -> `Error::NoReleaseFound { target: None }`
-  (`gitea.rs:334-339`, `gitea.rs:456-461`). A missing required JSON field ->
+  `request.check()` / `CommonBuilderConfig::build` as `Error::InvalidHeader`.
+- An empty releases array -> `Error::NoReleaseFound { target: None }`; a non-array list
+  payload -> `Error::InvalidResponse { source }` (the serde_json error is chained).
+  A missing required JSON field ->
   `Error::MissingAssetField { field }` (see JSON-to-model above).
 - A token that cannot parse into a header value -> `Error::InvalidAuthToken` (via `apply_auth`).
 - Transport/HTTP failures propagate from the shared `send` / `send_async` helpers.
@@ -136,16 +142,19 @@ validate identically and cannot drift.
 
 - `gitea::ReleaseList`, `gitea::ReleaseListBuilder`
   - `ReleaseList::configure() -> ReleaseListBuilder`
-  - `ReleaseListBuilder`: `url`, `repo_owner`, `repo_name`, `filter_target`,
+  - `ReleaseListBuilder`: `host`, `repo_owner`, `repo_name`, `filter_target`,
     `auth_token`, the `request_config_setters!` setters, `build`
   - `ReleaseList::fetch() -> Result<Releases>` (filters by `target` when set; returns a `Releases` whose
-    `current_version()` is `None`, so recover the `Vec<Release>` with `into_vec()`)
+    `current_version()` is `None`, so recover the `Vec<Release>` with `into_vec()`);
+    `ReleaseList::fetch_async()` (feature `async`)
 - `gitea::Update` (`#[non_exhaustive]`), `gitea::UpdateBuilder`
   - `Update::configure() -> UpdateBuilder`
-  - `UpdateBuilder`: `new`, `url`, `repo_owner`, `repo_name`, common setters,
-    `build`, `build_async` (feature `async`)
-  - `Update` implements `ReleaseUpdate` (sync) and the public sealed `AsyncReleaseUpdate`
-    (feature `async`)
+  - `UpdateBuilder`: `new`, `host`, `repo_owner`, `repo_name`, common setters,
+    `build`, `build_async` (feature `async`); both return the concrete `Update`
+  - `Update` is `Send`, exposes the inherent verbs (`update`, `update_extended`,
+    `get_latest_release`, `get_newer_releases`, `get_release_version`,
+    `is_update_available`), and implements `ReleaseUpdate` (sync) and the public sealed
+    `AsyncReleaseUpdate` (feature `async`, including `get_newer_releases_async`)
 - Free `api_headers` and the `releases_plan` / `newest_plan` / `single_plan` plan builders are
   private to the module.
 
@@ -159,12 +168,13 @@ fields do not break downstream code; it is constructed only through the builder.
 - Base route shape is exactly `<host>/api/v1/repos/<owner>/<repo>/releases`, shared by
   sync, async, and `ReleaseList` paths via `releases_url()` (`gitea.rs:314-319`).
 - "Latest" is `releases[0]` of the first page, depending on the endpoint's newest-first
-  ordering; the latest path does not paginate (`gitea.rs:343`, `gitea.rs:462`).
+  ordering; the latest path does not paginate.
 - Newer-release filtering is strict (`bump_is_greater`), folded into the page parser via
-  `stop_at` / `Page::stop` (early-stop at the first non-newer release), and preserves source order.
-- `url` is required (no default host); missing it is `Error::MissingField { field: "url" }`.
+  `stop_at` as a per-item filter, and preserves source order; pagination walks all pages.
+- `host` is required (no default host); missing it is `Error::MissingField { field: "host" }`.
 - Auth uses the `token <token>` scheme with a fixed `rust-reqwest/self-update`
-  User-Agent.
+  User-Agent, and the token is only sent to the configured instance host (or an
+  `allow_auth_host` entry) over https.
 - `version` has a single leading `v` stripped; `name` defaults to the tag.
 
 ## Tests
@@ -175,16 +185,15 @@ In `src/backends/gitea.rs` `mod tests` (`gitea.rs:517-1186`), backed by a loopba
 - Sync `ReleaseUpdate` fetch: one-element latest wrap, strictly-newer filtering,
   no-update-when-up-to-date, and single-vs-list agreement
   (`gitea.rs:628-754`).
-- Builder shape: `url`/`filter_target` exist on `ReleaseListBuilder`; `ReleaseList`
-  and `Update` builds require `url`, `repo_owner`, `repo_name`; invalid header surfaces
-  as `Error::InvalidHeader`; `releases_url` shape; identifier and `bin_name` wiring
-  (`gitea.rs:756-976`).
-- `api_headers` override uses the Gitea User-Agent and `token` scheme
-  (`gitea.rs:779-809`).
+- Builder shape: `host`/`filter_target` exist on `ReleaseListBuilder`; `ReleaseList`
+  and `Update` builds require `host`, `repo_owner`, `repo_name`; invalid header surfaces
+  as `Error::InvalidHeader`; `releases_url` shape; identifier and `bin_name` wiring.
+- `api_headers` override uses the Gitea User-Agent and `token` scheme.
+- `ReleaseList::fetch_async` returns a bare listing without a current version.
 - Async (feature `async`): latest parse, `Link` pagination across two pages,
   `/tags/{ver}` single-object parse, missing-`tag_name` error, newer-only filtering,
-  empty-when-up-to-date, accumulate-then-filter across pages, empty-array error,
-  non-array-payload error (`gitea.rs:978-1185`).
+  empty-when-up-to-date, accumulate-then-filter across pages, empty-array error
+  (`NoReleaseFound`), non-array-payload error (`InvalidResponse`).
 
 ## Related
 
