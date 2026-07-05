@@ -1862,10 +1862,12 @@ mod tests {
             .unwrap();
 
         let (bin, target) = accessor_via_release_update_bound(&upd);
-        assert_eq!(bin, "app");
+        // `bin_name(...)` appends the platform exe suffix (".exe" on windows).
+        let expected_bin = format!("app{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(bin, expected_bin);
         assert_eq!(target, "x86_64-unknown-linux-gnu");
         assert_eq!(accessor_via_dyn_release_update(&upd), "1.0.0");
-        assert_eq!(accessor_via_update_config_bound(&upd), "app");
+        assert_eq!(accessor_via_update_config_bound(&upd), expected_bin);
         // B1: the internal accessor is reachable through the `UpdateInternals` bound.
         assert_eq!(internal_accessor_via_update_internals_bound(&upd), 0);
     }

@@ -509,7 +509,9 @@ mod tests {
     fn shared_accessors_are_wired() {
         let upd = configured(Arc::new(AtomicUsize::new(0)));
         assert_eq!(upd.target(), "x86_64-unknown-linux-gnu");
-        assert_eq!(upd.bin_name(), "app");
+        // `bin_name(...)` appends the platform exe suffix (".exe" on windows).
+        let expected_bin = format!("app{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(upd.bin_name(), expected_bin);
         assert_eq!(upd.current_version(), "1.0.0");
         // The custom backend has no auth token (its source owns listing auth).
         assert_eq!(upd.auth_token(), None);
