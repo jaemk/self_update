@@ -502,7 +502,7 @@ impl crate::update::AsyncFetch for Update {
 #[cfg(feature = "s3-auth")]
 mod auth {
     use crate::errors::*;
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use percent_encoding::{utf8_percent_encode, AsciiSet, PercentEncode, NON_ALPHANUMERIC};
     use sha2::{Digest, Sha256};
     use std::{

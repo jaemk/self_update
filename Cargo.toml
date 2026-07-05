@@ -36,15 +36,15 @@ tempfile = "3"
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "6", default-features = false, features = ["time"], optional = true }
+zip = { version = "8", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
 indicatif = "0.18"
-quick-xml = "0.38"
+quick-xml = "0.41"
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-zipsign-api = { version = "0.1", default-features = false, optional = true }
+zipsign-api = { version = "0.2", default-features = false, optional = true }
 
 http = "1"
 
@@ -52,9 +52,9 @@ reqwest = { version = "0.13", default-features = false, optional = true, feature
 
 ureq = { version = "3.0.6", optional = true, default-features = false, features = ["gzip", "json", "socks-proxy", "charset"]}
 
-hmac = { version = "0.12.1", optional = true }
+hmac = { version = "0.13", optional = true }
 percent-encoding = { version = "2.3.2", optional = true }
-sha2 = { version = "0.10.0", optional = true }
+sha2 = { version = "0.11.0", optional = true }
 time = { version = "0.3.45", optional = true }
 url = { version = "2.5.8", optional = true }
 
