@@ -29,6 +29,17 @@ fn clamp_max_keys(max_keys: u16) -> u16 {
     max_keys.clamp(1, DEFAULT_MAX_KEYS)
 }
 
+/// The AWS SigV4 `X-Amz-Expires` bound: a presigned URL may live between 1 second and 7 days.
+#[cfg(feature = "s3-auth")]
+const MAX_SIGNATURE_TTL_SECS: u64 = 604_800;
+
+/// Clamp a requested presigned-URL TTL into AWS's `1..=604800` (1s..7d) `X-Amz-Expires` range, so a
+/// too-long TTL does not sign successfully only to be rejected by S3 at request time.
+#[cfg(feature = "s3-auth")]
+fn clamp_signature_ttl(ttl: Duration) -> Duration {
+    Duration::from_secs(ttl.as_secs().clamp(1, MAX_SIGNATURE_TTL_SECS))
+}
+
 /// Re-export the S3 [`AccessKey`] credential type at the backend module level so consumers can
 /// name it as `self_update::backends::s3::AccessKey` (e.g. to build one explicitly). Available
 /// under the `s3-auth` feature.
@@ -118,10 +129,10 @@ impl ReleaseListBuilder {
     }
 
     /// Set the presigned-URL expiry applied to SigV4-signed listing and download URLs under the
-    /// `s3-auth` feature (default 300s).
+    /// `s3-auth` feature (default 300s). Clamped to AWS's `X-Amz-Expires` range of 1s..=7d.
     #[cfg(feature = "s3-auth")]
     pub fn signature_ttl(&mut self, ttl: Duration) -> &mut Self {
-        self.signature_ttl = ttl;
+        self.signature_ttl = clamp_signature_ttl(ttl);
         self
     }
 
@@ -344,10 +355,10 @@ impl UpdateBuilder {
     }
 
     /// Set the presigned-URL expiry applied to SigV4-signed listing and download URLs under the
-    /// `s3-auth` feature (default 300s).
+    /// `s3-auth` feature (default 300s). Clamped to AWS's `X-Amz-Expires` range of 1s..=7d.
     #[cfg(feature = "s3-auth")]
     pub fn signature_ttl(&mut self, ttl: Duration) -> &mut Self {
-        self.signature_ttl = ttl;
+        self.signature_ttl = clamp_signature_ttl(ttl);
         self
     }
 
@@ -2215,6 +2226,27 @@ mod tests {
             "above 1000 clamps to the 1000 ceiling"
         );
         assert_eq!(super::clamp_max_keys(u16::MAX), 1000);
+    }
+
+    #[cfg(feature = "s3-auth")]
+    #[test]
+    fn signature_ttl_clamps_to_aws_expires_range() {
+        use std::time::Duration;
+        assert_eq!(
+            super::clamp_signature_ttl(Duration::from_secs(0)),
+            Duration::from_secs(1),
+            "0 clamps up to the 1s floor"
+        );
+        assert_eq!(
+            super::clamp_signature_ttl(Duration::from_secs(300)),
+            Duration::from_secs(300),
+            "in-range passes through"
+        );
+        assert_eq!(
+            super::clamp_signature_ttl(Duration::from_secs(1_000_000)),
+            Duration::from_secs(604_800),
+            "above 7d clamps to the 604800s ceiling"
+        );
     }
 
     #[test]

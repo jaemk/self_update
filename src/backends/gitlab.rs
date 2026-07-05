@@ -204,7 +204,7 @@ impl ReleaseList {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases = run_paginated(
@@ -228,7 +228,7 @@ impl ReleaseList {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases = crate::backends::run_paginated_async(
@@ -358,7 +358,7 @@ impl Update {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         )
     }
 }
