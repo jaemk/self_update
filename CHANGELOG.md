@@ -1,6 +1,8 @@
 # Changelog
 
 ## [unreleased]
+
+## [1.0.0-rc.2]
 Further breaking changes finalizing the 1.0 surface (still in release-candidate). They make the
 HTTP transport an injectable object-safe trait, restructure the error type, finalize the release
 model, reshape the feature surface, and change several builder signatures. The crate moves to
