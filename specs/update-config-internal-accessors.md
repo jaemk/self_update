@@ -1,6 +1,19 @@
 # UpdateConfig internal accessors
 
-Status: needs research
+Status: implemented
+
+## Resolution
+
+The crate-private-typed accessors (`request_timeout`, `request_headers`, `request_config`,
+`request_client`, `request_async_client`, `progress_callback`, `verify_callback`, `asset_matcher`,
+and the feature-gated `verify_checksum` / `verify_keys`) now live on a separate `pub(crate) trait
+UpdateInternals: sealed::Sealed` in `src/update.rs`. The public sealed `UpdateConfig` keeps only
+public-typed accessors plus `api_headers`. `ReleaseUpdate` and `AsyncReleaseUpdate` require
+`UpdateInternals` as a supertrait (so the orchestrator bounds `U: ReleaseUpdate` /
+`U: AsyncReleaseUpdate` still reach the internal accessors), and `resolve_and_confirm`,
+`build_download`, and `FinishCtx::capture` re-bound to `U: UpdateConfig + UpdateInternals`. The
+`impl_update_config_accessors!` macro emits a separate `impl UpdateInternals` block per backend
+(`@internals` arm), covering github/gitlab/gitea/s3/custom and the generic `AsyncUpdate<S>`.
 
 ## Problem
 

@@ -25,4 +25,4 @@ generics, never a `dyn` object, so the futures need no `async-trait` or boxing. 
 `.retries()` is a documented no-op for the custom backend.
 
 See `src/backends/custom.rs`, `examples/custom.rs`, and the CHANGELOG `[1.0.0]` Added
-and Changed entries. Design notes are in `local/design-g4-custom-backends.md`.
+and Changed entries.

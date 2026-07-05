@@ -1,7 +1,7 @@
 /*!
 Example updating an executable from a custom release source (user-defined backend)
 
-`cargo build --example custom --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`
+`cargo build --example custom --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 
 Use this when the built-in backends (github, gitlab, gitea, s3) don't cover your host. Implement
 `ReleaseSource` for your host — the three methods that say *where releases come from* — then
@@ -12,10 +12,10 @@ over your source.
 With the `async` feature, implement `AsyncReleaseSource` (or wrap a `Clone` sync source in
 `Blocking`) and drive the update through `custom::AsyncUpdate`.
 
-`cargo build --example custom --features "async archive-tar archive-zip compression-flate2 compression-zip-deflate"`
+`cargo build --example custom --features "async archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 */
 
-use self_update::{cargo_crate_version, Release, ReleaseAsset, ReleaseSource};
+use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
 
 // ---------------------------------------------------------------------------
 // Minimal `ReleaseSource` implementation
@@ -44,7 +44,7 @@ impl ReleaseSource for MyHost {
             .build()
     }
 
-    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         // Return the full candidate list. The updater discards releases that are not
         // strictly newer than the current version and picks the newest semver-compatible
         // one, so you do not need to pre-filter by `current`.
@@ -80,7 +80,7 @@ impl ReleaseSource for MyHost {
 #[allow(dead_code)]
 mod async_update {
     use self_update::backends::custom::{AsyncUpdate, Blocking};
-    use self_update::{AsyncReleaseSource, Release, ReleaseAsset};
+    use self_update::{AsyncReleaseSource, AsyncReleaseUpdate, Release, ReleaseAsset};
 
     // A natively-async source: implement `AsyncReleaseSource` when your listing
     // transport is already async (e.g. you hold a `reqwest::Client`).
@@ -98,7 +98,7 @@ mod async_update {
                 .build()
         }
 
-        async fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+        async fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
             Ok(vec![self.get_latest_release().await?])
         }
 

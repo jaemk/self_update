@@ -1,59 +1,81 @@
 /*!
 Gitlab releases
 */
-use crate::http_client::{header, HttpResponse};
+use crate::http_client::{HeaderMap, header};
 
 use crate::backends::common::{CommonBuilderConfig, CommonConfig, RequestConfig};
-use crate::backends::{collect_paginated, first_page_url, next_link, send};
+use crate::backends::{Page, PageRequest, first_page_url, next_link, run_paginated};
 use crate::version::bump_is_greater;
 use crate::{
     errors::*,
     update::{Release, ReleaseAsset, ReleaseUpdate, Releases},
 };
+use serde::Deserialize;
 
-impl ReleaseAsset {
-    /// Parse a release-asset json object
-    ///
-    /// Errors:
-    ///     * Missing required name & download-url keys
-    fn from_asset_gitlab(asset: &serde_json::Value) -> Result<ReleaseAsset> {
-        let download_url = asset["url"]
-            .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `url`"))?;
-        let name = asset["name"]
-            .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Asset missing `name`"))?;
-        Ok(ReleaseAsset {
-            download_url: download_url.to_owned(),
-            name: name.to_owned(),
-        })
+/// GitLab release-asset link JSON shape (assets live under `assets.links`). Private DTO converted
+/// into the public [`ReleaseAsset`]; keeping it private keeps `Deserialize` out of `ReleaseAsset`'s
+/// public API.
+#[derive(Deserialize)]
+struct AssetDto {
+    name: Option<String>,
+    url: Option<String>,
+}
+
+impl AssetDto {
+    fn into_asset(self) -> Result<ReleaseAsset> {
+        let download_url = self.url.ok_or(Error::MissingAssetField { field: "url" })?;
+        let name = self
+            .name
+            .ok_or(Error::MissingAssetField { field: "name" })?;
+        Ok(ReleaseAsset::new(name, download_url))
     }
 }
 
-impl Release {
-    fn from_release_gitlab(release: &serde_json::Value) -> Result<Release> {
-        let tag = release["tag_name"]
-            .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `tag_name`"))?;
-        let date = release["created_at"]
-            .as_str()
-            .ok_or_else(|| format_err!(Error::Release, "Release missing `created_at`"))?;
-        let name = release["name"].as_str().unwrap_or(tag);
-        let assets = release["assets"]["links"]
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No assets found"))?;
-        let body = release["description"].as_str().map(String::from);
-        let assets = assets
-            .iter()
-            .map(ReleaseAsset::from_asset_gitlab)
+/// GitLab `assets` object wrapping the `links` array.
+#[derive(Deserialize, Default)]
+struct AssetsDto {
+    links: Option<Vec<AssetDto>>,
+}
+
+/// GitLab release JSON shape (note: body is `description`, assets are nested under `assets.links`).
+/// Private DTO deserialized directly from the response bytes, then converted into the public
+/// [`Release`].
+#[derive(Deserialize)]
+struct ReleaseDto {
+    tag_name: Option<String>,
+    created_at: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    assets: AssetsDto,
+}
+
+impl ReleaseDto {
+    fn into_release(self) -> Result<Release> {
+        let tag = self
+            .tag_name
+            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
+        let date = self.created_at.ok_or(Error::MissingAssetField {
+            field: "created_at",
+        })?;
+        let links = self.assets.links.ok_or(Error::MissingAssetField {
+            field: "assets.links",
+        })?;
+        let name = self.name.unwrap_or_else(|| tag.clone());
+        let assets = links
+            .into_iter()
+            .map(AssetDto::into_asset)
             .collect::<Result<Vec<ReleaseAsset>>>()?;
-        Ok(Release {
-            name: name.to_owned(),
-            version: tag.trim_start_matches('v').to_owned(),
-            date: date.to_owned(),
-            body,
-            assets,
-        })
+        let mut builder = Release::builder();
+        builder
+            .name(name)
+            .version(tag.trim_start_matches('v').to_owned())
+            .date(date)
+            .assets(assets);
+        if let Some(body) = self.description {
+            builder.body(body);
+        }
+        builder.build()
     }
 }
 
@@ -74,7 +96,7 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
     }
@@ -118,28 +140,31 @@ impl ReleaseListBuilder {
 
     /// Verify builder args, returning a `ReleaseList`
     pub fn build(&self) -> Result<ReleaseList> {
-        self.request.check()?;
+        // Thread the auth token + gitlab's `Bearer` scheme into the request so the shared
+        // `apply_auth` applies it on the listing path (honoring a user override).
+        let mut request = self.request.clone();
+        request.auth_scheme = crate::backends::common::AuthScheme::Bearer;
+        request.auth_token = self.auth_token.clone();
+        request.auth_base_host = crate::backends::common::host_of(&self.host);
+        request.build_client();
+        request.check()?;
         Ok(ReleaseList {
             host: self.host.clone(),
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
             target: self.target.clone(),
             auth_token: self.auth_token.clone(),
-            request: self.request.clone(),
+            request,
         })
     }
 }
@@ -168,16 +193,24 @@ impl ReleaseList {
         }
     }
 
-    /// Retrieve a list of `Release`s.
-    /// If specified, filter for those containing a specified `target`
-    pub fn fetch(&self) -> Result<Vec<Release>> {
+    /// Retrieve the available `Release`s as a [`Releases`].
+    ///
+    /// If a `filter_target` is set, only releases carrying an asset whose name contains it are
+    /// returned. The result carries no current version (it is a bare listing), so
+    /// [`Releases::current_version`] is `None`; use [`Releases::into_vec`] to recover the raw
+    /// `Vec<Release>`.
+    pub fn fetch(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         );
-        let releases = fetch_all_releases(&api_url, self.auth_token.as_deref(), &self.request)?;
+        // An unfiltered listing must walk ALL pages: `stop_at = None`.
+        let releases = run_paginated(
+            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
+            &self.request,
+        )?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -185,7 +218,32 @@ impl ReleaseList {
                 .filter(|r| r.has_target_asset(target))
                 .collect::<Vec<_>>(),
         };
-        Ok(releases)
+        Ok(Releases::from_listing(releases))
+    }
+
+    /// Async sibling of [`fetch`](Self::fetch).
+    #[cfg(feature = "async")]
+    pub async fn fetch_async(&self) -> Result<Releases> {
+        let api_url = format!(
+            "{}/api/v4/projects/{}%2F{}/releases",
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
+        );
+        // An unfiltered listing must walk ALL pages: `stop_at = None`.
+        let releases = crate::backends::run_paginated_async(
+            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
+            &self.request,
+        )
+        .await?;
+        let releases = match self.target {
+            None => releases,
+            Some(ref target) => releases
+                .into_iter()
+                .filter(|r| r.has_target_asset(target))
+                .collect::<Vec<_>>(),
+        };
+        Ok(Releases::from_listing(releases))
     }
 }
 
@@ -213,7 +271,7 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
-    pub fn url(&mut self, url: impl Into<String>) -> &mut Self {
+    pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
     }
@@ -238,29 +296,35 @@ impl UpdateBuilder {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_owner` required (call `.repo_owner(...)`)"
-                )
+                return Err(Error::MissingField {
+                    field: "repo_owner",
+                });
             },
             repo_name: if let Some(ref name) = self.repo_name {
                 name.to_owned()
             } else {
-                bail!(
-                    Error::Config,
-                    "`repo_name` required (call `.repo_name(...)`)"
-                )
+                return Err(Error::MissingField { field: "repo_name" });
             },
-            common: self.common.build()?,
+            common: {
+                // gitlab authenticates with the `Bearer` scheme; set it before resolving so the
+                // shared `apply_auth` renders `Bearer <token>` on both listing and download.
+                let mut common = self.common.clone();
+                common.auth_scheme = crate::backends::common::AuthScheme::Bearer;
+                let mut resolved = common.build()?;
+                // Only the gitlab host receives the token; a server-supplied external asset link
+                // (gitlab allows arbitrary asset URLs) does not.
+                resolved.request.auth_base_host = crate::backends::common::host_of(&self.host);
+                resolved
+            },
         })
     }
 
-    /// Confirm config and create a ready-to-use `Update`
+    /// Confirm config and create a ready-to-use `Update`.
     ///
-    /// * Errors:
-    ///     * Config - Invalid `Update` configuration
-    pub fn build(&self) -> Result<Box<dyn ReleaseUpdate>> {
-        Ok(Box::new(self.build_update()?))
+    /// Returns the concrete [`Update`], which is `Send` and exposes the update verbs as inherent
+    /// methods.
+    pub fn build(&self) -> Result<Update> {
+        self.build_update()
     }
 
     /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
@@ -271,11 +335,6 @@ impl UpdateBuilder {
     pub fn build_async(&self) -> Result<Update> {
         self.build_update()
     }
-}
-
-#[cfg(feature = "async")]
-impl Update {
-    impl_async_update_methods!();
 }
 
 /// Updates to a specified or latest release distributed via Gitlab
@@ -299,7 +358,7 @@ impl Update {
             "{}/api/v4/projects/{}%2F{}/releases",
             self.host,
             urlencoding::encode(&self.repo_owner),
-            self.repo_name
+            urlencoding::encode(&self.repo_name)
         )
     }
 }
@@ -307,67 +366,52 @@ impl Update {
 impl crate::update::sealed::Sealed for Update {}
 
 impl Update {
-    /// Fetch and parse the single newest release (network helper; returns a bare `Release`).
-    fn fetch_latest_release(&self) -> Result<Release> {
-        let api_url = self.releases_url();
-        let resp = send(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
-        let json = resp.json::<serde_json::Value>()?;
-        let releases = json
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
-        if releases.is_empty() {
-            bail!(Error::Release, "no releases found");
-        }
-        // Unlike github (which hits a dedicated `/releases/latest` endpoint), gitlab has no such
-        // endpoint, so "newest" is `releases[0]` and relies on the list endpoint's default
-        // descending (newest-first) order.
-        Release::from_release_gitlab(&releases[0])
-    }
-
-    /// Fetch the full (paginated) release list, keeping only those newer than `current_version`
-    /// (network helper; returns a bare `Vec<Release>`). `current_version` still bounds the filter.
-    fn fetch_newer_releases(&self, current_version: &str) -> Result<Vec<Release>> {
-        let api_url = self.releases_url();
-        let releases = fetch_all_releases(
-            &api_url,
-            self.common.auth_token.as_deref(),
-            &self.common.request,
-        )?;
-        Ok(releases
-            .into_iter()
-            .filter(|r| bump_is_greater(current_version, &r.version).unwrap_or(false))
-            .collect())
+    /// The single-release-by-tag URL: `.../releases/{ver}`.
+    fn tag_url(&self, ver: &str) -> String {
+        format!("{}/{}", self.releases_url(), urlencoding::encode(ver))
     }
 }
 
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let release = self.fetch_latest_release()?;
+        let releases = run_paginated(
+            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
+            &self.common.request,
+        )?;
+        let release = releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
-    fn get_latest_releases(&self) -> Result<Releases> {
+    fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.fetch_newer_releases(&current_version)?;
+        let releases = run_paginated(
+            releases_plan(
+                &self.releases_url(),
+                self.common.auth_token.as_deref(),
+                Some(&current_version),
+            )?,
+            &self.common.request,
+        )?;
         Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let api_url = format!("{}/{}", self.releases_url(), urlencoding::encode(ver));
-        let resp = send(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        let releases = run_paginated(
+            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
             &self.common.request,
         )?;
-        let json = resp.json::<serde_json::Value>()?;
-        Release::from_release_gitlab(&json)
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
+
+impl_sync_update_verbs!(Update);
 
 impl_update_config_accessors!(Update, {
     fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
@@ -386,110 +430,156 @@ impl Default for UpdateBuilder {
     }
 }
 
-/// Fetch every release from `base_url`, following GitLab's `Link: rel="next"` pagination.
-fn fetch_all_releases(
+/// Transport-free plan to fetch the paginated `releases` array (GitLab format), parsing each page
+/// via the private `ReleaseDto` and following `Link: rel="next"`. `stop_at` filters per-item
+/// (releases not strictly newer are omitted but pagination continues); when `None` all pages are
+/// walked unfiltered.
+fn releases_plan(
     base_url: &str,
     auth_token: Option<&str>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    collect_paginated(&first_page_url(base_url), |url| {
-        let resp = send(url, api_headers(auth_token)?, req)?;
-        let headers = resp.headers().clone();
-        let releases = resp
-            .json::<serde_json::Value>()?
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
-            .iter()
-            .map(Release::from_release_gitlab)
-            .collect::<Result<Vec<Release>>>()?;
-        Ok((releases, next_link(&headers)))
-    })
-}
-
-/// Async sibling of [`fetch_all_releases`], following GitLab's `Link: rel="next"` pagination with
-/// the async transport. Reuses the same [`Release::from_release_gitlab`] parser.
-#[cfg(feature = "async")]
-async fn fetch_all_releases_async(
-    base_url: &str,
-    auth_token: Option<&str>,
-    req: &RequestConfig,
-) -> Result<Vec<Release>> {
-    use crate::backends::{collect_paginated_async, send_async};
+    stop_at: Option<&str>,
+) -> Result<PageRequest<Release>> {
+    let headers = api_headers(auth_token)?;
     let auth = auth_token.map(str::to_owned);
-    collect_paginated_async(&first_page_url(base_url), |url| {
-        let auth = auth.clone();
-        let req = req.clone();
-        async move {
-            let resp = send_async(&url, api_headers(auth.as_deref())?, &req).await?;
-            let headers = resp.headers().clone();
-            let releases = resp
-                .json::<serde_json::Value>()
-                .await?
-                .as_array()
-                .ok_or_else(|| format_err!(Error::Release, "No releases found"))?
-                .iter()
-                .map(Release::from_release_gitlab)
-                .collect::<Result<Vec<Release>>>()?;
-            Ok((releases, next_link(&headers)))
-        }
+    let stop_at = stop_at.map(str::to_owned);
+    Ok(release_array_page(
+        first_page_url(base_url),
+        headers,
+        auth,
+        stop_at,
+    ))
+}
+
+fn release_array_page(
+    url: String,
+    headers: HeaderMap,
+    auth: Option<String>,
+    stop_at: Option<String>,
+) -> PageRequest<Release> {
+    PageRequest {
+        url,
+        headers,
+        parse: Box::new(move |body, resp_headers| {
+            // Deserialize the page directly into the private DTO vec (no intermediate
+            // `serde_json::Value` tree), then convert each into a public `Release`.
+            let dtos: Vec<ReleaseDto> =
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
+            let mut items = Vec::new();
+            for dto in dtos {
+                let release = dto.into_release()?;
+                // Skip releases not strictly newer than the current version, but do NOT stop
+                // pagination. A backport release (older semver, newer creation date) must not
+                // halt the walk; a genuinely newer release on a later page must still be found.
+                if let Some(ref current) = stop_at
+                    && !bump_is_greater(current, release.version()).unwrap_or(false)
+                {
+                    continue;
+                }
+                items.push(release);
+            }
+            let next = next_link(resp_headers).map(|next_url| {
+                release_array_page(
+                    next_url,
+                    api_headers(auth.as_deref()).unwrap_or_default(),
+                    auth.clone(),
+                    stop_at.clone(),
+                )
+            });
+            Ok(Page {
+                items,
+                next,
+                stop: false,
+            })
+        }),
+    }
+}
+
+/// Transport-free plan for the newest release: GitLab has no `/releases/latest`, so the listing's
+/// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
+fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers(auth_token)?;
+    Ok(PageRequest {
+        url: first_page_url(base_url),
+        headers,
+        parse: Box::new(|body, _resp_headers| {
+            let dtos: Vec<ReleaseDto> =
+                serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
+                    source: Box::new(e),
+                })?;
+            let first = dtos
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
+            Ok(Page::last(vec![first.into_release()?]))
+        }),
     })
-    .await
+}
+
+/// Transport-free plan to fetch a single release *object* (the `.../releases/{ver}` endpoint).
+fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers(auth_token)?;
+    Ok(PageRequest {
+        url,
+        headers,
+        parse: Box::new(|body, _resp_headers| {
+            let dto: ReleaseDto = serde_json::from_slice(body)?;
+            Ok(Page::last(vec![dto.into_release()?]))
+        }),
+    })
 }
 
 #[cfg(feature = "async")]
-impl crate::update::AsyncFetch for Update {
+impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
-        use crate::backends::send_async;
+        use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let api_url = self.releases_url();
-        let resp = send_async(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        let releases = run_paginated_async(
+            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
-        let releases = json
-            .as_array()
-            .ok_or_else(|| format_err!(Error::Release, "no releases found"))?;
-        if releases.is_empty() {
-            bail!(Error::Release, "no releases found");
-        }
-        let release = Release::from_release_gitlab(&releases[0])?;
+        let release = releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoReleaseFound { target: None })?;
         Ok(Releases::new(vec![release], current_version))
     }
 
-    async fn get_latest_releases_async(&self) -> Result<Releases> {
+    async fn get_newer_releases_async(&self) -> Result<Releases> {
+        use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let api_url = self.releases_url();
-        let releases = fetch_all_releases_async(
-            &api_url,
-            self.common.auth_token.as_deref(),
+        let releases = run_paginated_async(
+            releases_plan(
+                &self.releases_url(),
+                self.common.auth_token.as_deref(),
+                Some(&current_version),
+            )?,
             &self.common.request,
         )
         .await?;
-        let releases = releases
-            .into_iter()
-            .filter(|r| bump_is_greater(&current_version, &r.version).unwrap_or(false))
-            .collect();
         Ok(Releases::new(releases, current_version))
     }
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
-        use crate::backends::send_async;
-        let api_url = format!("{}/{}", self.releases_url(), urlencoding::encode(ver));
-        let resp = send_async(
-            &api_url,
-            api_headers(self.common.auth_token.as_deref())?,
+        use crate::backends::run_paginated_async;
+        let releases = run_paginated_async(
+            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
             &self.common.request,
         )
         .await?;
-        let json = resp.json::<serde_json::Value>().await?;
-        Release::from_release_gitlab(&json)
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoReleaseFound { target: None })
     }
 }
 
-fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
+/// Build gitlab's base request headers (its User-Agent). The Authorization header is applied
+/// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
+/// gitlab's `Bearer` scheme on both the listing and download paths, honoring a user override.
+fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -497,22 +587,27 @@ fn api_headers(auth_token: Option<&str>) -> Result<header::HeaderMap> {
             .parse()
             .expect("gitlab invalid user-agent"),
     );
-
-    if let Some(token) = auth_token {
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", token)
-                .parse()
-                .map_err(|err| Error::Config(format!("Failed to parse auth token: {}", err)))?,
-        );
-    };
-
     Ok(headers)
 }
 
 #[cfg(test)]
 mod tests {
     use super::Update;
+    use crate::update::UpdateConfig;
+
+    #[cfg(feature = "async")]
+    use crate::update::AsyncReleaseUpdate;
+
+    /// Async test wrapper over `releases_plan` + the async driver (unfiltered, all pages).
+    #[cfg(feature = "async")]
+    async fn fetch_all_releases_async(
+        base_url: &str,
+        auth_token: Option<&str>,
+        req: &crate::backends::common::RequestConfig,
+    ) -> crate::errors::Result<Vec<super::Release>> {
+        crate::backends::run_paginated_async(super::releases_plan(base_url, auth_token, None)?, req)
+            .await
+    }
 
     // -----------------------------------------------------------------------
     // Shared loopback stub infrastructure (sync and async tests both use this)
@@ -638,7 +733,7 @@ mod tests {
     #[cfg(feature = "async")]
     fn gitlab_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -647,11 +742,11 @@ mod tests {
             .unwrap()
     }
 
-    /// Convenience: build a `Box<dyn ReleaseUpdate>` pointed at the loopback stub.
+    /// Convenience: build a sync `Update` pointed at the loopback stub.
     /// Available under both sync transports (reqwest blocking and ureq).
-    fn gl_update(base: &str, current_version: &str) -> Box<dyn crate::update::ReleaseUpdate> {
+    fn gl_update(base: &str, current_version: &str) -> Update {
         Update::configure()
-            .url(base)
+            .host(base)
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -679,7 +774,7 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
 
         let releases = upd.get_latest_release_async().await.unwrap();
-        assert_eq!(releases.latest().unwrap().version, "2.5.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.5.0");
     }
 
     #[cfg(feature = "async")]
@@ -701,7 +796,7 @@ mod tests {
                 },
             ]
         });
-        let releases = super::fetch_all_releases_async(
+        let releases = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -713,8 +808,8 @@ mod tests {
             2,
             "both pages accumulated over async transport"
         );
-        assert_eq!(releases[0].version, "1.0.0");
-        assert_eq!(releases[1].version, "0.9.0");
+        assert_eq!(releases[0].version(), "1.0.0");
+        assert_eq!(releases[1].version(), "0.9.0");
     }
 
     #[cfg(feature = "async")]
@@ -781,7 +876,11 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "an empty releases array must propagate as Error::Release out of \
              get_latest_release_async, got {:?}",
             res
@@ -803,14 +902,14 @@ mod tests {
 
         let upd = gitlab_update(&base, "0.1.0");
         let rel = upd.get_release_version_async("v4.2.1").await.unwrap();
-        assert_eq!(rel.version, "4.2.1");
+        assert_eq!(rel.version(), "4.2.1");
     }
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_filters_to_newer_only() {
+    async fn get_newer_releases_async_filters_to_newer_only() {
         // The payload mixes releases newer than, equal to, and older than the current version.
-        // `get_latest_releases_async` must keep only strictly-newer ones, preserving order.
+        // `get_newer_releases_async` must keep only strictly-newer ones, preserving order.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -820,8 +919,8 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_newer_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -831,7 +930,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_empty_when_all_older_or_equal() {
+    async fn get_newer_releases_async_empty_when_all_older_or_equal() {
         // When no release is newer than the current version, the result is empty.
         let base = stub(|_| {
             vec![Resp {
@@ -842,7 +941,7 @@ mod tests {
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
+        let releases = upd.get_newer_releases_async().await.unwrap();
         assert!(
             releases.all().is_empty(),
             "no release newer than current => empty list, got {:?}",
@@ -852,31 +951,34 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn get_latest_releases_async_accumulates_across_pages_then_filters() {
-        // Filtering must happen *after* pagination: a newer release on page 2 (reached via
-        // a `Link: rel="next"` header) must still be retained.
+    async fn get_newer_releases_async_accumulates_across_pages_then_filters() {
+        // Pagination must accumulate across pages: a newer release on page 2 (reached via a
+        // `Link: rel="next"` header) must be retained alongside page 1's. The listing is
+        // newest-first, so page 1 carries the newest releases and page 2 the next-newest; the
+        // early-stop only halts on a release NOT newer than current, which never happens here, so
+        // page 2 is fetched and its release survives the strictly-newer filter.
         let base = stub(|base| {
             vec![
                 Resp {
                     status: "200 OK",
                     link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
-                    body: releases_json(&["v0.5.0"]),
+                    body: releases_json(&["v3.0.0"]),
                 },
                 Resp {
                     status: "200 OK",
                     link: None,
-                    body: releases_json(&["v3.0.0"]),
+                    body: releases_json(&["v2.0.0"]),
                 },
             ]
         });
 
         let upd = gitlab_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases_async().await.unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_newer_releases_async().await.unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
-            vec!["3.0.0"],
-            "the newer release on page 2 survives pagination + filtering"
+            vec!["3.0.0", "2.0.0"],
+            "the newer release on page 2 is reached and survives pagination + filtering"
         );
     }
 
@@ -895,7 +997,11 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "empty releases array must surface as Error::Release, got {:?}",
             res
         );
@@ -916,8 +1022,8 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
-            "non-array payload must surface as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "non-array payload must surface as Error::InvalidResponse, got {:?}",
             res
         );
     }
@@ -937,10 +1043,74 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_release_version_async("v1.0.0").await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "missing tag_name must surface as Error::Release, got {:?}",
             res
         );
+    }
+
+    // variant-routing (exact): a release object missing `tag_name` must surface as EXACTLY
+    // `MissingAssetField { field: "tag_name" }` -- not `NoReleaseFound`. The sibling test above
+    // accepts either via an `A | B` match; this pins the precise variant and the field name so a
+    // regression that conflates a malformed-payload failure with the empty-listing variant (or
+    // names the wrong field) is caught.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn missing_tag_name_routes_to_missing_asset_field_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"{"created_at":"2020-01-01T00:00:00Z","assets":{"links":[]}}"#.to_string(),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_release_version_async("v1.0.0").await;
+        match res {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(
+                    field, "tag_name",
+                    "must name the absent payload field exactly"
+                );
+            }
+            other => panic!(
+                "missing tag_name must be Error::MissingAssetField {{ field: \"tag_name\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // variant-routing (exact): an empty top-level releases array yields zero parsed releases,
+    // so the latest-release lookup finds nothing and must surface as EXACTLY
+    // `NoReleaseFound { target: None }` -- the clean empty-listing negative, NOT a payload-field
+    // failure. Pins the other side of the `NoReleaseFound | MissingAssetField` split.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn empty_array_routes_to_no_release_found_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+
+        let upd = gitlab_update(&base, "0.1.0");
+        let res = upd.get_latest_release_async().await;
+        match res {
+            Err(crate::errors::Error::NoReleaseFound { target }) => {
+                assert_eq!(target, None, "empty listing carries no asset target");
+            }
+            other => panic!(
+                "empty releases array must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                other
+            ),
+        }
     }
 
     #[cfg(feature = "async")]
@@ -959,7 +1129,7 @@ mod tests {
         });
 
         let upd = Update::configure()
-            .url(&base)
+            .host(&base)
             .repo_owner("group/subgroup")
             .repo_name("r")
             .bin_name("app")
@@ -999,7 +1169,10 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::HttpStatus { status: 500, .. })),
+            matches!(
+                res,
+                Err(crate::errors::Error::HttpStatus { status: 500, .. })
+            ),
             "non-2xx 500 on get_latest_release_async must surface as Error::HttpStatus(500), got {:?}",
             res
         );
@@ -1038,14 +1211,17 @@ mod tests {
                 body: "busy".to_string(),
             }]
         });
-        let res = super::fetch_all_releases_async(
+        let res = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await;
         assert!(
-            matches!(res, Err(crate::errors::Error::HttpStatus { status: 503, .. })),
+            matches!(
+                res,
+                Err(crate::errors::Error::HttpStatus { status: 503, .. })
+            ),
             "non-2xx 503 on fetch_all_releases_async must surface as Error::HttpStatus(503), got {:?}",
             res
         );
@@ -1064,15 +1240,15 @@ mod tests {
                 body: "{}".to_string(),
             }]
         });
-        let res = super::fetch_all_releases_async(
+        let res = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
-            "non-array body on fetch_all_releases_async must surface as Error::Release, got {:?}",
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "non-array body on fetch_all_releases_async must surface as Error::InvalidResponse, got {:?}",
             res
         );
     }
@@ -1090,7 +1266,7 @@ mod tests {
                 body: "[]".to_string(),
             }]
         });
-        let releases = super::fetch_all_releases_async(
+        let releases = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
             None,
             &crate::backends::common::RequestConfig::default(),
@@ -1123,7 +1299,11 @@ mod tests {
         let upd = gitlab_update(&base, "0.1.0");
         let res = upd.get_latest_release_async().await;
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "missing assets.links must surface as Error::Release, got {:?}",
             res
         );
@@ -1138,7 +1318,7 @@ mod tests {
         // The renamed `url` / `filter_target` setters must exist on the gitlab
         // `ReleaseListBuilder` and the builder must still build.
         let _list = super::ReleaseList::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .filter_target("x86_64-unknown-linux-gnu")
@@ -1150,7 +1330,7 @@ mod tests {
     fn url_setter_exists_on_update_builder() {
         // The renamed `url` setter must exist on the gitlab `UpdateBuilder`.
         let _upd = Update::configure()
-            .url("https://gitlab.example.com")
+            .host("https://gitlab.example.com")
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -1160,10 +1340,10 @@ mod tests {
     }
 
     #[test]
-    fn api_headers_override_uses_gitlab_user_agent_and_bearer_scheme() {
+    fn api_headers_override_uses_gitlab_user_agent() {
         // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire gitlab's
-        // custom `api_headers` (User-Agent + `Bearer` auth scheme), not the trait default (which
-        // sets no User-Agent and a `token` scheme).
+        // custom `api_headers` (User-Agent), not the trait default (which sets no User-Agent). After
+        // B5 the auth scheme/token is applied centrally by `apply_auth`, not baked here.
         let upd = Update::configure()
             .repo_owner("o")
             .repo_name("r")
@@ -1180,14 +1360,64 @@ mod tests {
                 .unwrap(),
             "rust-reqwest/self-update"
         );
-        assert_eq!(
+        assert!(
             headers
                 .get(crate::http_client::header::AUTHORIZATION)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+                .is_none(),
+            "api_headers no longer bakes auth; apply_auth applies the Bearer scheme"
+        );
+    }
+
+    // gitlab resolves to the `Bearer` scheme, applied by the shared `apply_auth` on the request
+    // config consumed by BOTH the listing and download paths. A user `request_header(AUTHORIZATION)`
+    // override wins.
+    #[test]
+    fn gitlab_bearer_scheme_applied_to_both_paths() {
+        use crate::http_client::header::{AUTHORIZATION, HeaderMap};
+        #[allow(unused_imports)]
+        use crate::update::UpdateInternals;
+        let upd = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        upd.request_config()
+            .apply_auth(
+                "https://gitlab.com/api/v4/projects/o%2Fr/releases",
+                &mut headers,
+            )
+            .unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer secret",
             "gitlab authenticates with the Bearer scheme"
+        );
+
+        // A user AUTHORIZATION override wins over the Bearer scheme.
+        let upd = Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("secret")
+            .request_header(AUTHORIZATION, "token user-override")
+            .build()
+            .unwrap();
+        let mut headers = upd.request_config().headers.clone();
+        upd.request_config()
+            .apply_auth(
+                "https://gitlab.com/api/v4/projects/o%2Fr/releases",
+                &mut headers,
+            )
+            .unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "token user-override",
+            "a user AUTHORIZATION override must win over the Bearer scheme"
         );
     }
 
@@ -1201,8 +1431,8 @@ mod tests {
             .request_header("inva lid", "ok")
             .build();
         assert!(
-            matches!(res, Err(crate::errors::Error::Config(_))),
-            "invalid header must surface as Error::Config from gitlab ReleaseList build()"
+            matches!(res, Err(crate::errors::Error::InvalidHeader { .. })),
+            "invalid header must surface as Error::InvalidHeader from gitlab ReleaseList build()"
         );
     }
 
@@ -1216,7 +1446,10 @@ mod tests {
             .current_version("0.1.0")
             .request_header("inva lid", "ok")
             .build();
-        assert!(matches!(res, Err(crate::errors::Error::Config(_))));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::InvalidHeader { .. })
+        ));
     }
 
     #[test]
@@ -1275,13 +1508,13 @@ mod tests {
         });
         let upd = gl_update(&base, "0.1.0");
         let releases = upd.get_latest_release().unwrap();
-        assert_eq!(releases.latest().unwrap().version, "2.5.0");
+        assert_eq!(releases.latest().unwrap().version(), "2.5.0");
     }
 
     #[test]
-    fn get_latest_releases_sync_filters_to_newer_only() {
+    fn get_newer_releases_sync_filters_to_newer_only() {
         // The payload mixes releases newer than, equal to, and older than the current version.
-        // `get_latest_releases` (sync) must keep only strictly-newer ones, preserving order.
+        // `get_newer_releases` (sync) must keep only strictly-newer ones, preserving order.
         let base = stub(|_| {
             vec![Resp {
                 status: "200 OK",
@@ -1290,8 +1523,8 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "1.0.0");
-        let releases = upd.get_latest_releases().unwrap();
-        let versions: Vec<&str> = releases.all().iter().map(|r| r.version.as_str()).collect();
+        let releases = upd.get_newer_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
             vec!["2.0.0", "1.5.0"],
@@ -1312,7 +1545,7 @@ mod tests {
         });
         let upd = gl_update(&base, "0.1.0");
         let rel = upd.get_release_version("v4.2.1").unwrap();
-        assert_eq!(rel.version, "4.2.1");
+        assert_eq!(rel.version(), "4.2.1");
     }
 
     #[test]
@@ -1337,7 +1570,7 @@ mod tests {
 
     #[test]
     fn is_update_available_sync_true_when_latest_is_newer() {
-        // D1 (sync): the pre-check is now `get_latest_releases()?.is_update_available()`. The stub's
+        // D1 (sync): the pre-check is now `get_newer_releases()?.is_update_available()`. The stub's
         // newest release is 2.5.0, so an update is available from 0.1.0.
         let base = stub(|_| {
             vec![Resp {
@@ -1348,7 +1581,7 @@ mod tests {
         });
         let upd = gl_update(&base, "0.1.0");
         assert!(
-            upd.get_latest_releases()
+            upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -1359,7 +1592,7 @@ mod tests {
     #[test]
     fn is_update_available_sync_false_when_latest_not_newer() {
         // D1 complement: when the current version is at/above the latest release, no update is
-        // available. `get_latest_releases` returns the single newer-filtered list (empty here);
+        // available. `get_newer_releases` returns the single newer-filtered list (empty here);
         // current is 2.5.0, so nothing is newer.
         let base = stub(|_| {
             vec![Resp {
@@ -1370,7 +1603,7 @@ mod tests {
         });
         let upd = gl_update(&base, "2.5.0");
         assert!(
-            !upd.get_latest_releases()
+            !upd.get_newer_releases()
                 .unwrap()
                 .is_update_available()
                 .unwrap(),
@@ -1381,7 +1614,7 @@ mod tests {
     #[test]
     fn is_update_available_sync_propagates_non_2xx_error() {
         // D1 (sync): a backend HTTP failure (500) during the listing request must propagate out
-        // of `get_latest_releases`, not be hidden as "no update available".
+        // of `get_newer_releases`, not be hidden as "no update available".
         let base = stub(|_| {
             vec![Resp {
                 status: "500 Internal Server Error",
@@ -1390,11 +1623,11 @@ mod tests {
             }]
         });
         let upd = gl_update(&base, "0.1.0");
-        let res = upd.get_latest_releases();
+        let res = upd.get_newer_releases();
         assert!(
             res.is_err(),
             "a non-2xx listing response must propagate as an error out of \
-             get_latest_releases, got {:?}",
+             get_newer_releases, got {:?}",
             res
         );
     }
@@ -1412,9 +1645,361 @@ mod tests {
         let upd = gl_update(&base, "0.1.0");
         let res = upd.get_latest_release();
         assert!(
-            matches!(res, Err(crate::errors::Error::Release(_))),
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { .. }
+                    | crate::errors::Error::MissingAssetField { .. })
+            ),
             "empty releases array must surface as Error::Release, got {:?}",
             res
         );
+    }
+
+    // --- gitlab git release-scan pagination (per-backend parser wiring) -----------------
+    //
+    // The gitlab parser (`release_array_page`) wires `stop_at` for per-item filtering without
+    // halting pagination. These pin that wiring: non-newer releases are omitted but the driver
+    // continues to subsequent pages, and the selection from a partial page must match a full walk.
+
+    #[test]
+    fn get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two() {
+        // Page 1 contains both newer (v2.0.0, v1.5.0) and non-newer (v1.0.0, v0.9.0) releases.
+        // Non-newer releases must NOT halt pagination — page 2 is requested and its newer
+        // release (v3.0.0) is included in the result alongside the newer items from page 1.
+        // (The old early-stop bug would have returned only ["2.0.0", "1.5.0"] in 1 request.)
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let upd = gl_update(&base, "1.0.0");
+        let releases = upd.get_newer_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
+        // Non-newer items (v1.0.0, v0.9.0) are filtered out per-item; newer items from both
+        // pages are kept. v3.0.0 from page 2 is present, proving pagination was not halted.
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.5.0", "3.0.0"],
+            "non-newer items are filtered per-item; page 2 is still fetched and its newer release included"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "non-newer releases must not halt pagination; both pages must be requested"
+        );
+    }
+
+    #[test]
+    fn get_newer_releases_finds_update_on_page_2_when_page_1_has_only_non_newer() {
+        // Backport scenario: page 1 contains only a release that is NOT newer than the current
+        // version (e.g. a backport patch with an older semver but a newer creation date).
+        // The old version-based early-stop would have halted after page 1 and silently missed
+        // the genuinely newer release on page 2. After the fix, pagination continues and v3.0.0
+        // is correctly found.
+        //
+        // This test would FAIL on the unfixed code (early-stop discards page 2) and PASS on the
+        // fixed code (per-item filter skips v0.5.0 but pagination continues to page 2).
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v0.5.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let upd = gl_update(&base, "1.0.0");
+        let releases = upd.get_newer_releases().unwrap();
+        let versions: Vec<&str> = releases.all().iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["3.0.0"],
+            "the newer release on page 2 must be found even when page 1 has only non-newer releases"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "both pages must be fetched: non-newer releases must not halt pagination"
+        );
+    }
+
+    #[test]
+    fn early_stop_selects_same_release_as_a_full_walk() {
+        // Selection parity: the early-stopped `get_newer_releases` must let the orchestrator pick
+        // the SAME release a full unfiltered walk would, driven through `choose_latest_release`.
+        let (base, _captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v2.0.0", "v1.5.0", "v1.0.0", "v0.9.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v0.5.0"]),
+                },
+            ]
+        });
+        let upd = gl_update(&base, "1.0.0");
+        let early = upd.get_newer_releases().unwrap().into_vec();
+        let early_choice =
+            crate::update::testing::choose_latest_release_for_test(early, "1.0.0").unwrap();
+
+        let full: Vec<_> = ["2.0.0", "1.5.0", "1.0.0", "0.9.0", "0.5.0"]
+            .iter()
+            .map(|v| {
+                crate::update::Release::builder()
+                    .version(*v)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let full_choice =
+            crate::update::testing::choose_latest_release_for_test(full, "1.0.0").unwrap();
+        assert_eq!(
+            early_choice.map(|r| r.version().to_string()),
+            full_choice.map(|r| r.version().to_string()),
+            "early-stop must select the same release as a full walk"
+        );
+    }
+
+    #[test]
+    fn release_list_fetch_walks_all_pages_unfiltered() {
+        // `ReleaseList::fetch` is an UNFILTERED listing (stop_at = None) and must walk ALL pages,
+        // accumulating even releases older than any current version.
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: releases_json(&["v2.0.0", "v0.5.0"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_json(&["v0.1.0"]),
+                },
+            ]
+        });
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "0.5.0", "0.1.0"],
+            "the unfiltered ReleaseList must accumulate ALL pages, older releases included"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "both pages must be requested for the unfiltered listing"
+        );
+    }
+
+    // --- a realistic populated payload parses through the DTO into a `Release`
+    // whose getters surface every field. The other gitlab parse tests use empty `assets.links`
+    // and a null `description`; this pins the populated mapping that differs in shape from the
+    // other forges (assets nested under `assets.links`, body in `description`).
+    #[test]
+    fn dto_parse_maps_populated_payload_through_getters() {
+        let body = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"[{"tag_name":"v3.4.5","created_at":"2021-07-08T09:10:11Z","name":"My App 3.4.5","description":"the notes","assets":{"links":[{"name":"app-x86_64-linux.tar.gz","url":"https://gl.example/app-x86_64-linux.tar.gz"},{"name":"app-aarch64-linux.tar.gz","url":"https://gl.example/app-aarch64-linux.tar.gz"}]}}]"#
+                    .to_string(),
+            }]
+        });
+        let upd = gl_update(&body, "0.1.0");
+        let releases = upd.get_latest_release().unwrap();
+        let rel = releases.latest().unwrap();
+        assert_eq!(rel.version(), "3.4.5", "leading `v` stripped from tag_name");
+        assert_eq!(rel.name(), "My App 3.4.5", "name surfaces from `name`");
+        assert_eq!(rel.date(), "2021-07-08T09:10:11Z", "date from `created_at`");
+        assert_eq!(
+            rel.body(),
+            Some("the notes"),
+            "body surfaces from gitlab's `description` field"
+        );
+        assert_eq!(rel.assets().len(), 2, "both `assets.links` entries parsed");
+        assert_eq!(rel.assets()[0].name(), "app-x86_64-linux.tar.gz");
+        assert_eq!(
+            rel.assets()[0].download_url(),
+            "https://gl.example/app-x86_64-linux.tar.gz",
+            "asset download_url comes from the link `url` field"
+        );
+        assert_eq!(rel.assets()[1].name(), "app-aarch64-linux.tar.gz");
+    }
+
+    // --- the listing `Releases` from `ReleaseList::fetch` carries NO current
+    // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
+    // `MissingField { field: "current_version" }` rather than silently answering. `into_vec()`
+    // still recovers the underlying release vec.
+    #[test]
+    fn release_list_fetch_returns_listing_releases_without_current_version() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on a listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.0.0"],
+            "into_vec() recovers the parsed releases, newest-first"
+        );
+    }
+
+    // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // from `is_update_available()`, `into_vec()` recovers the releases).
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn release_list_fetch_async_returns_listing_releases_without_current_version() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v2.0.0", "v1.0.0"]),
+            }]
+        });
+        let releases = super::ReleaseList::configure()
+            .host(&base)
+            .repo_owner("o")
+            .repo_name("r")
+            .build()
+            .unwrap()
+            .fetch_async()
+            .await
+            .unwrap();
+        assert_eq!(
+            releases.current_version(),
+            None,
+            "a bare listing carries no current version"
+        );
+        assert!(
+            matches!(
+                releases.is_update_available(),
+                Err(crate::errors::Error::MissingField {
+                    field: "current_version"
+                })
+            ),
+            "is_update_available() on a listing must error with MissingField, got {:?}",
+            releases.is_update_available()
+        );
+        let versions: Vec<String> = releases
+            .into_vec()
+            .into_iter()
+            .map(|r| r.version().to_string())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0", "1.0.0"],
+            "into_vec() recovers the parsed releases, newest-first"
+        );
+    }
+
+    // --- exact-variant routing on the sync transport (gitlab). The sibling
+    // exact-variant tests are `#[cfg(feature = "async")]` only, so the ureq lane (no async) never
+    // pins the precise variant. This pins it on whichever sync client is active: a release object
+    // missing `tag_name` must surface as EXACTLY `MissingAssetField { field: "tag_name" }`.
+    #[test]
+    fn sync_missing_tag_name_routes_to_missing_asset_field_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: r#"{"created_at":"2020-01-01T00:00:00Z","name":"x","assets":{"links":[]}}"#
+                    .to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let res = upd.get_release_version("v1.0.0");
+        match res {
+            Err(crate::errors::Error::MissingAssetField { field }) => {
+                assert_eq!(
+                    field, "tag_name",
+                    "must name the absent payload field exactly"
+                );
+            }
+            other => panic!(
+                "missing tag_name must be Error::MissingAssetField {{ field: \"tag_name\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // --- the other side of the sync-lane split (gitlab): an empty top-level releases
+    // array surfaces as EXACTLY `NoReleaseFound { target: None }`, not a payload-field failure.
+    #[test]
+    fn sync_empty_array_routes_to_no_release_found_exactly() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: "[]".to_string(),
+            }]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        match upd.get_latest_release() {
+            Err(crate::errors::Error::NoReleaseFound { target }) => {
+                assert_eq!(target, None, "empty listing carries no asset target");
+            }
+            other => panic!(
+                "empty releases array must be Error::NoReleaseFound {{ target: None }}, got {:?}",
+                other
+            ),
+        }
     }
 }

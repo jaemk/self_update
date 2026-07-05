@@ -5,33 +5,48 @@ Status: implemented
 ## Scope
 
 The client-agnostic HTTP layer the crate uses for every outbound GET: release
-listing/lookup requests and the binary download. It covers the trait/dispatch
-abstraction over `reqwest` and `ureq`, the request/response shape, header
-handling via the re-exported `http` crate, mutually-exclusive client selection,
-TLS selection, the transport setters (`timeout`, `request_header`, `retries`
-with exponential backoff), proxy support, user-provided client injection and the
-`ClientOverride` carrier, client reuse across paginated requests, and the
-high-level Network-vs-Http error mapping.
+listing/lookup requests and the binary download. It covers the object-safe
+trait/dispatch seam over `reqwest` and `ureq`, the request/response shape, header
+handling via the re-exported `http` crate, non-exclusive client selection,
+TLS selection (including coexistence), the transport setters (`timeout`,
+`request_header`, `retries` with exponential backoff), proxy support,
+user-provided client injection via `Arc<dyn HttpClient>`, client reuse across
+paginated requests, and the high-level Network-vs-Http error mapping.
 
 ## Behavior
 
 ### Abstraction and dispatch
 
-There is no runtime trait-object dispatch across clients. Exactly one client
-crate is compiled, and `http_client/mod.rs:11-14` re-exports either
-`reqwest::*` or `ureq::*`, so `http_client::get` resolves to one concrete
-function at compile time (`http_client/reqwest.rs:8`, `http_client/ureq.rs:9`).
-Both `get` functions share the signature `(url, headers, timeout, client:
-&ClientOverride) -> Result<impl HttpResponse>`.
+The transport is an **object-safe trait seam** dispatched at runtime, not a
+compile-time monomorphized function. `http_client::HttpClient`
+(`http_client/mod.rs`) has a single method `get(&self, url, headers, timeout) ->
+Result<Box<dyn HttpResponse>>` (the crate only ever issues GETs), and each impl
+maps a non-2xx status to the structured `NotFound`/`Unauthorized`/`HttpStatus`
+variant *before* returning `Ok`. Retries are **not** in the trait — they stay in
+`backends::send`/`retry`, wrapping `client.get(...)`.
 
-Responses are abstracted by the `HttpResponse` trait
-(`http_client/mod.rs:39-47`): `headers() -> &HeaderMap<HeaderValue>`, `body() ->
-impl std::io::Read`, `json::<T>()`, `text()`. It is implemented for
-`reqwest::blocking::Response` (`http_client/reqwest.rs:94-110`) and for ureq's
-`Response<Body>` (`http_client/ureq.rs:60-76`). The async path is reqwest-only,
-so it needs no trait: `AsyncResponse` is a type alias for `reqwest::Response`
-(`http_client/mod.rs:20`) and `get_async` returns it directly
-(`http_client/reqwest.rs:53-58`).
+Both client crates can be compiled at once: `ReqwestClient` (a
+`reqwest::blocking::Client`, `http_client/reqwest.rs`) and `UreqClient` (a
+`ureq::Agent`, `http_client/ureq.rs`) each `impl HttpClient`, namespaced so they
+coexist. `default_client() -> Box<dyn HttpClient>` (`http_client/mod.rs`) selects
+reqwest when the `reqwest` feature is on (preferred when both are enabled), else
+ureq; a genuine no-client build is a `compile_error!`. `send`/`download_to` call
+`config.client.as_deref().unwrap_or(&default).get(...)`.
+
+Responses are abstracted by the `HttpResponse` trait (`http_client/mod.rs`):
+`headers() -> &HeaderMap<HeaderValue>`, `body(self: Box<Self>) -> Box<dyn Read>`,
+and a `body_buffered` default wrapping `body()` in a `BufReader`. The former
+`json_value` / `text` methods are removed: the crate parses JSON/XML from the
+body reader itself, so a custom transport implements only `headers()` +
+`body()`. It is implemented for `reqwest::blocking::Response` and ureq's
+`Response<Body>`.
+
+The async path (reqwest + tokio only) has the sibling object-safe traits
+`AsyncHttpClient`/`AsyncHttpResponse` (`http_client/mod.rs`). `AsyncHttpResponse`
+exposes `headers()`, `text()`, and `bytes_stream() -> BoxStream<Result<Bytes>>`;
+`download_to_async` drives `bytes_stream()` rather than leaking a concrete
+`reqwest::Response`. `default_async_client()` is always reqwest. The `bytes`
+crate is a direct optional dep gated under `async`.
 
 Headers use the `http` crate types throughout. `http_client/mod.rs:5-6`
 re-exports `http::header` and `http::HeaderMap`; the whole `http` crate is
@@ -40,40 +55,45 @@ types without a separate dependency.
 
 ### Client and TLS selection
 
-`reqwest` and `ureq` are mutually exclusive. `reqwest` (plus `default-tls`) is
-the default feature set; selecting `ureq` requires `default-features = false`
-(`Cargo.toml:67,82-86`). Enabling both, or neither, is a hard
-`compile_error!` (`lib.rs:414-421`). The `async` feature is reqwest-only and is
-a `compile_error!` when combined with `ureq` (`lib.rs:433-436`).
+`reqwest` and `ureq` are **no longer mutually exclusive** — both impls can be
+compiled and `default_client()` selects one at runtime (reqwest preferred when
+both are on). `reqwest` (plus `rustls`) is still the default feature set; the
+only hard requirement is at least one client (a no-client build is a
+`compile_error!` in `http_client/mod.rs`). The `async` feature is reqwest-only;
+because `async` already implies `reqwest` in `Cargo.toml`, `async` + `ureq`
+together is fine (async drives the reqwest path, ureq serves the sync path). The
+surviving guard only fires if `async` is somehow on without `reqwest`.
 
-TLS is chosen by feature, not at runtime. `default-tls` maps to each client's
-native-TLS backend and `rustls` maps to each client's rustls backend
-(`Cargo.toml:82-83`). For reqwest the rustls path calls `use_rustls_tls()` on
-the per-call builder under `#[cfg(feature = "rustls")]`
-(`http_client/reqwest.rs:28-31`, `73-76`); otherwise reqwest's default applies.
-For ureq the per-call agent sets `TlsProvider::Rustls` under `rustls` and
-`TlsProvider::NativeTls` otherwise (`http_client/ureq.rs:23-29`).
+TLS is feature-selected, and the two TLS features **coexist**: when both
+`native-tls` and `rustls` are enabled, the per-call builders prefer rustls (it is
+the crate default). For reqwest the per-call builder calls `use_rustls_tls()`
+under `#[cfg(feature = "rustls")]`, else `use_native_tls()` under
+`#[cfg(all(feature = "native-tls", not(feature = "rustls")))]`, else reqwest's
+default. For ureq the per-call agent sets `TlsProvider::Rustls` under `rustls`
+and `TlsProvider::NativeTls` otherwise. This is what lets `cargo build
+--all-features` (both clients + both TLS + async) build.
 
 ### Timeout, headers, retries and backoff
 
 The shared setters are emitted by `request_config_setters!`
 (`macros.rs:14-88`), writing into a `RequestConfig` (`backends/common.rs:29-40`)
 that holds `timeout`, `headers`, `retries`, an injected `client`
-(`ClientOverride`), and a deferred `header_error`.
+(`Option<Arc<dyn HttpClient>>` / `Option<Arc<dyn AsyncHttpClient>>`), and a deferred `header_error`.
 
 - `timeout` sets a per-request timeout, default none, applied to every request
   the builder makes including the download (`macros.rs:18-21`).
 - `request_header(name, value)` inserts one extra header; a repeated name
   overwrites. It is infallible at call time: an invalid name/value is stored as
   the first `header_error` (`backends/common.rs:46-72`) and surfaced from
-  `build()` as `Error::Config` via `check()` (`backends/common.rs:75-80`).
-- `retries` is the number of retries (default 0 = one attempt) for API requests
-  only; the binary download is not retried, and it is a no-op on the custom
-  backend (`macros.rs:41-54`).
+  `build()` as `Error::InvalidHeader` via `check()` (`backends/common.rs:75-80`).
+- `retries` is the number of retries (default 0 = one attempt); the download's
+  request-establishment phase is retried under the same budget, but mid-stream
+  transfer errors are not retried. It is a no-op on the custom backend
+  (`macros.rs:41-54`).
 
 The retry loop lives in `backends/mod.rs`, not in the http_client module.
 `send` (`backends/mod.rs:173-189`) merges `config.headers` over the backend's
-base headers, then calls `retry` with `http_client::get` as the attempt and a
+base headers, then calls `retry` with `client.get(...)` as the attempt and a
 closure that logs a warning and sleeps `backoff` ms between tries. `retry`
 (`backends/mod.rs:117-135`) runs the attempt, and on error returns immediately
 once `attempts >= retries`, otherwise sleeps `retry_backoff_ms(attempts)` and
@@ -88,6 +108,24 @@ backoff (not just index 0). `send_async` / `retry_async`
 the log runs synchronously between tries so the error is never held across the
 await.
 
+### Root certificates and auth-token scope
+
+`self_update::Certificate` is an opaque root-CA certificate (PEM or DER).
+`add_root_certificate(Certificate)` on the `Update`/`ReleaseList` builders and on
+`Download` adds it to the per-call client's trust store, so a private/internal CA
+can be trusted without injecting a whole pre-built client. A malformed
+certificate (or a client that cannot be built with it) surfaces as
+`Error::InvalidCertificate { source }` from `build()` or `download_to` /
+`download_to_async`. Each client slot is materialized independently
+(`RequestConfig::build_client`, `backends/common.rs`): the certs build a client
+only for a slot with no injected client, so an injected client keeps its own TLS
+trust and the other slot still trusts the added certs.
+
+The `auth_token` is sent only to requests whose host matches the backend's
+configured API host (or an `allow_auth_host(host)` entry), over https.
+`dangerously_allow_non_https_auth_forwarding()` drops the https requirement for a
+host-matched request.
+
 ### Proxy
 
 Both clients honor `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`. reqwest does this
@@ -95,42 +133,46 @@ automatically. ureq's per-call agent sets `.proxy(ureq::Proxy::try_from_env())`
 explicitly (`http_client/ureq.rs:31-32`). Proxy-from-env applies only to the
 per-call client; an injected client is left to its own proxy config (see below).
 
-### Client injection and ClientOverride
+### Client injection (Arc<dyn HttpClient>)
 
-`ClientOverride` (`http_client/mod.rs:29-37`) is the client-agnostic carrier.
-Only the field(s) for the compiled client exist: `blocking`
-(`reqwest::blocking::Client`), `r#async` (`reqwest::Client`, under `async`),
-`agent` (`ureq::Agent`). All are Arc-backed, so cloning shares the connection
-pool. Setters: `reqwest_client`, `reqwest_async_client` (under `async`),
-`ureq_agent` (`macros.rs:56-86`), each gated on its feature, plus matching
-methods on `Download` (`lib.rs:1242-1261`). `set_client_override`
-(`lib.rs:1265-1268`) forwards an `Update`'s injected client to its download.
+The canonical injection seam is `Option<Arc<dyn HttpClient>>` (and, under
+`async`, `Option<Arc<dyn AsyncHttpClient>>`) on `RequestConfig`
+(`backends/common.rs`) and on `Download` (`lib.rs`). The primary setters are
+`http_client(Arc<dyn HttpClient>)` and `http_client_async(Arc<dyn
+AsyncHttpClient>)` (emitted by `request_config_setters!` and on `Download`). The
+client-specific setters are thin convenience wrappers:
+`reqwest_client(c)` => `http_client(Arc::new(ReqwestClient::from(c)))`, and
+likewise `ureq_agent` / `reqwest_async_client`, each feature-gated. The old
+`ClientOverride` carrier is removed. `set_http_client` (`lib.rs`) forwards an
+`Update`'s injected clients to its download.
 
-When a field is set, the matching `get`/`get_async` reuses that client instead
-of building one per call. The two clients are independent: a reqwest blocking
-injection feeds the sync verbs and `reqwest_async_client` feeds the async ones;
-injecting one and calling the other half falls back to a per-call client.
+Because the seam is a trait object, **any** `Arc<dyn HttpClient>` can be injected
+— including a user wrapper or a test double — not just the two built-in clients.
+When set, `send`/`download_to` dispatch through it instead of building a per-call
+client; the `Arc` is reused across requests (sharing its connection pool). The
+sync and async injections are independent: injecting one and calling the other
+half falls back to that half's per-call client.
 
 What still applies vs defers to the injected client:
 
-- reqwest (`http_client/reqwest.rs:14-20`, `59-65`): the per-request `timeout`
-  and `headers` are layered onto the injected client's request; TLS feature and
-  proxy-env defer to the injected client.
-- ureq (`http_client/ureq.rs:19-44`): the injected agent owns its own
-  timeout/TLS/proxy, so the per-request `timeout` is applied only to the
-  per-call agent and not to an injected agent; extra `request_header`s are still
-  applied per request.
-- `retries` is independent of the client: it wraps `get` in `send`, so an
-  injected client is still retried.
+- `ReqwestClient`/`ReqwestAsyncClient` built from an injected client
+  (`From<reqwest::blocking::Client>` etc.): the per-request `timeout` and
+  `headers` are layered onto the request; TLS feature and proxy-env defer to the
+  injected client.
+- `UreqClient` built from an injected agent: the agent owns its own
+  timeout/TLS/proxy, so the per-request `timeout` is applied only to the per-call
+  agent and not to an injected agent; extra `request_header`s are still applied
+  per request.
+- `retries` is independent of the client: it wraps `client.get(...)` in `send`,
+  so an injected client is still retried.
 
 ### Reuse across paginated requests
 
-`fetch_all_releases` walks `Link: rel="next"` pages via `collect_paginated`
-(`backends/mod.rs:82-105`, `github.rs:368-385`), calling `send` once per page.
-Each call passes `&config.client`, so an injected client (Arc-backed) is reused
-across all pages, sharing its connection pool; a per-call client is rebuilt per
-page. Pagination is bounded by `MAX_RELEASE_PAGES`. `collect_paginated_async`
-(`backends/mod.rs:218-245`) is the async sibling.
+The listing walks pages through the sans-io `run_paginated` driver (`backends/mod.rs`), which
+calls `send` once per `PageRequest`. Each call passes `&config.client`, so an injected client
+(Arc-backed) is reused across all pages, sharing its connection pool; a per-call client is rebuilt
+per page. Pagination is bounded by `MAX_RELEASE_PAGES`. `run_paginated_async` is the async sibling,
+reusing `send_async`.
 
 ### Error mapping (Transport vs status)
 
@@ -151,30 +193,42 @@ status variants.
 
 - `self_update::http` (re-export of the `http` crate); `http_client::header`,
   `http_client::HeaderMap`.
-- `self_update::reqwest` / `self_update::ureq` (re-export of the active client
-  crate, `lib.rs:442-451`).
-- Builder/`Download` setters: `timeout`, `request_header` / `header`,
-  `retries`, `reqwest_client`, `reqwest_async_client`, `ureq_agent`.
-- `HttpResponse` trait, `AsyncResponse` alias, `ClientOverride` (carrier;
-  fields are `pub(crate)`).
+- `self_update::reqwest` / `self_update::ureq` (re-export of each compiled client
+  crate; both may be present).
+- Builder/`Download` setters: `timeout`, `request_header`, `retries`,
+  `http_client` / `http_client_async`, `add_root_certificate`, and the
+  convenience `reqwest_client`, `reqwest_async_client`, `ureq_agent`; plus
+  `allow_auth_host` and `dangerously_allow_non_https_auth_forwarding` on the
+  builders.
+- `self_update::Certificate` (opaque PEM/DER root CA).
+- `HttpClient` / `HttpResponse` traits and their async siblings
+  `AsyncHttpClient` / `AsyncHttpResponse`; the concrete `ReqwestClient`,
+  `ReqwestAsyncClient`, `UreqClient` impls.
 
 ## Invariants and regression checklist
 
-- Exactly one HTTP client is compiled: both-or-neither is a `compile_error!`;
-  `async` requires reqwest.
-- TLS is feature-selected (`default-tls` native, `rustls`), never runtime.
+- At least one HTTP client must be compiled (no-client is a `compile_error!`);
+  both clients can coexist. `async` requires reqwest (auto-satisfied by the
+  feature implication).
+- The seam traits are **object-safe** (`Box<dyn HttpClient>` / `Box<dyn
+  HttpResponse>`); the sync `HttpResponse` surface is `headers()` + `body()`
+  (plus the defaulted `body_buffered()`), with no `json_value` / `text`.
+- TLS is feature-selected; when both TLS features are on, rustls wins, so
+  `cargo build --all-features` builds.
 - `retries == 0` means exactly one attempt; the exhaustion boundary is
   `attempts >= retries` (one retry => two attempts).
 - Backoff sequence is 100/200/400/800/1600/3200 ms, capped at 3200 from attempt
   5 onward (`100 << attempt.min(5)`); the rising index is fed in-loop.
-- The binary download is not retried (`Download` has no `retries`; it calls
-  `http_client::get` directly, not `send`).
-- An injected client still honors `request_header` and `retries`; for reqwest it
-  also honors the per-request `timeout`, for ureq the timeout defers to the
-  agent. Proxy-env and TLS defer to the injected client.
+- The binary download's request-establishment phase is retried under the `retries`
+  budget (via `send`); mid-stream transfer errors are not retried.
+- An injected client still honors `request_header` and `retries`; for a reqwest
+  client it also honors the per-request `timeout`, for a ureq agent the timeout
+  defers to the agent. Proxy-env and TLS defer to the injected client.
 - Non-success status => a structured status variant (`NotFound` / `Unauthorized` /
   `HttpStatus`), identically on both clients; transport failure => `Error::Transport`.
-- Injected clients are Arc-backed and reused across paginated pages.
+- Injected clients are `Arc<dyn HttpClient>` and reused across paginated pages.
+- s3 feeds quick-xml from the streaming `body_buffered()` reader, not a fully
+  buffered `text()` String.
 
 ## Tests
 
@@ -185,7 +239,17 @@ status variants.
   `retries_are_exhausted_and_then_error`, `retries=1` boundary, timeout honored,
   pagination follows `Link` (`github.rs:1260-1364`, `764-833`).
 - `backends/common.rs`: `insert_header` records invalid name/value, first-error
-  wins, valid-then-invalid keeps the valid header (`common.rs:218-289`).
+  wins, valid-then-invalid keeps the valid header.
+- `http_client/{reqwest,ureq}.rs`: per-client status-mapping tests, exercised
+  through the trait `get` method; `build_with_certs_rejects_non_pem` for the
+  certificate path.
+- `backends/github.rs`: `injected_fake_http_client_drives_a_backend_through_the_trait`
+  (a `FakeClient` test double injected via `.http_client(Arc::new(...))` records
+  the URL and returns a canned `Box<dyn HttpResponse>`), and
+  `http_traits_are_object_safe` (a `Box<dyn HttpClient>` / `Box<dyn HttpResponse>`
+  compile assertion).
+- `backends/s3.rs`: `parse_s3_response_parses_from_streaming_body_buffered` drives
+  the XML parser from a trait `body_buffered()` reader.
 - `errors.rs`: boxed `source()` mirroring for `Http` and siblings.
 
 ## Related

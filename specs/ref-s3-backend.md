@@ -19,70 +19,81 @@ canonical reference; it does not propose changes.
 Two builders, each reached through a `configure()` entry point:
 
 - `ReleaseList` / `ReleaseListBuilder` (`s3.rs:91`, `s3.rs:151`): queries a bucket
-  and returns a `Vec<Release>` via `ReleaseList::fetch` (`s3.rs:220`).
+  and returns a `Releases` via `ReleaseList::fetch` (`s3.rs:257`) or, under the
+  `async` feature, `ReleaseList::fetch_async` (`s3.rs:282`). The result is a bare listing
+  (`current_version()` is `None`); recover the `Vec<Release>` with `into_vec()`.
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
-  `asset_prefix`, `region`, `end_point`, `filter_target`, and (under `s3-auth`)
-  `access_key`; plus the shared `request_config_setters!(request)` (`s3.rs:166`).
-  `auth_token` exists on this builder only as a `#[deprecated]` no-op shim
-  (`s3.rs:159`); the real credential setter is `access_key`.
+  `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`, and (under `s3-auth`)
+  `access_key` and `signature_ttl`; plus the shared `request_config_setters!(request)`.
+  There is **no** `auth_token` setter on this builder (the deprecated no-op was removed);
+  the credential setter is `access_key`.
 - `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
-  implementation. `Update::configure` (`s3.rs:371`) returns an `UpdateBuilder`.
-  `build` returns `Box<dyn ReleaseUpdate>` (`s3.rs:337`); `build_async` (under
-  `async`) returns the concrete `Update` so the inherent `*_async` methods are
-  reachable (`s3.rs:346`). Backend setters mirror the list builder
-  (`end_point`, `bucket_name`, `asset_prefix`, `region`, `access_key`); the common
+  implementation. `Update::configure` returns an `UpdateBuilder`.
+  `build` (`s3.rs:433`) and `build_async` (under `async`, `s3.rs:442`) both return
+  the concrete `Update` (which is `Send` and exposes the update verbs as inherent
+  methods, so no trait import is needed). Backend setters mirror the list builder
+  (`endpoint`, `bucket_name`, `asset_prefix`, `region`, `access_key`); the common
   setters come from `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`).
-  As on the list builder, `auth_token` is present only as a `#[deprecated]` no-op
-  shim (`s3.rs:307`), not the credential setter.
+  As on the list builder, there is **no** `auth_token` setter (the deprecated shim was
+  removed); use `access_key`.
 
 `filter_target` on the list builder drops whole releases that carry no matching
 asset (`s3.rs:144`, via `has_target_asset` in `fetch`, `s3.rs:234`); the `Update`
 `target` (a common setter) selects which asset of the chosen release to download.
 
-Both `build` paths require `bucket_name`, bailing `Error::Config` with
+Both `build` paths require `bucket_name`, bailing `Error::MissingField { field }` with
 "`bucket_name` required" otherwise (`s3.rs:177`, `s3.rs:323`). They also validate
 the endpoint/region pairing up front via `check_endpoint_region` (`s3.rs:78`),
 called from `ReleaseListBuilder::build` (`s3.rs:171`) and
 `UpdateBuilder::build_update` (`s3.rs:317`), so a missing required region is an
-`Error::Config` from `build()` rather than from the first request. All the string
+`Error::MissingField { field }` from `build()` rather than from the first request. All the string
 setters (`bucket_name`, `asset_prefix`, `region`, `filter_target`, and the common
 setters) take `impl Into<String>`.
 
 ### URL / endpoint composition
 
-`EndPoint` (`s3.rs:28`) is `#[non_exhaustive]`, derives `Default` (defaulting to
-`S3`, `s3.rs:35`), and has `From<&str>` / `From<String>` impls that both produce
-`Generic` (`s3.rs:53`, `s3.rs:61`). `build_s3_api_url` (`s3.rs:689`) returns
-`(download_base_url, api_url)`:
+`Endpoint` is `#[non_exhaustive]`, derives
+`Default` (defaulting to `S3`), and has `From<&str>` / `From<String>` impls that both
+produce `Generic(String)` (the variant is now a tuple variant, renamed from
+`Generic { end_point }`). The builder setter is `endpoint(impl Into<Endpoint>)` (renamed
+from `end_point`). `build_s3_api_url` returns `(download_base_url, api_url)`:
 
 - `S3`: `https://<bucket>.s3.<region>.amazonaws.com/` (`s3.rs:706`)
 - `S3DualStack`: `https://<bucket>.s3.dualstack.<region>.amazonaws.com/` (`s3.rs:710`)
 - `DigitalOceanSpaces`: `https://<bucket>.<region>.digitaloceanspaces.com/` (`s3.rs:714`)
 - `GCS`: `https://storage.googleapis.com/<bucket>/` (region not consumed) (`s3.rs:718`)
-- `Generic { end_point }`: the supplied URL used verbatim as the base (`s3.rs:719`)
+- `Generic(endpoint)`: the supplied URL used verbatim as the base
 
 `region` is `Option<String>`. The three host-interpolating endpoints (`S3`,
 `S3DualStack`, `DigitalOceanSpaces`) require it (`endpoint_requires_region`,
-`s3.rs:69`): a missing region surfaces as `Error::Config("`region` required for the
-S3, S3DualStack, and DigitalOceanSpaces endpoints; call `.region(...)`")`. This is
+`s3.rs:69`): a missing region surfaces as `Error::MissingField { field }` (field `region`,
+for the S3, S3DualStack, and DigitalOceanSpaces endpoints). This is
 now validated at `build()` time via `check_endpoint_region` (`s3.rs:78`), not
 deferred to URL construction. `GCS` and `Generic` never read the region and build
 without it (under `s3-auth`, SigV4 still defaults the signing region to `us-east-1`
 when none is set).
 
-### Listing + MAX_KEYS + prefix
+### Listing + max_keys + continuation + prefix
 
-`MAX_KEYS` is a `const u8 = 100` (`s3.rs:20`), the per-request item cap sent to the
-listing API. The listing query string is appended to the download base:
+`max_keys` is a `u16` field on the `Update` / `ReleaseList` builders, defaulting to 1000 (the
+ListObjectsV2 cap). The `max_keys(u16)` setter clamps to `1..=1000` via
+`clamp_max_keys`. The listing query string is appended to the download base:
 
 - S3 / S3DualStack / DigitalOceanSpaces / Generic:
-  `?list-type=2&max-keys=<MAX_KEYS><prefix>` (the ListBucket v2 API) (`s3.rs:726`)
-- GCS: `?max-keys=<MAX_KEYS><prefix>` (no `list-type=2`, which is S3-specific)
-  (`s3.rs:730`)
+  `?list-type=2&max-keys=<max_keys><prefix><continuation>` (the ListBucket v2 API)
+- GCS: `?max-keys=<max_keys><prefix><continuation>` (no `list-type=2`, which is S3-specific)
 
-`asset_prefix`, when set, is appended as `&prefix=<value>` (`s3.rs:697`); when
-`None` the segment is absent. The listing is a single request: there is no
-continuation-token pagination, so at most `MAX_KEYS` objects are listed.
+`asset_prefix`, when set, is appended as `&prefix=<value>`; when `None` the segment is absent.
+
+The listing is described transport-free as a `PageRequest<Release>` (`s3_listing_plan` ->
+`s3_page`) and driven by the sans-io `run_paginated` / `run_paginated_async` drivers. The parser
+reads `<IsTruncated>true</IsTruncated>` and `<NextContinuationToken>`, and when truncated emits
+`Page::next` as a fresh `PageRequest` with `&continuation-token=<token>` in the query, which the
+same driver follows. So a >1000-key bucket is walked across multiple requests, not truncated. Under
+`s3-auth` each continuation URL is freshly SigV4-signed. The `signature_ttl(Duration)` setter
+(default 300s, clamped to AWS's `X-Amz-Expires` range of 1s..=7d via
+`clamp_signature_ttl`, `s3.rs:39`) sets the `X-Amz-Expires` of signed listing and
+download URLs.
 
 ### XML to model
 
@@ -113,15 +124,16 @@ A single case-insensitive regex parses object keys (`s3.rs:834`):
 The key must contain a `name-[v]<major>.<minor>.<patch>-<suffix>` shape: `name`
 becomes the release name and the dotted triple becomes the version, with any
 leading `v` stripped (`s3.rs:874`). Keys lacking this shape produce no release.
-Regex construction failure surfaces as `Error::Release` (`s3.rs:836`).
+Regex construction failure surfaces as `Error::InvalidResponse` (`s3.rs:836`).
 
 `ReleaseUpdate` selection helpers operate on the parsed list: `pick_latest`
-(`s3.rs:406`) picks the highest version (ignoring unparseable ones, erroring
-"No release was found" when empty); `sort_newer` (`s3.rs:428`) filters to strictly
-newer-than-current, newest-first; `find_version` (`s3.rs:449`) matches an exact
-version, erroring `Error::Release` when absent. These back `get_latest_release`,
-`get_latest_releases`, and `get_release_version` (`s3.rs:475`) and their `async`
-siblings (`s3.rs:484`).
+(`s3.rs:498`) picks the highest version (ignoring unparseable ones, erroring
+`Error::NoReleaseFound` when empty); `sort_newer` (`s3.rs:513`) filters to strictly
+newer-than-current, newest-first; `find_version` (`s3.rs:524`) matches an exact
+version, erroring `Error::NoReleaseFound` when absent. These back
+`get_latest_release`, `get_newer_releases`, and `get_release_version`
+(`s3.rs:534`) and their `async` siblings, all also exposed as inherent methods on
+`Update` alongside `is_update_available`.
 
 ### Signing under s3-auth
 
@@ -148,15 +160,11 @@ HMAC-SHA256 and SHA-256, `percent-encoding` for URI encoding (reserving
 signed when an access key is present.
 
 The s3 backend does not authenticate via bearer token. The shared `auth_token`
-setter is omitted via `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`,
-macro at `src/macros.rs:228`); in its place both s3 builders carry a `#[deprecated]`
-no-op `auth_token(impl Into<String>)` shim (`ReleaseListBuilder` at `s3.rs:159`,
-`UpdateBuilder` at `s3.rs:307`) that returns `&mut Self` without storing anything
-and whose deprecation note points the caller at `.access_key((id, secret))` under
-`s3-auth`. The shim exists so code ported from a git backend gets a helpful
-deprecation hint rather than a bare "no method" error. `api_headers` uses the
-`UpdateConfig` trait default (no override), so it sets a single
-`Authorization: token ...` header and no `User-Agent`.
+setter is omitted via `impl_common_builder_setters!(no_auth_token)`; there is no
+`auth_token` method at all on the s3 builders (use `.access_key((id, secret))`
+under `s3-auth`). The shared auth derivation is a no-op for s3 (no `Authorization`,
+no `User-Agent`): `api_headers` uses the `UpdateConfig` trait default, which is a
+no-op, because s3 authenticates by SigV4-signing the URL, not via an auth header.
 
 ### Errors
 
@@ -166,30 +174,36 @@ body: `send` / `http_client::get` bail on any non-2xx status before returning
 variant by status: 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`,
 any other non-2xx -> `Error::HttpStatus` (`status_to_error`, `errors.rs:254`); a
 request that cannot complete (connection/TLS/timeout) is `Error::Transport`. XML
-parse errors surface as `Error::Release` with the buffer position (`s3.rs:904`).
+parse errors surface as `Error::InvalidResponse` with the buffer position (`s3.rs:904`).
 Missing region (for the region-requiring endpoints) and missing bucket are both
-`Error::Config`, now raised from `build()` rather than the first request.
+`Error::MissingField { field }`, now raised from `build()` rather than the first request.
 
 ## Public surface
 
-- `s3::EndPoint` (`#[non_exhaustive]`, `Default = S3`) with variants `S3`,
-  `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic { end_point }`; plus
+- `s3::Endpoint` (`#[non_exhaustive]`, `Default = S3`) with variants `S3`,
+  `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic(String)`; plus
   `From<&str>` / `From<String>` -> `Generic`.
 - `s3::ReleaseList`, `s3::ReleaseListBuilder` (setters: `bucket_name`,
-  `asset_prefix`, `region`, `end_point`, `filter_target`, `access_key` [s3-auth],
-  request-config setters, `build`).
+  `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`,
+  `access_key` / `signature_ttl` [s3-auth], request-config setters, `build`);
+  `ReleaseList::fetch` and `fetch_async` [async].
 - `s3::UpdateBuilder`, `s3::Update` (`#[non_exhaustive]`); `Update::configure`,
-  `build` -> `Box<dyn ReleaseUpdate>`, `build_async` -> `Update` [async].
+  `build` -> `Update`, `build_async` -> `Update` [async]. `Update` is `Send` with
+  the inherent verbs (`update`, `update_extended`, `get_latest_release`,
+  `get_newer_releases`, `get_release_version`, `is_update_available`).
 - `s3::AccessKey` [s3-auth], re-exported, `#[non_exhaustive]`, `AccessKey::new`
   plus tuple `From` impls.
 
 ## Invariants and regression checklist
 
-- `bucket_name` required on both builders -> `Error::Config`.
+- `bucket_name` required on both builders -> `Error::MissingField { field }`.
 - Region required for `S3`/`S3DualStack`/`DigitalOceanSpaces`; ignored for
-  `GCS`/`Generic`. Missing required region -> `Error::Config`.
-- S3-family and Generic listing query uses `list-type=2&max-keys=100`; GCS uses
-  `max-keys=100` only (no `list-type=2`).
+  `GCS`/`Generic`. Missing required region -> `Error::MissingField { field }`.
+- S3-family and Generic listing query uses `list-type=2&max-keys=<max_keys>` (default 1000); GCS
+  uses `max-keys=<max_keys>` only (no `list-type=2`). `max_keys` clamps to `1..=1000`.
+- A truncated listing (`<IsTruncated>true</IsTruncated>` + `<NextContinuationToken>`) is followed
+  via `&continuation-token=<token>`, so a >1000-key bucket is walked across requests. Under
+  `s3-auth` each continuation URL is freshly signed; `signature_ttl` sets the `X-Amz-Expires`.
 - `asset_prefix` appended as `&prefix=<value>`; absent when unset.
 - Asset `name` is the key's filename component, not the full key path.
 - Version regex requires a `\d+\.\d+\.\d+` triple; leading `v` stripped; keys not
@@ -200,9 +214,9 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 - Public buckets (no access key) emit unsigned URLs; with `s3-auth` + access key,
   both listing and asset URLs are SigV4-signed (TTL 300s), region defaulting to
   `us-east-1`.
-- `auth_token` exists on the s3 builders only as a `#[deprecated]` no-op that does
-  nothing (use `.access_key(...)` to authenticate); `api_headers` sets no `User-Agent`.
-- `EndPoint`, `Update`, and `AccessKey` are `#[non_exhaustive]`.
+- the `auth_token` setter was removed from the s3 builders; use `access_key((id, secret))` under `s3-auth` to authenticate.
+- `Endpoint`, `Update`, and `AccessKey` are `#[non_exhaustive]`.
+- `max_keys` takes a `u16`; `signature_ttl` clamps to 1s..=7d.
 
 ## Tests
 
@@ -210,17 +224,13 @@ In-module tests (`s3.rs:938`): `parse_s3_response` cases (single/multi asset,
 v-prefix strip, multiple releases, non-matching-key skip, path-stripped filename,
 malformed-XML error, empty body); `add_to_releases_list` empty-name/version drop;
 loopback-TCP stub tests for the sync and async `ReleaseUpdate` fetch methods
-(`get_latest_release`, `get_latest_releases`, `get_release_version`,
+(`get_latest_release`, `get_newer_releases`, `get_release_version`,
 `is_update_available`, multi-asset merge); the non-2xx error contract
 (`assert_non_2xx_err`); `pick_latest`/`sort_newer`/`find_version` unit tests;
 `build_s3_api_url` shape tests per endpoint (S3, dual-stack, DigitalOcean, GCS,
 Generic), prefix append, and missing-region error; and (under `s3-auth`)
 `s3_signature_v4` structural invariants, region default, listing-URL signing, and
-asset-URL signing, plus `AccessKey` re-export/tuple-`From` coverage. The deprecated
-`auth_token` no-op shim is covered by `release_list_builder_auth_token_is_a_noop`
-(`s3.rs:2109`) and `update_builder_auth_token_is_a_noop` (`s3.rs:2124`), both
-`#[allow(deprecated)]`, asserting the shim compiles, accepts a token, and leaves
-`build` succeeding.
+asset-URL signing, plus `AccessKey` re-export/tuple-`From` coverage.
 
 ## Related
 

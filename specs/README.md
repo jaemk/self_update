@@ -1,88 +1,61 @@
-# Specifications
+# Spec
 
-This directory is the committed, canonical record of `self_update`'s behavior and
-design. It serves two roles:
+Every feature is documented here before or as it lands, with its status.
 
-- **Behavior reference** (`ref-*.md`) documents what each subsystem does today,
-  cited to `file:line`. These are the source of truth for defining existing
-  functionality, evaluating a proposed change, and detecting regressions: if code
-  and a `ref-*` spec disagree, one of them is a bug.
-- **Decisions and deferred work** records why the surface is shaped the way it is
-  (implemented decisions) and what is intentionally left for later (deferred /
-  needs-research items, each with a concrete additive path).
+## Feature status
 
-## How to use these specs
+Status values: `done` (implemented and covered by tests), `pending` (documented,
+not yet built; the default), `research` (needs investigation or design before it
+can be built). Keep each row's status current with `spec.py set`.
 
-- Before changing a subsystem, read its `ref-*` spec to learn the current contract
-  and the invariants a change must preserve (each reference spec ends with an
-  "Invariants and regression checklist").
-- When a change alters behavior, update the matching `ref-*` spec in the same change,
-  the same way `README.md` and `CHANGELOG.md` are kept in sync.
-- When adding functionality, write or extend the relevant `ref-*` spec to describe
-  the new contract; if a decision is involved, add a decision spec.
-- Deferred items move to `implemented` (and usually gain or update a `ref-*` spec)
-  once shipped.
+| Feature | Status | Spec |
+|---------|--------|------|
+| Update Pipeline | done | [ref-update-pipeline.md](ref-update-pipeline.md) |
+| Release Model | done | [ref-release-model.md](ref-release-model.md) |
+| Version and Target | done | [ref-version-and-target.md](ref-version-and-target.md) |
+| Common Config | done | [ref-common-config.md](ref-common-config.md) |
+| HTTP Client | done | [ref-http-client.md](ref-http-client.md) |
+| GitHub Backend | done | [ref-github-backend.md](ref-github-backend.md) |
+| GitLab Backend | done | [ref-gitlab-backend.md](ref-gitlab-backend.md) |
+| Gitea Backend | done | [ref-gitea-backend.md](ref-gitea-backend.md) |
+| S3 Backend | done | [ref-s3-backend.md](ref-s3-backend.md) |
+| Custom Backend | done | [ref-custom-backend.md](ref-custom-backend.md) |
+| Signatures and Checksums | done | [ref-signatures-and-checksums.md](ref-signatures-and-checksums.md) |
+| Errors | done | [ref-errors.md](ref-errors.md) |
+| Feature Flags | done | [ref-feature-flags.md](ref-feature-flags.md) |
+| 1.0 API Surface | done | [1.0-api-surface.md](1.0-api-surface.md) |
+| Releases Check Type | done | [releases-check-type.md](releases-check-type.md) |
+| Async API | done | [async-api.md](async-api.md) |
+| Transport Control | done | [transport-control.md](transport-control.md) |
+| Release Scan Pagination | done | [release-scan-pagination.md](release-scan-pagination.md) |
+| Custom Backends | done | [custom-backends.md](custom-backends.md) |
+| Checksum Verification | done | [checksum-verification.md](checksum-verification.md) |
+| Multi-file Install | done | [multi-file-install.md](multi-file-install.md) |
+| Custom Asset Matching | done | [custom-asset-matching.md](custom-asset-matching.md) |
+| Progress Callback | done | [progress-callback.md](progress-callback.md) |
+| S3 Auth Token Removal | done | [s3-auth-token-removal.md](s3-auth-token-removal.md) |
+| Post-update Verify | done | [post-update-verify.md](post-update-verify.md) |
+| Release Tag URL Encoding | done | [release-tag-url-encoding.md](release-tag-url-encoding.md) |
+| Error Network vs HTTP Semantics | done | [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) |
+| Error Variant Granularity | done | [error-variant-granularity.md](error-variant-granularity.md) |
+| S3 Max Keys Configurable | done | [s3-max-keys-configurable.md](s3-max-keys-configurable.md) |
+| Async Future Extensions | pending | [async-future-extensions.md](async-future-extensions.md) |
+| Checksum from Asset | pending | [checksum-from-asset.md](checksum-from-asset.md) |
+| Update Config Internal Accessors | done | [update-config-internal-accessors.md](update-config-internal-accessors.md) |
+| Releases Test Constructor | done | [releases-test-constructor.md](releases-test-constructor.md) |
+| Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
+| Embedded Key Verification | done | [embedded-key-verification.md](embedded-key-verification.md) |
+| Corporate Network Config | pending | [corporate-network-config.md](corporate-network-config.md) |
 
-## Status legend
+## Conventions
 
-- `implemented` - shipped in the crate; the spec points at the code and CHANGELOG.
-- `not implemented` - a decided-against-for-now item with a concrete additive path.
-- `needs research` - a known gap whose shape is not yet settled.
-
-## Behavior reference
-
-Current behavior per subsystem. All `implemented`.
-
-| Spec | Subsystem | Source |
-|------|-----------|--------|
-| [ref-update-pipeline.md](ref-update-pipeline.md) | The end-to-end download / verify / extract / replace flow, confirm + output, multi-file install | `src/update.rs`, `src/lib.rs` |
-| [ref-release-model.md](ref-release-model.md) | `Release` / `ReleaseAsset` / `Releases` and the sealed `ReleaseUpdate` / `UpdateConfig` fetch traits | `src/update.rs` |
-| [ref-version-and-target.md](ref-version-and-target.md) | Semver parsing and comparison, `get_target()`, asset matching and overrides | `src/version.rs`, `src/lib.rs` |
-| [ref-common-config.md](ref-common-config.md) | `CommonBuilderConfig` / `CommonConfig` and the builder-setter / accessor / async-method macros | `src/backends/common.rs`, `src/macros.rs` |
-| [ref-http-client.md](ref-http-client.md) | The reqwest/ureq abstraction, TLS, timeouts, retries, proxy, client injection | `src/http_client/`, `src/macros.rs`, `src/backends/mod.rs` |
-| [ref-github-backend.md](ref-github-backend.md) | GitHub release listing, by-tag fetch, auth, pagination, JSON mapping | `src/backends/github.rs` |
-| [ref-gitlab-backend.md](ref-gitlab-backend.md) | GitLab release listing, by-tag fetch, auth, project-path encoding | `src/backends/gitlab.rs` |
-| [ref-gitea-backend.md](ref-gitea-backend.md) | Gitea release listing, by-tag fetch, auth, pagination | `src/backends/gitea.rs` |
-| [ref-s3-backend.md](ref-s3-backend.md) | S3-compatible listing, URL composition, XML mapping, SigV4 signing | `src/backends/s3.rs` |
-| [ref-custom-backend.md](ref-custom-backend.md) | `ReleaseSource` / `AsyncReleaseSource` traits and the `backends::custom` adapters | `src/backends/custom.rs`, `src/update.rs` |
-| [ref-signatures-and-checksums.md](ref-signatures-and-checksums.md) | Artifact verification (`checksums` digest, `signatures` zipsign) and its pipeline ordering | `src/checksum.rs`, `src/update.rs` |
-| [ref-errors.md](ref-errors.md) | Every `Error` variant, its producer, feature gate, and opaque boxing | `src/errors.rs` |
-| [ref-feature-flags.md](ref-feature-flags.md) | Cargo features, what each gates, and the compile-time mutual-exclusion guards | `Cargo.toml`, `src/lib.rs` |
-
-## Decisions and deferred work
-
-### Implemented decisions
-
-| Spec | Summary |
-|------|---------|
-| [1.0-api-surface.md](1.0-api-surface.md) | The 1.0 ergonomic and naming surface that shipped together. |
-| [releases-check-type.md](releases-check-type.md) | The fetch-once `Releases` check type and its ergonomics. |
-| [async-api.md](async-api.md) | Async update verbs behind the `async` feature (reqwest + tokio). |
-| [transport-control.md](transport-control.md) | Timeouts, headers, retries, proxy, and injectable HTTP clients. |
-| [release-scan-pagination.md](release-scan-pagination.md) | `update()` paginates the release listing. |
-| [custom-backends.md](custom-backends.md) | `ReleaseSource` / `AsyncReleaseSource` + `backends::custom`. |
-| [checksum-verification.md](checksum-verification.md) | Caller-pinned digest check behind the `checksums` feature. |
-| [multi-file-install.md](multi-file-install.md) | `MoveAll` transactional multi-file installer. |
-| [custom-asset-matching.md](custom-asset-matching.md) | `asset_matcher` override for asset selection. |
-| [progress-callback.md](progress-callback.md) | Byte-level `progress_callback` independent of indicatif. |
-| [s3-auth-token-removal.md](s3-auth-token-removal.md) | Removed the no-op s3 `auth_token` setter. |
-| [post-update-verify.md](post-update-verify.md) | `verify_with` hook on the extracted binary before swap. |
-| [release-tag-url-encoding.md](release-tag-url-encoding.md) | Percent-encoding the tag segment in the fetch-by-tag URLs. |
-| [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) | Renamed `Http` to `Transport` and split non-2xx into `NotFound`/`Unauthorized`/`HttpStatus`. |
-
-### Deferred (not implemented)
-
-| Spec | Summary |
-|------|---------|
-| [error-variant-granularity.md](error-variant-granularity.md) | Splitting the stringly-typed catch-all `Error` variants (status variants done; `Update`/`Release`/`Config` remain). |
-| [s3-max-keys-configurable.md](s3-max-keys-configurable.md) | A builder setter for the s3 `MAX_KEYS` per-request cap. |
-| [async-future-extensions.md](async-future-extensions.md) | Further async work beyond the current verbs. |
-| [checksum-from-asset.md](checksum-from-asset.md) | Fetching and parsing a `SHA256SUMS` asset for the digest. |
-
-### Needs research
-
-| Spec | Summary |
-|------|---------|
-| [update-config-internal-accessors.md](update-config-internal-accessors.md) | Moving crate-private-typed `UpdateConfig` accessors off the public trait. |
-| [releases-test-constructor.md](releases-test-constructor.md) | A downstream-buildable `Releases` for unit tests. |
-| [choose-latest-release-sort.md](choose-latest-release-sort.md) | A total-order comparator in `choose_latest_release`. |
+- Each normative statement carries a stable ID (e.g. `FEAT-1`, `API-3`). IDs are
+  append-only: retire an ID by marking it removed, never reuse the number.
+- Specs are document-first: a feature is documented (status `pending`, or
+  `research` if it needs design work) before implementation begins. Flip to
+  `done` only once implemented and verified.
+- Spec files are named `<slug>.md` and linked from the table above.
+- `ref-*.md` files document current behavior cited to `file:line`. They are the
+  source of truth for evaluating changes and detecting regressions: if code and a
+  `ref-*` spec disagree, one of them is a bug. Update the matching `ref-*` spec
+  in the same change that alters behavior.

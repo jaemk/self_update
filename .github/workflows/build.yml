@@ -10,46 +10,52 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  ci:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
 
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
+        components: rustfmt, clippy
 
     - name: Cache cargo dir
       uses: actions/cache@v4
-      env:
-        cache-name: cache-cargo-dir
       with:
         path: ~/.cargo
-        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-ci-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-build-${{ env.cache-name }}-
-          ${{ runner.os }}-build-
+          ${{ runner.os }}-ci-
           ${{ runner.os }}-
 
     - name: Cache target dir
       uses: actions/cache@v4
-      env:
-        cache-name: cache-target-dir
       with:
         path: ./target
-        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-ci-target-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-build-${{ env.cache-name }}-
-          ${{ runner.os }}-build-
-          ${{ runner.os }}-
+          ${{ runner.os }}-ci-target-
+          ${{ runner.os }}-ci-
 
     - run: cargo install cargo-readme
-    - run: ./readme.sh check
-    - run: cargo fmt --check
-    # todo: fix clippy lints and run `clippy -- -Dwarnings` instead of cargo check
-    - run: cargo check
-    # Run the test suite across the default, reqwest, ureq, and async feature sets
-    # (mirrors the Makefile's `tests` target so the feature lists stay in one place).
-    - run: make tests
+    # `make ci` runs fmt + README drift + clippy (-D warnings) on every client, the test suite on
+    # the default/reqwest/ureq/async feature sets, the `--all-features` build, and the example builds.
+    - run: make ci
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.88.0
+    # Pin the declared MSRV: the full reqwest feature set must build on 1.88 (zip 8 requires 1.88).
+    - run: cargo build --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+
+  windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    # Exercise the Windows-sensitive paths (asset-name guard, zip extraction, self-replace) on both
+    # clients. `make` is not available on the Windows runner, so run the lanes directly.
+    - run: cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+    - run: cargo test --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"

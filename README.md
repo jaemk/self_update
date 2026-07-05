@@ -50,38 +50,46 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Features
 
-Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
-exclusive -- enabling both, or neither, is a compile error):
+At least one HTTP client must be selected; having zero clients is a compile error. Multiple
+clients and multiple TLS backends may coexist (reqwest is preferred when both are present):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
-* `default-tls` (default): native TLS for the selected client;
-* `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
+* `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
+* `native-tls`: opt-in native/OpenSSL TLS for the selected client;
 
-The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
-are _disabled_ by default; activate the one(s) your release files need:
+The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
+are enabled by default:
 
-* `archive-tar`: Support for _tar_ archive format;
-* `archive-zip`: Support for _zip_ archive format;
-* `compression-flate2`: Support for _gzip_ compression;
-* `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
-* `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
-* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
-* `checksums`: Verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
-* `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
-* `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
+* `github`: the GitHub Releases backend;
+* `progress-bar`: terminal download progress bar;
 
-The S3 backend needs **no feature** -- it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
+The following are opt-in; activate the one(s) your release files need:
+
+* `gitlab`: the GitLab Releases backend;
+* `gitea`: the Gitea Releases backend;
+* `s3`: the S3-compatible backend (Amazon S3, GCS, DigitalOcean Spaces, etc.);
+* `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
+* `archive-tar`: support for _tar_ archive format;
+* `archive-zip`: support for _zip_ archive format;
+* `compression-tar-gz`: support for _gzip_ compression;
+* `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
+* `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
+* `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
+* `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
+* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest handles async, ureq handles sync); see [Async](#async) below.
+
+`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
 
 ### Example
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example github --features "signatures archive-tar compression-tar-gz"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example gitlab --features "gitlab archive-tar compression-tar-gz"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -95,8 +103,8 @@ use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
         .region("eu-west-2")
@@ -114,8 +122,8 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example extracts a `.tar.gz`, which
-_requires_ both the `archive-tar` and `compression-flate2` features -- `archive-tar` reads the tar
-archive and `compression-flate2` decodes the gzip layer; see the [features](#features) section
+_requires_ both the `archive-tar` and `compression-tar-gz` features -- `archive-tar` reads the tar
+archive and `compression-tar-gz` decodes the gzip layer; see the [features](#features) section
 above). It downloads, extracts, and replaces the running binary
 by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
 and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
@@ -131,19 +139,20 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    // get the first available release
-    let asset = releases[0]
+    // get the first available release (`fetch` returns a `Releases`; `latest()` is the first entry)
+    let latest = releases.latest().unwrap();
+    let asset = latest
         .asset_for(&self_update::get_target(), None)
         .unwrap();
 
     let tmp_dir = tempfile::Builder::new()
             .prefix("self_update")
             .tempdir_in(::std::env::current_dir()?)?;
-    let tmp_tarball_path = tmp_dir.path().join(&asset.name);
+    let tmp_tarball_path = tmp_dir.path().join(asset.name());
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
-    self_update::Download::from_url(&asset.download_url)
-        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
+    self_update::Download::from_url(asset.download_url())
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -170,7 +179,7 @@ filesystems), the source files, every destination, and the temp dir must all be 
 filesystem.
 
 **NOTE**: this example extracts a `.tar.gz`, which requires both the `archive-tar` and
-`compression-flate2` features.
+`compression-tar-gz` features.
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {
@@ -222,30 +231,22 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Checking for an update without installing
 
-To check whether a newer release exists without downloading or installing anything, fetch the
-releases once and query the returned `Releases`. The updater no longer has an
-`is_update_available()` method; instead call `get_latest_releases()` (the full candidate list) or
-`get_latest_release()` (a one-element list with just the newest release), then ask the result:
-`.is_update_available()` compares the newest fetched release against the configured
-`current_version`, and `.latest()` / `.all()` expose the releases themselves. The fetch happens
-once; every query reads the already-fetched data.
+To check whether a newer release exists without downloading or installing anything, call
+`is_update_available()` on the built updater. It fetches the release listing and returns the newest
+strictly-newer `Release` (or `None` when up to date):
 
 ```rust
 fn check() -> Result<(), Box<dyn std::error::Error>> {
-    let releases = self_update::backends::github::Update::configure()
+    let update = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
-        .build()?
-        .get_latest_releases()?;
+        .build()?;
 
-    if releases.is_update_available()? {
-        if let Some(latest) = releases.latest() {
-            println!("update available: {}", latest.version);
-        }
-    } else {
-        println!("already up to date");
+    match update.is_update_available()? {
+        Some(release) => println!("update available: {}", release.version()),
+        None => println!("already up to date"),
     }
     Ok(())
 }
@@ -293,7 +294,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -316,14 +317,18 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Async
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
-returns a concrete `Update` with async (`*_async`) verbs — `update_async()`,
-`update_extended_async()`, `get_latest_release_async()`, `get_latest_releases_async()`, and
-`get_release_version_async()` — so a `tokio` application can update
-without wrapping the blocking calls in `spawn_blocking`. The blocking API is unchanged; the async
-path is purely additive. It is **tokio-only and reqwest-only** (ureq has no async story, so `async`
-is incompatible with `ureq`). Network IO becomes async; the extract/replace step stays synchronous.
+returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
+(`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
+`get_newer_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
+update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
+scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
+**tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq
+handles sync); the only invalid configuration is `async` without `reqwest`.
+Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
+does not block the executor.
 
 ```rust
+use self_update::AsyncReleaseUpdate;
 async fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
@@ -343,15 +348,21 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
 The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
 for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
-It is used for both the release listing and the download. The setters are client-specific (the
-client types differ and are mutually exclusive): `reqwest_client` (a blocking
-`reqwest::blocking::Client`, used by the blocking API), `reqwest_async_client`
-(an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent` (a
-`ureq::Agent`). The selected client crate is re-exported (`self_update::reqwest` /
-`self_update::ureq`) so you don't need a separate dependency to name the type.
+It is used for both the release listing and the download. The client-specific convenience setters
+are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
+`reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
+(a `ureq::Agent`); each wraps your client behind the crate's object-safe HTTP transport trait. The
+compiled client crate(s) are re-exported (`self_update::reqwest` / `self_update::ureq`) so you don't
+need a separate dependency to name the type. (Since the transport is a runtime trait seam, `reqwest`
+and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
+when both are present.) For test doubles or fully custom transport, inject any type that implements
+the object-safe trait directly via `.http_client(Arc<dyn HttpClient>)` (sync) or
+`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`self_update::http_client`] module
+for the trait definitions.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
-release-listing requests (the download is never retried), and for `reqwest` the per-request
+release-listing requests and to the download's request-establishment phase (a mid-stream failure
+is not retried, as that would corrupt the partially-written destination), and for `reqwest` the per-request
 `.timeout()` is layered on too; but `HTTP(S)_PROXY` env and the crate's TLS feature are left entirely
 to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does not apply to an
 injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and
@@ -377,13 +388,12 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Troubleshooting
 
-When using cross compilation tools such as cross if you want to use rustls and not openssl
+**Cross-compilation (`cross` / `cargo-cross`).** `rustls` is the default TLS backend, so
+no additional configuration is needed for cross-compilation: a build on default features
+already uses rustls. If you have explicitly switched to `native-tls` and want to revert,
+remove the `native-tls` feature; `rustls` is active by default.
 
-```toml
-self_update = { version = "1", features = ["rustls"], default-features = false }
-```
-
-**TLS certificate errors on Linux (`default-tls` / OpenSSL).** With the native-TLS backend,
+**TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
 it can't (some containers, `musl` static builds, or a non-standard cert layout) a request may fail
 with a certificate-verification error. Point OpenSSL at the bundle by exporting `SSL_CERT_FILE`

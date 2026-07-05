@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -9,28 +9,32 @@ license = "MIT"
 readme = "README.md"
 authors = ["James Kominick <james@kominick.com>"]
 exclude = ["/ci/*", ".travis.yml", "appveyor.yml"]
-edition = "2018"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.88"
 
-# Can't enable all features, reqwest and ureq are mutually exclusives
 [package.metadata.docs.rs]
 features = [
   "reqwest",
-  "default-tls",
+  "native-tls",
   "archive-zip",
   "compression-zip-bzip2",
   "compression-zip-deflate",
   "archive-tar",
-  "compression-flate2",
+  "compression-tar-gz",
   "signatures",
   "checksums",
   "s3-auth",
   "async",
+  "progress-bar",
+  "github",
+  "gitlab",
+  "gitea",
+  "s3",
 ]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 flate2 = { version = "1", optional = true }
@@ -38,8 +42,8 @@ tar = { version = "0.4", optional = true }
 semver = "1.0"
 zip = { version = "8", default-features = false, features = ["time"], optional = true }
 either = { version = "1", optional = true }
-indicatif = "0.18"
-quick-xml = "0.41"
+indicatif = { version = "0.18", optional = true }
+quick-xml = { version = "0.41", optional = true }
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
@@ -60,32 +64,66 @@ url = { version = "2.5.8", optional = true }
 
 tokio = { version = "1", optional = true, default-features = false, features = ["time"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+# Direct dep for the async response trait's `bytes_stream` chunk type (already a transitive reqwest
+# dep); gated under `async`.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
+serde_json = "1"
+zipsign-api = { version = "0.2", default-features = false, features = ["sign-tar", "sign-zip"] }
 
 [features]
-default = ["reqwest", "default-tls"]
+default = ["reqwest", "rustls", "progress-bar", "github", "archive-tar", "compression-tar-gz"]
 
 archive-zip = ["zip", "zipsign-api?/verify-zip"]
 compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
 compression-zip-deflate = ["archive-zip", "zip/deflate"]
 archive-tar = ["tar", "zipsign-api?/verify-tar"]
-compression-flate2 = ["archive-tar", "flate2", "either"]
+compression-tar-gz = ["archive-tar", "flate2", "either"]
 signatures = ["dep:zipsign-api"]
 checksums = ["dep:sha2"]
 
+progress-bar = ["dep:indicatif"]
+github = []
+gitlab = []
+gitea = []
+s3 = ["dep:quick-xml"]
+
 # Async update API (tokio-only, reqwest-only). Adds `*_async` verbs alongside the unchanged
 # blocking API. ureq has no async story, so this requires the `reqwest` client.
-async = ["reqwest", "reqwest?/stream", "dep:tokio", "dep:futures-util"]
+async = ["reqwest", "reqwest?/stream", "dep:tokio", "dep:futures-util", "dep:bytes"]
 
 
-default-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
+native-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
 rustls = ["reqwest?/rustls", "ureq?/rustls"]
 
 reqwest = ["dep:reqwest"]
 ureq = ["dep:ureq"]
 
-# The s3 backend itself needs no feature (it is always compiled). Only private-bucket request
-# signing needs a feature (`s3-auth`).
-s3-auth = ["dep:hmac", "dep:percent-encoding", "dep:sha2", "dep:url", "dep:time"]
+# The s3 backend is gated behind the `s3` feature; private-bucket request signing additionally
+# needs `s3-auth` (which implies `s3`).
+s3-auth = ["s3", "dep:hmac", "dep:percent-encoding", "dep:sha2", "dep:url", "dep:time"]
+
+# Each backend example only builds when its backend feature is enabled, so a default
+# (github-only) `cargo test` does not try to compile the gitlab/gitea/s3 examples. The `custom`
+# example builds unconditionally (the custom backend is always compiled).
+[[example]]
+name = "github"
+required-features = ["github"]
+
+[[example]]
+name = "gitlab"
+required-features = ["gitlab"]
+
+[[example]]
+name = "gitea"
+required-features = ["gitea"]
+
+[[example]]
+name = "s3"
+required-features = ["s3"]
+
+[[example]]
+name = "embedded_key"
+required-features = ["github", "signatures"]

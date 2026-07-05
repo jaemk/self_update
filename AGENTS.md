@@ -64,10 +64,10 @@ builder:
 ## Public API conventions (1.0+)
 The `1.0.0` release stabilised the public surface; keep new code consistent with it:
 - **Builder vocabulary is unified, no `with_` prefix.** Custom endpoint is `url(...)` on every
-  git backend; the target filter is `target(...)`; s3 credentials are `access_key(...)`. Common
-  setters (`current_version`, `target`, `identifier`, `bin_name`, `bin_install_path`,
-  `bin_path_in_archive`, `show_download_progress`, `set_progress_style`, `show_output`,
-  `no_confirm`, `auth_token`, `verifying_keys`) are generated once by the
+  git backend; the `ReleaseList` target filter is `filter_target(...)`; s3 credentials are `access_key(...)`. Common
+  setters (`current_version`, `target`, `asset_identifier`, `bin_name`, `bin_install_path`,
+  `bin_path_in_archive`, `show_download_progress`, `progress_style`, `show_output`,
+  `no_confirm`, `auth_token`, `verify_keys`) are generated once by the
   `impl_common_builder_setters!` macro — add or change a shared setter there, not per backend.
 - **Shared config lives in `src/backends/common.rs`** (`CommonBuilderConfig` → validated
   `CommonConfig`). Each backend's `UpdateBuilder`/`Update` embeds a `common` field plus only its
@@ -75,9 +75,9 @@ The `1.0.0` release stabilised the public surface; keep new code consistent with
   `impl_release_update_accessors!` (reads through `self.common`).
 - **`ReleaseUpdate` is a sealed trait** (`update::sealed::Sealed`) — callable by downstream, not
   implementable. Its accessors return borrows (`&str` / `Option<&str>`), not owned `String`.
-- **`Error` is `#[non_exhaustive]`**; the active http-client error is the opaque `Error::Http`
+- **`Error` is `#[non_exhaustive]`**; the active http-client error is the opaque `Error::Transport`
   and the `s3-auth` signing errors are the opaque `Error::S3Auth` (underlying error via
-  `Error::source()`). `Status`/`ArchiveKind`/`Compression`/`UpdateStatus`/`Release`/`ReleaseAsset`
+  `Error::source()`). `VersionStatus`/`ArchiveKind`/`Compression`/`ReleaseStatus`/`Release`/`ReleaseAsset`
   are also `#[non_exhaustive]`.
 - The `http` crate is re-exported as `self_update::http`; `zipsign_api` and the `VerifyingKey`
   alias are re-exported under the `signatures` feature.
@@ -87,27 +87,24 @@ The `1.0.0` release stabilised the public surface; keep new code consistent with
 
 ---
 
-## HTTP client & TLS (mutually exclusive choices)
-Exactly **one** http client must be enabled:
-- `reqwest` (default)
-- `ureq` (`default-features = false, features = ["ureq", ...]`)
+## HTTP client & TLS
+Both `reqwest` and `ureq` may be enabled at the same time; the sync API prefers `reqwest`
+when both are on. To use `ureq` alone, set `default-features = false, features = ["ureq", ...]`.
+A build with **neither** client is a hard `compile_error!` in `src/http_client/mod.rs`.
 
-Enabling both, or neither, is a hard compile error with an explicit `compile_error!`
-diagnostic (in `src/lib.rs`). TLS is selected with `default-tls` (default, native/OpenSSL)
-**or** `rustls`; enabling both is likewise a `compile_error!`. To use `ureq` or `rustls`, set
-`default-features = false` and pick one client + one TLS backend.
+TLS backends (`rustls` default, `native-tls`) may also coexist; `rustls` wins when both are
+enabled. `cargo build --all-features` (both clients + both TLS backends) builds.
 
 ---
 
 ## Build
 ```bash
-cargo build                                   # default: reqwest + default-tls
+cargo build                                   # default: reqwest + rustls
 # full optional feature set (reqwest):
-cargo build --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo build --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 # the ureq client:
-cargo build --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo build --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
-Note: `--all-features` does **not** build (it enables both `reqwest` and `ureq`). Always pick one client.
 
 ## Format
 ```bash
@@ -117,15 +114,15 @@ cargo fmt --check      # verify only
 
 ## Lint
 ```bash
-cargo clippy --all-targets --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-cargo clippy --all-targets --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo clippy --all-targets --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo clippy --all-targets --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## Test
 Tests are in-module (`#[cfg(test)] mod tests` in `src/…`, including the backend modules) plus doctests in `src/lib.rs` and the backend modules. No external services are required.
 ```bash
-cargo test --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-cargo test --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+cargo test --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## README Sync
@@ -179,18 +176,23 @@ Claude sub-agent definitions used by these skills live in `.claude/agents/`
 | Feature | Description |
 |---|---|
 | `reqwest` (default) | reqwest http client backend |
-| `ureq` | ureq http client backend (mutually exclusive with `reqwest`) |
-| `default-tls` (default) | native TLS for the selected client |
-| `rustls` | rustls TLS for the selected client |
+| `ureq` | ureq http client backend; may coexist with `reqwest` (reqwest is preferred for sync when both are present) |
+| `rustls` (default) | rustls TLS for the selected client |
+| `native-tls` | native/OpenSSL TLS for the selected client |
+| `progress-bar` (default) | indicatif terminal progress bar |
+| `github` (default) | gate the GitHub release backend |
+| `gitlab` | gate the GitLab release backend |
+| `gitea` | gate the Gitea release backend |
+| `s3` | gate the S3 release backend (`s3-auth` implies this) |
 | `archive-tar` | tar archive support |
 | `archive-zip` | zip archive support |
-| `compression-flate2` | gzip compression (tar.gz) |
+| `compression-tar-gz` | gzip compression (tar.gz) |
 | `compression-zip-deflate` | zip deflate compression |
 | `compression-zip-bzip2` | zip bzip2 compression |
 | `signatures` | verify `.zip`/`.tar.gz` artifacts via zipsign |
 | `checksums` | verify a downloaded artifact against a known digest (sha2) |
 | `s3-auth` | sign S3 requests (AWS SigV4) for private buckets |
-| `async` | `*_async` update verbs (tokio + reqwest only; incompatible with `ureq`) |
+| `async` | `*_async` update verbs; requires `reqwest`; `ureq` may coexist |
 
 ---
 
@@ -206,7 +208,7 @@ Claude sub-agent definitions used by these skills live in `.claude/agents/`
 | `src/http_client/{mod,reqwest,ureq}.rs` | Pluggable http client abstraction |
 | `src/macros.rs` | Crate macros (`cargo_crate_version!`; `impl_common_builder_setters!` + `impl_release_update_accessors!` for the shared backend surface; internal helpers) |
 | `src/version.rs` | Semver comparison helpers |
-| `src/errors.rs` | `Error` / `Result` types (`#[non_exhaustive]`; opaque `Http` / `S3Auth` variants) |
+| `src/errors.rs` | `Error` / `Result` types (`#[non_exhaustive]`; opaque `Transport` / `S3Auth` variants) |
 | `examples/` | Runnable usage examples, one per backend (`github`, `gitlab`, `gitea`, `s3`) |
 | `readme.sh` | README generation/check wrapper around `cargo-readme` |
 | `CHANGELOG.md` | Keep-a-changelog style; always has an `[unreleased]` section on top |

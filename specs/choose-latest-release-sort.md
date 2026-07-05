@@ -1,6 +1,17 @@
 # choose_latest_release sort comparator
 
-Status: needs research
+Status: implemented
+
+## Resolution
+
+`version::cmp_versions(a, b) -> Result<Ordering>` parses each version once and returns a true
+total order (real `Equal` for equal versions). The shared release comparator
+`version::cmp_releases_newest_first(a, b) -> Ordering` builds on it to produce a newest-first order
+that places an unparseable version deterministically **last** (and treats two unparseable versions
+as `Equal`). `choose_latest_release` (`src/update.rs`) and `backends::s3::sort_newer` / `pick_latest`
+(`src/backends/s3.rs`) now all sort/select through this one comparator, so they agree on "newest"
+regardless of input order and select the same release as before (selection-parity test in
+`s3.rs::selection_parity_pick_latest_sort_newer_and_choose_latest_release`).
 
 ## Problem
 

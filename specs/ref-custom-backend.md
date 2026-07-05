@@ -21,23 +21,23 @@ Source files: `src/update.rs` (trait definitions), `src/backends/custom.rs` (ada
 `ReleaseSource` (`update.rs:325-340`) is synchronous and has three methods, all returning the
 public `Result` type:
 
-- `get_latest_release(&self) -> Result<Release>` (`update.rs:327`)
-- `get_latest_releases(&self, current_version: &str) -> Result<Vec<Release>>` (`update.rs:336`)
-- `get_release_version(&self, ver: &str) -> Result<Release>` (`update.rs:339`)
+- `get_latest_release(&self) -> Result<Release>`
+- `get_latest_releases(&self) -> Result<Vec<Release>>`
+- `get_release_version(&self, ver: &str) -> Result<Release>`
 
-The trait requires `Send + Sync` (`update.rs:325`). It is documented as **not sealed**
-(`update.rs:303`), so downstream crates may implement it. `current_version` is advisory only:
-the updater discards releases not strictly newer than current, prefers the newest
-semver-compatible one, and otherwise offers the newest available, so the source need not
-pre-filter (`update.rs:329-335`). Releases should be returned newest-first.
+The trait requires `Send + Sync`. It is documented as **not sealed**, so downstream crates may
+implement it. `get_latest_releases` takes no `current_version` (the dead advisory parameter was
+dropped): the updater re-filters downstream, discarding releases not strictly newer than current,
+preferring the newest semver-compatible one, and otherwise offering the newest available, so the
+source need not pre-filter. Releases should be returned newest-first.
 
 `AsyncReleaseSource` (`update.rs:372-392`, gated on `feature = "async"`) is the async analog.
 It also requires `Send + Sync` and has the same three methods, but each returns a
 return-position `impl Trait` future rather than a value:
 
-- `get_latest_release(&self) -> impl Future<Output = Result<Release>> + Send + '_` (`update.rs:378`)
-- `get_latest_releases<'a>(&'a self, current_version: &'a str) -> impl Future<Output = Result<Vec<Release>>> + Send + 'a` (`update.rs:382-385`)
-- `get_release_version<'a>(&'a self, ver: &'a str) -> impl Future<Output = Result<Release>> + Send + 'a` (`update.rs:388-391`)
+- `get_latest_release(&self) -> impl Future<Output = Result<Release>> + Send + '_`
+- `get_latest_releases(&self) -> impl Future<Output = Result<Vec<Release>>> + Send + '_`
+- `get_release_version<'a>(&'a self, ver: &'a str) -> impl Future<Output = Result<Release>> + Send + 'a`
 
 The `+ Send` bound on each returned future is load-bearing. Because the trait is consumed
 through generics (the async updater is generic over its source, never `dyn AsyncReleaseSource`),
@@ -47,7 +47,7 @@ compile where it is defined, not later at the spawn site (`update.rs:357-361`, `
 Implementors may still write the bodies as `async fn`; the compiler checks the resulting future
 is `Send`.
 
-On failure, both traits return public `Error` variants (`Error::Release`, `Error::Config`, or a
+On failure, both traits return public `Error` variants (`Error::NoReleaseFound`, `Error::MissingAssetField`, `Error::InvalidResponse` (for release failures), `Error::MissingField { field }` (for config failures), or a
 request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status, url }` /
 `Error::Transport`), which are constructible from a custom source (`update.rs:321-324`,
 `367-370`).
@@ -58,7 +58,7 @@ request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status,
 and a `CommonConfig`. It is built through `UpdateBuilder` (`custom.rs:143-185`): `.source(...)`
 takes `impl ReleaseSource + 'static` and boxes it into the `Arc` (`custom.rs:164-167`);
 `build()` (`custom.rs:175-184`) takes `&self`, clones the `Arc` source, and errors with
-`Error::Config("`source` required")` when no source was set, so a configured builder can be
+`Error::MissingField { field: "source" }` when no source was set, so a configured builder can be
 built repeatedly. `Update::configure()` returns a fresh `UpdateBuilder` (`custom.rs:205-207`).
 
 `AsyncUpdate<S>` (`custom.rs:303-306`, `#[non_exhaustive]`, `feature = "async"`) is generic over
@@ -78,25 +78,29 @@ construct or inspect it are the three methods (`custom.rs:362-377`):
 
 `impl AsyncReleaseSource for Blocking<S> where S: ReleaseSource + Clone + 'static`
 (`custom.rs:380-401`) runs each sync fetch on `tokio::task::spawn_blocking`, cloning the inner
-source into the blocking task; a `JoinError` is mapped to `Error::Update("blocking task
-failed: ...")`. The inner source's own error is returned unchanged.
+source into the blocking task; a `JoinError` is mapped to `Error::Internal { message, source }`
+(the `JoinError` chained via `source()`). The inner source's own error is returned unchanged.
 
 ### Integration with the pipeline
 
-`Update` implements the sealed `ReleaseUpdate` trait (`custom.rs:214-230`) by delegating its
+`Update` implements the sealed `ReleaseUpdate` trait (`custom.rs:214-234`) by delegating its
 three fetch methods to the source. `get_latest_release` wraps the single release in a
 one-element `Releases` carrying the configured `current_version` (so `is_update_available()`
-works without a second fetch); `get_latest_releases` wraps the source's `Vec` likewise;
-`get_release_version` returns the source's `Release` directly. Shared config accessors come from
+works without a second fetch); the trait's `get_newer_releases` wraps the `Vec` from the
+source's `get_latest_releases` likewise (the source method keeps its name);
+`get_release_version` returns the source's `Release` directly. The inherent update verbs
+(including `is_update_available`) come from `impl_sync_update_verbs!(Update)`
+(`custom.rs:236`). Shared config accessors come from
 `impl_update_config_accessors!(Update)` (`custom.rs:212`), and the sealed marker is
 `impl sealed::Sealed for Update` (`custom.rs:210`). From there the crate runs its usual
 compare -> select-asset -> download -> verify -> extract -> install flow over the source's
 releases; the implementor never touches the low-level `Download`/`Extract`/`Move` primitives
 (`custom.rs:5-10`).
 
-`AsyncUpdate<S>` implements the internal `AsyncFetch` trait (`custom.rs:335-349`) the same way,
-plus `sealed::Sealed`, the config accessors, and `impl_async_update_methods!()`
-(`custom.rs:325-332`), so the async orchestrator drives the same flow asynchronously.
+`AsyncUpdate<S>` implements the public sealed `AsyncReleaseUpdate` trait the same way, plus
+`sealed::Sealed` and the config accessors, so the async orchestrator drives the same flow
+asynchronously. The `*_async` fetch verbs delegate to the source; `update_async` /
+`update_extended_async` are `AsyncReleaseUpdate` default methods.
 
 Transport caveats: the shared `.timeout()`, `.request_header()`, and injected-client setters
 configure only the crate-controlled **download**; `.retries()` has no effect here because the
@@ -126,11 +130,10 @@ builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `cu
 - `AsyncUpdate<S>` must not require `S: Clone` (it stores `Arc<S>`).
 - `Blocking`'s inner `source` field stays private; construction/inspection only via
   `new`/`into_inner`/`as_inner` (a tuple-struct literal must not compile from outside).
-- `build()` / `build_async()` take `&self` (repeatable) and error with `Error::Config` when no
-  source is set.
+- `build()` / `build_async()` take `&self` (repeatable) and error with `Error::MissingField { field: "source" }` when no source is set.
 - `Update` and `AsyncUpdate` carry `#[non_exhaustive]`.
 - `.retries()` has no effect; no `auth_token` setter; download honors injected clients.
-- A `Blocking` `JoinError` becomes `Error::Update`; the inner source error passes through.
+- A `Blocking` `JoinError` becomes `Error::Internal { message, source: Some(JoinError) }`; the inner JoinError is now chained via `source()`. The inner source error passes through.
 
 ## Tests
 
@@ -154,6 +157,6 @@ In `src/backends/custom.rs` (`custom.rs:403-1191`):
 ## Related
 
 - `custom-backends.md` - narrative design doc for this backend.
-- `async-api.md` - the async API and `AsyncFetch`/orchestrator integration.
+- `async-api.md` - the async API and `AsyncReleaseUpdate`/orchestrator integration.
 - `custom-asset-matching.md` - asset selection over a source's releases.
 - `choose-latest-release-sort.md` - newest-compatible selection over unsorted source lists.

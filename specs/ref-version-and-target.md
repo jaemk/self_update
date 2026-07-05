@@ -27,6 +27,13 @@ on the parsed `Version` (`src/version.rs:6`). They take bare `&str` version stri
   prerelease except in the prerelease-current branch.
 - `bump_is_major` / `bump_is_minor` / `bump_is_patch` compare the corresponding
   numeric fields (`src/version.rs:34-52`).
+- `cmp_versions(a, b) -> Result<Ordering>` parses each version once and
+  returns a true total order, including real `Equal` for equal versions (unlike the
+  boolean `bump_is_greater`, which collapses equal/less into `false`). The shared
+  release comparator `cmp_releases_newest_first(a, b) -> Ordering` builds on it for a
+  newest-first order that places unparseable versions deterministically last (two
+  unparseable compare `Equal`); it backs the selection sort in `choose_latest_release`
+  and `s3::sort_newer` / `pick_latest`, so all three agree on "newest".
 
 Parsing rules come entirely from the `semver` crate: strings must be `MAJOR.MINOR.PATCH`
 with optional `-prerelease` and `+build` segments. Prerelease identifiers order below

@@ -1,24 +1,35 @@
 # Releases test constructor
 
-Status: needs research
+Status: implemented
 
-## Problem
+## Behavior
 
-`Releases` has a `pub(crate)` constructor and is `#[non_exhaustive]`, so downstream
-code cannot build a `Releases` value to exercise its own code in unit tests (for
-example a helper that takes a `Releases` and inspects `latest()` /
-`is_update_available()`). `Release` and `ReleaseAsset` already gained constructors
-(`ReleaseAsset::new`, `Release::builder()`), but `Releases` did not.
+`Releases` is `#[non_exhaustive]` with a crate-private primary constructor
+(`Releases::new` / `Releases::from_listing`), so downstream code cannot build one
+with a struct literal. `Releases::from_releases(releases: Vec<Release>,
+current_version: impl Into<String>) -> Self` is the public constructor, primarily
+for building a `Releases` in downstream unit tests (e.g. a helper that takes a
+`Releases` and inspects `latest()` / `is_update_available()`).
 
-## What it would take
+The releases are taken as-is; the built-in backends order them newest-first, but
+no ordering is validated or imposed at construction. The supplied current version
+is stored as the comparison version, so `current_version()` returns
+`Some(current_version)` and `is_update_available()` compares against it (unlike the
+listing constructor `from_listing`, which stores no current version and whose
+`is_update_available()` errors).
 
-A `#[doc(hidden)]` test constructor or a small builder that takes a set of releases
-plus a current version and produces a `Releases`. The research is in deciding the
-shape (a single `#[doc(hidden)] pub fn` vs a builder) and whether the held current
-version and newest-first ordering should be validated or assumed at construction.
+## Public surface
 
-## Why deferred
+- `Releases::from_releases(releases: Vec<Release>, current_version: impl
+  Into<String>) -> Releases`.
 
-No demand signal yet, and the appendix in the gap tracking flagged it as
-"consider ... if demand appears". Adding a constructor later is non-breaking, so it
-can wait for a concrete request.
+## Tests
+
+`src/update.rs` `mod tests`: `releases_from_releases_builds_a_usable_collection`
+builds a `Releases` and asserts `latest()`, `current_version()`, and
+`is_update_available()` work off it (both the update-available and up-to-date
+cases).
+
+## Related
+
+- `ref-release-model.md`

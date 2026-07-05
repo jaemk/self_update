@@ -26,7 +26,7 @@ macro_rules! request_config_setters {
         /// Accepts anything that converts into a header name/value, so both typed values and plain
         /// strings work: `.request_header("X-Foo", "bar")` or
         /// `.request_header(self_update::http::header::ACCEPT, "application/json")`. A name or value
-        /// that is not a valid HTTP header is reported as an `Error::Config` from
+        /// that is not a valid HTTP header is reported as an `Error::InvalidHeader` from
         /// [`build()`](Self::build) rather than panicking here.
         pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
         where
@@ -38,18 +38,62 @@ macro_rules! request_config_setters {
         }
 
         /// Number of times to retry a failed API request (release listing, single-release-by-tag
-        /// fetches, and any other listing or lookup request), with exponential backoff. Defaults to
-        /// `0` (no retries). Intended for transient failures, though any failed attempt (including
-        /// a permanent one such as a 404) consumes the retry budget. The binary **download** is not
-        /// retried — this knob does not affect it.
+        /// fetches, and any other listing or lookup request) **and** the binary download's
+        /// request-establishment phase, with exponential backoff (see
+        /// [`retry_backoff`](Self::retry_backoff)). Defaults to `0` (no retries). Intended for
+        /// transient failures, though any failed attempt (including a permanent one such as a 404)
+        /// consumes the retry budget.
         ///
-        /// **No-op on the custom backend.** It only ever retried the crate's built-in
-        /// release-listing requests; on
-        /// [`backends::custom`](crate::backends::custom) the listing is performed entirely by your
-        /// [`ReleaseSource`](crate::ReleaseSource), so this setter has no effect there. Configure
-        /// retries inside your source implementation instead.
+        /// The download is retried only *before* any bytes are streamed to disk (a failure
+        /// mid-stream is not retried, since it would corrupt the partially-written file).
+        ///
+        /// On the [`backends::custom`](crate::backends::custom) backend this affects only the
+        /// crate-controlled **download**: the release *listing* is performed entirely by your
+        /// [`ReleaseSource`](crate::ReleaseSource), so retries there are your source's
+        /// responsibility.
         pub fn retries(&mut self, retries: u32) -> &mut Self {
             self.$($path).+.retries = retries;
+            self
+        }
+
+        /// Configure the exponential retry backoff: `base` is the delay before the first retry and
+        /// the delay doubles each subsequent attempt, clamped to never exceed `max`. Defaults to a
+        /// `100ms` base and a `~3.2s` cap. Applies to listing/lookup requests and to the binary
+        /// download's request-establishment phase (see [`retries`](Self::retries)); a mid-stream
+        /// transfer failure is not retried.
+        pub fn retry_backoff(
+            &mut self,
+            base: std::time::Duration,
+            max: std::time::Duration,
+        ) -> &mut Self {
+            self.$($path).+.retry_base_delay = base;
+            self.$($path).+.retry_max_delay = max;
+            self
+        }
+
+        /// Use a custom [`HttpClient`](crate::http_client::HttpClient) for every request (release
+        /// listing and the download) instead of the client the crate builds per call. This is the
+        /// canonical, client-agnostic injection seam: hand over any `Arc<dyn HttpClient>` (a test
+        /// double, a wrapper around your application's client, etc.). The client-specific
+        /// convenience setters (`reqwest_client` / `ureq_agent`) are thin wrappers over this.
+        /// `.timeout()` and `.request_header()` still apply per request, but `HTTP(S)_PROXY` env and
+        /// the crate's TLS feature are left to your client.
+        pub fn http_client(
+            &mut self,
+            client: std::sync::Arc<dyn crate::http_client::HttpClient>,
+        ) -> &mut Self {
+            self.$($path).+.client = Some(client);
+            self
+        }
+
+        /// Async sibling of [`http_client`](Self::http_client): a custom
+        /// [`AsyncHttpClient`](crate::http_client::AsyncHttpClient) used by the `*_async` verbs.
+        #[cfg(feature = "async")]
+        pub fn http_client_async(
+            &mut self,
+            client: std::sync::Arc<dyn crate::http_client::AsyncHttpClient>,
+        ) -> &mut Self {
+            self.$($path).+.async_client = Some(client);
             self
         }
 
@@ -60,28 +104,83 @@ macro_rules! request_config_setters {
         /// reuse your application's existing client. `.timeout()` and `.request_header()` still
         /// apply per request, but `HTTP(S)_PROXY` env and the crate's TLS feature are left to your
         /// client. Used by the blocking API; for the async path use `reqwest_async_client` (under
-        /// the `async` feature).
+        /// the `async` feature). Thin wrapper over [`http_client`](Self::http_client).
         #[cfg(feature = "reqwest")]
         pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
-            self.$($path).+.client.blocking = Some(client);
-            self
+            self.http_client(std::sync::Arc::new(
+                crate::http_client::ReqwestClient::from(client),
+            ))
         }
 
         /// Async sibling of [`reqwest_client`](Self::reqwest_client): a pre-built async
         /// [`reqwest::Client`](::reqwest::Client) used by the `*_async` verbs.
         #[cfg(feature = "async")]
         pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
-            self.$($path).+.client.r#async = Some(client);
-            self
+            self.http_client_async(std::sync::Arc::new(
+                crate::http_client::ReqwestAsyncClient::from(client),
+            ))
         }
 
         /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for every request instead of the agent
         /// the crate builds per call. The agent owns its own timeout / TLS / proxy config, so
         /// `.timeout()` does not apply to an injected agent (configure it on the agent); extra
-        /// `.request_header()`s are still applied per request.
+        /// `.request_header()`s are still applied per request. Thin wrapper over
+        /// [`http_client`](Self::http_client).
         #[cfg(feature = "ureq")]
         pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
-            self.$($path).+.client.agent = Some(agent);
+            self.http_client(std::sync::Arc::new(
+                crate::http_client::UreqClient::from(agent),
+            ))
+        }
+
+        /// Trust an additional TLS root CA certificate for every request (release listing and the
+        /// download). Call multiple times to add more than one. Use this to reach a server behind a
+        /// private/internal CA without injecting a whole pre-built client. A malformed certificate
+        /// surfaces as an [`Error::InvalidCertificate`](crate::errors::Error::InvalidCertificate)
+        /// from [`build()`](Self::build). Construct the argument with
+        /// [`Certificate::from_pem`](crate::Certificate::from_pem) or
+        /// [`Certificate::from_der`](crate::Certificate::from_der).
+        ///
+        /// The certificates apply per transport: a client injected via
+        /// [`http_client`](Self::http_client) (or `http_client_async`) owns its own TLS and ignores
+        /// these certificates, but the *other*, auto-built transport still trusts them.
+        ///
+        /// PEM certificate bytes are validated at `build()` on every backend. DER bytes are
+        /// validated at `build()` on the reqwest backend, but on a ureq-only build a malformed DER
+        /// certificate is surfaced at connection time instead.
+        ///
+        /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
+        /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply
+        /// all CA certificates you need, including any public roots. If you need the Mozilla set plus
+        /// a custom CA, inject a pre-built `ureq::Agent` via [`ureq_agent`](Self::ureq_agent)
+        /// configured with `RootCerts::PlatformVerifier` or a merged root set instead.
+        pub fn add_root_certificate(&mut self, cert: crate::Certificate) -> &mut Self {
+            self.$($path).+.root_certificates.push(cert);
+            self
+        }
+
+        /// Authorize an additional host to receive the auth token.
+        ///
+        /// By default the token set via `auth_token` is sent only to the backend's own API host, so
+        /// a server-supplied asset `download_url` or pagination `Link` pointing at a different host
+        /// does not receive the credential. If your release assets are served from a separate host
+        /// (a CDN or artifact mirror) that legitimately needs the token, authorize it here. Call
+        /// multiple times to add more than one. Matching is by host, case-insensitive; the request
+        /// must still use `https` (loopback hosts may use http).
+        pub fn allow_auth_host(&mut self, host: impl Into<String>) -> &mut Self {
+            self.$($path).+.auth_hosts.push(host.into());
+            self
+        }
+
+        /// Allow the auth token to be forwarded over plain `http` (not just `https`) to a
+        /// host-matched request.
+        ///
+        /// The token is still only attached to the configured API host or an
+        /// [`allow_auth_host`](Self::allow_auth_host) entry; this only lifts the `https` scheme
+        /// requirement. It transmits the credential in cleartext, so use it only for a trusted
+        /// internal network you control. Off by default.
+        pub fn dangerously_allow_non_https_auth_forwarding(&mut self) -> &mut Self {
+            self.$($path).+.allow_insecure_auth = true;
             self
         }
     };
@@ -108,9 +207,11 @@ macro_rules! request_config_setters {
 macro_rules! impl_update_config_accessors {
     ($t:ty) => {
         impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), {});
+        impl_update_config_accessors!(@internals (impl crate::update::UpdateInternals for $t));
     };
     ($t:ty, { $($extra:tt)* }) => {
         impl_update_config_accessors!(@emit (impl crate::update::UpdateConfig for $t), { $($extra)* });
+        impl_update_config_accessors!(@internals (impl crate::update::UpdateInternals for $t));
     };
     // Generic form for the custom `AsyncUpdate<S>`: a `where (...)` clause carries the bound.
     ($t:ty, where ( $($bound:tt)* )) => {
@@ -118,6 +219,48 @@ macro_rules! impl_update_config_accessors {
             @emit (impl<S> crate::update::UpdateConfig for $t where $($bound)*),
             {}
         );
+        impl_update_config_accessors!(
+            @internals (impl<S> crate::update::UpdateInternals for $t where $($bound)*)
+        );
+    };
+    (@internals ($($header:tt)*)) => {
+        $($header)* {
+            fn request_timeout(&self) -> Option<std::time::Duration> {
+                self.common.request.timeout
+            }
+            fn request_headers(&self) -> &crate::http_client::HeaderMap {
+                &self.common.request.headers
+            }
+            fn request_config(&self) -> &crate::backends::common::RequestConfig {
+                &self.common.request
+            }
+            fn request_client(&self) -> Option<std::sync::Arc<dyn crate::http_client::HttpClient>> {
+                self.common.request.client.clone()
+            }
+            #[cfg(feature = "async")]
+            fn request_async_client(
+                &self,
+            ) -> Option<std::sync::Arc<dyn crate::http_client::AsyncHttpClient>> {
+                self.common.request.async_client.clone()
+            }
+            fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>> {
+                self.common.progress_callback.as_ref().map(|c| c.0.clone())
+            }
+            fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
+                self.common.verify.as_ref().map(|c| c.0.clone())
+            }
+            fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
+                self.common.asset_matcher.as_ref().map(|c| c.0.clone())
+            }
+            #[cfg(feature = "checksums")]
+            fn verify_checksum(&self) -> Option<&crate::Checksum> {
+                self.common.checksum.as_ref()
+            }
+            #[cfg(feature = "signatures")]
+            fn verify_keys(&self) -> &[crate::VerifyingKey] {
+                &self.common.verifying_keys
+            }
+        }
     };
     (@emit ($($header:tt)*), { $($extra:tt)* }) => {
         $($header)* {
@@ -153,47 +296,16 @@ macro_rules! impl_update_config_accessors {
         fn no_confirm(&self) -> bool {
             self.common.no_confirm
         }
+        #[cfg(feature = "progress-bar")]
         fn progress_template(&self) -> &str {
             &self.common.progress_template
         }
+        #[cfg(feature = "progress-bar")]
         fn progress_chars(&self) -> &str {
             &self.common.progress_chars
         }
         fn auth_token(&self) -> Option<&str> {
             self.common.auth_token.as_deref()
-        }
-        #[doc(hidden)]
-        fn request_timeout(&self) -> Option<std::time::Duration> {
-            self.common.request.timeout
-        }
-        #[doc(hidden)]
-        fn request_headers(&self) -> &crate::http_client::HeaderMap {
-            &self.common.request.headers
-        }
-        #[doc(hidden)]
-        fn request_client(&self) -> &crate::http_client::ClientOverride {
-            &self.common.request.client
-        }
-        #[doc(hidden)]
-        fn progress_callback(&self) -> Option<std::sync::Arc<crate::DynProgressFn>> {
-            self.common.progress_callback.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
-            self.common.verify.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
-            self.common.asset_matcher.as_ref().map(|c| c.0.clone())
-        }
-        #[doc(hidden)]
-        #[cfg(feature = "checksums")]
-        fn verify_checksum(&self) -> Option<&crate::Checksum> {
-            self.common.checksum.as_ref()
-        }
-        #[cfg(feature = "signatures")]
-        fn verify_keys(&self) -> &[crate::VerifyingKey] {
-            &self.common.verifying_keys
         }
         }
     };
@@ -201,6 +313,56 @@ macro_rules! impl_update_config_accessors {
 
 /// Emit the backend-independent `UpdateBuilder` setters shared by every backend.
 ///
+/// Emit the inherent sync update verbs on a backend `Update`.
+///
+/// `build()` returns the concrete `Update` (not `Box<dyn ReleaseUpdate>`), so these inherent methods
+/// let callers write `.build()?.update()?` without importing the sealed
+/// [`ReleaseUpdate`](crate::ReleaseUpdate) trait. Each forwards to the trait impl.
+macro_rules! impl_sync_update_verbs {
+    ($t:ty) => {
+        impl $t {
+            /// Display release information and update the current binary to the latest release,
+            /// pending confirmation. Returns a [`VersionStatus`](crate::VersionStatus). See
+            /// [`ReleaseUpdate::update`](crate::ReleaseUpdate::update).
+            pub fn update(&self) -> crate::Result<crate::VersionStatus> {
+                <Self as crate::ReleaseUpdate>::update(self)
+            }
+
+            /// Same as [`update`](Self::update) but returns a [`ReleaseStatus`](crate::ReleaseStatus)
+            /// with the full release details.
+            pub fn update_extended(&self) -> crate::Result<crate::ReleaseStatus> {
+                <Self as crate::ReleaseUpdate>::update_extended(self)
+            }
+
+            /// Fetch the single newest release (raw, unfiltered). See
+            /// [`ReleaseUpdate::get_latest_release`](crate::ReleaseUpdate::get_latest_release).
+            pub fn get_latest_release(&self) -> crate::Result<crate::Releases> {
+                <Self as crate::ReleaseUpdate>::get_latest_release(self)
+            }
+
+            /// Fetch the releases newer than the current version. See
+            /// [`ReleaseUpdate::get_newer_releases`](crate::ReleaseUpdate::get_newer_releases).
+            pub fn get_newer_releases(&self) -> crate::Result<crate::Releases> {
+                <Self as crate::ReleaseUpdate>::get_newer_releases(self)
+            }
+
+            /// Fetch details of the release matching `ver`. See
+            /// [`ReleaseUpdate::get_release_version`](crate::ReleaseUpdate::get_release_version).
+            pub fn get_release_version(&self, ver: &str) -> crate::Result<crate::Release> {
+                <Self as crate::ReleaseUpdate>::get_release_version(self, ver)
+            }
+
+            /// Whether a release newer than the current version is available, returning it if so.
+            ///
+            /// A convenience over [`get_newer_releases`](Self::get_newer_releases): returns the
+            /// newest strictly-newer [`Release`](crate::Release), or `None` when already up to date.
+            pub fn is_update_available(&self) -> crate::Result<Option<crate::Release>> {
+                Ok(self.get_newer_releases()?.into_vec().into_iter().next())
+            }
+        }
+    };
+}
+
 /// Every backend's `UpdateBuilder` embeds a `common:
 /// crate::backends::common::CommonBuilderConfig` field; these setters write through it, so
 /// the shared configuration surface (target, identifier, bin name/path, version, progress
@@ -338,14 +500,12 @@ macro_rules! impl_common_builder_setters {
             self
         }
 
-        /// Set download progress style.
-        pub fn progress_style(
-            &mut self,
-            progress_template: impl Into<String>,
-            progress_chars: impl Into<String>,
-        ) -> &mut Self {
-            self.common.progress_template = progress_template.into();
-            self.common.progress_chars = progress_chars.into();
+        /// Set download progress style, as a typed [`ProgressStyle`](crate::ProgressStyle)
+        /// (template + chars) so the two strings can't be transposed.
+        #[cfg(feature = "progress-bar")]
+        pub fn progress_style(&mut self, style: crate::ProgressStyle) -> &mut Self {
+            self.common.progress_template = style.template;
+            self.common.progress_chars = style.chars;
             self
         }
 
@@ -415,18 +575,20 @@ macro_rules! impl_common_builder_setters {
 
         /// Register a post-update verification hook. After the new binary is extracted but
         /// **before** it replaces the installed one, the closure is called with the path to the
-        /// extracted binary; returning `false` aborts the update (nothing is installed), so a bad
-        /// release cannot replace a working binary. Typical use: run `new --version` and check it.
+        /// extracted binary; returning `Err(..)` aborts the update (nothing is installed), so a bad
+        /// release cannot replace a working binary. Typical use: run `new --version` and check it,
+        /// returning `Ok(())` on success or an error describing the rejection.
         ///
         /// This runs **last** in the verification chain and on the **extracted binary**, not the
         /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
         /// of the archive) -> signature ([`verify_keys`](Self::verify_keys), over the archive) ->
-        /// extract -> `verify_with` (the extracted binary) -> replace. Use
-        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_with` to
-        /// gate it by running the new binary.
-        pub fn verify_with(
+        /// extract -> `verify_binary` (the extracted binary) -> replace. Use
+        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_binary` to
+        /// gate it by running the new binary. A returned error's message becomes the reason of the
+        /// resulting `Error::VerificationRejected`.
+        pub fn verify_binary(
             &mut self,
-            verify: impl Fn(&std::path::Path) -> bool + Send + Sync + 'static,
+            verify: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
         ) -> &mut Self {
             self.common.verify = Some(crate::VerifyCallback(std::sync::Arc::new(verify)));
             self
@@ -452,71 +614,12 @@ macro_rules! impl_common_builder_setters {
         /// This **replaces** the key set on each call (unlike [`request_header`](Self::request_header),
         /// which appends); the last call wins.
         #[cfg(feature = "signatures")]
-        pub fn verify_keys(
+        pub fn verifying_keys(
             &mut self,
             keys: impl Into<Vec<crate::VerifyingKey>>,
         ) -> &mut Self {
             self.common.verifying_keys = keys.into();
             self
-        }
-    };
-}
-
-/// Emit the inherent async update methods shared by every backend's `Update` (under the `async`
-/// feature). Invoked inside a `#[cfg(feature = "async")] impl Update { … }` block. The `Update`
-/// type must implement both `UpdateConfig` and the internal `AsyncFetch`.
-#[cfg(feature = "async")]
-macro_rules! impl_async_update_methods {
-    () => {
-        /// Async sibling of `update`: display release info and update the current binary to the
-        /// latest release, returning the resulting [`VersionStatus`](crate::VersionStatus).
-        ///
-        /// Requires a `tokio` runtime (provided by the caller). The release listing and the
-        /// download are async; the extract/replace step is synchronous and runs inline, briefly
-        /// blocking the executor — keep that in mind on a small single-threaded runtime.
-        pub async fn update_async(&self) -> crate::errors::Result<crate::VersionStatus> {
-            let current_version = crate::update::UpdateConfig::current_version(self).to_string();
-            self.update_extended_async()
-                .await
-                .map(|s| s.into_version_status(current_version))
-        }
-
-        /// Async sibling of `update_extended`: same as [`update_async`](Self::update_async) but
-        /// returns [`ReleaseStatus`](crate::update::ReleaseStatus).
-        pub async fn update_extended_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::ReleaseStatus> {
-            crate::update::update_extended_async(self).await
-        }
-
-        /// Async sibling of `get_latest_release`: fetch the single newest release from the
-        /// backend, as a one-element [`Releases`](crate::update::Releases). Call
-        /// `.is_update_available()` / `.latest()` on the result for a lightweight pre-check
-        /// without downloading or installing anything.
-        pub async fn get_latest_release_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::Releases> {
-            crate::update::AsyncFetch::get_latest_release_async(self).await
-        }
-
-        /// Async sibling of `get_latest_releases`: fetch the candidate releases from the backend
-        /// as a [`Releases`](crate::update::Releases) (newest-first). Call
-        /// `.is_update_available()` on the result for a lightweight "is there anything to do?"
-        /// check without downloading or installing anything.
-        pub async fn get_latest_releases_async(
-            &self,
-        ) -> crate::errors::Result<crate::update::Releases> {
-            crate::update::AsyncFetch::get_latest_releases_async(self).await
-        }
-
-        /// Async sibling of `get_release_version`: fetch the [`Release`](crate::update::Release)
-        /// matching the given tag/version from the backend. The tag is used verbatim (including any
-        /// leading `v`); a missing tag is reported as an error.
-        pub async fn get_release_version_async(
-            &self,
-            ver: &str,
-        ) -> crate::errors::Result<crate::update::Release> {
-            crate::update::AsyncFetch::get_release_version_async(self, ver).await
         }
     };
 }
@@ -531,24 +634,4 @@ macro_rules! print_flush {
         print!($literal, $($arg),*);
         ::std::io::Write::flush(&mut ::std::io::stdout())?;
     }
-}
-
-/// Helper for formatting `errors::Error`s
-macro_rules! format_err {
-    ($e_type:expr, $literal:expr) => {
-        $e_type(format!($literal))
-    };
-    ($e_type:expr, $literal:expr, $($arg:expr),*) => {
-        $e_type(format!($literal, $($arg),*))
-    };
-}
-
-/// Helper for formatting `errors::Error`s and returning early
-macro_rules! bail {
-    ($e_type:expr, $literal:expr) => {
-        return Err(format_err!($e_type, $literal))
-    };
-    ($e_type:expr, $literal:expr, $($arg:expr),*) => {
-        return Err(format_err!($e_type, $literal, $($arg),*))
-    };
 }

@@ -1,7 +1,7 @@
 /*!
 Example updating an executable to the latest version released via an S3-compatible bucket
 
-`cargo run --example s3 --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`
+`cargo run --example s3 --features "s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 
 Works with Amazon S3, Google GCS, DigitalOcean Spaces, or any S3-compatible endpoint. Releases
 are matched by filename using the convention
@@ -15,8 +15,8 @@ use self_update::cargo_crate_version;
 
 fn run() -> Result<(), Box<dyn ::std::error::Error>> {
     let releases = self_update::backends::s3::ReleaseList::configure()
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("my-releases")
         .asset_prefix("myapp")
         .region("us-east-1")
@@ -27,8 +27,8 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
 
     let mut builder = self_update::backends::s3::Update::configure();
     builder
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("my-releases")
         .asset_prefix("myapp")
         .region("us-east-1")

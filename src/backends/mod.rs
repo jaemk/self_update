@@ -7,9 +7,13 @@ use crate::http_client;
 
 pub(crate) mod common;
 pub mod custom;
+#[cfg(feature = "gitea")]
 pub mod gitea;
+#[cfg(feature = "github")]
 pub mod github;
+#[cfg(feature = "gitlab")]
 pub mod gitlab;
+#[cfg(feature = "s3")]
 pub mod s3;
 
 /// Search for the first "rel" link-header uri in a full link header string.
@@ -52,6 +56,133 @@ pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
 /// against pathological release histories.
 pub(crate) const MAX_RELEASE_PAGES: usize = 100;
 
+/// A sans-io description of a single page request: *what* to fetch (`url` + `headers`) and *how*
+/// to parse the response body into items, the next page (if any), and an early-stop signal — with
+/// no transport. The two drivers ([`run_paginated`] / [`run_paginated_async`]) perform the IO by
+/// sending this via the shared `send`/`send_async` + `retry` machinery, then call `parse`.
+///
+/// `parse` is `+ Send` so [`run_paginated_async`]'s future stays `Send` (it is held across the
+/// await in the async driver).
+pub(crate) struct PageRequest<T> {
+    pub url: String,
+    pub headers: http_client::HeaderMap,
+    /// Pure parser: `(body bytes, response headers) -> this page's items + next page + early-stop`.
+    #[allow(clippy::type_complexity)]
+    pub parse: Box<dyn FnOnce(&[u8], &http_client::HeaderMap) -> Result<Page<T>> + Send>,
+}
+
+/// The parsed result of one [`PageRequest`]: the page's `items`, the optional `next` page request,
+/// and an early-`stop` flag. The driver appends `items`, then stops if `stop` is set, `next` is
+/// `None`, or the [`MAX_RELEASE_PAGES`] bound is hit.
+pub(crate) struct Page<T> {
+    pub items: Vec<T>,
+    pub next: Option<PageRequest<T>>,
+    pub stop: bool,
+}
+
+impl<T> Page<T> {
+    /// A terminal single-page result: these `items`, no next page, no early stop.
+    pub(crate) fn last(items: Vec<T>) -> Self {
+        Self {
+            items,
+            next: None,
+            stop: false,
+        }
+    }
+}
+
+/// Drive a sans-io [`PageRequest`] chain to completion over the sync transport.
+///
+/// Loops: send the request via [`send`] (reusing its retry/backoff machinery), read the body bytes
+/// once, call `parse`, extend the accumulator, then stop if `page.stop`, `page.next` is `None`, or
+/// the [`MAX_RELEASE_PAGES`] bound is reached (logging a warning if a further page was still
+/// advertised at the bound).
+pub(crate) fn run_paginated<T>(
+    first: PageRequest<T>,
+    config: &common::RequestConfig,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    let mut next = Some(first);
+    let mut pages = 0usize;
+    while let Some(request) = next {
+        let PageRequest {
+            url,
+            headers,
+            parse,
+        } = request;
+        let resp = send(&url, headers, config)?;
+        let resp_headers = resp.headers().clone();
+        let mut body = Vec::new();
+        let mut reader = resp.body();
+        std::io::Read::read_to_end(&mut reader, &mut body)?;
+        let page = parse(&body, &resp_headers)?;
+        out.extend(page.items);
+        pages += 1;
+        if page.stop {
+            break;
+        }
+        if pages >= MAX_RELEASE_PAGES {
+            if page.next.is_some() {
+                log::warn!(
+                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
+                     older releases may be omitted"
+                );
+            }
+            break;
+        }
+        next = page.next;
+    }
+    Ok(out)
+}
+
+/// Async sibling of [`run_paginated`]: drive a sans-io [`PageRequest`] chain over the async
+/// transport. Reuses [`send_async`]'s retry/backoff machinery; reads the body bytes via the async
+/// response trait, then calls the same `parse` closure.
+#[cfg(feature = "async")]
+pub(crate) async fn run_paginated_async<T>(
+    first: PageRequest<T>,
+    config: &common::RequestConfig,
+) -> Result<Vec<T>> {
+    use futures_util::StreamExt;
+
+    let mut out = Vec::new();
+    let mut next = Some(first);
+    let mut pages = 0usize;
+    while let Some(request) = next {
+        let PageRequest {
+            url,
+            headers,
+            parse,
+        } = request;
+        let resp = send_async(&url, headers, config).await?;
+        let resp_headers = resp.headers().clone();
+        // Drain the streamed body into a single buffer (one full read, honoring the I7 intent of
+        // not double-buffering: the bytes stream feeds the buffer directly).
+        let mut stream = resp.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(&chunk?);
+        }
+        let page = parse(&body, &resp_headers)?;
+        out.extend(page.items);
+        pages += 1;
+        if page.stop {
+            break;
+        }
+        if pages >= MAX_RELEASE_PAGES {
+            if page.next.is_some() {
+                log::warn!(
+                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
+                     older releases may be omitted"
+                );
+            }
+            break;
+        }
+        next = page.next;
+    }
+    Ok(out)
+}
+
 /// Build the first-page request URL, defaulting the page size to 100 — unless the base URL
 /// already carries query parameters (e.g. a `Link`-header "next" URL), in which case it is used
 /// verbatim so an existing `page`/`per_page` is not clobbered.
@@ -73,41 +204,20 @@ pub(crate) fn next_link(headers: &http_client::HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Accumulate items across `Link: rel="next"`-paginated pages, starting at `first_url`.
-///
-/// `fetch_page` performs one request and returns that page's items plus the next page's URL
-/// (`None` when there is no `rel="next"` link). At most [`MAX_RELEASE_PAGES`] pages are walked;
-/// if a further page is still advertised at that point, a warning is logged and the walk stops
-/// (returning what was collected) rather than looping unbounded.
-pub(crate) fn collect_paginated<T>(
-    first_url: &str,
-    mut fetch_page: impl FnMut(&str) -> Result<(Vec<T>, Option<String>)>,
-) -> Result<Vec<T>> {
-    let mut out = Vec::new();
-    let mut next = Some(first_url.to_owned());
-    let mut pages = 0usize;
-    while let Some(url) = next {
-        let (items, next_url) = fetch_page(&url)?;
-        out.extend(items);
-        pages += 1;
-        if pages >= MAX_RELEASE_PAGES {
-            if next_url.is_some() {
-                log::warn!(
-                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
-                     older releases may be omitted"
-                );
-            }
-            break;
-        }
-        next = next_url;
-    }
-    Ok(out)
-}
-
-/// Exponential backoff in milliseconds before retry `attempt` (0-based): 100, 200, 400, … capped
-/// at ~3.2s (attempt 5 and beyond).
-pub(crate) fn retry_backoff_ms(attempt: u32) -> u64 {
-    100u64 << attempt.min(5)
+/// Exponential backoff in milliseconds before retry `attempt` (0-based): `base`, `base*2`,
+/// `base*4`, … doubling each attempt, clamped to never exceed `max`. With the defaults
+/// (`base = 100ms`, `max = 3200ms`) this is the historical 100, 200, 400, … capped at ~3.2s
+/// (attempt 5 and beyond).
+pub(crate) fn retry_backoff_ms(
+    attempt: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
+) -> u64 {
+    let base_ms = base.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    // Double `base` `attempt` times with saturation, then clamp to `max`.
+    let doubled = (0..attempt).fold(base_ms, |acc, _| acc.saturating_mul(2));
+    doubled.min(max_ms)
 }
 
 /// Run `attempt` until it succeeds or the retry budget is spent, invoking `on_retry(err, backoff)`
@@ -116,6 +226,8 @@ pub(crate) fn retry_backoff_ms(attempt: u32) -> u64 {
 /// unit-tested without real requests or real delays.
 pub(crate) fn retry<R>(
     retries: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
     mut attempt: impl FnMut() -> Result<R>,
     mut on_retry: impl FnMut(&Error, u64),
 ) -> Result<R> {
@@ -127,7 +239,7 @@ pub(crate) fn retry<R>(
                 if attempts >= retries {
                     return Err(e);
                 }
-                on_retry(&e, retry_backoff_ms(attempts));
+                on_retry(&e, retry_backoff_ms(attempts, base, max));
                 attempts += 1;
             }
         }
@@ -140,6 +252,8 @@ pub(crate) fn retry<R>(
 #[cfg(feature = "async")]
 pub(crate) async fn retry_async<R, A, Fut, S, SFut>(
     retries: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
     mut attempt: A,
     mut log_retry: impl FnMut(&Error, u64),
     mut sleep: S,
@@ -158,7 +272,7 @@ where
                 if attempts >= retries {
                     return Err(e);
                 }
-                let backoff = retry_backoff_ms(attempts);
+                let backoff = retry_backoff_ms(attempts, base, max);
                 log_retry(&e, backoff);
                 sleep(backoff).await;
                 attempts += 1;
@@ -174,13 +288,29 @@ pub(crate) fn send(
     url: &str,
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
-) -> Result<impl http_client::HttpResponse> {
+) -> Result<Box<dyn http_client::HttpResponse>> {
+    // Apply the backend's derived Authorization first (scheme + token), unless the user set their
+    // own Authorization via `request_header` (honored below when `config.headers` is merged). The
+    // token is attached only for a same-host request, so a malicious `Link` next-page URL pointing
+    // at another host does not receive it.
+    config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
+    // Dispatch through the injected client if present, else the crate's default per-call client.
+    let default;
+    let client: &dyn http_client::HttpClient = match config.client.as_deref() {
+        Some(c) => c,
+        None => {
+            default = http_client::default_client();
+            &*default
+        }
+    };
     retry(
         config.retries,
-        || http_client::get(url, base.clone(), config.timeout, &config.client),
+        config.retry_base_delay,
+        config.retry_max_delay,
+        || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
             std::thread::sleep(std::time::Duration::from_millis(backoff));
@@ -195,13 +325,24 @@ pub(crate) async fn send_async(
     url: &str,
     mut base: http_client::HeaderMap,
     config: &common::RequestConfig,
-) -> Result<http_client::AsyncResponse> {
+) -> Result<Box<dyn http_client::AsyncHttpResponse>> {
+    config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
         base.insert(name.clone(), value.clone());
     }
+    let default;
+    let client: &dyn http_client::AsyncHttpClient = match config.async_client.as_deref() {
+        Some(c) => c,
+        None => {
+            default = http_client::default_async_client();
+            &*default
+        }
+    };
     retry_async(
         config.retries,
-        || http_client::get_async(url, base.clone(), config.timeout, &config.client),
+        config.retry_base_delay,
+        config.retry_max_delay,
+        || client.get(url, &base, config.timeout),
         |e, backoff| {
             log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
         },
@@ -210,43 +351,12 @@ pub(crate) async fn send_async(
     .await
 }
 
-/// Async sibling of [`collect_paginated`]: accumulate items across `Link: rel="next"` pages.
-///
-/// `fetch_page` takes an owned page URL (so it can be captured across the `await`) and returns that
-/// page's items plus the next page URL. Bounded by [`MAX_RELEASE_PAGES`].
-#[cfg(feature = "async")]
-pub(crate) async fn collect_paginated_async<T, F, Fut>(
-    first_url: &str,
-    mut fetch_page: F,
-) -> Result<Vec<T>>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(Vec<T>, Option<String>)>>,
-{
-    let mut out = Vec::new();
-    let mut next = Some(first_url.to_owned());
-    let mut pages = 0usize;
-    while let Some(url) = next {
-        let (items, next_url) = fetch_page(url).await?;
-        out.extend(items);
-        pages += 1;
-        if pages >= MAX_RELEASE_PAGES {
-            if next_url.is_some() {
-                log::warn!(
-                    "self_update: stopped paginating releases after {MAX_RELEASE_PAGES} pages; \
-                     older releases may be omitted"
-                );
-            }
-            break;
-        }
-        next = next_url;
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod test {
+    use crate::backends::common::RequestConfig;
     use crate::backends::find_rel_next_link;
+    use crate::backends::{Page, PageRequest};
+    use crate::http_client::HeaderMap;
 
     #[test]
     fn test_find_rel_link() {
@@ -277,66 +387,338 @@ mod test {
         assert!(link.is_none());
     }
 
-    #[test]
-    fn collect_paginated_accumulates_pages() {
-        use crate::backends::collect_paginated;
+    // -----------------------------------------------------------------------
+    // run_paginated: sans-io page-chain driver (over a loopback TCP stub)
+    // -----------------------------------------------------------------------
 
-        // Three pages of items, then no more `next` link.
-        let mut pages = vec![
-            (vec![1, 2], Some("page2".to_string())),
-            (vec![3], Some("page3".to_string())),
-            (vec![4, 5], None),
-        ]
-        .into_iter();
-        let visited = std::cell::RefCell::new(Vec::new());
-        let got = collect_paginated::<i32>("page1", |url| {
-            visited.borrow_mut().push(url.to_string());
-            Ok(pages.next().unwrap())
-        })
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    /// A `PageRequest<i32>` that parses the body as a comma-separated list of ints and follows the
+    /// `rel="next"` Link header (never setting the early-stop flag).
+    fn int_page(url: String) -> PageRequest<i32> {
+        PageRequest {
+            url,
+            headers: HeaderMap::new(),
+            parse: Box::new(move |body, headers| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<i32>().unwrap())
+                    .collect();
+                let next = crate::backends::next_link(headers).map(int_page);
+                Ok(Page {
+                    items,
+                    next,
+                    stop: false,
+                })
+            }),
+        }
+    }
+
+    /// Build a stub serving pages whose `Link` next-URLs are wired to the stub's own base via the
+    /// supplied paths. `specs` is `(next_path, body)` per page; a `None` next_path is the last page.
+    fn linked_stub(
+        specs: Vec<(Option<&str>, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        // Bind first so we know the base, then resolve the relative next-paths against it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let pages: Vec<(Option<String>, String)> = specs
+            .into_iter()
+            .map(|(next, body)| (next.map(|p| format!("{base}{p}")), body.to_string()))
+            .collect();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for (link, body) in pages {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                sink.lock()
+                    .unwrap()
+                    .push(req.lines().next().unwrap_or("").to_string());
+                let mut out = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n".to_string();
+                if let Some(link) = link {
+                    out.push_str(&format!("Link: <{link}>; rel=\"next\"\r\n"));
+                }
+                out.push_str(&format!(
+                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                ));
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    #[test]
+    fn run_paginated_accumulates_pages() {
+        // Three pages, the first two advertising a `rel="next"` link to the next.
+        let (base, captured) = linked_stub(vec![
+            (Some("/p2"), "1,2"),
+            (Some("/p3"), "3"),
+            (None, "4,5"),
+        ]);
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
         .unwrap();
         assert_eq!(got, vec![1, 2, 3, 4, 5]);
-        assert_eq!(*visited.borrow(), vec!["page1", "page2", "page3"]);
+        let paths = captured.lock().unwrap();
+        assert_eq!(paths.len(), 3, "exactly three pages were requested");
+        assert!(paths[0].contains("/p1"));
+        assert!(paths[1].contains("/p2"));
+        assert!(paths[2].contains("/p3"));
     }
 
     #[test]
-    fn collect_paginated_is_bounded_by_max_pages() {
-        use crate::backends::{collect_paginated, MAX_RELEASE_PAGES};
-
-        // A server that always advertises a next page must not loop forever.
-        let mut calls = 0usize;
-        let got = collect_paginated::<i32>("start", |_url| {
-            calls += 1;
-            Ok((vec![0], Some("next".to_string())))
-        })
+    fn run_paginated_single_page() {
+        let (base, captured) = linked_stub(vec![(None, "7,8,9")]);
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/only")),
+            &RequestConfig::default(),
+        )
         .unwrap();
-        assert_eq!(calls, MAX_RELEASE_PAGES);
-        assert_eq!(got.len(), MAX_RELEASE_PAGES);
-    }
-
-    #[test]
-    fn collect_paginated_single_page() {
-        use crate::backends::collect_paginated;
-        let mut calls = 0usize;
-        let got = collect_paginated::<i32>("only", |_url| {
-            calls += 1;
-            Ok((vec![7, 8, 9], None))
-        })
-        .unwrap();
-        assert_eq!(calls, 1);
         assert_eq!(got, vec![7, 8, 9]);
+        assert_eq!(captured.lock().unwrap().len(), 1, "one request only");
     }
 
     #[test]
-    fn collect_paginated_propagates_fetch_error() {
-        use crate::backends::collect_paginated;
-        use crate::errors::Error;
-        let res: crate::errors::Result<Vec<i32>> = collect_paginated("u", |_url| {
-            Err(Error::HttpStatus {
-                status: 503,
-                url: "u".into(),
-            })
+    fn run_paginated_stops_early_on_page_stop_flag() {
+        // Page 1 advertises a next page but sets `stop=true`; the driver must NOT request page 2.
+        let (base, captured) = linked_stub(vec![
+            (Some("/never"), "1,2"),
+            (None, "should-not-be-served"),
+        ]);
+        let stopping = PageRequest {
+            url: format!("{base}/p1"),
+            headers: HeaderMap::new(),
+            parse: Box::new(|body: &[u8], _headers: &HeaderMap| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text.split(',').map(|s| s.parse().unwrap()).collect();
+                // Pretend the server still advertises a next page but we stop early.
+                Ok(Page {
+                    items,
+                    next: Some(int_page("http://unused.invalid/never".into())),
+                    stop: true,
+                })
+            }),
+        };
+        let got = crate::backends::run_paginated(stopping, &RequestConfig::default()).unwrap();
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "stop=true must halt after page 1; page 2 must never be requested"
+        );
+    }
+
+    #[test]
+    fn run_paginated_is_bounded_by_max_pages() {
+        use crate::backends::MAX_RELEASE_PAGES;
+        // A server that always advertises a next page (pointing back at itself) must not loop
+        // forever — the driver is bounded by MAX_RELEASE_PAGES.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "0";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLink: <{base_for_thread}/n>; rel=\"next\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
         });
-        assert!(matches!(res, Err(Error::HttpStatus { .. })));
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/start")),
+            &RequestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            got.len(),
+            MAX_RELEASE_PAGES,
+            "the walk is bounded at MAX_RELEASE_PAGES even when next is always advertised"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_paginated_async: direct coverage of the async page-chain driver
+    // (body-drain via bytes_stream + async early-stop), mirroring the sync tests.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_accumulates_pages() {
+        let (base, captured) = linked_stub(vec![
+            (Some("/p2"), "1,2"),
+            (Some("/p3"), "3"),
+            (None, "4,5"),
+        ]);
+        let got = crate::backends::run_paginated_async(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, vec![1, 2, 3, 4, 5]);
+        let paths = captured.lock().unwrap();
+        assert_eq!(paths.len(), 3, "exactly three pages were requested");
+        assert!(paths[0].contains("/p1"));
+        assert!(paths[1].contains("/p2"));
+        assert!(paths[2].contains("/p3"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_stops_early_on_page_stop_flag() {
+        // Page 1 advertises a next page but sets `stop=true`; the async driver must NOT request
+        // page 2 (same contract as the sync driver).
+        let (base, captured) = linked_stub(vec![
+            (Some("/never"), "1,2"),
+            (None, "should-not-be-served"),
+        ]);
+        let stopping = PageRequest {
+            url: format!("{base}/p1"),
+            headers: HeaderMap::new(),
+            parse: Box::new(|body: &[u8], _headers: &HeaderMap| {
+                let text = std::str::from_utf8(body).unwrap_or("");
+                let items: Vec<i32> = text.split(',').map(|s| s.parse().unwrap()).collect();
+                Ok(Page {
+                    items,
+                    next: Some(int_page("http://unused.invalid/never".into())),
+                    stop: true,
+                })
+            }),
+        };
+        let got = crate::backends::run_paginated_async(stopping, &RequestConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "stop=true must halt after page 1; page 2 must never be requested (async)"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_is_bounded_by_max_pages() {
+        use crate::backends::MAX_RELEASE_PAGES;
+        // A server always advertising a next page (pointing back at itself) must not loop forever;
+        // the async driver is bounded by MAX_RELEASE_PAGES just like the sync one.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "0";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLink: <{base_for_thread}/n>; rel=\"next\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let got = crate::backends::run_paginated_async(
+            int_page(format!("{base}/start")),
+            &RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got.len(),
+            MAX_RELEASE_PAGES,
+            "the async walk is bounded at MAX_RELEASE_PAGES even when next is always advertised"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_propagates_fetch_error() {
+        // A non-2xx status on the first page must propagate as the structured error over the async
+        // transport, before any accumulation.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "boom";
+                let out = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let res = crate::backends::run_paginated_async(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        )
+        .await;
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 503, .. })
+        ));
+    }
+
+    #[test]
+    fn run_paginated_propagates_fetch_error() {
+        // A non-2xx status on the first page must propagate as the structured error.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "boom";
+                let out = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let res = crate::backends::run_paginated(
+            int_page(format!("{base}/p1")),
+            &RequestConfig::default(),
+        );
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 503, .. })
+        ));
     }
 
     #[test]
@@ -347,6 +729,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             3,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Ok(7)
@@ -367,6 +751,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             0,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -390,6 +776,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             2,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -414,6 +802,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 if calls.get() < 3 {
@@ -434,16 +824,48 @@ mod test {
 
     #[test]
     fn retry_backoff_is_exponential_and_capped() {
+        use crate::backends::common::{DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY};
         use crate::backends::retry_backoff_ms;
-        assert_eq!(retry_backoff_ms(0), 100);
-        assert_eq!(retry_backoff_ms(1), 200);
-        assert_eq!(retry_backoff_ms(2), 400);
-        assert_eq!(retry_backoff_ms(3), 800);
-        assert_eq!(retry_backoff_ms(4), 1600);
-        assert_eq!(retry_backoff_ms(5), 3200);
+        // The default base/cap reproduce the historical 100, 200, 400, … capped at 3200ms.
+        let ms =
+            |attempt| retry_backoff_ms(attempt, DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY);
+        assert_eq!(ms(0), 100);
+        assert_eq!(ms(1), 200);
+        assert_eq!(ms(2), 400);
+        assert_eq!(ms(3), 800);
+        assert_eq!(ms(4), 1600);
+        assert_eq!(ms(5), 3200);
         // capped from attempt 5 onward
-        assert_eq!(retry_backoff_ms(6), 3200);
-        assert_eq!(retry_backoff_ms(100), 3200);
+        assert_eq!(ms(6), 3200);
+        assert_eq!(ms(100), 3200);
+    }
+
+    #[test]
+    fn retry_backoff_honors_a_configured_base_and_cap() {
+        use crate::backends::retry_backoff_ms;
+        use std::time::Duration;
+        // I4: a configured base/cap drives the backoff. base = 250ms doubles each attempt and is
+        // clamped at the 1000ms cap.
+        let base = Duration::from_millis(250);
+        let max = Duration::from_millis(1000);
+        assert_eq!(retry_backoff_ms(0, base, max), 250);
+        assert_eq!(retry_backoff_ms(1, base, max), 500);
+        assert_eq!(retry_backoff_ms(2, base, max), 1000);
+        // clamped at the cap from here on (would be 2000, 4000, …).
+        assert_eq!(retry_backoff_ms(3, base, max), 1000);
+        assert_eq!(retry_backoff_ms(10, base, max), 1000);
+        // A very large attempt index must saturate, not overflow/panic.
+        assert_eq!(retry_backoff_ms(100, base, max), 1000);
+    }
+
+    #[test]
+    fn retry_backoff_uses_the_request_config_defaults() {
+        use crate::backends::common::RequestConfig;
+        use std::time::Duration;
+        // The defaults wired into RequestConfig match the historical 100ms base / 3.2s cap.
+        let cfg = RequestConfig::default();
+        assert_eq!(cfg.retry_base_delay, Duration::from_millis(100));
+        assert_eq!(cfg.retry_max_delay, Duration::from_millis(3200));
     }
 
     #[test]
@@ -455,6 +877,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry(
             1,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -482,6 +906,8 @@ mod test {
         // feeds the rising attempt index into `retry_backoff_ms`, not just index 0/1.
         let res: crate::errors::Result<i32> = retry(
             6,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 Err(Error::HttpStatus {
@@ -506,6 +932,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry_async(
             2,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 async {
@@ -534,6 +962,8 @@ mod test {
         let backoffs = RefCell::new(Vec::<u64>::new());
         let res: crate::errors::Result<i32> = retry_async(
             5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
             || {
                 calls.set(calls.get() + 1);
                 let done = calls.get() >= 3;
@@ -555,6 +985,109 @@ mod test {
         assert_eq!(res.unwrap(), 42);
         assert_eq!(calls.get(), 3);
         assert_eq!(*backoffs.borrow(), vec![100, 200]);
+    }
+
+    // -----------------------------------------------------------------------
+    // send: the listing path applies the derived auth header AND honors a user
+    // AUTHORIZATION override (B5), captured off a loopback TCP stub.
+    // -----------------------------------------------------------------------
+
+    /// Bind a loopback stub that accepts one request, captures its raw header lines, and replies
+    /// with an empty 200. Returns the base URL and the captured-request handle.
+    fn auth_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let lines: Vec<String> = req.lines().map(|l| l.to_string()).collect();
+                *sink.lock().unwrap() = lines;
+                let body = "";
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, captured)
+    }
+
+    /// Extract the `Authorization` header value the stub received, if any.
+    fn captured_authorization(lines: &[String]) -> Option<String> {
+        lines.iter().find_map(|l| {
+            l.strip_prefix("Authorization: ")
+                .or_else(|| l.strip_prefix("authorization: "))
+                .map(|v| v.to_string())
+        })
+    }
+
+    #[test]
+    fn send_applies_derived_token_auth_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        let (base, captured) = auth_capture_stub();
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Token,
+            auth_token: Some("secret".to_string()),
+            auth_base_host: crate::backends::common::host_of(&base),
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("token secret".to_string()),
+            "the listing path must send the derived `token` auth header"
+        );
+    }
+
+    #[test]
+    fn send_applies_derived_bearer_auth_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        let (base, captured) = auth_capture_stub();
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Bearer,
+            auth_token: Some("secret".to_string()),
+            auth_base_host: crate::backends::common::host_of(&base),
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("Bearer secret".to_string()),
+            "the listing path must send the derived `Bearer` auth header"
+        );
+    }
+
+    #[test]
+    fn send_honors_user_authorization_override_on_listing_path() {
+        use crate::backends::common::AuthScheme;
+        use crate::http_client::header::AUTHORIZATION;
+        // A backend token is configured AND the user supplies their own Authorization via
+        // `request_header` (i.e. config.headers). The user override must win on the listing path.
+        let (base, captured) = auth_capture_stub();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer user-override".parse().unwrap());
+        let config = RequestConfig {
+            auth_scheme: AuthScheme::Token,
+            auth_token: Some("secret".to_string()),
+            headers,
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("Bearer user-override".to_string()),
+            "a user AUTHORIZATION override must win over the backend token on the listing path"
+        );
     }
 
     #[test]

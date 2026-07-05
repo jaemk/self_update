@@ -49,38 +49,46 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Features
 
-Exactly **one** HTTP client and **one** TLS backend must be selected (they are mutually
-exclusive -- enabling both, or neither, is a compile error):
+At least one HTTP client must be selected; having zero clients is a compile error. Multiple
+clients and multiple TLS backends may coexist (reqwest is preferred when both are present):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
-* `default-tls` (default): native TLS for the selected client;
-* `rustls`: use a [pure rust TLS implementation](https://github.com/rustls/rustls) instead. This feature does _not_ support 32bit macOS.
+* `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
+* `native-tls`: opt-in native/OpenSSL TLS for the selected client;
 
-The following optional [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
-are _disabled_ by default; activate the one(s) your release files need:
+The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
+are enabled by default:
 
-* `archive-tar`: Support for _tar_ archive format;
-* `archive-zip`: Support for _zip_ archive format;
-* `compression-flate2`: Support for _gzip_ compression;
-* `compression-zip-deflate`: Support for _zip_'s _deflate_ compression format;
-* `compression-zip-bzip2`: Support for _zip_'s _bzip2_ compression format;
-* `signatures`: Use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
-* `checksums`: Verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
-* `s3-auth`: Sign S3 requests (AWS SigV4) to update from private buckets via the S3 backend;
-* `async`: Add async (`*_async`) update methods alongside the unchanged blocking API. tokio-only and reqwest-only (incompatible with `ureq`); see [Async](#async) below.
+* `github`: the GitHub Releases backend;
+* `progress-bar`: terminal download progress bar;
 
-The S3 backend needs **no feature** -- it is always compiled. Only private-bucket request signing needs an actual feature, `s3-auth`.
+The following are opt-in; activate the one(s) your release files need:
+
+* `gitlab`: the GitLab Releases backend;
+* `gitea`: the Gitea Releases backend;
+* `s3`: the S3-compatible backend (Amazon S3, GCS, DigitalOcean Spaces, etc.);
+* `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
+* `archive-tar`: support for _tar_ archive format;
+* `archive-zip`: support for _zip_ archive format;
+* `compression-tar-gz`: support for _gzip_ compression;
+* `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
+* `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
+* `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
+* `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
+* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest handles async, ureq handles sync); see [Async](#async) below.
+
+`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
 
 ### Example
 
 Run the following example to see `self_update` in action:
 
-`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example github --features "signatures archive-tar compression-tar-gz"`.
 
 There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
 
-`cargo run --example gitlab --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example gitlab --features "gitlab archive-tar compression-tar-gz"`.
 
 Amazon S3, Google GCS, and DigitalOcean Spaces, as well as any S3 compatible server are also supported
 through the `S3` backend to check for new releases.  Provided a `bucket_name`
@@ -90,12 +98,14 @@ Leading directories will be stripped from the file name allowing the use of subd
 and any file not matching the format, or not matching the provided prefix string, will be ignored.
 
 ```rust
+# #[cfg(feature = "s3")]
+# mod s3_example {
 use self_update::cargo_crate_version;
 
 fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     let status = self_update::backends::s3::Update::configure()
-        // .end_point(self_update::backends::s3::EndPoint::GCS)
-        // .end_point("https://s3.example.com")
+        // .endpoint(self_update::backends::s3::Endpoint::GCS)
+        // .endpoint("https://s3.example.com")
         .bucket_name("self_update_releases")
         .asset_prefix("something/self_update")
         .region("eu-west-2")
@@ -110,11 +120,12 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
     println!("S3 Update status: `{}`!", status.version());
     Ok(())
 }
+# }
 ```
 
 Separate utilities are also exposed (**NOTE**: the following example extracts a `.tar.gz`, which
-_requires_ both the `archive-tar` and `compression-flate2` features -- `archive-tar` reads the tar
-archive and `compression-flate2` decodes the gzip layer; see the [features](#features) section
+_requires_ both the `archive-tar` and `compression-tar-gz` features -- `archive-tar` reads the tar
+archive and `compression-tar-gz` decodes the gzip layer; see the [features](#features) section
 above). It downloads, extracts, and replaces the running binary
 by hand; the staging directory and the in-place replacement use the [`tempfile`](https://crates.io/crates/tempfile)
 and [`self_replace`](https://crates.io/crates/self-replace) crates, which you add as your own dependencies
@@ -131,19 +142,20 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     println!("found releases:");
     println!("{:#?}\n", releases);
 
-    // get the first available release
-    let asset = releases[0]
+    // get the first available release (`fetch` returns a `Releases`; `latest()` is the first entry)
+    let latest = releases.latest().unwrap();
+    let asset = latest
         .asset_for(&self_update::get_target(), None)
         .unwrap();
 
     let tmp_dir = tempfile::Builder::new()
             .prefix("self_update")
             .tempdir_in(::std::env::current_dir()?)?;
-    let tmp_tarball_path = tmp_dir.path().join(&asset.name);
+    let tmp_tarball_path = tmp_dir.path().join(asset.name());
     let tmp_tarball = ::std::fs::File::create(&tmp_tarball_path)?;
 
-    self_update::Download::from_url(&asset.download_url)
-        .header(self_update::http::header::ACCEPT, "application/octet-stream")?
+    self_update::Download::from_url(asset.download_url())
+        .request_header(self_update::http::header::ACCEPT, "application/octet-stream")
         .download_to(&tmp_tarball)?;
 
     let bin_name = std::path::PathBuf::from("self_update_bin");
@@ -170,10 +182,10 @@ filesystems), the source files, every destination, and the temp dir must all be 
 filesystem.
 
 **NOTE**: this example extracts a `.tar.gz`, which requires both the `archive-tar` and
-`compression-flate2` features.
+`compression-tar-gz` features.
 
 ```rust
-# #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+# #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
 fn update() -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = tempfile::TempDir::new()?;
     let tarball_path = tmp_dir.path().join("release.tar.gz");
@@ -224,30 +236,22 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Checking for an update without installing
 
-To check whether a newer release exists without downloading or installing anything, fetch the
-releases once and query the returned `Releases`. The updater no longer has an
-`is_update_available()` method; instead call `get_latest_releases()` (the full candidate list) or
-`get_latest_release()` (a one-element list with just the newest release), then ask the result:
-`.is_update_available()` compares the newest fetched release against the configured
-`current_version`, and `.latest()` / `.all()` expose the releases themselves. The fetch happens
-once; every query reads the already-fetched data.
+To check whether a newer release exists without downloading or installing anything, call
+`is_update_available()` on the built updater. It fetches the release listing and returns the newest
+strictly-newer `Release` (or `None` when up to date):
 
 ```rust
 fn check() -> Result<(), Box<dyn std::error::Error>> {
-    let releases = self_update::backends::github::Update::configure()
+    let update = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
         .repo_name("self_update")
         .bin_name("github")
         .current_version(self_update::cargo_crate_version!())
-        .build()?
-        .get_latest_releases()?;
+        .build()?;
 
-    if releases.is_update_available()? {
-        if let Some(latest) = releases.latest() {
-            println!("update available: {}", latest.version);
-        }
-    } else {
-        println!("already up to date");
+    match update.is_update_available()? {
+        Some(release) => println!("update available: {}", release.version()),
+        None => println!("already up to date"),
     }
     Ok(())
 }
@@ -295,7 +299,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self, _current: &str) -> self_update::Result<Vec<Release>> {
+    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -318,14 +322,19 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Async
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
-returns a concrete `Update` with async (`*_async`) verbs — `update_async()`,
-`update_extended_async()`, `get_latest_release_async()`, `get_latest_releases_async()`, and
-`get_release_version_async()` — so a `tokio` application can update
-without wrapping the blocking calls in `spawn_blocking`. The blocking API is unchanged; the async
-path is purely additive. It is **tokio-only and reqwest-only** (ureq has no async story, so `async`
-is incompatible with `ureq`). Network IO becomes async; the extract/replace step stays synchronous.
+returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
+(`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
+`get_newer_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
+update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
+scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
+**tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq
+handles sync); the only invalid configuration is `async` without `reqwest`.
+Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
+does not block the executor.
 
 ```rust
+# #[cfg(feature = "async")]
+use self_update::AsyncReleaseUpdate;
 # #[cfg(feature = "async")]
 async fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
@@ -346,15 +355,21 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
 The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
 for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
 simply reusing your application's existing client — you can hand the crate a **pre-built client**.
-It is used for both the release listing and the download. The setters are client-specific (the
-client types differ and are mutually exclusive): `reqwest_client` (a blocking
-`reqwest::blocking::Client`, used by the blocking API), `reqwest_async_client`
-(an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent` (a
-`ureq::Agent`). The selected client crate is re-exported (`self_update::reqwest` /
-`self_update::ureq`) so you don't need a separate dependency to name the type.
+It is used for both the release listing and the download. The client-specific convenience setters
+are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
+`reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
+(a `ureq::Agent`); each wraps your client behind the crate's object-safe HTTP transport trait. The
+compiled client crate(s) are re-exported (`self_update::reqwest` / `self_update::ureq`) so you don't
+need a separate dependency to name the type. (Since the transport is a runtime trait seam, `reqwest`
+and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
+when both are present.) For test doubles or fully custom transport, inject any type that implements
+the object-safe trait directly via `.http_client(Arc<dyn HttpClient>)` (sync) or
+`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`self_update::http_client`] module
+for the trait definitions.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
-release-listing requests (the download is never retried), and for `reqwest` the per-request
+release-listing requests and to the download's request-establishment phase (a mid-stream failure
+is not retried, as that would corrupt the partially-written destination), and for `reqwest` the per-request
 `.timeout()` is layered on too; but `HTTP(S)_PROXY` env and the crate's TLS feature are left entirely
 to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does not apply to an
 injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and
@@ -381,13 +396,12 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Troubleshooting
 
-When using cross compilation tools such as cross if you want to use rustls and not openssl
+**Cross-compilation (`cross` / `cargo-cross`).** `rustls` is the default TLS backend, so
+no additional configuration is needed for cross-compilation: a build on default features
+already uses rustls. If you have explicitly switched to `native-tls` and want to revert,
+remove the `native-tls` feature; `rustls` is active by default.
 
-```toml
-self_update = { version = "1", features = ["rustls"], default-features = false }
-```
-
-**TLS certificate errors on Linux (`default-tls` / OpenSSL).** With the native-TLS backend,
+**TLS certificate errors on Linux (`native-tls` / OpenSSL).** With the native-TLS backend,
 OpenSSL finds the system CA bundle on its own on most distributions. In a minimal environment where
 it can't (some containers, `musl` static builds, or a non-standard cert layout) a request may fail
 with a certificate-verification error. Point OpenSSL at the bundle by exporting `SSL_CERT_FILE`
@@ -409,32 +423,19 @@ on the system OpenSSL cert layout.
 // the cfg is never set outside of the docs.rs environment.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-// Exactly one HTTP client must be selected. Surface a human-readable diagnostic instead of
-// the raw symbol collision (both) or undefined-item error (neither) that would otherwise occur.
-#[cfg(all(feature = "reqwest", feature = "ureq"))]
-compile_error!(
-    "features `reqwest` and `ureq` are mutually exclusive - enable exactly one HTTP client \
-     (for `ureq`, set `default-features = false`)"
-);
-#[cfg(not(any(feature = "reqwest", feature = "ureq")))]
-compile_error!(
-    "no HTTP client selected - enable exactly one of the `reqwest` (default) or `ureq` features"
-);
+// The HTTP transport is now an object-safe trait seam (`http_client::HttpClient`), so `reqwest` and
+// `ureq` are no longer mutually exclusive — both client impls can be compiled and one is selected at
+// runtime via `default_client()` (reqwest preferred when both are on). The genuine no-client case is
+// a `compile_error!` in `http_client/mod.rs`. TLS features can also coexist: when both `native-tls`
+// and `rustls` are enabled the per-call builders prefer rustls.
 
-// The TLS backend is also a single choice; enabling both forwards conflicting TLS features to
-// the selected client.
-#[cfg(all(feature = "default-tls", feature = "rustls"))]
-compile_error!(
-    "features `default-tls` and `rustls` are mutually exclusive - to use `rustls`, set \
-     `default-features = false`"
-);
-
-// The async API is reqwest-only — ureq has no async story.
-#[cfg(all(feature = "async", feature = "ureq"))]
-compile_error!(
-    "feature `async` requires the `reqwest` client and is incompatible with `ureq` - \
-     `ureq` has no async API"
-);
+// The async API is reqwest-only — ureq has no async story. With the trait seam the two clients are
+// no longer mutually exclusive, so `async` + `ureq` together is fine (async uses reqwest for the
+// async path, ureq serves the sync path). The genuine bad case is `async` without the `reqwest`
+// client at all; the `async` feature already implies `reqwest` (see Cargo.toml), so this guard only
+// fires if that implication is ever broken.
+#[cfg(all(feature = "async", not(feature = "reqwest")))]
+compile_error!("feature `async` requires the `reqwest` client - `ureq` has no async API");
 
 pub use http;
 // Re-export the selected HTTP client so callers can name the types accepted by the client-injection
@@ -444,7 +445,7 @@ pub use http;
 pub use reqwest;
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub use update::AsyncReleaseSource;
+pub use update::{AsyncReleaseSource, AsyncReleaseUpdate};
 pub use update::{
     Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseStatus, ReleaseUpdate, Releases,
     UpdateConfig,
@@ -465,14 +466,40 @@ pub use zipsign_api;
 ///
 /// This is a convenience alias for the fixed-size key array accepted by the `verifying_keys`
 /// builder methods, so consumers don't need to depend on `zipsign-api` directly.
+///
+/// # Compile-time embedding
+///
+/// The typical way to supply a key is to embed it at compile time:
+///
+/// ```rust,ignore
+/// const VERIFYING_KEY: self_update::VerifyingKey =
+///     *include_bytes!("path/to/key.pub");
+/// ```
+///
+/// The file must be exactly 32 raw bytes (the ed25519 public key in wire format).
+/// zipsign key files are raw 32-byte ed25519 public keys, not PEM.
+/// If the file length does not match, Rust will emit a compile error because
+/// the array size is fixed at `PUBLIC_KEY_LENGTH` (32).
+///
+/// # Key rotation
+///
+/// When rotating signing keys, sign new releases with both the old key and the
+/// new key.  Old binaries, which embed only the old key, can still verify and
+/// update because the archive carries both signatures.  zipsign uses any-of
+/// semantics: verification passes as soon as any (key, signature) pair matches.
+/// New binaries embed only the new key.  Once the transition window has passed
+/// and no old binaries remain in the field, releases only need the new key's
+/// signature.
 #[cfg(feature = "signatures")]
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 
-#[cfg(feature = "compression-flate2")]
+#[cfg(feature = "compression-tar-gz")]
 use either::Either;
-use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(feature = "progress-bar")]
+use indicatif::{ProgressBar, ProgressStyle as IndicatifProgressStyle};
 use log::debug;
+#[cfg(feature = "progress-bar")]
 use std::cmp::min;
 use std::fs;
 use std::io;
@@ -484,9 +511,17 @@ pub mod backends;
 #[cfg(feature = "checksums")]
 mod checksum;
 pub mod errors;
-mod http_client;
+pub mod http_client;
+mod tls;
 pub mod update;
 pub mod version;
+
+/// An opaque TLS root CA certificate, supplied to a backend builder or a [`Download`] via the
+/// `add_root_certificate` setter so the crate-built HTTP client trusts a private/internal CA.
+/// Construct with [`Certificate::from_pem`](crate::Certificate::from_pem) or
+/// [`Certificate::from_der`](crate::Certificate::from_der); the bytes are validated when the client
+/// is built, not at construction.
+pub use tls::Certificate;
 
 /// Re-export the crate's [`Error`](errors::Error) and [`Result`](errors::Result) at the crate root,
 /// so consumers (and `ReleaseSource` implementors) can write `self_update::Result<T>` /
@@ -499,11 +534,51 @@ pub use errors::{Error, Result};
 #[cfg_attr(docsrs, doc(cfg(feature = "checksums")))]
 pub use checksum::Checksum;
 
-use http_client::{header, HttpResponse};
+use http_client::header;
 
+#[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta}) {msg}";
+#[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_CHARS: &str = "=>-";
+
+/// The download progress-bar style: an `indicatif` `template` plus the `chars` it renders the bar
+/// with. Requires the `progress-bar` feature.
+///
+/// This is a typed pair so the two strings can't be transposed at a call site (the previous setter
+/// took two `impl Into<String>` args in template-then-chars order, which were easy to swap). Build
+/// one with [`ProgressStyle::new`] and pass it to the `Update` builder's `progress_style` or
+/// [`Download::progress_style`].
+///
+/// ```
+/// # #[cfg(feature = "progress-bar")] {
+/// let style = self_update::ProgressStyle::new(
+///     "[{bar:40}] {bytes}/{total_bytes}",
+///     "=>-",
+/// );
+/// # let _ = style;
+/// # }
+/// ```
+#[cfg(feature = "progress-bar")]
+#[cfg_attr(docsrs, doc(cfg(feature = "progress-bar")))]
+#[derive(Clone, Debug)]
+pub struct ProgressStyle {
+    /// The `indicatif` progress-bar template (see `indicatif::ProgressStyle::template`).
+    pub template: String,
+    /// The characters used to render the bar (see `indicatif::ProgressStyle::progress_chars`).
+    pub chars: String,
+}
+
+#[cfg(feature = "progress-bar")]
+impl ProgressStyle {
+    /// Construct a `ProgressStyle` from a `template` and its progress `chars`.
+    pub fn new(template: impl Into<String>, chars: impl Into<String>) -> Self {
+        Self {
+            template: template.into(),
+            chars: chars.into(),
+        }
+    }
+}
 
 /// Get the current target triple.
 ///
@@ -522,7 +597,12 @@ fn confirm(msg: &str) -> Result<()> {
     print_flush!("{}", msg);
 
     let mut s = String::new();
-    io::stdin().read_line(&mut s)?;
+    // EOF (closed stdin: a daemon, `</dev/null`, CI) reads zero bytes. Treat it as a decline, not a
+    // blank-line "yes", so an unattended caller that forgot `no_confirm` aborts rather than silently
+    // proceeding with a self-replacement.
+    if io::stdin().read_line(&mut s)? == 0 {
+        return Err(Error::Aborted);
+    }
     let s = s.trim().to_lowercase();
     if !s.is_empty() && s != "y" {
         return Err(Error::Aborted);
@@ -617,7 +697,7 @@ impl std::fmt::Display for ArchiveKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Compression {
-    /// gzip (`.gz`); decoding the stream requires the `compression-flate2` feature.
+    /// gzip (`.gz`); decoding the stream requires the `compression-tar-gz` feature.
     Gz,
 }
 
@@ -650,10 +730,14 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
             }
         }
         Some(extension) if extension == std::ffi::OsStr::new("tgz") => {
-            #[cfg(feature = "archive-tar")]
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
             {
                 debug!("Detected .tgz archive");
                 Ok(ArchiveKind::Tar(Some(Compression::Gz)))
+            }
+            #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+            {
+                Err(Error::CompressionNotEnabled("gz".to_string()))
             }
             #[cfg(not(feature = "archive-tar"))]
             {
@@ -666,17 +750,33 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
             .and_then(|f| f.extension())
         {
             Some(extension) if extension == std::ffi::OsStr::new("tar") => {
-                #[cfg(feature = "archive-tar")]
+                #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
                 {
                     debug!("Detected .tar.gz archive");
                     Ok(ArchiveKind::Tar(Some(Compression::Gz)))
+                }
+                #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+                {
+                    Err(Error::CompressionNotEnabled("gz".to_string()))
                 }
                 #[cfg(not(feature = "archive-tar"))]
                 {
                     Err(Error::ArchiveNotEnabled("tar".to_string()))
                 }
             }
-            _ => Ok(ArchiveKind::Plain(Some(Compression::Gz))),
+            // A plain `.gz` single-file asset: decoding the gzip layer requires the
+            // `compression-tar-gz` feature. Without it, refuse rather than installing the still
+            // compressed bytes as the binary.
+            _ => {
+                #[cfg(feature = "compression-tar-gz")]
+                {
+                    Ok(ArchiveKind::Plain(Some(Compression::Gz)))
+                }
+                #[cfg(not(feature = "compression-tar-gz"))]
+                {
+                    Err(Error::CompressionNotEnabled("gz".to_string()))
+                }
+            }
         },
         _ => Ok(ArchiveKind::Plain(None)),
     };
@@ -694,20 +794,21 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
 ///     * Io - archive unpacking
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Extract<'a> {
-    source: &'a path::Path,
+pub struct Extract {
+    source: path::PathBuf,
     archive: Option<ArchiveKind>,
 }
-#[cfg(feature = "compression-flate2")]
+#[cfg(feature = "compression-tar-gz")]
 type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
-#[cfg(not(feature = "compression-flate2"))]
+#[cfg(not(feature = "compression-tar-gz"))]
 type GetArchiveReaderResult = fs::File;
 
-impl<'a> Extract<'a> {
-    /// Create an `Extract`or from a source path
-    pub fn from_source(source: &'a path::Path) -> Extract<'a> {
+impl Extract {
+    /// Create an `Extract`or from a source path. Accepts anything path-like (`&Path`, `PathBuf`,
+    /// `&str`, …), storing an owned [`PathBuf`](std::path::PathBuf).
+    pub fn from_source(source: impl AsRef<path::Path>) -> Extract {
         Self {
-            source,
+            source: source.as_ref().to_path_buf(),
             archive: None,
         }
     }
@@ -724,23 +825,24 @@ impl<'a> Extract<'a> {
         source: fs::File,
         compression: Option<Compression>,
     ) -> GetArchiveReaderResult {
-        #[cfg(feature = "compression-flate2")]
+        #[cfg(feature = "compression-tar-gz")]
         match compression {
             Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
             None => Either::Left(source),
         }
-        #[cfg(not(feature = "compression-flate2"))]
+        #[cfg(not(feature = "compression-tar-gz"))]
         source
     }
 
     /// Extract an entire source archive into a specified path. If the source is a single compressed
     /// file and not an archive, it will be extracted into a file with the same name inside of
     /// `into_dir`.
-    pub fn extract_into(&self, into_dir: &path::Path) -> Result<()> {
-        let source = fs::File::open(self.source)?;
+    pub fn extract_into(&self, into_dir: impl AsRef<path::Path>) -> Result<()> {
+        let into_dir = into_dir.as_ref();
+        let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(self.source)?,
+            None => detect_archive(&self.source)?,
         };
 
         // We cannot use a feature flag in a match arm. To bypass this the code block is
@@ -758,10 +860,10 @@ impl<'a> Extract<'a> {
                             }
                         }
                     }
-                    let file_name = self
-                        .source
-                        .file_name()
-                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let file_name = self.source.file_name().ok_or_else(|| Error::Internal {
+                        message: "Extractor source has no file-name".to_string(),
+                        source: None,
+                    })?;
                     let mut out_path = into_dir.join(file_name);
                     out_path.set_extension("");
                     let mut out_file = fs::File::create(&out_path)?;
@@ -796,17 +898,36 @@ impl<'a> Extract<'a> {
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
 
-                    let output_path = into_dir.join(file.name());
-                    if let Some(parent_dir) = output_path.parent() {
-                        if let Err(e) = fs::create_dir_all(parent_dir) {
-                            if e.kind() != io::ErrorKind::AlreadyExists {
-                                return Err(Error::Io(e));
-                            }
-                        }
+                    // Reject entries whose name would escape `into_dir` (zip-slip). `enclosed_name`
+                    // returns `None` for an absolute path or one containing `..`.
+                    let Some(rel_path) = file.enclosed_name() else {
+                        return Err(Error::Internal {
+                            message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                            source: None,
+                        });
+                    };
+                    let output_path = into_dir.join(rel_path);
+
+                    if file.is_dir() {
+                        fs::create_dir_all(&output_path)?;
+                        continue;
+                    }
+                    if let Some(parent_dir) = output_path.parent()
+                        && let Err(e) = fs::create_dir_all(parent_dir)
+                        && e.kind() != io::ErrorKind::AlreadyExists
+                    {
+                        return Err(Error::Io(e));
                     }
 
-                    let mut output = fs::File::create(output_path)?;
+                    let mut output = fs::File::create(&output_path)?;
                     io::copy(&mut file, &mut output)?;
+                    // Preserve the archived unix permission mode (notably the executable bit) so a
+                    // binary extracted from a zip is runnable when installed to a custom path.
+                    #[cfg(unix)]
+                    if let Some(mode) = file.unix_mode() {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                    }
                 }
             }
         };
@@ -818,14 +939,15 @@ impl<'a> Extract<'a> {
     /// in the specified `into_dir`.
     pub fn extract_file<T: AsRef<path::Path>>(
         &self,
-        into_dir: &path::Path,
+        into_dir: impl AsRef<path::Path>,
         file_to_extract: T,
     ) -> Result<()> {
+        let into_dir = into_dir.as_ref();
         let file_to_extract = file_to_extract.as_ref();
-        let source = fs::File::open(self.source)?;
+        let source = fs::File::open(&self.source)?;
         let archive = match self.archive {
             Some(archive) => archive,
-            None => detect_archive(self.source)?,
+            None => detect_archive(&self.source)?,
         };
 
         debug!(
@@ -849,9 +971,10 @@ impl<'a> Extract<'a> {
                             }
                         }
                     }
-                    let file_name = file_to_extract
-                        .file_name()
-                        .ok_or_else(|| Error::Update("Extractor source has no file-name".into()))?;
+                    let file_name = file_to_extract.file_name().ok_or_else(|| Error::Internal {
+                        message: "Extractor source has no file-name".to_string(),
+                        source: None,
+                    })?;
                     let out_path = into_dir.join(file_name);
                     let mut out_file = fs::File::create(out_path)?;
                     io::copy(&mut reader, &mut out_file)?;
@@ -869,11 +992,12 @@ impl<'a> Extract<'a> {
                             debug!("Archive path: {:?}", p);
                             p.ok().filter(|p| p == file_to_extract).is_some()
                         })
-                        .ok_or_else(|| {
-                            Error::Update(format!(
+                        .ok_or_else(|| Error::Internal {
+                            message: format!(
                                 "Could not find the required path in the archive: {:?}",
                                 file_to_extract
-                            ))
+                            ),
+                            source: None,
                         })?;
                     entry.unpack_in(into_dir)?;
                 }
@@ -898,25 +1022,37 @@ impl<'a> Extract<'a> {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
-                let file_name = file_to_extract.to_str().ok_or_else(|| {
-                    Error::Update(format!(
+                let file_name = file_to_extract.to_str().ok_or_else(|| Error::Internal {
+                    message: format!(
                         "cannot extract file with a non-UTF-8 path: {:?}",
                         file_to_extract
-                    ))
+                    ),
+                    source: None,
                 })?;
                 let mut file = archive.by_name(file_name)?;
 
-                let output_path = into_dir.join(file.name());
-                if let Some(parent_dir) = output_path.parent() {
-                    if let Err(e) = fs::create_dir_all(parent_dir) {
-                        if e.kind() != io::ErrorKind::AlreadyExists {
-                            return Err(Error::Io(e));
-                        }
-                    }
+                let Some(rel_path) = file.enclosed_name() else {
+                    return Err(Error::Internal {
+                        message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                        source: None,
+                    });
+                };
+                let output_path = into_dir.join(rel_path);
+                if let Some(parent_dir) = output_path.parent()
+                    && let Err(e) = fs::create_dir_all(parent_dir)
+                    && e.kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(Error::Io(e));
                 }
 
-                let mut output = fs::File::create(output_path)?;
+                let mut output = fs::File::create(&output_path)?;
                 io::copy(&mut file, &mut output)?;
+                // Preserve the archived unix permission mode so the extracted binary is runnable.
+                #[cfg(unix)]
+                if let Some(mode) = file.unix_mode() {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                }
             }
         };
         Ok(())
@@ -936,14 +1072,18 @@ impl<'a> Extract<'a> {
 ///     * Io - copying / renaming
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Move<'a> {
-    source: &'a path::Path,
-    temp: Option<&'a path::Path>,
+pub struct Move {
+    source: path::PathBuf,
+    temp: Option<path::PathBuf>,
 }
-impl<'a> Move<'a> {
-    /// Specify source file
-    pub fn from_source(source: &'a path::Path) -> Move<'a> {
-        Self { source, temp: None }
+impl Move {
+    /// Specify source file. Accepts anything path-like, storing an owned
+    /// [`PathBuf`](std::path::PathBuf).
+    pub fn from_source(source: impl AsRef<path::Path>) -> Move {
+        Self {
+            source: source.as_ref().to_path_buf(),
+            temp: None,
+        }
     }
 
     /// If specified and the destination file already exists, the "destination"
@@ -955,30 +1095,62 @@ impl<'a> Move<'a> {
     ///
     /// The `temp` dir must be explicitly provided since `rename` operations require
     /// files to live on the same filesystem.
-    pub fn replace_using_temp(&mut self, temp: &'a path::Path) -> &mut Self {
-        self.temp = Some(temp);
+    pub fn replace_using_temp(&mut self, temp: impl AsRef<path::Path>) -> &mut Self {
+        self.temp = Some(temp.as_ref().to_path_buf());
         self
     }
 
     /// Move source file to specified destination
-    pub fn to_dest(&self, dest: &path::Path) -> Result<()> {
-        match self.temp {
+    pub fn to_dest(&self, dest: impl AsRef<path::Path>) -> Result<()> {
+        let dest = dest.as_ref();
+        match self.temp.as_deref() {
             // Move the existing dest to a temp location so we can move it back if
             // there's an error. If the existing `dest` file is a long running program,
             // this may prevent the temp dir from being cleaned up.
             Some(temp) if dest.exists() => {
                 fs::rename(dest, temp)?;
-                if let Err(e) = fs::rename(self.source, dest) {
+                if let Err(e) = fs::rename(&self.source, dest) {
                     fs::rename(temp, dest)?;
                     return Err(Error::from(e));
                 }
             }
             // No temp set, or nothing to preserve at `dest`: just move source into place.
             _ => {
-                fs::rename(self.source, dest)?;
+                rename_or_copy(&self.source, dest)?;
             }
         };
         Ok(())
+    }
+}
+
+/// Rename `source` onto `dest`, falling back to copy when the two are on different filesystems.
+///
+/// The extraction temp dir is often a tmpfs on Linux while `bin_install_path` lives on the root
+/// filesystem, so a plain `fs::rename` returns `CrossesDevices` (EXDEV). On that error the source is
+/// copied to a temporary file beside `dest` (same filesystem, so the following rename is atomic),
+/// renamed over `dest`, and the original source removed. `fs::copy` preserves the source's
+/// permission mode.
+fn rename_or_copy(source: &path::Path, dest: &path::Path) -> Result<()> {
+    match fs::rename(source, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            let tmp = match dest.file_name() {
+                Some(name) => {
+                    let mut n = name.to_os_string();
+                    n.push(".self_update.tmp");
+                    dest.with_file_name(n)
+                }
+                None => return Err(Error::from(e)),
+            };
+            fs::copy(source, &tmp)?;
+            if let Err(rename_err) = fs::rename(&tmp, dest) {
+                let _ = fs::remove_file(&tmp);
+                return Err(Error::from(rename_err));
+            }
+            let _ = fs::remove_file(source);
+            Ok(())
+        }
+        Err(e) => Err(Error::from(e)),
     }
 }
 
@@ -1021,17 +1193,18 @@ impl<'a> Move<'a> {
 #[derive(Debug)]
 #[must_use = "queued moves are only applied when `.commit()` is called"]
 #[non_exhaustive]
-pub struct MoveAll<'a> {
-    temp: &'a path::Path,
+pub struct MoveAll {
+    temp: path::PathBuf,
     moves: Vec<(path::PathBuf, path::PathBuf)>,
 }
 
-impl<'a> MoveAll<'a> {
+impl MoveAll {
     /// Start a transactional install, stashing displaced destinations under `temp` so they can be
     /// restored if a later move fails. `temp` must be on the same filesystem as every destination.
-    pub fn from_temp(temp: &'a path::Path) -> Self {
+    /// Accepts anything path-like, storing an owned [`PathBuf`](std::path::PathBuf).
+    pub fn from_temp(temp: impl AsRef<path::Path>) -> Self {
         Self {
-            temp,
+            temp: temp.as_ref().to_path_buf(),
             moves: Vec::new(),
         }
     }
@@ -1079,15 +1252,15 @@ impl<'a> MoveAll<'a> {
             // Move the new file into place.
             if let Err(e) = fs::rename(source, dest) {
                 // Undo this step's stash before rolling back the earlier ones.
-                if let Some(stash) = &stash {
-                    if let Err(restore_err) = fs::rename(stash, dest) {
-                        log::error!(
-                            "failed to restore {:?} from stash {:?} during rollback: {}",
-                            dest,
-                            stash,
-                            restore_err
-                        );
-                    }
+                if let Some(stash) = &stash
+                    && let Err(restore_err) = fs::rename(stash, dest)
+                {
+                    log::error!(
+                        "failed to restore {:?} from stash {:?} during rollback: {}",
+                        dest,
+                        stash,
+                        restore_err
+                    );
                 }
                 rollback(&applied);
                 return Err(Error::from(e));
@@ -1153,9 +1326,11 @@ impl std::fmt::Debug for ProgressCallback {
     }
 }
 
-/// A post-update verification callback: given the path to the freshly-extracted binary (before
-/// it is installed), returns `true` to accept it or `false` to reject it (aborting the update).
-pub(crate) type DynVerifyFn = dyn Fn(&std::path::Path) -> bool + Send + Sync;
+/// A post-update verification callback: given the path to the freshly-extracted binary (before it
+/// is installed), returns `Ok(())` to accept it or `Err(..)` to reject it (aborting the update). A
+/// returned error's message is carried as the reason of the resulting
+/// [`Error::VerificationRejected`](errors::Error::VerificationRejected).
+pub(crate) type DynVerifyFn = dyn Fn(&std::path::Path) -> Result<()> + Send + Sync;
 
 /// Wrapper around a [`DynVerifyFn`] so structs holding one can still derive `Clone`/`Debug`.
 #[derive(Clone)]
@@ -1184,30 +1359,87 @@ impl std::fmt::Debug for AssetMatcher {
 /// Download things into files
 ///
 /// With optional progress bar
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct Download {
     show_progress: bool,
     url: String,
     headers: http_client::header::HeaderMap,
+    #[cfg(feature = "progress-bar")]
     progress_template: String,
+    #[cfg(feature = "progress-bar")]
     progress_chars: String,
     timeout: Option<std::time::Duration>,
     on_progress: Option<ProgressCallback>,
-    client: http_client::ClientOverride,
+    /// Number of times to retry establishing the download request (before any bytes are streamed)
+    /// with exponential backoff. `0` (the default) means a single attempt, preserving the prior
+    /// no-retry behavior. A failure that occurs *after* streaming has begun is not retried (it would
+    /// corrupt the partially-written destination).
+    retries: u32,
+    retry_base_delay: std::time::Duration,
+    retry_max_delay: std::time::Duration,
+    /// Optional user-supplied sync HTTP client (used through the trait); `None` => crate default.
+    client: Option<std::sync::Arc<dyn http_client::HttpClient>>,
+    /// Optional user-supplied async HTTP client; `None` => crate default. Async is reqwest-only.
+    #[cfg(feature = "async")]
+    async_client: Option<std::sync::Arc<dyn http_client::AsyncHttpClient>>,
+    /// Custom TLS root CA certificates to bake into the crate-built client when no client was
+    /// injected (see [`add_root_certificate`](Self::add_root_certificate)).
+    root_certificates: Vec<Certificate>,
+    /// First error from a `request_header(name, value)` argument that wasn't a valid HTTP header.
+    /// Deferred like the builders' `request_header` so the setter stays infallible; surfaced from
+    /// [`download_to`](Self::download_to) as an `Error::InvalidHeader`.
+    header_error: Option<String>,
 }
+
+impl std::fmt::Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Download");
+        s.field("show_progress", &self.show_progress)
+            .field("url", &self.url)
+            .field("headers", &self.headers);
+        #[cfg(feature = "progress-bar")]
+        s.field("progress_template", &self.progress_template)
+            .field("progress_chars", &self.progress_chars);
+        s.field("timeout", &self.timeout)
+            .field(
+                "on_progress",
+                &self.on_progress.as_ref().map(|_| "<callback>"),
+            )
+            .field("client", &self.client.as_ref().map(|_| "<http_client>"));
+        #[cfg(feature = "async")]
+        s.field(
+            "async_client",
+            &self.async_client.as_ref().map(|_| "<async_http_client>"),
+        );
+        s.field(
+            "root_certificates",
+            &format_args!("<{} root_certificates>", self.root_certificates.len()),
+        );
+        s.finish()
+    }
+}
+
 impl Download {
-    /// Specify download url
-    pub fn from_url(url: &str) -> Self {
+    /// Specify download url. Accepts anything string-like (`&str`, `String`, …).
+    pub fn from_url(url: impl Into<String>) -> Self {
         Self {
             show_progress: false,
-            url: url.to_owned(),
+            url: url.into(),
             headers: http_client::header::HeaderMap::new(),
+            #[cfg(feature = "progress-bar")]
             progress_template: DEFAULT_PROGRESS_TEMPLATE.to_string(),
+            #[cfg(feature = "progress-bar")]
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             timeout: None,
             on_progress: None,
-            client: http_client::ClientOverride::default(),
+            retries: 0,
+            retry_base_delay: std::time::Duration::from_millis(100),
+            retry_max_delay: std::time::Duration::from_millis(3200),
+            client: None,
+            #[cfg(feature = "async")]
+            async_client: None,
+            root_certificates: vec![],
+            header_error: None,
         }
     }
 
@@ -1248,54 +1480,74 @@ impl Download {
         self
     }
 
-    /// Set the progress style
-    pub fn progress_style(
-        &mut self,
-        progress_template: impl Into<String>,
-        progress_chars: impl Into<String>,
-    ) -> &mut Self {
-        self.progress_template = progress_template.into();
-        self.progress_chars = progress_chars.into();
+    /// Set the progress style, as a typed [`ProgressStyle`] (template + chars) so the two strings
+    /// can't be transposed.
+    #[cfg(feature = "progress-bar")]
+    pub fn progress_style(&mut self, style: ProgressStyle) -> &mut Self {
+        self.progress_template = style.template;
+        self.progress_chars = style.chars;
         self
     }
 
     /// Replace the entire download request `HeaderMap`. To add a single header without discarding
-    /// the others, use [`header`](Self::header) instead.
+    /// the others, use [`request_header`](Self::request_header) instead.
     pub fn replace_headers(&mut self, headers: http_client::header::HeaderMap) -> &mut Self {
         self.headers = headers;
         self
     }
 
-    /// Use a pre-built blocking [`reqwest::Client`](::reqwest::blocking::Client) for the download
-    /// instead of the per-call client. See the `Update` builder's `reqwest_client` for the
-    /// rationale and precedence rules.
-    #[cfg(feature = "reqwest")]
-    pub fn reqwest_client(&mut self, client: ::reqwest::blocking::Client) -> &mut Self {
-        self.client.blocking = Some(client);
+    /// Internal: set the download request-establishment retry budget and backoff (used by the
+    /// update flow to forward an `Update`'s configured `retries`/`retry_backoff` to the download).
+    pub(crate) fn set_retries(
+        &mut self,
+        retries: u32,
+        base: std::time::Duration,
+        max: std::time::Duration,
+    ) -> &mut Self {
+        self.retries = retries;
+        self.retry_base_delay = base;
+        self.retry_max_delay = max;
         self
     }
 
-    /// Async sibling of [`reqwest_client`](Self::reqwest_client), used by
-    /// [`download_to_async`](Self::download_to_async).
-    #[cfg(feature = "async")]
-    pub fn reqwest_async_client(&mut self, client: ::reqwest::Client) -> &mut Self {
-        self.client.r#async = Some(client);
-        self
-    }
-
-    /// Use a pre-built [`ureq::Agent`](::ureq::Agent) for the download instead of the per-call
-    /// agent. The agent owns its own timeout / TLS / proxy config.
-    #[cfg(feature = "ureq")]
-    pub fn ureq_agent(&mut self, agent: ::ureq::Agent) -> &mut Self {
-        self.client.agent = Some(agent);
-        self
-    }
-
-    /// Internal: set the client override from an already-built one (used by the update flow to
+    /// Internal: set the injected HTTP clients from already-built `Arc`s (used by the update flow to
     /// forward an `Update`'s injected client to its download).
-    pub(crate) fn set_client_override(&mut self, client: http_client::ClientOverride) -> &mut Self {
+    pub(crate) fn set_http_client(
+        &mut self,
+        client: Option<std::sync::Arc<dyn http_client::HttpClient>>,
+        #[cfg(feature = "async")] async_client: Option<
+            std::sync::Arc<dyn http_client::AsyncHttpClient>,
+        >,
+    ) -> &mut Self {
         self.client = client;
+        #[cfg(feature = "async")]
+        {
+            self.async_client = async_client;
+        }
         self
+    }
+
+    /// Add a custom TLS root CA certificate the crate-built HTTP client will trust. Call multiple
+    /// times to add more than one. Ignored when an HTTP client is injected via
+    /// [`set_http_client`](Self::set_http_client) (the injected client owns its own TLS config). A
+    /// malformed certificate surfaces as an
+    /// [`Error::InvalidCertificate`](errors::Error::InvalidCertificate) from
+    /// [`download_to`](Self::download_to).
+    ///
+    /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
+    /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply all
+    /// CA certificates you need, including any public roots, or inject a `ureq::Agent` via
+    /// [`set_http_client`](Self::set_http_client) with a merged root set instead.
+    pub fn add_root_certificate(&mut self, cert: Certificate) -> &mut Self {
+        self.root_certificates.push(cert);
+        self
+    }
+
+    /// Internal: the configured custom root CA certificates (used by tests to confirm cert
+    /// forwarding). Empty unless [`add_root_certificate`](Self::add_root_certificate) was called.
+    #[cfg(test)]
+    pub(crate) fn root_certificates(&self) -> &[Certificate] {
+        &self.root_certificates
     }
 
     /// Set a download request header, inserting into the existing `HeaderMap`. To add a single
@@ -1303,23 +1555,39 @@ impl Download {
     /// [`replace_headers`](Self::replace_headers).
     ///
     /// Accepts anything that converts into a header name/value, so both typed values and plain
-    /// strings work: `.header("X-Foo", "bar")?` or
-    /// `.header(self_update::http::header::ACCEPT, "application/octet-stream")?`. A name or value
-    /// that is not a valid HTTP header returns an [`Error::Config`](errors::Error::Config) rather
-    /// than panicking. Mirrors the builders' `request_header`.
-    pub fn header<N, V>(&mut self, name: N, value: V) -> Result<&mut Self>
+    /// strings work: `.request_header("X-Foo", "bar")` or
+    /// `.request_header(self_update::http::header::ACCEPT, "application/octet-stream")`. The setter
+    /// is infallible; a name or value that is not a valid HTTP header is deferred and surfaced from
+    /// [`download_to`](Self::download_to) as an
+    /// [`Error::InvalidHeader`](errors::Error::InvalidHeader), matching the builders'
+    /// `request_header` verb.
+    pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
     where
         N: ::core::convert::TryInto<http_client::header::HeaderName>,
         V: ::core::convert::TryInto<http_client::header::HeaderValue>,
     {
-        let name = name.try_into().map_err(|_| {
-            Error::Config("invalid HTTP header name passed to `header`".to_string())
-        })?;
-        let value = value.try_into().map_err(|_| {
-            Error::Config("invalid HTTP header value passed to `header`".to_string())
-        })?;
-        self.headers.insert(name, value);
-        Ok(self)
+        match (name.try_into(), value.try_into()) {
+            (Ok(name), Ok(value)) => {
+                self.headers.insert(name, value);
+            }
+            _ => {
+                if self.header_error.is_none() {
+                    self.header_error =
+                        Some("invalid HTTP header passed to `request_header`".to_string());
+                }
+            }
+        }
+        self
+    }
+
+    /// Surface a deferred `request_header` conversion failure as an `Error::InvalidHeader`.
+    fn check_header_error(&self) -> Result<()> {
+        if let Some(msg) = &self.header_error {
+            return Err(Error::InvalidHeader {
+                source: Box::new(errors::MessageError(msg.clone())),
+            });
+        }
+        Ok(())
     }
 
     /// Download the file behind the given `url` into the specified `dest`.
@@ -1334,6 +1602,7 @@ impl Download {
     ///     * Writing from `BufReader`-buffer to `File`
     pub fn download_to<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use io::BufRead;
+        self.check_header_error()?;
         let mut headers = self.headers.clone();
         if !headers.contains_key(header::USER_AGENT) {
             headers.insert(
@@ -1344,7 +1613,38 @@ impl Download {
             );
         }
 
-        let resp = http_client::get(&self.url, headers, self.timeout, &self.client)?;
+        let default;
+        let built;
+        let client: &dyn http_client::HttpClient = match self.client.as_deref() {
+            Some(c) => c,
+            None if !self.root_certificates.is_empty() => {
+                // No injected client but custom root CAs were supplied: build a client that trusts
+                // them. A malformed cert / build failure surfaces here as `Error::InvalidCertificate`.
+                built = http_client::client_with_root_certs(&self.root_certificates)
+                    .map_err(|source| Error::InvalidCertificate { source })?;
+                &*built
+            }
+            None => {
+                default = http_client::default_client();
+                &*default
+            }
+        };
+        // Retry only the request-establishment phase (before any bytes are streamed): a failure
+        // after streaming begins would corrupt the partially-written destination. With the default
+        // `retries == 0` this is a single attempt.
+        let resp = backends::retry(
+            self.retries,
+            self.retry_base_delay,
+            self.retry_max_delay,
+            || client.get(&self.url, &headers, self.timeout),
+            |e, backoff| {
+                log::warn!(
+                    "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
+                    self.url
+                );
+                std::thread::sleep(std::time::Duration::from_millis(backoff));
+            },
+        )?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1356,19 +1656,21 @@ impl Download {
             .unwrap_or(0);
         // `http_client::get` already errored on a non-success status (see `download_to_async`).
         let total = if size == 0 { None } else { Some(size) };
+        #[cfg(feature = "progress-bar")]
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut src = io::BufReader::new(resp.body());
         let mut downloaded: u64 = 0;
+        #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
+            let style = IndicatifProgressStyle::default_bar()
+                .template(&self.progress_template)
+                .map_err(|e| Error::InvalidProgressStyle {
+                    source: Box::new(e),
+                })?
+                .progress_chars(&self.progress_chars);
             let pb = ProgressBar::new(size);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(&self.progress_template)
-                    .expect("set ProgressStyle template failed")
-                    .progress_chars(&self.progress_chars),
-            );
-
+            pb.set_style(style);
             Some(pb)
         } else {
             None
@@ -1385,6 +1687,7 @@ impl Download {
             src.consume(n);
             downloaded += n as u64;
 
+            #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
                 bar.set_position(min(downloaded, size));
             }
@@ -1392,6 +1695,7 @@ impl Download {
                 (cb.0)(downloaded, total);
             }
         }
+        #[cfg(feature = "progress-bar")]
         if let Some(ref mut bar) = bar {
             bar.finish_with_message("Done");
         }
@@ -1405,6 +1709,7 @@ impl Download {
     pub async fn download_to_async<T: io::Write>(&self, mut dest: T) -> Result<()> {
         use futures_util::StreamExt;
 
+        self.check_header_error()?;
         let mut headers = self.headers.clone();
         if !headers.contains_key(header::USER_AGENT) {
             headers.insert(
@@ -1415,7 +1720,37 @@ impl Download {
             );
         }
 
-        let resp = http_client::get_async(&self.url, headers, self.timeout, &self.client).await?;
+        let default;
+        let built;
+        let client: &dyn http_client::AsyncHttpClient = match self.async_client.as_deref() {
+            Some(c) => c,
+            None if !self.root_certificates.is_empty() => {
+                // No injected async client but custom root CAs were supplied: build one that trusts
+                // them. A malformed cert / build failure surfaces here as `Error::InvalidCertificate`.
+                built = http_client::async_client_with_root_certs(&self.root_certificates)
+                    .map_err(|source| Error::InvalidCertificate { source })?;
+                &*built
+            }
+            None => {
+                default = http_client::default_async_client();
+                &*default
+            }
+        };
+        // Retry only the request-establishment phase (see `download_to`).
+        let resp = backends::retry_async(
+            self.retries,
+            self.retry_base_delay,
+            self.retry_max_delay,
+            || client.get(&self.url, &headers, self.timeout),
+            |e, backoff| {
+                log::warn!(
+                    "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
+                    self.url
+                );
+            },
+            |backoff| tokio::time::sleep(std::time::Duration::from_millis(backoff)),
+        )
+        .await?;
         let size = resp
             .headers()
             .get(http_client::header::CONTENT_LENGTH)
@@ -1427,17 +1762,20 @@ impl Download {
             .unwrap_or(0);
         // `get_async` already errored on a non-success status.
         let total = if size == 0 { None } else { Some(size) };
+        #[cfg(feature = "progress-bar")]
         let show_progress = if size == 0 { false } else { self.show_progress };
 
         let mut downloaded: u64 = 0;
+        #[cfg(feature = "progress-bar")]
         let mut bar = if show_progress {
+            let style = IndicatifProgressStyle::default_bar()
+                .template(&self.progress_template)
+                .map_err(|e| Error::InvalidProgressStyle {
+                    source: Box::new(e),
+                })?
+                .progress_chars(&self.progress_chars);
             let pb = ProgressBar::new(size);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(&self.progress_template)
-                    .expect("set ProgressStyle template failed")
-                    .progress_chars(&self.progress_chars),
-            );
+            pb.set_style(style);
             Some(pb)
         } else {
             None
@@ -1449,6 +1787,7 @@ impl Download {
             dest.write_all(&chunk)?;
             downloaded += chunk.len() as u64;
 
+            #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
                 bar.set_position(min(downloaded, size));
             }
@@ -1456,6 +1795,7 @@ impl Download {
                 (cb.0)(downloaded, total);
             }
         }
+        #[cfg(feature = "progress-bar")]
         if let Some(ref mut bar) = bar {
             bar.finish_with_message("Done");
         }
@@ -1469,7 +1809,7 @@ mod tests {
     // #![warn(unused_mut)]
 
     use super::*;
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     use flate2::{self, write::GzEncoder};
     #[allow(unused_imports)]
     use std::{
@@ -1531,12 +1871,50 @@ mod tests {
         assert_eq!(ArchiveKind::Zip.to_string(), "zip");
     }
 
+    // A3/A4/A12/A5: the ergonomic argument types are accepted. These are compile-locks plus light
+    // assertions: `Download::from_url` takes `impl Into<String>`; `Extract::from_source` /
+    // `Move::from_source` / `MoveAll::from_temp` take `impl AsRef<Path>` (now lifetime-free); the
+    // Download header verb is `request_header`; and `progress_style` takes a typed `ProgressStyle`.
+    #[test]
+    fn ergonomic_constructors_accept_owned_and_borrowed_paths_and_strings() {
+        // from_url accepts &str and String.
+        let _ = Download::from_url("https://example.com/a.bin");
+        let _ = Download::from_url(String::from("https://example.com/b.bin"));
+
+        // Extract::from_source accepts &str, PathBuf, and &Path — and the struct holds no lifetime.
+        let _: Extract = Extract::from_source("some/path.tar.gz");
+        let _: Extract = Extract::from_source(PathBuf::from("some/path.tar.gz"));
+        let owned = PathBuf::from("some/path.tar.gz");
+        let _: Extract = Extract::from_source(owned.as_path());
+
+        // Move::from_source / replace_using_temp accept path-like; the type is lifetime-free.
+        let mut mv: Move = Move::from_source("src");
+        mv.replace_using_temp("tmp");
+
+        // MoveAll::from_temp accepts path-like; lifetime-free.
+        let _: MoveAll = MoveAll::from_temp("tmp-dir");
+    }
+
+    #[cfg(feature = "progress-bar")]
+    #[test]
+    fn progress_style_newtype_threads_template_and_chars() {
+        // A5: `ProgressStyle::new(template, chars)` builds the typed pair and the Download setter
+        // threads both fields through (no transposable two-arg setter).
+        let style = ProgressStyle::new("[{bar:40}] {bytes}", "#>-");
+        assert_eq!(style.template, "[{bar:40}] {bytes}");
+        assert_eq!(style.chars, "#>-");
+
+        let mut dl = Download::from_url("https://example.com/app.tar.gz");
+        dl.progress_style(style);
+        assert_eq!(dl.progress_template, "[{bar:40}] {bytes}");
+        assert_eq!(dl.progress_chars, "#>-");
+    }
+
     #[test]
     fn download_header_accepts_str_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // Plain string literals must convert into a valid name/value.
-        dl.header("x-custom-header", "custom-value")
-            .expect("valid str header should be accepted");
+        dl.request_header("x-custom-header", "custom-value");
         let stored = dl
             .headers
             .get("x-custom-header")
@@ -1548,8 +1926,7 @@ mod tests {
     fn download_header_accepts_typed_name_and_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
         // The typed `HeaderName` / `&str` value form still works.
-        dl.header(http_client::header::ACCEPT, "application/octet-stream")
-            .expect("typed name + str value should be accepted");
+        dl.request_header(http_client::header::ACCEPT, "application/octet-stream");
         assert_eq!(
             dl.headers.get(http_client::header::ACCEPT).unwrap(),
             "application/octet-stream"
@@ -1561,8 +1938,8 @@ mod tests {
         // B5: `header()` inserts into the existing map. Calling it twice with the same name must
         // keep the *last* value (insert semantics), not append or keep the first.
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.header("x-dup", "first").unwrap();
-        dl.header("x-dup", "second").unwrap();
+        dl.request_header("x-dup", "first");
+        dl.request_header("x-dup", "second");
         // `get` returns the (single) value; `get_all` must contain exactly one entry.
         assert_eq!(dl.headers.get("x-dup").unwrap(), "second");
         assert_eq!(
@@ -1577,8 +1954,8 @@ mod tests {
         // B5: after building up headers with `header()`, `replace_headers` must discard them all
         // and install only the supplied map (it is a whole-map setter, not a merge).
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        dl.header("x-old-a", "a").unwrap();
-        dl.header("x-old-b", "b").unwrap();
+        dl.request_header("x-old-a", "a");
+        dl.request_header("x-old-b", "b");
 
         let mut fresh = http_client::header::HeaderMap::new();
         fresh.insert("x-new", "n".parse().unwrap());
@@ -1597,7 +1974,7 @@ mod tests {
         );
 
         // And `header()` still works after a replace, inserting into the new map.
-        dl.header("x-after", "y").unwrap();
+        dl.request_header("x-after", "y");
         assert_eq!(dl.headers.get("x-after").unwrap(), "y");
         assert_eq!(dl.headers.get("x-new").unwrap(), "n");
     }
@@ -1605,33 +1982,38 @@ mod tests {
     #[test]
     fn download_header_rejects_invalid_value() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        // A newline is not a valid header value -> conversion fails -> Err, no panic.
-        let err = dl
-            .header("x-ok", "bad\nvalue")
-            .expect_err("invalid header value must be rejected");
+        // A newline is not a valid header value. The setter is infallible (deferred): the bad
+        // header is not inserted, and the error surfaces from `download_to`.
+        dl.request_header("x-ok", "bad\nvalue");
         assert!(
-            matches!(err, Error::Config(_)),
-            "expected Error::Config, got {:?}",
+            dl.headers.get("x-ok").is_none(),
+            "the bad header must not be inserted"
+        );
+        let err = dl
+            .download_to(Vec::<u8>::new())
+            .expect_err("a deferred invalid header must surface from download_to");
+        assert!(
+            matches!(err, Error::InvalidHeader { .. }),
+            "expected Error::InvalidHeader, got {:?}",
             err
         );
-        // The bad header must not have been inserted.
-        assert!(dl.headers.get("x-ok").is_none());
     }
 
     #[test]
     fn download_header_rejects_invalid_name() {
         let mut dl = Download::from_url("https://example.com/app.tar.gz");
-        // A space is not valid in a header name -> conversion fails -> Err, no panic.
-        let err = dl
-            .header("inva lid", "ok")
-            .expect_err("invalid header name must be rejected");
-        assert!(matches!(err, Error::Config(_)));
-        // The invalid name is rejected before any value insertion, so the map stays empty: no
-        // partial entry is left behind (the value "ok" must not leak in under some other key).
+        // A space is not valid in a header name. The setter is infallible (deferred); the invalid
+        // name is rejected before any value insertion, so the map stays empty and the error
+        // surfaces from download_to.
+        dl.request_header("inva lid", "ok");
         assert!(
             dl.headers.is_empty(),
             "an invalid header name must not leave a partial value inserted"
         );
+        let err = dl
+            .download_to(Vec::<u8>::new())
+            .expect_err("a deferred invalid header name must surface from download_to");
+        assert!(matches!(err, Error::InvalidHeader { .. }));
     }
 
     #[test]
@@ -1777,7 +2159,7 @@ mod tests {
         let progress = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
         let sink_progress = progress.clone();
         let mut out = Vec::new();
-        Download::from_url(&format!("http://{addr}/file"))
+        Download::from_url(format!("http://{addr}/file"))
             .progress_callback(move |downloaded, total| {
                 sink_progress.lock().unwrap().push((downloaded, total));
             })
@@ -1798,6 +2180,398 @@ mod tests {
         assert_eq!(calls.last().unwrap().0, 20_000);
     }
 
+    /// A test-double [`HttpResponse`](http_client::HttpResponse) returning a canned body and a
+    /// configurable `Content-Length`. Used to prove `download_to` streams the injected client's
+    /// body through the trait (`headers()` + `body()`), not a real network response.
+    struct DlResponse {
+        body: Vec<u8>,
+        headers: http_client::header::HeaderMap,
+    }
+
+    impl http_client::HttpResponse for DlResponse {
+        fn headers(&self) -> &http_client::header::HeaderMap {
+            &self.headers
+        }
+        fn body(self: Box<Self>) -> Box<dyn io::Read> {
+            Box::new(io::Cursor::new(self.body))
+        }
+    }
+
+    /// A test-double [`HttpClient`](http_client::HttpClient) (neither reqwest nor ureq) that records
+    /// the requested URL and returns a canned [`DlResponse`].
+    struct DlClient {
+        body: Vec<u8>,
+        content_length: Option<u64>,
+        requested: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl http_client::HttpClient for DlClient {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<Box<dyn http_client::HttpResponse>> {
+            self.requested.lock().unwrap().push(url.to_string());
+            let mut headers = http_client::header::HeaderMap::new();
+            if let Some(len) = self.content_length {
+                headers.insert(
+                    http_client::header::CONTENT_LENGTH,
+                    len.to_string().parse().unwrap(),
+                );
+            }
+            Ok(Box::new(DlResponse {
+                body: self.body.clone(),
+                headers,
+            }))
+        }
+    }
+
+    /// A flaky [`HttpClient`](http_client::HttpClient) that fails the first `fail_times` GETs with a
+    /// transport error, then succeeds — to prove `download_to` retries the request-establishment
+    /// phase when a retry budget is configured (B9).
+    struct FlakyDlClient {
+        body: Vec<u8>,
+        fail_times: std::sync::atomic::AtomicU32,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl http_client::HttpClient for FlakyDlClient {
+        fn get(
+            &self,
+            _url: &str,
+            _headers: &http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<Box<dyn http_client::HttpResponse>> {
+            use std::sync::atomic::Ordering;
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.fail_times.load(Ordering::SeqCst) > 0 {
+                self.fail_times.fetch_sub(1, Ordering::SeqCst);
+                return Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                });
+            }
+            let mut headers = http_client::header::HeaderMap::new();
+            headers.insert(
+                http_client::header::CONTENT_LENGTH,
+                self.body.len().to_string().parse().unwrap(),
+            );
+            Ok(Box::new(DlResponse {
+                body: self.body.clone(),
+                headers,
+            }))
+        }
+    }
+
+    #[test]
+    fn download_retries_request_establishment_with_configured_budget() {
+        // B9: with a retry budget, `download_to` re-establishes the request after a transient
+        // failure (before any bytes are streamed) and ultimately succeeds. Two failures then a
+        // success => three attempts. A short base/cap keeps the test fast.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let body = b"payload-after-retries".to_vec();
+        let attempts = std::sync::Arc::new(AtomicU32::new(0));
+        let client = std::sync::Arc::new(FlakyDlClient {
+            body: body.clone(),
+            fail_times: AtomicU32::new(2),
+            attempts: attempts.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.set_retries(
+            3,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(2),
+        );
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(out, body, "the download succeeds after retrying");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "two failed attempts plus the successful third"
+        );
+    }
+
+    #[test]
+    fn download_without_retry_budget_does_not_retry() {
+        // With the default `retries == 0`, a single failure is fatal (one attempt, no retry).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = std::sync::Arc::new(AtomicU32::new(0));
+        let client = std::sync::Arc::new(FlakyDlClient {
+            body: b"never-reached".to_vec(),
+            fail_times: AtomicU32::new(5),
+            attempts: attempts.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        let res = dl.download_to(&mut out);
+        assert!(
+            res.is_err(),
+            "no retry budget => the first failure is fatal"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "exactly one attempt with retries == 0"
+        );
+    }
+
+    #[test]
+    fn download_to_uses_injected_http_client_through_the_trait() {
+        // Gap #4 (sync Download path): an arbitrary `Arc<dyn HttpClient>` that is NOT reqwest/ureq,
+        // injected via `.http_client(...)`, must actually drive `download_to` — the streamed body
+        // comes from the fake and the fake records the requested URL. No network is touched (the URL
+        // is non-routable).
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"injected-binary-payload".to_vec();
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(out, body, "download_to streamed the injected client's body");
+        let urls = requested.lock().unwrap();
+        assert_eq!(
+            urls.len(),
+            1,
+            "exactly one GET went through the injected client"
+        );
+        assert_eq!(urls[0], "https://nonroutable.invalid/asset.bin");
+    }
+
+    #[test]
+    fn download_to_handles_injected_client_without_content_length() {
+        // When the injected response carries no Content-Length, `download_to` must still stream the
+        // whole body to completion (size defaults to 0 -> no progress bar, `total == None`) and the
+        // progress callback still fires with `total = None`.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"no-length-body".to_vec();
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: None,
+            requested: requested.clone(),
+        });
+
+        let totals = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<u64>>::new()));
+        let sink = totals.clone();
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.progress_callback(move |_d, total| sink.lock().unwrap().push(total));
+        dl.download_to(&mut out).unwrap();
+
+        assert_eq!(
+            out, body,
+            "the full body is streamed even with no Content-Length"
+        );
+        let totals = totals.lock().unwrap();
+        assert!(
+            totals.iter().all(|t| t.is_none()),
+            "with no Content-Length the callback's total must be None, got {:?}",
+            totals
+        );
+    }
+
+    /// Async test-double response: yields the body as a single `bytes_stream` chunk and as `text`.
+    #[cfg(feature = "async")]
+    struct DlAsyncResponse {
+        body: Vec<u8>,
+        headers: http_client::header::HeaderMap,
+    }
+
+    #[cfg(feature = "async")]
+    impl http_client::AsyncHttpResponse for DlAsyncResponse {
+        fn headers(&self) -> &http_client::header::HeaderMap {
+            &self.headers
+        }
+        fn text(self: Box<Self>) -> futures_util::future::BoxFuture<'static, Result<String>> {
+            Box::pin(async move { Ok(String::from_utf8_lossy(&self.body).into_owned()) })
+        }
+        fn bytes_stream(
+            self: Box<Self>,
+        ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
+            Box::pin(futures_util::stream::once(async move {
+                Ok(bytes::Bytes::from(self.body))
+            }))
+        }
+    }
+
+    /// Async test-double client (not reqwest) that records the URL and returns [`DlAsyncResponse`].
+    #[cfg(feature = "async")]
+    struct DlAsyncClient {
+        body: Vec<u8>,
+        content_length: Option<u64>,
+        requested: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[cfg(feature = "async")]
+    impl http_client::AsyncHttpClient for DlAsyncClient {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            _headers: &'a http_client::header::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> futures_util::future::BoxFuture<'a, Result<Box<dyn http_client::AsyncHttpResponse>>>
+        {
+            self.requested.lock().unwrap().push(url.to_string());
+            let mut headers = http_client::header::HeaderMap::new();
+            if let Some(len) = self.content_length {
+                headers.insert(
+                    http_client::header::CONTENT_LENGTH,
+                    len.to_string().parse().unwrap(),
+                );
+            }
+            let body = self.body.clone();
+            Box::pin(async move {
+                Ok(Box::new(DlAsyncResponse { body, headers })
+                    as Box<dyn http_client::AsyncHttpResponse>)
+            })
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn download_to_async_uses_injected_async_client_through_the_trait() {
+        // Gap #4 (async Download path): an injected `Arc<dyn AsyncHttpClient>` (not reqwest) must
+        // drive `download_to_async` via `bytes_stream()`, independently of the sync injection path.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"async-injected-payload".to_vec();
+        let client = std::sync::Arc::new(DlAsyncClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(None, Some(client));
+        dl.download_to_async(&mut out).await.unwrap();
+
+        assert_eq!(
+            out, body,
+            "download_to_async streamed the injected client's body"
+        );
+        let urls = requested.lock().unwrap();
+        assert_eq!(
+            urls.len(),
+            1,
+            "exactly one async GET went through the injected client"
+        );
+        assert_eq!(urls[0], "https://nonroutable.invalid/asset.bin");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn sync_and_async_injection_are_independent() {
+        // Setting only the async client must leave the sync client unset (and vice versa), proving
+        // the two injection slots are independent: a `download_to_async` with only an async client
+        // injected uses it, and does not fall back to / require the sync slot.
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let body = b"only-async".to_vec();
+        let async_client = std::sync::Arc::new(DlAsyncClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: requested.clone(),
+        });
+
+        let mut dl = Download::from_url("https://nonroutable.invalid/asset.bin");
+        dl.set_http_client(None, Some(async_client));
+        // The sync slot was never set.
+        assert!(
+            dl.client.is_none(),
+            "injecting an async client must not populate the sync client slot"
+        );
+        assert!(dl.async_client.is_some(), "the async slot is populated");
+
+        let mut out = Vec::new();
+        dl.download_to_async(&mut out).await.unwrap();
+        assert_eq!(out, body);
+    }
+
+    // Regression: `progress_callback` (the byte-level hook) must still fire even when the
+    // `progress-bar` feature is disabled. The terminal `indicatif` bar and the callback are
+    // orthogonal; disabling the former must not silence the latter.
+    #[cfg(not(feature = "progress-bar"))]
+    #[test]
+    fn progress_callback_fires_without_progress_bar_feature() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let body = "y".repeat(8_000);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = body.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                served.len(),
+                served
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        let calls = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+        let sink = calls.clone();
+        let mut out = Vec::new();
+        Download::from_url(format!("http://{addr}/file"))
+            // `show_download_progress(true)` is intentionally set: with progress-bar OFF it
+            // must be a no-op, while the callback below must still fire.
+            .show_download_progress(true)
+            .progress_callback(move |downloaded, total| {
+                sink.lock().unwrap().push((downloaded, total));
+            })
+            .download_to(&mut out)
+            .unwrap();
+
+        assert_eq!(out.len(), 8_000);
+        let calls = calls.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "progress_callback must fire even with progress-bar feature disabled"
+        );
+        assert!(
+            calls.iter().all(|(_, total)| *total == Some(8_000)),
+            "total should reflect Content-Length"
+        );
+        assert_eq!(
+            calls.last().unwrap().0,
+            8_000,
+            "final byte count should equal body length"
+        );
+    }
+
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn detect_plain_gz() {
         assert_eq!(
@@ -1806,19 +2580,40 @@ mod tests {
         );
     }
 
+    // Without the gzip feature, a plain `.gz` asset must be rejected with `CompressionNotEnabled`,
+    // not silently detected as a decodable archive (which would install the compressed bytes).
+    #[cfg(not(feature = "compression-tar-gz"))]
+    #[test]
+    fn detect_plain_gz_without_feature_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.exe.gz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
+    }
+
     #[cfg(not(feature = "archive-tar"))]
     #[test]
     #[ignore]
     fn detect_tar_gz() {
         println!("WARNING: Please enable 'archive-tar' feature!");
     }
-    #[cfg(feature = "archive-tar")]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn detect_tar_gz() {
         assert_eq!(
             ArchiveKind::Tar(Some(Compression::Gz)),
             detect_archive(&PathBuf::from("Something.tar.gz")).unwrap()
         );
+    }
+    // `.tar.gz` with the tar container but no gzip codec must error, not fall through to an opaque
+    // failure inside the tar reader.
+    #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-gz")))]
+    #[test]
+    fn detect_tar_gz_without_compression_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.tar.gz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
     }
 
     #[cfg(not(feature = "archive-tar"))]
@@ -1859,13 +2654,13 @@ mod tests {
         assert!(s == content);
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_plain_gzip() {
         let tmp_dir = tempfile::Builder::new()
@@ -1891,13 +2686,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_plain_gzip_double_ext() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_plain_gzip_double_ext() {
         let tmp_dir = tempfile::Builder::new()
@@ -1923,13 +2718,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-tar-gz")))]
     #[test]
     #[ignore]
     fn unpack_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
+        println!("WARNING: Please enable 'archive-tar compression-tar-gz' features!");
     }
-    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn unpack_tar_gzip() {
         test_extract_into(
@@ -1939,13 +2734,13 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "compression-flate2"))]
+    #[cfg(not(feature = "compression-tar-gz"))]
     #[test]
     #[ignore]
     fn unpack_file_plain_gzip() {
-        println!("WARNING: Please enable 'compression-flate2' feature!");
+        println!("WARNING: Please enable 'compression-tar-gz' feature!");
     }
-    #[cfg(feature = "compression-flate2")]
+    #[cfg(feature = "compression-tar-gz")]
     #[test]
     fn unpack_file_plain_gzip() {
         let tmp_dir = tempfile::Builder::new()
@@ -1971,13 +2766,13 @@ mod tests {
         cmp_content(out_file, "This is a test!");
     }
 
-    #[cfg(not(all(feature = "archive-tar", feature = "compression-flate2")))]
+    #[cfg(not(all(feature = "archive-tar", feature = "compression-tar-gz")))]
     #[test]
     #[ignore]
     fn unpack_file_tar_gzip() {
-        println!("WARNING: Please enable 'archive-tar compression-flate2' features!");
+        println!("WARNING: Please enable 'archive-tar compression-tar-gz' features!");
     }
-    #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     #[test]
     fn unpack_file_tar_gzip() {
         test_extract_file(
@@ -2083,6 +2878,67 @@ mod tests {
         cmp_content(&out_file, "This is a second test!");
     }
 
+    // A zip whose entry name escapes the output dir (`../escape.txt`) must be rejected, and nothing
+    // may be written outside `into_dir`. Guards against zip-slip.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn extract_into_rejects_zip_slip() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("evil.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("../escape.txt", options).expect("start");
+            zip.write_all(b"pwned").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let out_dir = out_tmp.path().join("into");
+        fs::create_dir_all(&out_dir).expect("mkdir");
+
+        let res = Extract::from_source(&archive_path).extract_into(&out_dir);
+        assert!(res.is_err(), "a zip-slip entry must be rejected");
+        assert!(
+            !out_tmp.path().join("escape.txt").exists(),
+            "nothing must be written outside the extraction dir"
+        );
+    }
+
+    // A zip entry carrying an executable unix mode must extract with that mode preserved, so a
+    // binary installed from a zip to a custom path stays runnable.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_preserves_zip_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("app.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            zip.start_file("app", options).expect("start");
+            zip.write_all(b"#!/bin/sh\n").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        let mode = fs::metadata(out_tmp.path().join("app"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "the executable bit must be preserved, got mode {:o}",
+            mode
+        );
+    }
+
     fn build_test_archive<T: AsRef<Path>>(
         mut archive_file: fs::File,
         archive_file_path: T,
@@ -2091,7 +2947,7 @@ mod tests {
         let archive_file_path = archive_file_path.as_ref();
 
         match archive_kind {
-            #[cfg(all(feature = "archive-tar", feature = "compression-flate2"))]
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
             ArchiveKind::Tar(Some(Compression::Gz)) => {
                 let tmp_tar_path = archive_file_path
                     .parent()
@@ -2138,6 +2994,140 @@ mod tests {
             _ => {
                 unimplemented!("{:?} not handled", archive_kind);
             }
+        }
+    }
+
+    // --- extractor `Internal { source: None }` variant-routing -----------------------------
+    //
+    // These pin the invariant-violation sites in `extract_file`/`extract_into` to EXACTLY
+    // `Error::Internal` carrying NO source (the genuine-invariant residue, distinct from the
+    // JoinError `Internal { source: Some(..) }`).
+
+    // `extract_file` on a Plain source where the *requested* `file_to_extract` has no file name
+    // (e.g. `..`) must route to `Error::Internal { source: None }` ("Extractor source has no
+    // file-name"), not an Io error. `file_to_extract` is caller-supplied and need not exist, so
+    // this is reachable without a real hostless-path file. (~lib.rs:852)
+    #[test]
+    fn extract_file_plain_no_file_name_routes_to_internal_without_source() {
+        use std::error::Error as _;
+        let src_dir = tempfile::tempdir().expect("tempdir");
+        let src = src_dir.path().join("payload.bin");
+        fs::write(&src, b"hello").expect("write source");
+
+        let out_dir = tempfile::tempdir().expect("out tempdir");
+
+        // `..` has no `file_name()`, firing the invariant branch.
+        let err = Extract::from_source(&src)
+            .archive(ArchiveKind::Plain(None))
+            .extract_file(out_dir.path(), "..")
+            .expect_err("a file_to_extract with no file name must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the no-file-name invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("file-name"),
+                    "message must describe the missing file name, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
+        }
+        // Defensive: confirm the variant truly chains no source via the trait too.
+        let err = Extract::from_source(&src)
+            .archive(ArchiveKind::Plain(None))
+            .extract_file(out_dir.path(), "..")
+            .unwrap_err();
+        assert!(err.source().is_none());
+    }
+
+    // `extract_file` on a Tar source where the requested path is not present in the archive must
+    // route to `Error::Internal { source: None }` ("Could not find the required path in the
+    // archive"), naming the missing path. (~lib.rs:873)
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn extract_file_tar_missing_path_routes_to_internal_without_source() {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_ws3_tar_missing_src")
+            .tempdir()
+            .expect("tempdir");
+        let archive_file_path = tmp_dir.path().join("archive.tar.gz");
+        let archive_file = File::create(&archive_file_path).expect("create archive");
+        build_test_archive(
+            archive_file,
+            &archive_file_path,
+            ArchiveKind::Tar(Some(Compression::Gz)),
+        );
+
+        let out_tmp = tempfile::tempdir().expect("out tempdir");
+        let err = Extract::from_source(&archive_file_path)
+            .extract_file(out_tmp.path(), "does/not/exist.txt")
+            .expect_err("a path absent from the tar must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the path-not-found invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("Could not find the required path"),
+                    "message must describe the missing archive path, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
+        }
+    }
+
+    // `extract_file` on a Zip source where the requested path is not valid UTF-8 must route to
+    // `Error::Internal { source: None }` ("cannot extract file with a non-UTF-8 path"). Reachable
+    // on Unix by building an `OsStr` from raw non-UTF-8 bytes. (~lib.rs:903)
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_file_zip_non_utf8_path_routes_to_internal_without_source() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_ws3_zip_nonutf8_src")
+            .tempdir()
+            .expect("tempdir");
+        let archive_file_path = tmp_dir.path().join("archive.zip");
+        let archive_file = File::create(&archive_file_path).expect("create archive");
+        build_test_archive(archive_file, &archive_file_path, ArchiveKind::Zip);
+
+        let out_tmp = tempfile::tempdir().expect("out tempdir");
+        // 0xFF is never valid UTF-8.
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xFFname");
+        let err = Extract::from_source(&archive_file_path)
+            .extract_file(out_tmp.path(), bad)
+            .expect_err("a non-UTF-8 zip path must error");
+        match err {
+            Error::Internal {
+                ref message,
+                ref source,
+            } => {
+                assert!(
+                    source.is_none(),
+                    "the non-UTF-8-path invariant carries no source, got {:?}",
+                    source
+                );
+                assert!(
+                    message.contains("non-UTF-8 path"),
+                    "message must describe the non-UTF-8 path, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Error::Internal, got {:?}", other),
         }
     }
 }

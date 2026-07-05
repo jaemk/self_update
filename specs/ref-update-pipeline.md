@@ -6,30 +6,40 @@ Status: implemented
 
 Files: `src/update.rs` (the `ReleaseUpdate::update` / `update_extended` flow and the
 shared helpers `choose_latest_release`, `resolve_and_confirm`, `build_download`,
-`finish_update`, `install_binary`, `verify_signature`, plus the async sibling
-`update_extended_async`) and `src/lib.rs` (the `Download`, `Extract`, `ArchiveKind`,
-`Compression`, `Move`, and `MoveAll` install primitives). This subsystem is the end-to-end
-install pipeline: how a built updater turns "there is a newer release" into a replaced
-on-disk binary.
+`finish_update` / `finish_update_owned`, `install_binary`, `verify_signature`, plus the async
+sibling `update_extended_async` and the public sealed `AsyncReleaseUpdate` trait) and
+`src/lib.rs` (the `Download`, `Extract`, `ArchiveKind`, `Compression`, `Move`, and `MoveAll`
+install primitives). This subsystem is the end-to-end install pipeline: how a built updater turns
+"there is a newer release" into a replaced on-disk binary.
 
 ## Behavior
 
 ### Entry points
 
 `update()` calls `update_extended()` and maps its result through
-`ReleaseStatus::into_version_status(current_version)` (`update.rs:607`-`611`). `update_extended()`
-(`update.rs:614`) is the sync flow; `update_extended_async()` (`update.rs:851`) is the async
-flow, which differs only in that the release listing and the download are awaited. Both share
-the same helpers; the verify/extract/replace tail (`finish_update`) is fully synchronous in
-both paths.
+`ReleaseStatus::into_version_status(current_version)`. `update_extended()` is the sync flow; the
+free `update::update_extended_async()` is the async flow, which differs in that the release listing
+and the download are awaited and the verify/extract/replace tail runs on
+`tokio::task::spawn_blocking`. The sync and async paths share the same selection/asset/download
+helpers and the same verify/extract/replace tail (`finish_update_owned`).
+
+The verify/extract/replace tail is `finish_update_owned(ctx, dir: TempDir, archive: &Path)`, which
+takes a `FinishCtx` of **owned** fields (install path, target, bin name, in-archive path,
+show_output, the verify callback, and under the features the owned checksum and verifying keys) and
+the `TempDir` moved in by value. The sync `finish_update(&U, release, dir, archive)` builds the ctx
+from the updater and calls the owned twin inline (no spawn). The async path builds the same ctx,
+moves the `TempDir` into the closure, and runs `finish_update_owned` inside
+`tokio::task::spawn_blocking(move || ...)`, awaiting the join handle and mapping a `JoinError` to
+`Error::Internal { message, source }`. So the async update never blocks the executor on the verify/extract/replace work,
+and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` parser is `+ Send`).
 
 ### Fetch and select
 
 1. Print the target-arch / current-version header (`print_check_header`, `update.rs:620`),
    gated on `show_output`.
-2. If `release_tag()` is set, fetch exactly that tag via `get_release_version` (`update.rs:600`).
-   Otherwise fetch the candidate list via `get_latest_releases()` and run
-   `choose_latest_release` (`update.rs:595`, `631`), which: filters to releases strictly newer
+2. If `release_tag()` is set, fetch exactly that tag via `get_release_version`.
+   Otherwise fetch the candidate list via `get_newer_releases()` and run
+   `choose_latest_release`, which: filters to releases strictly newer
    than the current version (`bump_is_greater`), sorts them semver-descending so selection is
    order-independent, prefers the newest semver-*compatible* release, else falls back to the
    newest available (flagged "*NOT* compatible"), else returns `Ok(None)` => `UpToDate`
@@ -38,8 +48,10 @@ both paths.
 3. `resolve_and_confirm` (`update.rs:716`) selects the asset: a custom `asset_matcher()` closure
    if present, otherwise `Release::asset_for(target, asset_identifier())`
    (`update.rs:86`), which matches by `target` substring (optionally `identifier`), then by
-   `OS`+`ARCH` substring, then by `identifier` alone. No match => `Error::Release`
-   "No asset found for target".
+   `OS`+`ARCH` substring, then by `identifier` alone. No match =>
+   `Error::NoReleaseFound { target: Some(...) }`. A server-supplied asset name that is empty,
+   `.`/`..`, contains a path separator, or is absolute =>
+   `Error::InvalidAssetName { name }` before any file is created.
 
 ### Download
 
@@ -50,7 +62,7 @@ both paths.
 application/octet-stream`, merges the user's `request_headers()` *after* (so a same-named
 user header overrides), forwards the injected HTTP client, per-request timeout, progress
 callback, and progress style. The download is driven by `download_to` (sync, `lib.rs:1305`)
-or `download_to_async` (`lib.rs:1375`). The download is never retried.
+or `download_to_async` (`lib.rs:1375`). The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried.
 
 ### Extract
 
@@ -64,7 +76,7 @@ is detected from the file extension by `detect_archive` (`lib.rs:588`) unless ov
 whose feature is not enabled yields `Error::ArchiveNotEnabled` (`lib.rs:602`). `ArchiveKind`
 (`lib.rs:574`) and `Compression` (`lib.rs:584`, only `Gz`) are `#[non_exhaustive]`; the `Tar`
 and `Zip` variants are feature-gated on `archive-tar` / `archive-zip`. `Plain` files are
-copied (gz-decoded if `compression-flate2`), `Tar` is unpacked via the `tar` crate, `Zip` via
+copied (gz-decoded if `compression-tar-gz`), `Tar` is unpacked via the `tar` crate, `Zip` via
 the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
 (`update.rs:803`).
 
@@ -83,14 +95,14 @@ In `finish_update`, before any extraction or replacement:
    implemented for `.tar.gz` and `.zip` assets, not gz files".
 
 Both run on the *downloaded archive bytes* and before extraction. The third hook,
-`verify_with`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
-immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_with ->
+`verify_binary`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
+immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_binary ->
 replace.
 
 ### Replace
 
-`install_binary` (`update.rs:867`): runs the `verify_with` hook first; `false` => bail
-`Error::Update` "post-update verification rejected the new binary" with nothing replaced. Then
+`install_binary` (`update.rs:867`): runs the `verify_binary` hook first; `Err(..)` => bail
+`Error::VerificationRejected { reason }` with nothing replaced. Then
 if `bin_install_path()` equals `std::env::current_exe()`, the swap goes through
 `self_replace::self_replace(new_exe)` (atomic in-place replace of the running exe,
 `update.rs:882`). Otherwise `Move::from_source(new_exe).to_dest(bin_install_path)`
@@ -142,26 +154,37 @@ via `into_version_status`.
 
 - `update::ReleaseUpdate` (sealed): `update(&self) -> Result<VersionStatus>`,
   `update_extended(&self) -> Result<ReleaseStatus>`, plus `get_latest_release`,
-  `get_latest_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
-  supertrait.
+  `get_newer_releases`, `get_release_version`. Accessors live on the sealed `UpdateConfig`
+  supertrait. Each backend `build()` returns the concrete `Update` (`Send`), which
+  exposes these verbs plus `is_update_available` as inherent methods.
+- `update::AsyncReleaseUpdate` (sealed via `UpdateConfig: sealed::Sealed`, feature `async`): the
+  async counterpart of `ReleaseUpdate`. Fetch verbs `get_latest_release_async`,
+  `get_newer_releases_async`, `get_release_version_async`, plus default-bodied `update_async` (->
+  `VersionStatus`) and `update_extended_async` (-> `ReleaseStatus`) that route to the free
+  `update::update_extended_async`. Its methods are RPITIT (`impl Future<Output = ...> + Send`), so
+  the trait is not object-safe (nameable and usable as a generic bound, like `AsyncReleaseSource`,
+  but never `dyn`). Bring it into scope to call the verbs.
 - `update::ReleaseStatus` (`#[non_exhaustive]`): `into_version_status`, `is_up_to_date`, `is_updated`.
 - `VersionStatus` (`#[non_exhaustive]`): `version`, `is_up_to_date`, `is_updated`, `Display`.
 - `Download`: `from_url`, `show_download_progress`, `timeout`, `progress_callback`,
-  `progress_style`, `replace_headers`, `header`, `download_to`, `download_to_async`
-  (feature `async`), `reqwest_client`/`reqwest_async_client`/`ureq_agent` (client-gated).
-- `Extract<'a>`: `from_source`, `archive`, `extract_into`, `extract_file`.
+  `progress_style`, `replace_headers`, `request_header`, `download_to`, `download_to_async`
+  (feature `async`).
+- `Extract`: `from_source`, `archive`, `extract_into`, `extract_file`; the path
+  arguments take `impl AsRef<Path>` (as do `Move` / `MoveAll`), with no lifetime
+  parameter on the types.
 - `ArchiveKind` (`#[non_exhaustive]`): `Plain(Option<Compression>)`, `Tar(...)` (feature
   `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`.
-- `Move<'a>`: `from_source`, `replace_using_temp`, `to_dest`.
-- `MoveAll<'a>` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
+- `Move`: `from_source`, `replace_using_temp`, `to_dest`.
+- `MoveAll` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
 
-Async `update_async` / `update_extended_async` verbs are generated on each backend's `Update`
-under feature `async`; `update_extended_async` (`update.rs:851`) is `pub(crate)`.
+Async `update_async` / `update_extended_async` are default methods on the public sealed
+`AsyncReleaseUpdate` trait, implemented by each backend's `Update` (and the custom `AsyncUpdate`)
+under feature `async`; the free `update::update_extended_async` they route to is `pub(crate)`.
 
 ## Invariants and regression checklist
 
 - Verify-before-replace: checksum and signature both run on the downloaded archive *before*
-  extraction; `verify_with` runs on the extracted binary *before* the swap. Nothing is
+  extraction; `verify_binary` runs on the extracted binary *before* the swap. Nothing is
   replaced if any of the three rejects (`update.rs:778-784`, `872-879`).
 - Order independence: `choose_latest_release` sorts candidates semver-descending and filters
   to strictly-newer, so a custom source's unordered/stale list selects correctly and never
@@ -173,10 +196,15 @@ under feature `async`; `update_extended_async` (`update.rs:851`) is `pub(crate)`
   rollback failures are logged only. A second `commit` is a no-op.
 - The status block prints when `show_output || !no_confirm`; the prompt prints only when
   `!no_confirm`. Suppressing one does not suppress the other.
-- The download is never retried; user `request_headers` override the crate's ACCEPT/auth
+- The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
 - `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).
+- The async path never blocks the executor on the finish tail: `finish_update_owned` runs inside
+  `tokio::task::spawn_blocking` over owned fields, with the `TempDir` moved into the closure. The
+  sync and async paths share the same owned finish tail, so verify/extract/replace behavior is
+  identical (sync/async parity). `update_extended_async`'s future is `Send` (the page parsers are
+  `+ Send`).
 
 ## Tests
 
@@ -196,7 +224,7 @@ download/extract/replace and `MoveAll` flows.
 
 - `ref-signatures-and-checksums.md` (verify primitives), `checksum-verification.md`,
   `checksum-from-asset.md`
-- `post-update-verify.md` (the `verify_with` hook)
+- `post-update-verify.md` (the `verify_binary` hook)
 - `multi-file-install.md` (`MoveAll`)
 - `progress-callback.md` (download progress)
 - `custom-asset-matching.md` (the `asset_matcher` override)

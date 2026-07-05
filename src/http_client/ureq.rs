@@ -1,66 +1,160 @@
 #![cfg(feature = "ureq")]
 
+use std::time::Duration;
+
 use ureq::tls::TlsProvider;
-use ureq::{http::Response, Agent, Body};
+use ureq::{Agent, Body, http::Response};
 
-use super::{ClientOverride, HeaderMap, HttpResponse};
-use crate::{errors::status_to_error, Error, Result};
+use super::{HeaderMap, HttpClient, HttpResponse};
+use crate::{Error, Result, errors::status_to_error};
 
-pub fn get(
-    url: &str,
-    headers: HeaderMap,
-    timeout: Option<std::time::Duration>,
-    client: &ClientOverride,
-) -> Result<impl HttpResponse> {
-    // Use the injected agent if present (by reference — `Agent::get` takes `&self`), otherwise
-    // build one per call. An injected agent owns its own timeout/TLS/proxy config, so the
-    // per-request `timeout` is only applied to the per-call agent (see the `### Custom HTTP client`
-    // docs).
-    let built_agent;
-    let (agent, is_injected): (&Agent, bool) = match &client.agent {
-        Some(agent) => (agent, true),
-        None => {
-            #[cfg(feature = "rustls")]
-            let provider = TlsProvider::Rustls;
-            #[cfg(not(feature = "rustls"))]
-            let provider = TlsProvider::NativeTls;
+/// The certificate set a crate-built ureq agent trusts. `Vec<Certificate<'static>>` so the roots
+/// outlive the per-call agent built from them.
+#[cfg(any(not(feature = "reqwest"), test))]
+type UreqRootCerts = std::sync::Arc<Vec<ureq::tls::Certificate<'static>>>;
 
-            let config = Agent::config_builder()
-                .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
-                .timeout_global(timeout)
-                // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
-                .proxy(ureq::Proxy::try_from_env())
-                // Disable ureq's built-in status-error so we reach our own is_success() check,
-                // which maps the status to the structured NotFound/Unauthorized/HttpStatus variants.
-                .http_status_as_error(false)
-                .build();
-            built_agent = Agent::new_with_config(config);
-            (&built_agent, false)
+/// How a [`UreqClient`] obtains the agent for each request.
+enum UreqInner {
+    /// Build a fresh per-call agent honoring the per-request timeout, the TLS feature, and proxy-env.
+    Default,
+    /// A user-injected agent (via `From<ureq::Agent>` / the `ureq_agent` setter) that owns its own
+    /// timeout/TLS/proxy config, so the per-request timeout is *not* applied to it.
+    Injected(Agent),
+    /// Build a fresh per-call agent (like [`Default`](UreqInner::Default), so it still honors the
+    /// per-request timeout and proxy-env) that trusts these custom root certificates.
+    #[cfg(any(not(feature = "reqwest"), test))]
+    Certs(UreqRootCerts),
+}
+
+/// Sync [`HttpClient`] backed by a `ureq::Agent`.
+pub struct UreqClient(UreqInner);
+
+impl Default for UreqClient {
+    fn default() -> Self {
+        Self(UreqInner::Default)
+    }
+}
+
+impl From<Agent> for UreqClient {
+    fn from(agent: Agent) -> Self {
+        Self(UreqInner::Injected(agent))
+    }
+}
+
+/// Build a per-call ureq agent honoring the per-request `timeout`, the TLS feature, and proxy-env.
+/// `root_certs`, when `Some`, replaces the default trust store with the supplied certificates.
+fn build_call_agent(
+    timeout: Option<Duration>,
+    #[cfg(any(not(feature = "reqwest"), test))] root_certs: Option<UreqRootCerts>,
+) -> Agent {
+    use ureq::tls::TlsConfig;
+    // When both TLS features are enabled, rustls wins (it is the crate default); otherwise fall
+    // back to native-tls (also the case when no TLS feature is set).
+    #[cfg(feature = "rustls")]
+    let provider = TlsProvider::Rustls;
+    #[cfg(not(feature = "rustls"))]
+    let provider = TlsProvider::NativeTls;
+
+    let mut tls = TlsConfig::builder().provider(provider);
+    #[cfg(any(not(feature = "reqwest"), test))]
+    if let Some(certs) = root_certs {
+        tls = tls.root_certs(ureq::tls::RootCerts::Specific(certs));
+    }
+    let config = Agent::config_builder()
+        .tls_config(tls.build())
+        .timeout_global(timeout)
+        // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
+        .proxy(ureq::Proxy::try_from_env())
+        // Disable ureq's built-in status-error so we reach our own is_success() check, which maps
+        // the status to the structured NotFound/Unauthorized/HttpStatus variants.
+        .http_status_as_error(false)
+        .build();
+    Agent::new_with_config(config)
+}
+
+// `client_with_root_certs` only dispatches to the ureq builder when reqwest is NOT also enabled
+// (reqwest wins, exactly like `default_client`), so this is dead in a both-features lib build. Gate
+// it to the lanes that actually reach it (and to `test`, where the ureq cert test exercises it).
+#[cfg(any(not(feature = "reqwest"), test))]
+impl UreqClient {
+    /// Build a UreqClient that trusts the supplied custom root CA certificates.
+    ///
+    /// The certificates are parsed and validated here (a malformed PEM certificate returns `Err`);
+    /// the agent itself is built per request in [`get`](HttpClient::get), so it still honors the
+    /// per-request timeout and proxy-env. `RootCerts::Specific` replaces the default trust store, so
+    /// only the supplied certificates are trusted (see the `add_root_certificate` docs).
+    pub(crate) fn build_with_certs(
+        certs: &[crate::tls::Certificate],
+    ) -> std::result::Result<
+        std::sync::Arc<dyn crate::http_client::HttpClient>,
+        crate::http_client::ClientBuildError,
+    > {
+        let mut ureq_certs = Vec::with_capacity(certs.len());
+        for cert in certs {
+            let c = if cert.is_pem() {
+                ureq::tls::Certificate::from_pem(cert.bytes())
+                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
+            } else {
+                // `from_der` is infallible in ureq; invalid DER bytes are surfaced at connection
+                // time, not here (documented on `Certificate::from_der` / `add_root_certificate`).
+                ureq::tls::Certificate::from_der(cert.bytes())
+            };
+            ureq_certs.push(c.to_owned());
         }
-    };
-    let mut req = agent.get(url);
+        Ok(std::sync::Arc::new(UreqClient(UreqInner::Certs(
+            std::sync::Arc::new(ureq_certs),
+        ))))
+    }
+}
 
-    for (key, value) in headers.into_iter() {
-        if let Some(key) = key {
+impl HttpClient for UreqClient {
+    fn get(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        timeout: Option<Duration>,
+    ) -> Result<Box<dyn HttpResponse>> {
+        // An injected agent owns its own timeout/TLS/proxy config, so the per-request `timeout` is
+        // only applied to the crate-built (Default / Certs) agents.
+        let built_agent;
+        let (agent, is_injected): (&Agent, bool) = match &self.0 {
+            UreqInner::Injected(agent) => (agent, true),
+            UreqInner::Default => {
+                built_agent = build_call_agent(
+                    timeout,
+                    #[cfg(any(not(feature = "reqwest"), test))]
+                    None,
+                );
+                (&built_agent, false)
+            }
+            #[cfg(any(not(feature = "reqwest"), test))]
+            UreqInner::Certs(certs) => {
+                built_agent = build_call_agent(timeout, Some(certs.clone()));
+                (&built_agent, false)
+            }
+        };
+        let mut req = agent.get(url);
+
+        for (key, value) in headers.iter() {
             req = req.header(key, value);
         }
-    }
 
-    let res = match req.call() {
-        Ok(r) => r,
-        Err(ureq::Error::StatusCode(code)) if is_injected => {
-            // An injected agent has http_status_as_error=true (the ureq default) and cannot be
-            // reconfigured. When it fires StatusCode, extract the code and map to structured error.
-            return Err(status_to_error(code, url));
+        let res = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(code)) if is_injected => {
+                // An injected agent has http_status_as_error=true (the ureq default) and cannot be
+                // reconfigured. When it fires StatusCode, extract the code and map to structured error.
+                return Err(status_to_error(code, url));
+            }
+            Err(e) => return Err(Error::Transport(Box::new(e))),
+        };
+
+        if !res.status().is_success() {
+            return Err(status_to_error(res.status().as_u16(), url));
         }
-        Err(e) => return Err(Error::Transport(Box::new(e))),
-    };
 
-    if !res.status().is_success() {
-        return Err(status_to_error(res.status().as_u16(), url));
+        Ok(Box::new(res))
     }
-
-    Ok(res)
 }
 
 impl HttpResponse for Response<Body> {
@@ -68,23 +162,15 @@ impl HttpResponse for Response<Body> {
         Response::headers(self)
     }
 
-    fn body(self) -> impl std::io::Read {
-        self.into_body().into_reader()
-    }
-
-    fn json<T: serde::de::DeserializeOwned>(mut self) -> Result<T> {
-        Ok(self.body_mut().read_json::<T>()?)
-    }
-
-    fn text(mut self) -> Result<String> {
-        Ok(self.body_mut().read_to_string()?)
+    fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+        Box::new((*self).into_body().into_reader())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http_client::ClientOverride;
+
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
@@ -115,9 +201,10 @@ mod tests {
     /// `http_status_as_error(false)`, so a non-2xx response is returned to our own `is_success()`
     /// check at the bottom of `get`, which routes it through `status_to_error`.
     fn get_default(status: &'static str) -> Error {
-        let client = ClientOverride::default();
+        let client = UreqClient::default();
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
     }
@@ -125,13 +212,13 @@ mod tests {
     /// Injected-agent path (`is_injected == true`): a user-supplied default `ureq::Agent` has
     /// `http_status_as_error == true` (the ureq default) and fires `ureq::Error::StatusCode(code)`
     /// on a non-2xx. That hits the `Err(ureq::Error::StatusCode(code)) if is_injected` arm, which
-    /// extracts the code and maps it through `status_to_error`. This is the arm the implementor
-    /// flagged as having no isolated unit test.
+    /// extracts the code and maps it through `status_to_error`.
     fn get_injected(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
-        let client = ClientOverride { agent: Some(agent) };
+        let client = UreqClient::from(agent);
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
     }
@@ -139,19 +226,34 @@ mod tests {
     /// Injected agent built with `http_status_as_error(false)` (the OTHER injected case): the user
     /// disabled ureq's status-error, so `call()` returns `Ok(res)` even on a non-2xx. The
     /// `StatusCode` arm is therefore NOT taken; instead control falls through to the bottom-of-`get`
-    /// `!res.status().is_success()` check, which routes the status through `status_to_error`. This
-    /// is the injected-agent path the implementor flagged as untested.
+    /// `!res.status().is_success()` check, which routes the status through `status_to_error`.
     fn get_injected_no_status_error(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .build(),
         );
-        let client = ClientOverride { agent: Some(agent) };
+        let client = UreqClient::from(agent);
         let base = stub(status);
-        super::get(&base, HeaderMap::new(), None, &client)
+        client
+            .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
+    }
+
+    #[test]
+    fn build_with_certs_rejects_non_pem() {
+        // ureq's `tls::Certificate::from_pem` validates the PEM framing eagerly and errors when the
+        // bytes contain no PEM certificate, so `build_with_certs` must surface a config-time `Err`
+        // (the parse is deferred to here from the infallible `Certificate::from_pem` constructor)
+        // rather than panicking or building an agent over garbage.
+        let res = UreqClient::build_with_certs(&[crate::tls::Certificate::from_pem(
+            b"not a pem certificate".to_vec(),
+        )]);
+        assert!(
+            res.is_err(),
+            "bytes with no PEM certificate must be rejected at build time, got Ok"
+        );
     }
 
     #[test]
@@ -251,8 +353,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let url = format!("http://{}/", addr);
-        let client = ClientOverride::default();
-        let err = super::get(&url, HeaderMap::new(), None, &client)
+        let client = UreqClient::default();
+        let err = client
+            .get(&url, &HeaderMap::new(), None)
             .err()
             .expect("connection refused must be an Err");
         assert!(
