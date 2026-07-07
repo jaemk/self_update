@@ -76,7 +76,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
 * `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
 * `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
-* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest handles async, ureq handles sync); see [Async](#async) below.
+* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest serves the async path, and the sync API prefers reqwest when both are present); see [Async](#async) below.
 
 `github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
 
@@ -316,18 +316,20 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Async
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
-returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
-(`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
-`get_newer_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
-update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
-scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
-**tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq
-handles sync); the only invalid configuration is `async` without `reqwest`.
-Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
-does not block the executor.
+returns a distinct `AsyncUpdate` wrapper (one per backend). Its async (`*_async`) verbs —
+`update_async()`, `update_extended_async()`, `get_latest_release_async()`,
+`get_newer_releases_async()`, `get_release_version_async()`, and `is_update_available_async()` — are
+**inherent methods** on that wrapper, so a `tokio` application can update without wrapping the
+blocking calls in `spawn_blocking` and without importing any trait. Crucially, the `AsyncUpdate`
+wrapper does **not** expose the blocking verbs: calling `.update()` on an async-built updater is a
+compile error, so the old footgun of accidentally running a blocking update from an async context
+is gone. The blocking API is unchanged; the async path is purely additive. It is **tokio-only and
+requires `reqwest`** -- ureq and reqwest can coexist (reqwest serves the async path, and the sync
+API prefers reqwest when both are present); the only invalid configuration is `async` without
+`reqwest`. Network IO becomes async, and the extract/replace tail runs on
+`tokio::task::spawn_blocking` so it does not block the executor.
 
 ```rust
-use self_update::AsyncReleaseUpdate;
 async fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
@@ -338,6 +340,27 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
         .update_async()
         .await?;
     println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+```
+
+The `AsyncUpdate` wrapper exposes only the `*_async` verbs; the blocking `update()` is not a method
+on it, so accidentally calling it from async code does not compile. The following block is
+`compile_fail` for exactly that reason — `update` is not a method on the async wrapper (this block
+is intentionally not feature-gated: gating it behind `cfg(feature = "async")` would make it an empty,
+successfully-compiling doctest in the crate's no-`async` test lanes, which a `compile_fail` block
+must never do):
+
+```rust,compile_fail
+fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
+    let updater = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .build_async()?;
+    // `update()` is the BLOCKING verb; it is not exposed on the async `AsyncUpdate` wrapper.
+    updater.update()?;
     Ok(())
 }
 ```
@@ -356,8 +379,8 @@ need a separate dependency to name the type. (Since the transport is a runtime t
 and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
 when both are present.) For test doubles or fully custom transport, inject any type that implements
 the object-safe trait directly via `.http_client(Arc<dyn HttpClient>)` (sync) or
-`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`self_update::http_client`] module
-for the trait definitions.
+`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`http_client`](crate::http_client)
+module for the trait definitions.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
 release-listing requests and to the download's request-establishment phase (a mid-stream failure

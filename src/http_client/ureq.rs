@@ -55,7 +55,10 @@ fn build_call_agent(
     #[cfg(not(feature = "rustls"))]
     let provider = TlsProvider::NativeTls;
 
+    #[cfg(any(not(feature = "reqwest"), test))]
     let mut tls = TlsConfig::builder().provider(provider);
+    #[cfg(all(feature = "reqwest", not(test)))]
+    let tls = TlsConfig::builder().provider(provider);
     #[cfg(any(not(feature = "reqwest"), test))]
     if let Some(certs) = root_certs {
         tls = tls.root_certs(ureq::tls::RootCerts::Specific(certs));

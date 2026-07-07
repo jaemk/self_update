@@ -75,7 +75,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
 * `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
 * `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
-* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest handles async, ureq handles sync); see [Async](#async) below.
+* `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest serves the async path, and the sync API prefers reqwest when both are present); see [Async](#async) below.
 
 `github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
 
@@ -321,19 +321,20 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 ### Async
 
 With the `async` feature, every built-in backend's `Update` builder gains a `build_async()` that
-returns a concrete `Update` implementing the public sealed [`AsyncReleaseUpdate`] trait, with async
-(`*_async`) verbs — `update_async()`, `update_extended_async()`, `get_latest_release_async()`,
-`get_newer_releases_async()`, and `get_release_version_async()` — so a `tokio` application can
-update without wrapping the blocking calls in `spawn_blocking`. Bring [`AsyncReleaseUpdate`] into
-scope to call the verbs. The blocking API is unchanged; the async path is purely additive. It is
-**tokio-only and requires `reqwest`** -- ureq and reqwest can coexist (reqwest handles async, ureq
-handles sync); the only invalid configuration is `async` without `reqwest`.
-Network IO becomes async, and the extract/replace tail runs on `tokio::task::spawn_blocking` so it
-does not block the executor.
+returns a distinct `AsyncUpdate` wrapper (one per backend). Its async (`*_async`) verbs —
+`update_async()`, `update_extended_async()`, `get_latest_release_async()`,
+`get_newer_releases_async()`, `get_release_version_async()`, and `is_update_available_async()` — are
+**inherent methods** on that wrapper, so a `tokio` application can update without wrapping the
+blocking calls in `spawn_blocking` and without importing any trait. Crucially, the `AsyncUpdate`
+wrapper does **not** expose the blocking verbs: calling `.update()` on an async-built updater is a
+compile error, so the old footgun of accidentally running a blocking update from an async context
+is gone. The blocking API is unchanged; the async path is purely additive. It is **tokio-only and
+requires `reqwest`** -- ureq and reqwest can coexist (reqwest serves the async path, and the sync
+API prefers reqwest when both are present); the only invalid configuration is `async` without
+`reqwest`. Network IO becomes async, and the extract/replace tail runs on
+`tokio::task::spawn_blocking` so it does not block the executor.
 
 ```rust
-# #[cfg(feature = "async")]
-use self_update::AsyncReleaseUpdate;
 # #[cfg(feature = "async")]
 async fn update() -> Result<(), Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
@@ -345,6 +346,27 @@ async fn update() -> Result<(), Box<dyn std::error::Error>> {
         .update_async()
         .await?;
     println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+```
+
+The `AsyncUpdate` wrapper exposes only the `*_async` verbs; the blocking `update()` is not a method
+on it, so accidentally calling it from async code does not compile. The following block is
+`compile_fail` for exactly that reason — `update` is not a method on the async wrapper (this block
+is intentionally not feature-gated: gating it behind `cfg(feature = "async")` would make it an empty,
+successfully-compiling doctest in the crate's no-`async` test lanes, which a `compile_fail` block
+must never do):
+
+```rust,compile_fail
+fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
+    let updater = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .build_async()?;
+    // `update()` is the BLOCKING verb; it is not exposed on the async `AsyncUpdate` wrapper.
+    updater.update()?;
     Ok(())
 }
 ```
@@ -363,8 +385,8 @@ need a separate dependency to name the type. (Since the transport is a runtime t
 and `ureq` are no longer mutually exclusive — both can be enabled, and the sync API prefers reqwest
 when both are present.) For test doubles or fully custom transport, inject any type that implements
 the object-safe trait directly via `.http_client(Arc<dyn HttpClient>)` (sync) or
-`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`self_update::http_client`] module
-for the trait definitions.
+`.http_client_async(Arc<dyn AsyncHttpClient>)` (async); see the [`http_client`](crate::http_client)
+module for the trait definitions.
 
 When you inject a client, `.request_header()` still applies, and `.retries()` still applies to the
 release-listing requests and to the download's request-establishment phase (a mid-stream failure
@@ -421,6 +443,9 @@ on the system OpenSSL cert layout.
 // `rustdoc-args = ["--cfg", "docsrs"]` in Cargo.toml). Stable builds are unaffected because
 // the cfg is never set outside of the docs.rs environment.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Keep the crate's rustdoc intra-doc links honest: an unresolved `[link]` in any doc comment is a
+// hard error, not a silent warning. The full-crate check is the final barrier during a doc build.
+#![deny(rustdoc::broken_intra_doc_links)]
 
 // The HTTP transport is now an object-safe trait seam (`http_client::HttpClient`), so `reqwest` and
 // `ureq` are no longer mutually exclusive — both client impls can be compiled and one is selected at
@@ -522,7 +547,7 @@ pub mod version;
 /// is built, not at construction.
 pub use tls::Certificate;
 
-/// Re-export the crate's [`Error`](errors::Error) and [`Result`](errors::Result) at the crate root,
+/// Re-export the crate's [`Error`] and [`Result`] at the crate root,
 /// so consumers (and `ReleaseSource` implementors) can write `self_update::Result<T>` /
 /// `self_update::Error` without naming the `errors` module.
 pub use errors::{Error, Result};
@@ -614,9 +639,9 @@ fn confirm(msg: &str) -> Result<()> {
 ///
 /// Wrapped `String`s are version tags.
 ///
-/// This is the lightweight counterpart of [`ReleaseStatus`](update::ReleaseStatus), the richer
+/// This is the lightweight counterpart of [`ReleaseStatus`], the richer
 /// result of [`update_extended`](update::ReleaseUpdate::update_extended) which carries the full
-/// [`Release`](update::Release) (name, date, body, assets). Reach for `VersionStatus` when the
+/// [`Release`] (name, date, body, assets). Reach for `VersionStatus` when the
 /// version string is all you need; reach for `ReleaseStatus` when you need the installed release's
 /// details.
 #[derive(Debug, Clone)]
@@ -659,7 +684,7 @@ impl std::fmt::Display for VersionStatus {
 /// The archive format of a release asset, as detected from its file extension.
 ///
 /// `#[non_exhaustive]`, and the `Tar`/`Zip` variants are gated on the `archive-tar` / `archive-zip`
-/// features: if the matching feature is off the variant does not exist and [`detect_archive`] for
+/// features: if the matching feature is off the variant does not exist and `detect_archive` for
 /// that extension returns [`Error::ArchiveNotEnabled`] instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
@@ -922,10 +947,16 @@ impl Extract {
                     io::copy(&mut file, &mut output)?;
                     // Preserve the archived unix permission mode (notably the executable bit) so a
                     // binary extracted from a zip is runnable when installed to a custom path.
+                    // Mask off the setuid/setgid/sticky bits (`0o7000`): a crafted archive must not
+                    // be able to install a setuid binary, so only the standard `rwx` permission
+                    // bits (`0o777`) are honored.
                     #[cfg(unix)]
                     if let Some(mode) = file.unix_mode() {
                         use std::os::unix::fs::PermissionsExt;
-                        fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                        fs::set_permissions(
+                            &output_path,
+                            fs::Permissions::from_mode(mode & 0o777),
+                        )?;
                     }
                 }
             }
@@ -1046,11 +1077,13 @@ impl Extract {
 
                 let mut output = fs::File::create(&output_path)?;
                 io::copy(&mut file, &mut output)?;
-                // Preserve the archived unix permission mode so the extracted binary is runnable.
+                // Preserve the archived unix permission mode so the extracted binary is runnable,
+                // but mask off the setuid/setgid/sticky bits (`0o7000`) so a crafted archive cannot
+                // install a setuid binary; only the standard `rwx` bits (`0o777`) are honored.
                 #[cfg(unix)]
                 if let Some(mode) = file.unix_mode() {
                     use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&output_path, fs::Permissions::from_mode(mode))?;
+                    fs::set_permissions(&output_path, fs::Permissions::from_mode(mode & 0o777))?;
                 }
             }
         };
@@ -1369,6 +1402,10 @@ pub struct Download {
     progress_chars: String,
     timeout: Option<std::time::Duration>,
     on_progress: Option<ProgressCallback>,
+    /// Optional cap on the number of bytes streamed into `dest`. `None` (the default) means no cap,
+    /// preserving prior unbounded behavior. When set, the streaming download aborts with an error as
+    /// soon as the total bytes written would exceed this many bytes.
+    max_download_size: Option<u64>,
     /// Number of times to retry establishing the download request (before any bytes are streamed)
     /// with exponential backoff. `0` (the default) means a single attempt, preserving the prior
     /// no-retry behavior. A failure that occurs *after* streaming has begun is not retried (it would
@@ -1404,6 +1441,7 @@ impl std::fmt::Debug for Download {
                 "on_progress",
                 &self.on_progress.as_ref().map(|_| "<callback>"),
             )
+            .field("max_download_size", &self.max_download_size)
             .field("client", &self.client.as_ref().map(|_| "<http_client>"));
         #[cfg(feature = "async")]
         s.field(
@@ -1416,6 +1454,15 @@ impl std::fmt::Debug for Download {
         );
         s.finish()
     }
+}
+
+/// Build the error returned when a streaming download exceeds its configured
+/// [`max_download_size`](Download::max_download_size) cap. Reported as an [`Error::Io`] with a
+/// message naming the cap so the failure mode is unambiguous.
+fn max_download_size_exceeded(cap: u64) -> Error {
+    Error::Io(io::Error::other(format!(
+        "download exceeded the configured max_download_size cap of {cap} bytes"
+    )))
 }
 
 impl Download {
@@ -1431,6 +1478,7 @@ impl Download {
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             timeout: None,
             on_progress: None,
+            max_download_size: None,
             retries: 0,
             retry_base_delay: std::time::Duration::from_millis(100),
             retry_max_delay: std::time::Duration::from_millis(3200),
@@ -1452,6 +1500,15 @@ impl Download {
     /// Set a timeout for the download request. Defaults to no timeout.
     pub fn timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Cap the number of bytes this download will stream into `dest`. Once the running total of
+    /// written bytes exceeds `max_bytes`, the download aborts with an [`Error`] instead of writing
+    /// an unbounded amount (useful to defend against a server that streams far more than the
+    /// advertised `Content-Length`). Defaults to no cap, so existing behavior is unchanged.
+    pub fn max_download_size(&mut self, max_bytes: u64) -> &mut Self {
+        self.max_download_size = Some(max_bytes);
         self
     }
 
@@ -1527,16 +1584,14 @@ impl Download {
     }
 
     /// Add a custom TLS root CA certificate the crate-built HTTP client will trust. Call multiple
-    /// times to add more than one. Ignored when an HTTP client is injected via
-    /// [`set_http_client`](Self::set_http_client) (the injected client owns its own TLS config). A
-    /// malformed certificate surfaces as an
-    /// [`Error::InvalidCertificate`](errors::Error::InvalidCertificate) from
-    /// [`download_to`](Self::download_to).
+    /// times to add more than one. Ignored when an HTTP client is injected via `set_http_client`
+    /// (the injected client owns its own TLS config). A malformed certificate surfaces as an
+    /// [`Error::InvalidCertificate`] from [`download_to`](Self::download_to).
     ///
     /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
     /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply all
     /// CA certificates you need, including any public roots, or inject a `ureq::Agent` via
-    /// [`set_http_client`](Self::set_http_client) with a merged root set instead.
+    /// `set_http_client` with a merged root set instead.
     pub fn add_root_certificate(&mut self, cert: Certificate) -> &mut Self {
         self.root_certificates.push(cert);
         self
@@ -1558,7 +1613,7 @@ impl Download {
     /// `.request_header(self_update::http::header::ACCEPT, "application/octet-stream")`. The setter
     /// is infallible; a name or value that is not a valid HTTP header is deferred and surfaced from
     /// [`download_to`](Self::download_to) as an
-    /// [`Error::InvalidHeader`](errors::Error::InvalidHeader), matching the builders'
+    /// [`Error::InvalidHeader`], matching the builders'
     /// `request_header` verb.
     pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
     where
@@ -1639,7 +1694,7 @@ impl Download {
             |e, backoff| {
                 log::warn!(
                     "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
-                    self.url
+                    crate::errors::redact_url(&self.url)
                 );
                 std::thread::sleep(std::time::Duration::from_millis(backoff));
             },
@@ -1685,6 +1740,11 @@ impl Download {
             }
             src.consume(n);
             downloaded += n as u64;
+            if let Some(cap) = self.max_download_size
+                && downloaded > cap
+            {
+                return Err(max_download_size_exceeded(cap));
+            }
 
             #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
@@ -1744,7 +1804,7 @@ impl Download {
             |e, backoff| {
                 log::warn!(
                     "self_update: download request to {} failed ({e}); retrying in {backoff}ms",
-                    self.url
+                    crate::errors::redact_url(&self.url)
                 );
             },
             |backoff| tokio::time::sleep(std::time::Duration::from_millis(backoff)),
@@ -1785,6 +1845,11 @@ impl Download {
             let chunk = chunk?;
             dest.write_all(&chunk)?;
             downloaded += chunk.len() as u64;
+            if let Some(cap) = self.max_download_size
+                && downloaded > cap
+            {
+                return Err(max_download_size_exceeded(cap));
+            }
 
             #[cfg(feature = "progress-bar")]
             if let Some(ref mut bar) = bar {
@@ -2397,6 +2462,200 @@ mod tests {
             "with no Content-Length the callback's total must be None, got {:?}",
             totals
         );
+    }
+
+    // --- S1: presigned-URL redaction in the download retry warning ---------------------------
+
+    /// A `log::Log` that captures every record's formatted message into a shared global buffer.
+    /// Tests filter the buffer by a unique URL host so a single global logger can serve them all.
+    struct CaptureLogger;
+    static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
+
+    fn log_capture() -> &'static std::sync::Mutex<Vec<String>> {
+        static BUF: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+        BUF.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            log_capture()
+                .lock()
+                .unwrap()
+                .push(format!("{}", record.args()));
+        }
+        fn flush(&self) {}
+    }
+
+    fn install_capture_logger() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INIT.get_or_init(|| {
+            // Ignore an error if another harness already set the global logger.
+            let _ = log::set_logger(&CAPTURE_LOGGER);
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
+    #[test]
+    fn download_retry_warning_redacts_presigned_signature() {
+        // S1: a download that retries must not leak a presigned S3 `X-Amz-Signature` /
+        // `X-Amz-Credential` into the retry warning. Drive `download_to` with a flaky client (one
+        // failure, then success) so the retry closure fires exactly one `log::warn!`, and assert the
+        // captured line carries neither secret. On the pre-fix code (which logged the raw
+        // `self.url`) the signature would appear verbatim and this test fails.
+        use std::sync::atomic::AtomicU32;
+
+        install_capture_logger();
+        let sig = "abc123-secret-signature-value";
+        let cred = "AKIAREDACTTESTONLY";
+        let host = "s3-redact-retry-test.invalid";
+        let url = format!(
+            "https://{host}/app.tar.gz?X-Amz-Credential={cred}%2F20260101\
+             &X-Amz-Expires=300&X-Amz-Signature={sig}&X-Amz-SignedHeaders=host"
+        );
+
+        let attempts = std::sync::Arc::new(AtomicU32::new(0));
+        let client = std::sync::Arc::new(FlakyDlClient {
+            body: b"ok".to_vec(),
+            fail_times: AtomicU32::new(1),
+            attempts: attempts.clone(),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url(url);
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.set_retries(
+            1,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(2),
+        );
+        dl.download_to(&mut out).unwrap();
+
+        let lines: Vec<String> = log_capture()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains(host))
+            .cloned()
+            .collect();
+        assert!(
+            !lines.is_empty(),
+            "the retry closure should have logged a warning for {host}"
+        );
+        for line in &lines {
+            assert!(
+                !line.contains(sig),
+                "presigned signature leaked into the retry warning: {line}"
+            );
+            assert!(
+                !line.contains(cred),
+                "presigned credential leaked into the retry warning: {line}"
+            );
+        }
+    }
+
+    // --- S3: extracted zip modes must not carry setuid/setgid/sticky --------------------------
+
+    #[cfg(all(unix, feature = "archive-zip"))]
+    #[test]
+    fn extract_zip_masks_setuid_setgid_sticky_bits() {
+        // S3: a zip entry archived with a setuid mode (0o4755) must NOT install a setuid file; the
+        // extractor masks the mode to `& 0o777`, so the setuid/setgid/sticky bits are dropped while
+        // the ordinary rwx bits survive. On the pre-fix code (`from_mode(mode)`) the installed file
+        // would be setuid and this test fails.
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("archive.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o4755);
+            zip.start_file("payload", opts).unwrap();
+            zip.write_all(b"#!/bin/sh\n").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let mut ex = Extract::from_source(&zip_path);
+        ex.archive(ArchiveKind::Zip);
+        ex.extract_into(&out_dir).unwrap();
+
+        let extracted = out_dir.join("payload");
+        let mode = fs::metadata(&extracted).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o7000,
+            0,
+            "extracted file must carry no setuid/setgid/sticky bits, got mode {mode:o}"
+        );
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "the ordinary rwx bits should be preserved, got mode {mode:o}"
+        );
+    }
+
+    // --- S4: optional max_download_size cap ---------------------------------------------------
+
+    #[test]
+    fn download_max_download_size_aborts_when_body_exceeds_cap() {
+        // S4: a body larger than the configured cap aborts the streaming download with an error
+        // naming the cap, instead of writing an unbounded amount to `dest`.
+        let body = vec![0u8; 4096];
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/big.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.max_download_size(1024);
+        let res = dl.download_to(&mut out);
+        assert!(res.is_err(), "a body over the cap must error");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("max_download_size"),
+            "the error should name the cap: {msg}"
+        );
+    }
+
+    #[test]
+    fn download_max_download_size_allows_body_under_cap() {
+        // S4: with the default (no cap) unchanged, an explicit cap larger than the body still lets
+        // the whole body download successfully.
+        let body = vec![7u8; 512];
+        let client = std::sync::Arc::new(DlClient {
+            body: body.clone(),
+            content_length: Some(body.len() as u64),
+            requested: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+
+        let mut out = Vec::new();
+        let mut dl = Download::from_url("https://nonroutable.invalid/small.bin");
+        dl.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        dl.max_download_size(1024);
+        dl.download_to(&mut out).unwrap();
+        assert_eq!(out, body, "a body under the cap downloads in full");
     }
 
     /// Async test-double response: yields the body as a single `bytes_stream` chunk and as `text`.

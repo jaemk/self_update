@@ -96,6 +96,11 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
+    ///
+    /// Note: this setter is deliberately different from the other backends. GitHub's
+    /// `api_base_url` wants the full API base URL (e.g. `https://api.github.com`); the S3
+    /// backend's `endpoint` is the S3 endpoint. GitLab is the instance host only because the
+    /// crate constructs the `/api/v4/projects/...` path itself (Decision 3).
     pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
@@ -271,6 +276,11 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v4/...` path itself. Do not include `/api/v4`.
+    ///
+    /// Note: this setter is deliberately different from the other backends. GitHub's
+    /// `api_base_url` wants the full API base URL (e.g. `https://api.github.com`); the S3
+    /// backend's `endpoint` is the S3 endpoint. GitLab is the instance host only because the
+    /// crate constructs the `/api/v4/projects/...` path itself (Decision 3).
     pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = url.into();
         self
@@ -327,13 +337,14 @@ impl UpdateBuilder {
         self.build_update()
     }
 
-    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    /// Confirm config and create a ready-to-use [`AsyncUpdate`] for the async API (`update_async`).
     ///
-    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
-    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    /// Unlike [`build`](Self::build) this returns the distinct [`AsyncUpdate`] newtype, which exposes
+    /// only the inherent `*_async` verbs, so a stray blocking `.update()` on an async-built updater
+    /// is a compile error rather than a silent block of the executor.
     #[cfg(feature = "async")]
-    pub fn build_async(&self) -> Result<Update> {
-        self.build_update()
+    pub fn build_async(&self) -> Result<AsyncUpdate> {
+        Ok(AsyncUpdate(self.build_update()?))
     }
 }
 
@@ -413,9 +424,22 @@ impl ReleaseUpdate for Update {
 
 impl_sync_update_verbs!(Update);
 
+/// Async-only updater returned by [`UpdateBuilder::build_async`].
+///
+/// A newtype over the blocking [`Update`] that exposes **only** the inherent `*_async` verbs. Using
+/// it (instead of returning `Update` from `build_async`) makes a blocking call on an async-built
+/// updater — e.g. `build_async()?.update()` — a compile error, so the async executor cannot be
+/// silently blocked.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct AsyncUpdate(Update);
+
+#[cfg(feature = "async")]
+impl_async_update_verbs!(AsyncUpdate);
+
 impl_update_config_accessors!(Update, {
-    fn api_headers(&self, auth_token: Option<&str>) -> Result<header::HeaderMap> {
-        api_headers(auth_token)
+    fn api_headers(&self, _auth_token: Option<&str>) -> Result<header::HeaderMap> {
+        api_headers()
     }
 });
 
@@ -439,7 +463,7 @@ fn releases_plan(
     auth_token: Option<&str>,
     stop_at: Option<&str>,
 ) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+    let headers = api_headers()?;
     let auth = auth_token.map(str::to_owned);
     let stop_at = stop_at.map(str::to_owned);
     Ok(release_array_page(
@@ -482,7 +506,7 @@ fn release_array_page(
             let next = next_link(resp_headers).map(|next_url| {
                 release_array_page(
                     next_url,
-                    api_headers(auth.as_deref()).unwrap_or_default(),
+                    api_headers().expect("api_headers builds from static values"),
                     auth.clone(),
                     stop_at.clone(),
                 )
@@ -498,8 +522,8 @@ fn release_array_page(
 
 /// Transport-free plan for the newest release: GitLab has no `/releases/latest`, so the listing's
 /// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
-fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+fn newest_plan(base_url: &str, _auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     Ok(PageRequest {
         url: first_page_url(base_url),
         headers,
@@ -518,8 +542,8 @@ fn newest_plan(base_url: &str, auth_token: Option<&str>) -> Result<PageRequest<R
 }
 
 /// Transport-free plan to fetch a single release *object* (the `.../releases/{ver}` endpoint).
-fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+fn single_plan(url: String, _auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     Ok(PageRequest {
         url,
         headers,
@@ -579,7 +603,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
 /// Build gitlab's base request headers (its User-Agent). The Authorization header is applied
 /// centrally by the shared [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) using
 /// gitlab's `Bearer` scheme on both the listing and download paths, honoring a user override.
-fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
+fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -594,9 +618,6 @@ fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
 mod tests {
     use super::Update;
     use crate::update::UpdateConfig;
-
-    #[cfg(feature = "async")]
-    use crate::update::AsyncReleaseUpdate;
 
     /// Async test wrapper over `releases_plan` + the async driver (unfiltered, all pages).
     #[cfg(feature = "async")]
@@ -729,9 +750,10 @@ mod tests {
     }
 
     /// Convenience: build a `gitlab::Update` (concrete type) pointed at the loopback stub.
-    /// Only available when the `async` feature is enabled (uses `build_async()`).
+    /// Only available when the `async` feature is enabled (uses `build_async()`, so the returned
+    /// [`AsyncUpdate`] exposes the inherent `*_async` verbs).
     #[cfg(feature = "async")]
-    fn gitlab_update(base: &str, current_version: &str) -> Update {
+    fn gitlab_update(base: &str, current_version: &str) -> super::AsyncUpdate {
         Update::configure()
             .host(base)
             .repo_owner("o")
@@ -1855,7 +1877,7 @@ mod tests {
 
     // --- the listing `Releases` from `ReleaseList::fetch` carries NO current
     // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
-    // `MissingField { field: "current_version" }` rather than silently answering. `into_vec()`
+    // `NoCurrentVersion` rather than silently answering. `into_vec()`
     // still recovers the underlying release vec.
     #[test]
     fn release_list_fetch_returns_listing_releases_without_current_version() {
@@ -1882,11 +1904,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on a listing must error with MissingField, got {:?}",
+            "is_update_available() on a listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let versions: Vec<String> = releases
@@ -1902,7 +1922,7 @@ mod tests {
     }
 
     // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
-    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, NoCurrentVersion
     // from `is_update_available()`, `into_vec()` recovers the releases).
     #[cfg(feature = "async")]
     #[tokio::test]
@@ -1931,11 +1951,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on a listing must error with MissingField, got {:?}",
+            "is_update_available() on a listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let versions: Vec<String> = releases
@@ -1977,6 +1995,74 @@ mod tests {
                 "missing tag_name must be Error::MissingAssetField {{ field: \"tag_name\" }}, got {:?}",
                 other
             ),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // I1/I2 guard tests
+    // -----------------------------------------------------------------------
+
+    // I2: `api_headers` takes no arguments after removing the vestigial `_auth_token` param.
+    // This test calls the private function with zero args; it would FAIL TO COMPILE on the old
+    // signature (`fn api_headers(_auth_token: Option<&str>) -> ...`) because that required one
+    // argument.
+    #[test]
+    fn api_headers_takes_no_args_and_sets_user_agent() {
+        let headers = super::api_headers().unwrap();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust-reqwest/self-update",
+            "api_headers() (no-arg form) must still set the User-Agent header"
+        );
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_none(),
+            "api_headers() must not bake an Authorization header; apply_auth handles that"
+        );
+    }
+
+    // I1: continuation pages must carry the correct User-Agent header, not empty headers.
+    // The test drives a two-page paginated fetch using the stub_capturing infrastructure, then
+    // inspects both raw requests to confirm the User-Agent is present. With the old
+    // `.unwrap_or_default()` (before I1), a failing `api_headers()` call on a continuation page
+    // would have silently produced an empty-headers page request; `.expect()` panics instead.
+    // In the normal (successful) case both old and new code send the header, so this is a
+    // regression guard that would catch any future regression where continuation page headers
+    // are built incorrectly.
+    #[test]
+    fn continuation_page_carries_user_agent_header() {
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/api/v4/projects/o%2Fr/releases?page=2")),
+                    body: release_json("v2.0.0"),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v1.0.0"),
+                },
+            ]
+        });
+        let upd = gl_update(&base, "0.1.0");
+        let _releases = upd.get_newer_releases().unwrap();
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 2, "both pages must have been requested");
+        for (i, req) in reqs.iter().enumerate() {
+            let lower = req.to_lowercase();
+            assert!(
+                lower.contains("user-agent: rust-reqwest/self-update"),
+                "page {} request must carry User-Agent header; got:\n{}",
+                i + 1,
+                req
+            );
         }
     }
 

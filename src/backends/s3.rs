@@ -13,7 +13,18 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use regex::Regex;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
+
+/// Filename -> `(name, version)` matcher for S3 asset keys, e.g. `myapp-v1.2.3-x86_64-linux`.
+///
+/// Hoisted to a process-wide `LazyLock` so it is compiled once rather than on every listing page
+/// parsed by [`parse_s3_response`]. The pattern is a compile-time literal and is known-valid, so
+/// `Regex::new` cannot fail here.
+static ASSET_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
+        .expect("the S3 asset-key regex is a valid compile-time literal")
+});
 
 /// Default number of items to retrieve per S3 listing request. The S3 ListObjectsV2 API caps a
 /// single request at 1000 keys.
@@ -158,7 +169,12 @@ impl ReleaseListBuilder {
         self
     }
 
-    /// Set the end point
+    /// Set the S3 endpoint (the storage endpoint the bucket listing is issued against).
+    ///
+    /// Note: this `endpoint` is the *S3 storage endpoint*, a deliberately different notion from the
+    /// server URL of the other backends. The github backend uses `api_base_url` (the full API base
+    /// URL) and the gitlab/gitea backends use `host` (the instance host); s3's `endpoint` is neither
+    /// of those. The differing names reflect that semantic divergence rather than an inconsistency.
     pub fn endpoint(&mut self, endpoint: impl Into<Endpoint>) -> &mut Self {
         self.endpoint = endpoint.into();
         self
@@ -362,7 +378,12 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set the end point
+    /// Set the S3 endpoint (the storage endpoint the bucket listing is issued against).
+    ///
+    /// Note: this `endpoint` is the *S3 storage endpoint*, a deliberately different notion from the
+    /// server URL of the other backends. The github backend uses `api_base_url` (the full API base
+    /// URL) and the gitlab/gitea backends use `host` (the instance host); s3's `endpoint` is neither
+    /// of those. The differing names reflect that semantic divergence rather than an inconsistency.
     pub fn endpoint(&mut self, endpoint: impl Into<Endpoint>) -> &mut Self {
         self.endpoint = endpoint.into();
         self
@@ -434,13 +455,14 @@ impl UpdateBuilder {
         self.build_update()
     }
 
-    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    /// Confirm config and create a ready-to-use [`AsyncUpdate`] for the async API (`update_async`).
     ///
-    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
-    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    /// Unlike [`build`](Self::build) this returns the distinct [`AsyncUpdate`] newtype, which exposes
+    /// only the inherent `*_async` verbs, so a stray blocking `.update()` on an async-built updater
+    /// is a compile error rather than a silent block of the executor.
     #[cfg(feature = "async")]
-    pub fn build_async(&self) -> Result<Update> {
-        self.build_update()
+    pub fn build_async(&self) -> Result<AsyncUpdate> {
+        Ok(AsyncUpdate(self.build_update()?))
     }
 }
 
@@ -521,7 +543,11 @@ fn sort_newer(releases: Vec<Release>, current_version: &str) -> Vec<Release> {
 }
 
 /// Find the release matching an explicit version. Shared by the sync and async paths.
+///
+/// Stored versions are bare semver (the parser strips any leading `v`), so a requested tag is
+/// normalized the same way before comparison: `.release_tag("v1.2.3")` matches a stored `1.2.3`.
 fn find_version(releases: &[Release], ver: &str) -> Result<Release> {
+    let ver = ver.trim_start_matches('v');
     match releases.iter().find(|x| x.version() == ver) {
         Some(r) => Ok(r.clone()),
         None => Err(Error::NoReleaseFound { target: None }),
@@ -549,6 +575,19 @@ impl ReleaseUpdate for Update {
 }
 
 impl_sync_update_verbs!(Update);
+
+/// Async-only updater returned by [`UpdateBuilder::build_async`].
+///
+/// A newtype over the blocking [`Update`] that exposes **only** the inherent `*_async` verbs. Using
+/// it (instead of returning `Update` from `build_async`) makes a blocking call on an async-built
+/// updater — e.g. `build_async()?.update()` — a compile error, so the async executor cannot be
+/// silently blocked.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct AsyncUpdate(Update);
+
+#[cfg(feature = "async")]
+impl_async_update_verbs!(AsyncUpdate);
 
 impl_update_config_accessors!(Update);
 
@@ -1328,7 +1367,7 @@ fn build_s3_api_url(
             download_base_url, max_keys, prefix, continuation
         ),
         Endpoint::GCS => format!(
-            "{}?max-keys={}{}{}",
+            "{}?list-type=2&max-keys={}{}{}",
             download_base_url, max_keys, prefix, continuation
         ),
     };
@@ -1471,11 +1510,9 @@ fn parse_s3_response<R: std::io::BufRead>(
     let mut current_release: Option<Release> = None;
     let mut is_truncated = false;
     let mut next_continuation_token: Option<String> = None;
-    let regex =
-        Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
-            .map_err(|err| Error::InvalidResponse {
-                source: Box::new(err),
-            })?;
+    // The filename matcher is compiled once, process-wide (see `ASSET_KEY_REGEX`), rather than on
+    // every page parsed.
+    let regex = &*ASSET_KEY_REGEX;
 
     // inspecting each XML element we populate our releases list
     let mut buf = Vec::new();
@@ -1592,9 +1629,6 @@ mod tests {
     use super::Update;
     use crate::update::{Release, UpdateConfig};
     use std::time::Duration;
-
-    #[cfg(feature = "async")]
-    use crate::update::AsyncReleaseUpdate;
 
     // ---------------------------------------------------------------------------
     // Helpers shared between sync XML-parse tests and async stub tests
@@ -1898,6 +1932,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_s3_response_extracts_continuation_token_for_gcs_multipage_listing() {
+        // C3 regression: GCS listings must page. When the first-page body is flagged truncated and
+        // carries a `<NextContinuationToken>` (which GCS emits only under `list-type=2`), the parser
+        // must surface that token so the driver fetches the next page. This drives the raw
+        // `super::parse_s3_response` (the test wrapper drops the token) and asserts BOTH the token is
+        // returned AND the first page's release is parsed, so pagination continues rather than
+        // silently dropping later pages.
+        let page1 = truncated_list_bucket_xml(&["myapp-1.0.0-x86_64-linux"], "GCS-TOKEN-PAGE-2");
+        let (releases, next_token) = super::parse_s3_response(
+            page1.as_bytes(),
+            "https://storage.googleapis.com/gbucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS),
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(
+            next_token.as_deref(),
+            Some("GCS-TOKEN-PAGE-2"),
+            "a truncated first page must surface its NextContinuationToken so pagination continues"
+        );
+        assert_eq!(
+            releases.len(),
+            1,
+            "the first page's release is still parsed alongside the continuation token"
+        );
+        assert_eq!(releases[0].version(), "1.0.0");
+    }
+
+    #[test]
     fn add_to_releases_list_skips_entries_with_empty_name_or_version() {
         // `add_to_releases_list` must silently drop a release whose name or version is empty,
         // matching the `if !rel.version().is_empty() && !rel.name.is_empty()` guard.
@@ -1961,7 +2028,7 @@ mod tests {
     /// Build a `fetch_releases_from_s3_async`-ready `Update` whose `Endpoint::Generic` points at
     /// the stub base URL. The Generic endpoint does not require a region.
     #[cfg(feature = "async")]
-    fn s3_update(base_url: &str, current_version: &str) -> Update {
+    fn s3_update(base_url: &str, current_version: &str) -> super::AsyncUpdate {
         Update::configure()
             .endpoint(super::Endpoint::Generic(base_url.to_owned()))
             .bucket_name("test-bucket")
@@ -2360,7 +2427,7 @@ mod tests {
 
     // --- `ReleaseList::fetch` returns a listing `Releases` with NO current version,
     // so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
-    // `MissingField { field: "current_version" }`. `into_vec()` recovers the parsed release vec.
+    // `NoCurrentVersion`. `into_vec()` recovers the parsed release vec.
     #[test]
     fn release_list_fetch_returns_listing_releases_without_current_version() {
         let xml = list_bucket_xml(&["myapp-2.0.0-x86_64-linux", "myapp-1.0.0-x86_64-linux"]);
@@ -2383,11 +2450,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on an s3 listing must error with MissingField, got {:?}",
+            "is_update_available() on an s3 listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let mut versions: Vec<String> = releases
@@ -2404,7 +2469,7 @@ mod tests {
     }
 
     // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
-    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, NoCurrentVersion
     // from `is_update_available()`, `into_vec()` recovers the releases).
     #[cfg(feature = "async")]
     #[tokio::test]
@@ -2430,11 +2495,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on an s3 listing must error with MissingField, got {:?}",
+            "is_update_available() on an s3 listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let mut versions: Vec<String> = releases
@@ -2913,6 +2976,29 @@ mod tests {
         assert!(super::find_version(&releases, "9.9.9").is_err());
     }
 
+    #[test]
+    fn find_version_matches_v_prefixed_release_tag() {
+        // Regression (I5): stored versions are bare semver (the S3 key parser strips any leading
+        // `v`), so a `.release_tag("v1.2.3")` must still resolve. `find_version` normalizes the
+        // requested tag by trimming a leading `v` before comparing; both the `v`-prefixed and the
+        // bare form must select the same release, and a genuinely-absent tag still errors.
+        let releases = [rel("1.0.0"), rel("1.2.3"), rel("2.0.0")];
+        assert_eq!(
+            super::find_version(&releases, "v1.2.3").unwrap().version(),
+            "1.2.3",
+            "a v-prefixed release_tag must match the bare stored semver"
+        );
+        assert_eq!(
+            super::find_version(&releases, "1.2.3").unwrap().version(),
+            "1.2.3",
+            "the bare form must keep working"
+        );
+        assert!(
+            super::find_version(&releases, "v9.9.9").is_err(),
+            "a v-prefixed tag with no matching release still errors"
+        );
+    }
+
     fn configured() -> Update {
         Update::configure()
             .bucket_name("bucket")
@@ -3012,15 +3098,21 @@ mod tests {
     }
 
     #[test]
-    fn build_s3_api_url_gcs_ignores_region_and_uses_maxkeys_only() {
-        // Endpoint::GCS targets `storage.googleapis.com/<bucket>/`, does NOT embed a region, and
-        // its listing query is `max-keys` only (no `list-type=2`, which is S3-specific).
+    fn build_s3_api_url_gcs_ignores_region_but_uses_list_type_2() {
+        // Endpoint::GCS targets `storage.googleapis.com/<bucket>/` and does NOT embed a region.
+        // GCS's XML API supports the S3 ListObjectsV2 `list-type=2` param, which yields
+        // `<NextContinuationToken>` pagination the parser follows; without it GCS falls back to V1
+        // `<NextMarker>` pagination the parser ignores, silently dropping later pages. So the GCS
+        // listing query must carry `list-type=2`, matching the S3/DualStack/DO/Generic arms.
         let (base, url) = api_url(super::Endpoint::GCS, "gbucket", None, None).unwrap();
         assert_eq!(base, "https://storage.googleapis.com/gbucket/");
-        assert_eq!(url, "https://storage.googleapis.com/gbucket/?max-keys=1000");
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/gbucket/?list-type=2&max-keys=1000"
+        );
         assert!(
-            !url.contains("list-type=2"),
-            "GCS listing must not use the S3-only list-type=2 param"
+            url.contains("list-type=2"),
+            "GCS listing must request list-type=2 so V2 NextContinuationToken pagination is used"
         );
     }
 

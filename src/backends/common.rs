@@ -257,7 +257,7 @@ impl RequestConfig {
     /// [`auth_hosts`](Self::auth_hosts) entry, and the scheme must be `https` -- except for loopback
     /// hosts (`localhost`, `127.0.0.1`, `::1`), which are allowed over plain http so a local mirror
     /// and the loopback test stubs keep working.
-    fn auth_allowed_for(&self, url: &str) -> bool {
+    pub(crate) fn auth_allowed_for(&self, url: &str) -> bool {
         let uri = match url.parse::<http::Uri>() {
             Ok(u) => u,
             Err(_) => return false,

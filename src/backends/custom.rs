@@ -2,7 +2,7 @@
 Updates from a user-defined release source.
 
 Use this backend to update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`)
-don't cover. Implement [`ReleaseSource`](crate::ReleaseSource) for your host — the three methods
+don't cover. Implement [`ReleaseSource`] for your host — the three methods
 that say *where releases come from* — then configure a [`custom::Update`](Update) with the same
 shared options as any other backend (target, bin name, version, progress, transport, checksum,
 verify hook, asset matcher, …) and call `update()`. The crate runs its usual compare →
@@ -224,7 +224,14 @@ impl ReleaseUpdate for Update {
 
     fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.source.get_latest_releases()?;
+        let releases = self
+            .source
+            .get_latest_releases()?
+            .into_iter()
+            .filter(|r| {
+                crate::version::bump_is_greater(&current_version, r.version()).unwrap_or(false)
+            })
+            .collect();
         Ok(Releases::new(releases, current_version))
     }
 
@@ -327,6 +334,22 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdate<S> {
     pub fn configure() -> AsyncUpdateBuilder<S> {
         AsyncUpdateBuilder::new()
     }
+
+    /// Whether a release newer than the current version is available, returning it if so.
+    ///
+    /// Async sibling of the sync `is_update_available`, and a convenience over
+    /// [`get_newer_releases_async`](crate::AsyncReleaseUpdate::get_newer_releases_async): returns the
+    /// newest strictly-newer [`Release`], or `None` when already up to date. The strictly-newer
+    /// filter lives in `get_newer_releases_async`; this method simply returns the first result.
+    pub async fn is_update_available_async(&self) -> Result<Option<Release>> {
+        Ok(
+            crate::update::AsyncReleaseUpdate::get_newer_releases_async(self)
+                .await?
+                .into_vec()
+                .into_iter()
+                .next(),
+        )
+    }
 }
 
 #[cfg(feature = "async")]
@@ -344,7 +367,15 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncReleaseUpdate for
     }
     async fn get_newer_releases_async(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = self.source.get_latest_releases().await?;
+        let releases = self
+            .source
+            .get_latest_releases()
+            .await?
+            .into_iter()
+            .filter(|r| {
+                crate::version::bump_is_greater(&current_version, r.version()).unwrap_or(false)
+            })
+            .collect();
         Ok(Releases::new(releases, current_version))
     }
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
@@ -550,6 +581,73 @@ mod tests {
                 .is_update_available()
                 .unwrap(),
             "latest (2.0.0) is not newer than current (2.0.0) => no update"
+        );
+    }
+
+    // C2: get_newer_releases must filter to strictly-newer releases only.
+    //
+    // A source that returns a mix of older-than-current, equal-to-current, and newer-than-current
+    // releases. The fixed `get_newer_releases` must exclude the first two groups; the bug (returning
+    // the unfiltered list verbatim) would cause these tests to fail.
+    struct MultiVersionSource;
+
+    impl ReleaseSource for MultiVersionSource {
+        fn get_latest_release(&self) -> crate::errors::Result<Release> {
+            Release::builder().version("3.0.0").build()
+        }
+        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+            Ok(vec![
+                Release::builder().version("3.0.0").build()?,
+                Release::builder().version("2.0.0").build()?,
+                Release::builder().version("1.5.0").build()?,
+                // equal to current (1.0.0) -- must be excluded
+                Release::builder().version("1.0.0").build()?,
+                // older than current -- must be excluded
+                Release::builder().version("0.9.0").build()?,
+            ])
+        }
+        fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+            Release::builder().version(ver).build()
+        }
+    }
+
+    #[test]
+    fn get_newer_releases_excludes_equal_and_older_releases() {
+        // C2 (sync): the returned Releases must contain only releases strictly newer than the
+        // configured current version. The old code returned the source's list verbatim (5 items);
+        // the fix must drop the equal (1.0.0) and older (0.9.0) entries, leaving 3.
+        let upd = Update::configure()
+            .source(MultiVersionSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build()
+            .unwrap();
+        let rels = upd.get_newer_releases().unwrap();
+        let versions: Vec<&str> = rels.all().iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["3.0.0", "2.0.0", "1.5.0"],
+            "get_newer_releases must exclude equal-to-current (1.0.0) and older (0.9.0)"
+        );
+    }
+
+    #[test]
+    fn get_newer_releases_returns_empty_when_all_releases_are_current_or_older() {
+        // C2 (sync): when every release the source returns is the current version or older, the
+        // filtered result must be an empty list (not the full unfiltered list).
+        let upd = Update::configure()
+            .source(MultiVersionSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("3.0.0")
+            .build()
+            .unwrap();
+        let rels = upd.get_newer_releases().unwrap();
+        assert!(
+            rels.all().is_empty(),
+            "get_newer_releases must return an empty list when nothing is strictly newer; got {:?}",
+            rels.all().iter().map(|r| r.version()).collect::<Vec<_>>()
         );
     }
 
@@ -1226,6 +1324,107 @@ mod tests {
                     .is_update_available()
                     .unwrap(),
                 "2.0.0 not newer than 2.0.0 => no update"
+            );
+        }
+
+        #[tokio::test]
+        async fn is_update_available_async_verb_returns_newest_newer_or_none() {
+            // Exercises the inherent `AsyncUpdate::is_update_available_async` convenience directly:
+            // it must return the newest strictly-newer release, or `None` when already current.
+            let mk = |cur: &str| {
+                AsyncUpdate::configure()
+                    .source(NativeAsyncSource {
+                        latest_calls: Arc::new(AtomicUsize::new(0)),
+                        releases_calls: Arc::new(AtomicUsize::new(0)),
+                        version_calls: Arc::new(AtomicUsize::new(0)),
+                    })
+                    .bin_name("app")
+                    .target("x86_64-unknown-linux-gnu")
+                    .current_version(cur)
+                    .build_async()
+                    .unwrap()
+            };
+            let newer = mk("1.0.0").is_update_available_async().await.unwrap();
+            assert_eq!(
+                newer.map(|r| r.version().to_string()),
+                Some("2.0.0".to_string()),
+                "from 1.0.0 the 2.0.0 release is available"
+            );
+            assert!(
+                mk("2.0.0")
+                    .is_update_available_async()
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "from 2.0.0 nothing newer => None"
+            );
+        }
+
+        // C2 (async): get_newer_releases_async must filter to strictly-newer releases only.
+
+        struct MultiVersionAsyncSource;
+
+        impl AsyncReleaseSource for MultiVersionAsyncSource {
+            async fn get_latest_release(&self) -> crate::errors::Result<Release> {
+                Release::builder().version("3.0.0").build()
+            }
+            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                Ok(vec![
+                    Release::builder().version("3.0.0").build()?,
+                    Release::builder().version("2.0.0").build()?,
+                    Release::builder().version("1.5.0").build()?,
+                    // equal to current -- must be excluded
+                    Release::builder().version("1.0.0").build()?,
+                    // older than current -- must be excluded
+                    Release::builder().version("0.9.0").build()?,
+                ])
+            }
+            async fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
+                Release::builder().version(ver).build()
+            }
+        }
+
+        #[tokio::test]
+        async fn get_newer_releases_async_excludes_equal_and_older_releases() {
+            // C2 (async): the returned Releases must contain only releases strictly newer than the
+            // configured current version. The old code returned the source's list verbatim (5
+            // items); the fix must drop equal (1.0.0) and older (0.9.0), leaving 3.
+            let upd = AsyncUpdate::configure()
+                .source(MultiVersionAsyncSource)
+                .bin_name("app")
+                .target("x86_64-unknown-linux-gnu")
+                .current_version("1.0.0")
+                .build_async()
+                .unwrap();
+            let rels = AsyncReleaseUpdate::get_newer_releases_async(&upd)
+                .await
+                .unwrap();
+            let versions: Vec<&str> = rels.all().iter().map(|r| r.version()).collect();
+            assert_eq!(
+                versions,
+                vec!["3.0.0", "2.0.0", "1.5.0"],
+                "get_newer_releases_async must exclude equal-to-current (1.0.0) and older (0.9.0)"
+            );
+        }
+
+        #[tokio::test]
+        async fn get_newer_releases_async_returns_empty_when_all_current_or_older() {
+            // C2 (async): when every release the source returns is the current version or older,
+            // the filtered result must be an empty list.
+            let upd = AsyncUpdate::configure()
+                .source(MultiVersionAsyncSource)
+                .bin_name("app")
+                .target("x86_64-unknown-linux-gnu")
+                .current_version("3.0.0")
+                .build_async()
+                .unwrap();
+            let rels = AsyncReleaseUpdate::get_newer_releases_async(&upd)
+                .await
+                .unwrap();
+            assert!(
+                rels.all().is_empty(),
+                "get_newer_releases_async must return empty when nothing is strictly newer; got {:?}",
+                rels.all().iter().map(|r| r.version()).collect::<Vec<_>>()
             );
         }
 

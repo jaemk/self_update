@@ -91,6 +91,11 @@ impl ReleaseListBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
+    ///
+    /// Note: this setter differs from `github`'s `api_base_url` (which takes the full API base
+    /// URL including any path prefix, e.g. `https://api.github.com`) and from `s3`'s `endpoint`
+    /// (which selects the S3 service type and endpoint). Each backend's custom-URL setter has a
+    /// different shape matching its API's structure.
     pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = Some(url.into());
         self
@@ -205,7 +210,9 @@ impl ReleaseList {
     pub fn fetch(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
@@ -225,7 +232,9 @@ impl ReleaseList {
     pub async fn fetch_async(&self) -> Result<Releases> {
         let api_url = format!(
             "{}/api/v1/repos/{}/{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
@@ -269,6 +278,11 @@ impl UpdateBuilder {
     ///
     /// Pass the instance host only (scheme + host, no trailing slash); the crate appends the
     /// `/api/v1/...` path itself. Do not include `/api/v1`.
+    ///
+    /// Note: this setter differs from `github`'s `api_base_url` (which takes the full API base
+    /// URL including any path prefix, e.g. `https://api.github.com`) and from `s3`'s `endpoint`
+    /// (which selects the S3 service type and endpoint). Each backend's custom-URL setter has a
+    /// different shape matching its API's structure.
     pub fn host(&mut self, url: impl Into<String>) -> &mut Self {
         self.host = Some(url.into());
         self
@@ -327,13 +341,14 @@ impl UpdateBuilder {
         self.build_update()
     }
 
-    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    /// Confirm config and create a ready-to-use [`AsyncUpdate`] for the async API (`update_async`).
     ///
-    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
-    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    /// Unlike [`build`](Self::build) this returns the distinct [`AsyncUpdate`] newtype, which exposes
+    /// only the inherent `*_async` verbs, so a stray blocking `.update()` on an async-built updater
+    /// is a compile error rather than a silent block of the executor.
     #[cfg(feature = "async")]
-    pub fn build_async(&self) -> Result<Update> {
-        self.build_update()
+    pub fn build_async(&self) -> Result<AsyncUpdate> {
+        Ok(AsyncUpdate(self.build_update()?))
     }
 }
 
@@ -356,7 +371,9 @@ impl Update {
     fn releases_url(&self) -> String {
         format!(
             "{}/api/v1/repos/{}/{}/releases",
-            self.host, self.repo_owner, self.repo_name
+            self.host,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 }
@@ -400,6 +417,19 @@ impl ReleaseUpdate for Update {
 }
 
 impl_sync_update_verbs!(Update);
+
+/// Async-only updater returned by [`UpdateBuilder::build_async`].
+///
+/// A newtype over the blocking [`Update`] that exposes **only** the inherent `*_async` verbs. Using
+/// it (instead of returning `Update` from `build_async`) makes a blocking call on an async-built
+/// updater — e.g. `build_async()?.update()` — a compile error, so the async executor cannot be
+/// silently blocked.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct AsyncUpdate(Update);
+
+#[cfg(feature = "async")]
+impl_async_update_verbs!(AsyncUpdate);
 
 impl_update_config_accessors!(Update, {
     fn api_headers(&self, _auth_token: Option<&str>) -> Result<header::HeaderMap> {
@@ -454,9 +484,15 @@ fn release_array_page(
                 }
                 items.push(release);
             }
-            let next = next_link(resp_headers).map(|next_url| {
-                release_array_page(next_url, api_headers().unwrap_or_default(), stop_at.clone())
-            });
+            let next = next_link(resp_headers)
+                .map(|next_url| -> Result<PageRequest<Release>> {
+                    Ok(release_array_page(
+                        next_url,
+                        api_headers()?,
+                        stop_at.clone(),
+                    ))
+                })
+                .transpose()?;
             Ok(Page {
                 items,
                 next,
@@ -556,9 +592,6 @@ mod tests {
     use super::Update;
     use crate::update::UpdateConfig;
 
-    #[cfg(feature = "async")]
-    use crate::update::AsyncReleaseUpdate;
-
     /// Async test wrapper over `releases_plan` + the async driver (unfiltered, all pages).
     #[cfg(feature = "async")]
     async fn fetch_all_releases_async(
@@ -643,7 +676,7 @@ mod tests {
     }
 
     #[cfg(feature = "async")]
-    fn gitea_update(base: &str, current_version: &str) -> Update {
+    fn gitea_update(base: &str, current_version: &str) -> super::AsyncUpdate {
         Update::configure()
             .host(base)
             .repo_owner("o")
@@ -1004,7 +1037,7 @@ mod tests {
 
     // --- the listing `Releases` from `ReleaseList::fetch` carries NO current
     // version, so `current_version()` is `None` and `is_update_available()` errors with EXACTLY
-    // `MissingField { field: "current_version" }`. `into_vec()` recovers the release vec.
+    // `NoCurrentVersion`. `into_vec()` recovers the release vec.
     #[test]
     fn release_list_fetch_returns_listing_releases_without_current_version() {
         let base = stub(|_| {
@@ -1030,11 +1063,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on a listing must error with MissingField, got {:?}",
+            "is_update_available() on a listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let versions: Vec<String> = releases
@@ -1050,7 +1081,7 @@ mod tests {
     }
 
     // --- async sibling of `release_list_fetch_returns_listing_releases_without_current_version`:
-    // `ReleaseList::fetch_async` yields the same bare listing (no current version, MissingField
+    // `ReleaseList::fetch_async` yields the same bare listing (no current version, NoCurrentVersion
     // from `is_update_available()`, `into_vec()` recovers the releases).
     #[cfg(feature = "async")]
     #[tokio::test]
@@ -1079,11 +1110,9 @@ mod tests {
         assert!(
             matches!(
                 releases.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "is_update_available() on a listing must error with MissingField, got {:?}",
+            "is_update_available() on a listing must error with NoCurrentVersion, got {:?}",
             releases.is_update_available()
         );
         let versions: Vec<String> = releases
@@ -1337,6 +1366,61 @@ mod tests {
         assert_eq!(
             upd.releases_url(),
             "https://gitea.example.com/api/v1/repos/owner/repo/releases"
+        );
+    }
+
+    // --- I3: releases_url percent-encodes owner and name ------------------------------------
+    //
+    // `repo_owner` / `repo_name` containing URL-special characters (e.g. a space) must be
+    // percent-encoded in the releases URL, matching gitlab's behavior. A space becomes %20;
+    // plain alphanumeric names are unaffected.
+
+    #[test]
+    fn releases_url_encodes_owner_and_name() {
+        // A space in repo_owner and repo_name must be encoded as %20 in the URL.
+        // Without the fix the raw space appears in the path and breaks HTTP requests.
+        let upd = Update::configure()
+            .host("https://gitea.example.com")
+            .repo_owner("my owner")
+            .repo_name("my repo")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build_update()
+            .unwrap();
+        assert_eq!(
+            upd.releases_url(),
+            "https://gitea.example.com/api/v1/repos/my%20owner/my%20repo/releases",
+            "repo_owner and repo_name must be percent-encoded in the releases URL"
+        );
+    }
+
+    #[test]
+    fn release_list_fetch_encodes_owner_and_name_in_request_path() {
+        // `ReleaseList::fetch` must also percent-encode owner/name in the actual HTTP request.
+        // Captures the raw request line and asserts the encoded form appears in the path.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_json(&["v1.0.0"]),
+            }]
+        });
+        super::ReleaseList::configure()
+            .host(&base)
+            .repo_owner("my owner")
+            .repo_name("my repo")
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap();
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one request must be made");
+        let request_line = reqs[0].lines().next().unwrap_or("");
+        assert!(
+            request_line.contains("/api/v1/repos/my%20owner/my%20repo/releases"),
+            "owner and name must be percent-encoded in the ReleaseList::fetch request path; \
+             got request line: {}",
+            request_line
         );
     }
 

@@ -2,6 +2,51 @@
 
 ## [unreleased]
 
+## [1.0.0-rc.3]
+Further 1.0 surface changes on top of rc.2: two API breaks (closing the async-blocking footgun and
+aligning the signature-key accessor name), plus correctness, security-hardening, and doc fixes. The
+breaks are folded into the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md).
+
+### Added
+- `is_update_available_async()` on every backend's async updater, the async sibling of
+  `is_update_available()`.
+- `max_download_size(bytes)` on `Download`: an optional cap that aborts a download whose body
+  exceeds it (default: no cap).
+- `Error::NoCurrentVersion`, returned by `Releases::is_update_available()` on a bare listing with no
+  current version (previously a misleading `MissingField { field: "current_version" }`).
+
+### Changed
+- `build_async()` returns a distinct `AsyncUpdate` wrapper per built-in backend
+  (`github::AsyncUpdate`, `gitlab::AsyncUpdate`, ...) instead of the same `Update` that `build()`
+  returns. The wrapper exposes only the async (`*_async`) verbs as inherent methods (no trait import
+  needed), so a blocking call such as `.update()` on an async-built updater is now a compile error
+  instead of silently blocking the executor. Migration: call the `*_async` verbs and drop any
+  `use self_update::AsyncReleaseUpdate`; if you named the return type, use the backend's `AsyncUpdate`.
+- Renamed the signature-key accessor `verify_keys()` -> `verifying_keys()`, matching the
+  `verifying_keys(...)` setter (`signatures` feature). Migration: rename accessor call sites; the
+  setter is unchanged.
+- `Releases::is_update_available()` on a bare listing now returns `Error::NoCurrentVersion` instead
+  of `Error::MissingField { field: "current_version" }`.
+- A user-supplied `Authorization` header (set via `request_header`) is now host-gated like the
+  derived auth token: it is not forwarded to a server-chosen next-page or download host unless that
+  host is authorized (`allow_auth_host` / a matching origin).
+- Zip extraction masks the setuid/setgid/sticky bits from archive entry modes (`mode & 0o777`), so
+  an archived `0o4755` entry no longer installs setuid.
+
+### Fixed
+- s3 `.release_tag("v1.2.3")` (v-prefixed) now matches; it previously always failed with
+  `NoReleaseFound` because stored s3 versions are bare semver.
+- The custom backend's `get_newer_releases()` now filters to strictly-newer releases, matching the
+  other backends and the trait contract (it previously returned the source's full list).
+- GCS bucket listings now paginate past the first page (the listing URL was missing `list-type=2`,
+  so continuation tokens were never emitted and later releases were dropped).
+- `version::bump_is_compatible` no longer reports a pre-release-to-older comparison (e.g.
+  `2.0.5-alpha.0` vs `2.0.3`) as compatible.
+- Presigned s3 URLs are redacted in the retry warn-logs (they were previously emitted with a live
+  `X-Amz-Signature`).
+- Listing response bodies are size-bounded before buffering, and `..` / path separators are
+  rejected in a templated `bin_path_in_archive` before extraction.
+
 ## [1.0.0-rc.2]
 Further breaking changes finalizing the 1.0 surface (still in release-candidate). They make the
 HTTP transport an injectable object-safe trait, restructure the error type, finalize the release
