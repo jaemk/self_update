@@ -56,6 +56,12 @@ pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
 /// against pathological release histories.
 pub(crate) const MAX_RELEASE_PAGES: usize = 100;
 
+/// Maximum number of bytes buffered for a single listing-page body. A per-page COUNT bound
+/// ([`MAX_RELEASE_PAGES`]) was already present; this per-page SIZE bound prevents a pathological
+/// or misconfigured endpoint from forcing unbounded memory use. Real GitHub/GitLab/Gitea release
+/// listing pages with 100 entries and many assets are well under 1 MiB; 4 MiB is a generous cap.
+pub(crate) const MAX_LISTING_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+
 /// A sans-io description of a single page request: *what* to fetch (`url` + `headers`) and *how*
 /// to parse the response body into items, the next page (if any), and an early-stop signal — with
 /// no transport. The two drivers ([`run_paginated`] / [`run_paginated_async`]) perform the IO by
@@ -113,8 +119,23 @@ pub(crate) fn run_paginated<T>(
         let resp = send(&url, headers, config)?;
         let resp_headers = resp.headers().clone();
         let mut body = Vec::new();
-        let mut reader = resp.body();
-        std::io::Read::read_to_end(&mut reader, &mut body)?;
+        let reader = resp.body();
+        // S5: cap the per-page body size so a malicious or misconfigured endpoint cannot force
+        // unbounded memory use. Read one byte past the cap to distinguish "exactly at the cap"
+        // (fine) from "over the cap" (error).
+        let mut limited = {
+            use std::io::Read as _;
+            reader.take((MAX_LISTING_BODY_BYTES + 1) as u64)
+        };
+        std::io::Read::read_to_end(&mut limited, &mut body)?;
+        if body.len() > MAX_LISTING_BODY_BYTES {
+            return Err(Error::InvalidResponse {
+                source: Box::new(crate::errors::MessageError(format!(
+                    "listing page body exceeded the {MAX_LISTING_BODY_BYTES}-byte cap; \
+                     real release listing pages are much smaller"
+                ))),
+            });
+        }
         let page = parse(&body, &resp_headers)?;
         out.extend(page.items);
         pages += 1;
@@ -162,6 +183,15 @@ pub(crate) async fn run_paginated_async<T>(
         let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
             body.extend_from_slice(&chunk?);
+            // S5: cap the per-page body size (same bound as the sync driver).
+            if body.len() > MAX_LISTING_BODY_BYTES {
+                return Err(Error::InvalidResponse {
+                    source: Box::new(crate::errors::MessageError(format!(
+                        "listing page body exceeded the {MAX_LISTING_BODY_BYTES}-byte cap; \
+                         real release listing pages are much smaller"
+                    ))),
+                });
+            }
         }
         let page = parse(&body, &resp_headers)?;
         out.extend(page.items);
@@ -213,8 +243,9 @@ pub(crate) fn retry_backoff_ms(
     base: std::time::Duration,
     max: std::time::Duration,
 ) -> u64 {
-    let base_ms = base.as_millis() as u64;
-    let max_ms = max.as_millis() as u64;
+    // I8: as_millis() returns u128; saturate to u64::MAX rather than silently truncating.
+    let base_ms = u64::try_from(base.as_millis()).unwrap_or(u64::MAX);
+    let max_ms = u64::try_from(max.as_millis()).unwrap_or(u64::MAX);
     // Double `base` `attempt` times with saturation, then clamp to `max`.
     let doubled = (0..attempt).fold(base_ms, |acc, _| acc.saturating_mul(2));
     doubled.min(max_ms)
@@ -295,6 +326,11 @@ pub(crate) fn send(
     // at another host does not receive it.
     config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
+        // S2: gate a user-supplied Authorization header with the same host check that guards the
+        // backend-derived token; drop it for any host that is not in the allow list.
+        if name == http_client::header::AUTHORIZATION && !config.auth_allowed_for(url) {
+            continue;
+        }
         base.insert(name.clone(), value.clone());
     }
     // Dispatch through the injected client if present, else the crate's default per-call client.
@@ -312,7 +348,9 @@ pub(crate) fn send(
         config.retry_max_delay,
         || client.get(url, &base, config.timeout),
         |e, backoff| {
-            log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
+            // S1: redact presigned-URL credentials before logging.
+            let safe_url = crate::errors::redact_url(url);
+            log::warn!("self_update: request to {safe_url} failed ({e}); retrying in {backoff}ms");
             std::thread::sleep(std::time::Duration::from_millis(backoff));
         },
     )
@@ -328,6 +366,10 @@ pub(crate) async fn send_async(
 ) -> Result<Box<dyn http_client::AsyncHttpResponse>> {
     config.apply_auth(url, &mut base)?;
     for (name, value) in &config.headers {
+        // S2: same host gate as the sync `send` path (see comment there).
+        if name == http_client::header::AUTHORIZATION && !config.auth_allowed_for(url) {
+            continue;
+        }
         base.insert(name.clone(), value.clone());
     }
     let default;
@@ -344,7 +386,9 @@ pub(crate) async fn send_async(
         config.retry_max_delay,
         || client.get(url, &base, config.timeout),
         |e, backoff| {
-            log::warn!("self_update: request to {url} failed ({e}); retrying in {backoff}ms");
+            // S1: redact presigned-URL credentials before logging.
+            let safe_url = crate::errors::redact_url(url);
+            log::warn!("self_update: request to {safe_url} failed ({e}); retrying in {backoff}ms");
         },
         |backoff| tokio::time::sleep(std::time::Duration::from_millis(backoff)),
     )
@@ -1071,7 +1115,9 @@ mod test {
         use crate::backends::common::AuthScheme;
         use crate::http_client::header::AUTHORIZATION;
         // A backend token is configured AND the user supplies their own Authorization via
-        // `request_header` (i.e. config.headers). The user override must win on the listing path.
+        // `request_header` (i.e. config.headers). The user override must win on the listing path
+        // when the URL's host is in the allow list (S2: the same host gate applies to both the
+        // derived token and the user-supplied Authorization).
         let (base, captured) = auth_capture_stub();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, "Bearer user-override".parse().unwrap());
@@ -1079,6 +1125,8 @@ mod test {
             auth_scheme: AuthScheme::Token,
             auth_token: Some("secret".to_string()),
             headers,
+            // Allow the stub's loopback host so the user Authorization passes the S2 gate.
+            auth_base_host: crate::backends::common::host_of(&base),
             ..Default::default()
         };
         let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
@@ -1136,6 +1184,217 @@ mod test {
         assert_eq!(
             next_link(&headers),
             Some("https://api.example.com/r?page=2".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // I8: retry_backoff_ms safe u128->u64 cast
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn retry_backoff_ms_saturates_for_huge_duration() {
+        use crate::backends::retry_backoff_ms;
+        use std::time::Duration;
+        // Duration::from_secs(u64::MAX) has as_millis() >> u64::MAX; the old `as u64` cast
+        // silently truncated. The fix (u64::try_from(..).unwrap_or(u64::MAX)) must saturate.
+        let huge = Duration::from_secs(u64::MAX);
+        // Both base and max are huge; regardless of attempt, the result must be u64::MAX.
+        assert_eq!(
+            retry_backoff_ms(0, huge, huge),
+            u64::MAX,
+            "a Duration::from_secs(u64::MAX) base must not truncate: expected u64::MAX"
+        );
+        // A clamp against a huge max: the doubled base is still huge, capped to the huge max.
+        assert_eq!(
+            retry_backoff_ms(5, huge, huge),
+            u64::MAX,
+            "a huge duration at a non-zero attempt must also saturate to u64::MAX"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S1: retry log lines must not leak presigned-URL credentials
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn retry_log_redacts_amz_signature_in_presigned_url() {
+        // The retry on_retry closure in `send`/`send_async` must call `crate::errors::redact_url`
+        // before formatting the log message (S1 fix). Construct the exact string the closure
+        // produces and assert no raw credential value appears.
+        let presigned_url = "https://bucket.s3.amazonaws.com/app.tar.gz\
+            ?X-Amz-Credential=AKIAEXAMPLE\
+            &X-Amz-Expires=300\
+            &X-Amz-Signature=s3cr3tsig\
+            &X-Amz-SignedHeaders=host";
+        let safe = crate::errors::redact_url(presigned_url);
+        // Format the message exactly as the on_retry closure does:
+        let log_line = format!("self_update: request to {safe} failed (err); retrying in 100ms");
+        assert!(
+            !log_line.contains("s3cr3tsig"),
+            "retry log line must not contain the raw X-Amz-Signature value: {log_line}"
+        );
+        assert!(
+            log_line.contains("X-Amz-Signature=REDACTED"),
+            "the parameter key must still appear as REDACTED in the log: {log_line}"
+        );
+        // Confirm that WITHOUT redaction the secret would have appeared (documents the fix intent).
+        let without_fix =
+            format!("self_update: request to {presigned_url} failed (err); retrying in 100ms");
+        assert!(
+            without_fix.contains("s3cr3tsig"),
+            "sanity: the unfixed format string DOES contain the raw signature"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S2: user-supplied Authorization is gated by the same host check as the
+    //     backend-derived token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn send_drops_user_authorization_for_disallowed_host() {
+        // A user-supplied Authorization in config.headers must be dropped for a host that is not
+        // in the allow list (S2 fix). auth_base_host=None means no host is allowed.
+        use crate::http_client::header::AUTHORIZATION;
+        let (base, captured) = auth_capture_stub();
+        let mut extra = HeaderMap::new();
+        extra.insert(AUTHORIZATION, "Bearer user-token".parse().unwrap());
+        let config = RequestConfig {
+            headers: extra,
+            auth_base_host: None, // no host allowed → user Authorization must be dropped
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            None,
+            "user Authorization must be dropped when auth_base_host is None (disallowed host)"
+        );
+    }
+
+    #[test]
+    fn send_keeps_user_authorization_for_allowed_host() {
+        // A user-supplied Authorization must reach the server when the URL's host is in the allow
+        // list (S2 regression guard: the gate must not over-restrict).
+        use crate::http_client::header::AUTHORIZATION;
+        let (base, captured) = auth_capture_stub();
+        let stub_host = crate::backends::common::host_of(&base);
+        let mut extra = HeaderMap::new();
+        extra.insert(AUTHORIZATION, "Bearer user-token".parse().unwrap());
+        let config = RequestConfig {
+            headers: extra,
+            auth_base_host: stub_host,
+            ..Default::default()
+        };
+        let _ = crate::backends::send(&base, HeaderMap::new(), &config).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_authorization(&lines),
+            Some("Bearer user-token".to_string()),
+            "user Authorization must be forwarded when the host is in the allow list"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S5: per-page body size cap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_paginated_errors_when_body_exceeds_cap() {
+        use crate::backends::MAX_LISTING_BODY_BYTES;
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        // A body one byte over MAX_LISTING_BODY_BYTES must produce Error::InvalidResponse
+        // before parse is ever called (S5: per-page body size cap).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let over_cap = MAX_LISTING_BODY_BYTES + 1;
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {over_cap}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let chunk = vec![b'x'; 8192];
+                let mut remaining = over_cap;
+                while remaining > 0 {
+                    let n = remaining.min(chunk.len());
+                    let _ = stream.write_all(&chunk[..n]);
+                    remaining -= n;
+                }
+                let _ = stream.flush();
+            }
+        });
+        let req = PageRequest::<i32> {
+            url: format!("{base}/page"),
+            headers: HeaderMap::new(),
+            // Without the S5 fix, parse would be called with a huge body and return Aborted —
+            // the assertion below would then fail (Aborted != InvalidResponse).
+            parse: Box::new(|_body, _headers| Err(crate::errors::Error::Aborted)),
+        };
+        let res = crate::backends::run_paginated(req, &RequestConfig::default());
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "a body over the cap must error with InvalidResponse, got: {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn run_paginated_normal_body_is_not_capped() {
+        // A body well under MAX_LISTING_BODY_BYTES must parse normally (S5 regression guard).
+        let (base, _) = linked_stub(vec![(None, "10,20,30")]);
+        let got = crate::backends::run_paginated(
+            int_page(format!("{base}/page")),
+            &RequestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(got, vec![10, 20, 30]);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_errors_when_body_exceeds_cap() {
+        use crate::backends::MAX_LISTING_BODY_BYTES;
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        // Async variant of run_paginated_errors_when_body_exceeds_cap.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let over_cap = MAX_LISTING_BODY_BYTES + 1;
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {over_cap}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let chunk = vec![b'x'; 8192];
+                let mut remaining = over_cap;
+                while remaining > 0 {
+                    let n = remaining.min(chunk.len());
+                    let _ = stream.write_all(&chunk[..n]);
+                    remaining -= n;
+                }
+                let _ = stream.flush();
+            }
+        });
+        let req = PageRequest::<i32> {
+            url: format!("{base}/page"),
+            headers: HeaderMap::new(),
+            parse: Box::new(|_body, _headers| Err(crate::errors::Error::Aborted)),
+        };
+        let res = crate::backends::run_paginated_async(req, &RequestConfig::default()).await;
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "async: a body over the cap must error with InvalidResponse, got: {:?}",
+            res
         );
     }
 }

@@ -122,6 +122,14 @@ pub enum Error {
         /// The name of the missing required field.
         field: &'static str,
     },
+    /// A bare release listing ([`ReleaseList::fetch`](crate::backends)) carries no current version,
+    /// so [`Releases::is_update_available`](crate::update::Releases::is_update_available) has nothing
+    /// to compare its releases against.
+    ///
+    /// Distinct from [`MissingField`](Error::MissingField): there is no builder field to set. Use
+    /// `Update::is_update_available` on a configured updater (which knows its current version)
+    /// instead.
+    NoCurrentVersion,
     /// An HTTP header supplied to the builder (`request_header` / `header`) was not valid.
     ///
     /// Wraps the underlying header-conversion error, surfaced via [`std::error::Error::source`].
@@ -330,6 +338,11 @@ impl std::fmt::Display for Error {
             }
             InvalidResponse { source } => write!(f, "ReleaseError: invalid response: {}", source),
             MissingField { field } => write!(f, "ConfigError: `{}` required", field),
+            NoCurrentVersion => write!(
+                f,
+                "ReleaseError: this Releases has no current_version to compare against; use \
+                 `Update::is_update_available` for a configured updater"
+            ),
             InvalidHeader { source } => write!(f, "ConfigError: invalid HTTP header: {}", source),
             InvalidAuthToken { source } => {
                 write!(f, "ConfigError: failed to parse auth token: {}", source)
@@ -1136,6 +1149,28 @@ mod tests {
             "MissingField carries no source, got {:?}",
             err.source()
         );
+        assert_eq!(err.http_status(), None);
+        assert_eq!(err.url(), None);
+    }
+
+    // `NoCurrentVersion` is a distinct, self-describing variant (not `MissingField`): its Display
+    // names the missing current_version and points at `Update::is_update_available`, carries no
+    // source, and exposes no http_status()/url(). Pins that the bare-listing precheck error is not
+    // the misleading builder-field message.
+    #[test]
+    fn no_current_version_display_and_no_source() {
+        let err = Error::NoCurrentVersion;
+        let shown = err.to_string();
+        assert_eq!(
+            shown,
+            "ReleaseError: this Releases has no current_version to compare against; use \
+             `Update::is_update_available` for a configured updater"
+        );
+        assert!(
+            !matches!(err, Error::MissingField { .. }),
+            "NoCurrentVersion must be distinct from MissingField"
+        );
+        assert!(err.source().is_none(), "NoCurrentVersion carries no source");
         assert_eq!(err.http_status(), None);
         assert_eq!(err.url(), None);
     }

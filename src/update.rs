@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::borrow::Cow;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::http_client::{self, header};
 use crate::{Download, Extract, Move, VersionStatus, confirm, errors::*, version};
@@ -45,7 +45,7 @@ impl ReleaseAsset {
 /// The richer result of [`update_extended`](ReleaseUpdate::update_extended) (and its async sibling
 /// `update_extended_async`): it carries the full [`Release`] that was installed.
 ///
-/// This is the extended counterpart of [`VersionStatus`](crate::VersionStatus), the lightweight
+/// This is the extended counterpart of [`VersionStatus`], the lightweight
 /// result of [`update`](ReleaseUpdate::update) which carries only the version tag. Reach for
 /// `ReleaseStatus` when you need the installed release's details (name, date, body, assets); reach
 /// for `VersionStatus` when the version string is all you need. Convert with
@@ -60,7 +60,7 @@ pub enum ReleaseStatus {
 }
 
 impl ReleaseStatus {
-    /// Turn the extended information into the crate's standard [`VersionStatus`](crate::VersionStatus) enum
+    /// Turn the extended information into the crate's standard [`VersionStatus`] enum
     pub fn into_version_status(self, current_version: String) -> VersionStatus {
         match self {
             ReleaseStatus::UpToDate => VersionStatus::UpToDate(current_version),
@@ -374,12 +374,20 @@ impl Releases {
     ///
     /// This consults only the already-fetched releases — no further request is made, so the only
     /// `Err` this can return is a version-parse failure ([`Error::SemVer`]) or, when no current
-    /// version is known (a bare listing), [`Error::MissingField`]; it never surfaces a transport or
-    /// HTTP error.
+    /// version is known (a bare listing), [`Error::NoCurrentVersion`]; it never surfaces a transport
+    /// or HTTP error.
+    ///
+    /// # See also
+    ///
+    /// The per-backend `Update::is_update_available` is the configured-updater counterpart: it
+    /// *fetches* the latest release and returns `Result<Option<Release>>` (the newer [`Release`], or
+    /// `None` when up to date), whereas this method returns `Result<bool>` over the releases already
+    /// in hand and never makes a request.
     pub fn is_update_available(&self) -> Result<bool> {
-        let current_version = self.current_version.as_deref().ok_or(Error::MissingField {
-            field: "current_version",
-        })?;
+        let current_version = self
+            .current_version
+            .as_deref()
+            .ok_or(Error::NoCurrentVersion)?;
         for r in &self.releases {
             if version::bump_is_greater(current_version, r.version())? {
                 return Ok(true);
@@ -433,7 +441,7 @@ impl<'a> IntoIterator for &'a Releases {
 /// sync `ReleaseSource` from the async API, wrap it in
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking).
 ///
-/// On failure, return one of the public [`Error`](crate::errors::Error) variants. For a completed
+/// On failure, return one of the public [`Error`] variants. For a completed
 /// request with a non-2xx status use the structured variants — e.g.
 /// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
 /// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
@@ -482,7 +490,7 @@ pub trait ReleaseSource: Send + Sync {
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking), which runs the sync fetches
 /// on [`tokio::task::spawn_blocking`].
 ///
-/// On failure, return one of the public [`Error`](crate::errors::Error) variants. For a completed
+/// On failure, return one of the public [`Error`] variants. For a completed
 /// request with a non-2xx status use the structured variants — e.g.
 /// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
 /// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
@@ -526,9 +534,10 @@ pub trait AsyncReleaseSource: Send + Sync {
 /// object-safe — that is expected and matches [`AsyncReleaseSource`]: it is nameable and usable as
 /// a generic bound, but never as a `dyn AsyncReleaseUpdate`.
 ///
-/// The shared accessor methods live on the [`UpdateConfig`] supertrait; bring it into scope
-/// (`use self_update::UpdateConfig;`) only to call them from generic code bounded
-/// `U: AsyncReleaseUpdate`.
+/// The shared accessor methods live on the [`UpdateConfig`] supertrait. In generic code bounded
+/// `U: AsyncReleaseUpdate` they are already in scope via the supertrait bound (no import needed);
+/// bring the trait into scope (`use self_update::UpdateConfig;`) only to call them on a concrete
+/// backend `Update` value.
 // `UpdateInternals` is intentionally `pub(crate)`: it carries the crate-private-typed accessors
 // and seals the trait further. The public trait is reachable but the bound is not nameable
 // downstream, which is the intent.
@@ -602,9 +611,10 @@ pub(crate) mod sealed {
 /// not implement the sync fetch methods.
 ///
 /// You rarely name this trait directly: accessor calls (e.g. `bin_name()`, `current_version()`,
-/// `target()`) resolve on a `dyn ReleaseUpdate` value without importing it. It is only needed in
-/// scope (`use self_update::UpdateConfig;`) to call an accessor from generic code bounded
-/// `R: ReleaseUpdate`.
+/// `target()`) resolve on a `dyn ReleaseUpdate` value without importing it, and in generic code
+/// bounded `R: ReleaseUpdate` they are in scope via the supertrait bound (also no import). It is
+/// only needed in scope (`use self_update::UpdateConfig;`) to call an accessor on a concrete
+/// backend `Update` value.
 pub trait UpdateConfig: sealed::Sealed {
     /// Current version of binary being updated
     fn current_version(&self) -> &str;
@@ -653,7 +663,7 @@ pub trait UpdateConfig: sealed::Sealed {
     /// Construct a header with an authorisation entry if an auth token is provided.
     ///
     /// The trait default is a no-op (empty header map): the authorization scheme now lives in the
-    /// per-backend [`RequestConfig`](crate::backends::common::RequestConfig) and is applied by the
+    /// per-backend `RequestConfig` and is applied by the
     /// shared header-derivation, not here. Backends that need a custom user-agent / scheme still
     /// override this (github/gitlab/gitea).
     fn api_headers(&self, _auth_token: Option<&str>) -> Result<http_client::HeaderMap> {
@@ -707,7 +717,7 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
 
     /// ed25519ph verifying keys to validate a download's authenticity
     #[cfg(feature = "signatures")]
-    fn verify_keys(&self) -> &[crate::VerifyingKey] {
+    fn verifying_keys(&self) -> &[crate::VerifyingKey] {
         &[]
     }
 }
@@ -720,11 +730,12 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
 /// `update()` / `update_extended()` on it — but you do not implement it yourself.
 ///
 /// The shared accessor methods live on the [`UpdateConfig`] supertrait. They resolve on a
-/// `dyn ReleaseUpdate` without importing it; bring it into scope (`use self_update::UpdateConfig;`)
-/// only to call them from generic code bounded `R: ReleaseUpdate`.
+/// `dyn ReleaseUpdate` without importing it, and in generic code bounded `R: ReleaseUpdate` they
+/// are in scope via the supertrait bound (also no import); bring it into scope
+/// (`use self_update::UpdateConfig;`) only to call them on a concrete backend `Update` value.
 ///
 /// The trait is sealed transitively: its [`UpdateConfig`] supertrait requires
-/// [`sealed::Sealed`](sealed) (implemented only inside this crate), so `ReleaseUpdate` cannot be
+/// `sealed::Sealed` (implemented only inside this crate), so `ReleaseUpdate` cannot be
 /// implemented for a foreign type even though the trait itself has no visible seal.
 #[allow(private_bounds)]
 pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
@@ -867,11 +878,16 @@ fn choose_latest_release(
             release.version()
         ),
     );
-    let qualifier = if version::bump_is_compatible(current_version, release.version())? {
-        ""
-    } else {
-        "*NOT* "
-    };
+    // Both versions were already validated as semver upstream (the selection filters above parse
+    // them), so this comparison cannot actually error. Express that invariant with `unwrap_or(false)`
+    // — consistent with the `bump_is_greater`/`bump_is_compatible` filter sites above — rather than a
+    // `?` that would imply a live error path here.
+    let qualifier =
+        if version::bump_is_compatible(current_version, release.version()).unwrap_or(false) {
+            ""
+        } else {
+            "*NOT* "
+        };
     println(
         show_output,
         &format!("New release is {}compatible", qualifier),
@@ -994,7 +1010,19 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
         .apply_auth(target_asset.download_url(), &mut headers)?;
     // Apply the user's extra request headers to the download too. This runs after the ACCEPT and
     // auth headers set above, so a user-supplied header of the same name overrides them here.
+    //
+    // S2: a user-supplied `Authorization` (set via `request_header(AUTHORIZATION, ..)`) is a
+    // credential, so it is host-gated exactly like the crate's derived token — forwarded only to a
+    // host `auth_allowed_for` permits (the configured API host or an `allow_auth_host` entry, over
+    // https / loopback). A server-chosen next-page or download host that is not authorized does not
+    // receive it, so a malicious release server cannot harvest the user's Authorization.
+    let user_auth_allowed = u
+        .request_config()
+        .auth_allowed_for(target_asset.download_url());
     for (name, value) in u.request_headers() {
+        if name == header::AUTHORIZATION && !user_auth_allowed {
+            continue;
+        }
         headers.insert(name.clone(), value.clone());
     }
     download.replace_headers(headers);
@@ -1065,7 +1093,7 @@ impl FinishCtx {
             #[cfg(feature = "checksums")]
             verify_checksum: u.verify_checksum().cloned(),
             #[cfg(feature = "signatures")]
-            verify_keys: u.verify_keys().to_vec(),
+            verify_keys: u.verifying_keys().to_vec(),
         }
     }
 }
@@ -1107,20 +1135,38 @@ fn finish_update_owned(
 
     let bin_path_str = Cow::Borrowed(ctx.bin_path_in_archive.as_str());
 
-    // Substitute the `var` variable in a string with the given `val` value.
-    // Variable format: `{{ var }}`
-    fn substitute<'a: 'b, 'b>(str: &'a str, var: &str, val: &str) -> Cow<'b, str> {
-        let format = format!(r"\{{\{{[[:space:]]*{}[[:space:]]*\}}\}}", var);
+    // The `{{ version }}` / `{{ target }}` / `{{ bin }}` template matchers. Hoisted to `static`
+    // `LazyLock<Regex>` (I6) so each is compiled once, not rebuilt from its constant pattern on
+    // every call. Pattern is unchanged: `{{`, optional whitespace, the variable name, optional
+    // whitespace, `}}`.
+    static VERSION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\{\{[[:space:]]*version[[:space:]]*\}\}").unwrap());
+    static TARGET_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\{\{[[:space:]]*target[[:space:]]*\}\}").unwrap());
+    static BIN_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\{\{[[:space:]]*bin[[:space:]]*\}\}").unwrap());
+
+    // Substitute a `{{ var }}` placeholder (matched by `re`) in `str` with `val`.
+    //
+    // S6 (defense-in-depth): the `{{ version }}` value comes from the release server, so a
+    // malicious version like `../evil` (or one with a `/`/`\` separator) could redirect the
+    // extraction path outside the temp dir. When the template actually references the variable,
+    // reject a value that is not a single safe path component (reusing `is_safe_asset_name`, which
+    // rejects `/`, `\`, `:`, `.`, `..`, roots, and drive prefixes) before it can reach the path.
+    fn substitute<'a: 'b, 'b>(re: &Regex, str: &'a str, val: &str) -> Result<Cow<'b, str>> {
+        if re.is_match(str) && !is_safe_asset_name(val) {
+            return Err(Error::InvalidAssetName {
+                name: val.to_string(),
+            });
+        }
         // `NoExpand` so a `$` in `val` (e.g. a bin name or version containing `$`) is inserted
         // literally, not interpreted as a regex capture-group reference.
-        Regex::new(&format)
-            .unwrap()
-            .replace_all(str, regex::NoExpand(val))
+        Ok(re.replace_all(str, regex::NoExpand(val)))
     }
 
-    let bin_path_str = substitute(&bin_path_str, "version", ctx.release.version());
-    let bin_path_str = substitute(&bin_path_str, "target", &ctx.target);
-    let bin_path_str = substitute(&bin_path_str, "bin", &ctx.bin_name);
+    let bin_path_str = substitute(&VERSION_RE, &bin_path_str, ctx.release.version())?;
+    let bin_path_str = substitute(&TARGET_RE, &bin_path_str, &ctx.target)?;
+    let bin_path_str = substitute(&BIN_RE, &bin_path_str, &ctx.bin_name)?;
     let bin_path_str = bin_path_str.as_ref();
 
     Extract::from_source(tmp_archive_path).extract_file(tmp_archive_dir.path(), bin_path_str)?;
@@ -1677,11 +1723,10 @@ mod tests {
         assert!(
             matches!(
                 listing.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
-            "a bare listing must error on is_update_available"
+            "a bare listing must error on is_update_available with the distinct NoCurrentVersion \
+             variant, not the misleading MissingField builder-field error"
         );
     }
 
@@ -1715,11 +1760,15 @@ mod tests {
         assert!(
             matches!(
                 listing.is_update_available(),
-                Err(crate::errors::Error::MissingField {
-                    field: "current_version"
-                })
+                Err(crate::errors::Error::NoCurrentVersion)
             ),
             "a listing with no current version must error on is_update_available()"
+        );
+        // The message must be self-describing, not the builder-field `MissingField` message.
+        let msg = listing.is_update_available().unwrap_err().to_string();
+        assert!(
+            msg.contains("no current_version to compare against"),
+            "the error must self-describe the bare-listing case, got: {msg}"
         );
     }
 
@@ -2312,15 +2361,19 @@ mod tests {
     #[test]
     fn download_path_honors_user_authorization_override() {
         // A backend token is configured AND the user supplies their own Authorization via
-        // `request_header`. The override must win on the DOWNLOAD path, exactly like the listing path.
+        // `request_header`. The override must win over the backend token on the DOWNLOAD path,
+        // exactly like the listing path — when the asset host is authorized (here via
+        // `allow_auth_host`, since the loopback stub is not the github API host).
         use crate::http_client::header::AUTHORIZATION;
         let (base, captured) = download_auth_capture_stub();
+        let host = crate::backends::common::host_of(&base).unwrap();
         let upd = crate::backends::github::Update::configure()
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
             .current_version("0.1.0")
             .auth_token("secret")
+            .allow_auth_host(host)
             .request_header(AUTHORIZATION, "Bearer user-override")
             .build()
             .unwrap();
@@ -2332,7 +2385,37 @@ mod tests {
         assert_eq!(
             captured_download_authorization(&lines),
             Some("Bearer user-override".to_string()),
-            "a user AUTHORIZATION override must win over the backend token on the download path"
+            "a user AUTHORIZATION override must win over the backend token, and be forwarded to the \
+             authorized asset host"
+        );
+    }
+
+    #[cfg(feature = "github")]
+    #[test]
+    fn download_path_drops_user_authorization_for_disallowed_host() {
+        // S2: a user-supplied `Authorization` (via `request_header`) is a credential, so it must be
+        // host-gated exactly like the crate's derived token. The loopback stub is NOT the github API
+        // host and is NOT in `allow_auth_host`, so the user's Authorization must be dropped, not
+        // leaked to the server-chosen download host.
+        use crate::http_client::header::AUTHORIZATION;
+        let (base, captured) = download_auth_capture_stub();
+        let upd = crate::backends::github::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .request_header(AUTHORIZATION, "Bearer user-secret")
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/app.tar.gz"));
+        let download = super::build_download(&upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        assert_eq!(
+            captured_download_authorization(&lines),
+            None,
+            "a user Authorization must NOT be forwarded to a disallowed (cross-origin) download host"
         );
     }
 
@@ -2917,6 +3000,138 @@ mod tests {
             "expected Signature error for wrong zip key, got: {err}"
         );
         Ok(())
+    }
+
+    // --- S6: template-substitution path-traversal guard --------------------------------------
+
+    /// Build a [`FinishCtx`] for the substitution guard tests. The archive is never read (the guard
+    /// fires before extraction), so `bin_path_in_archive` + the (attacker-controlled) `version`
+    /// drive the outcome.
+    fn traversal_ctx(bin_path_in_archive: &str, version: &str) -> super::FinishCtx {
+        super::FinishCtx {
+            release: rel(version),
+            bin_install_path: std::path::PathBuf::from("unused"),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            bin_name: "app".to_string(),
+            bin_path_in_archive: bin_path_in_archive.to_string(),
+            show_output: false,
+            verify_callback: None,
+            #[cfg(feature = "checksums")]
+            verify_checksum: None,
+            #[cfg(feature = "signatures")]
+            verify_keys: vec![],
+        }
+    }
+
+    // A malicious release `version` like `../evil` substituted into the extraction path must be
+    // rejected (S6), before any archive read, with `Error::InvalidAssetName` naming the offending
+    // component. Without the guard this would redirect extraction outside the temp dir.
+    #[test]
+    fn finish_update_rejects_traversal_in_substituted_version() {
+        let ctx = traversal_ctx("{{ version }}/app", "../evil");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive.tar.gz");
+        let res = super::finish_update_owned(ctx, dir, &archive);
+        match res {
+            Err(super::Error::InvalidAssetName { name }) => {
+                assert_eq!(name, "../evil", "the offending component must be named");
+            }
+            other => panic!("expected InvalidAssetName for a traversal version, got {other:?}"),
+        }
+    }
+
+    // A separator injected through the substituted value (e.g. `sub/evil`) is likewise rejected.
+    #[test]
+    fn finish_update_rejects_separator_in_substituted_version() {
+        let ctx = traversal_ctx("{{ version }}", "sub/evil");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive.tar.gz");
+        assert!(
+            matches!(
+                super::finish_update_owned(ctx, dir, &archive),
+                Err(super::Error::InvalidAssetName { .. })
+            ),
+            "a `/` in a substituted component must be rejected"
+        );
+    }
+
+    // The guard only fires for a variable the template actually references. A weird `version` that
+    // never reaches the path (template has no `{{ version }}`) must NOT fail here; extraction of a
+    // safe, literal path proceeds to the archive read (which then errors on the missing dummy file,
+    // an IO error — not `InvalidAssetName`).
+    #[test]
+    fn finish_update_does_not_reject_unreferenced_substitution_value() {
+        let ctx = traversal_ctx("plain-bin", "../evil");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive.tar.gz");
+        let res = super::finish_update_owned(ctx, dir, &archive);
+        assert!(
+            !matches!(res, Err(super::Error::InvalidAssetName { .. })),
+            "an unreferenced traversal value must not trigger the substitution guard, got {res:?}"
+        );
+    }
+
+    // --- S2: credential host-gate parity (RequestConfig::auth_allowed_for) --------------------
+
+    // The host-gate mirrors `RequestConfig::auth_allowed_for`: a matching host over https is
+    // allowed; a non-matching host is not; and a matching host over plain http is not (unless
+    // loopback / insecure override).
+    #[test]
+    fn config_auth_allowed_for_gates_host_and_scheme() {
+        let cfg = crate::backends::common::RequestConfig {
+            auth_base_host: Some("api.example.com".into()),
+            auth_hosts: vec!["cdn.example.com".into()],
+            ..Default::default()
+        };
+
+        assert!(
+            cfg.auth_allowed_for("https://api.example.com/asset"),
+            "the configured API host over https is allowed"
+        );
+        assert!(
+            cfg.auth_allowed_for("https://cdn.example.com/asset"),
+            "an allow_auth_host entry over https is allowed"
+        );
+        assert!(
+            !cfg.auth_allowed_for("https://evil.example.net/asset"),
+            "an unlisted host must be rejected"
+        );
+        assert!(
+            !cfg.auth_allowed_for("http://api.example.com/asset"),
+            "a matching host over plain http (non-loopback) must be rejected"
+        );
+    }
+
+    // Loopback hosts are allowed over plain http (only when host-matched), matching the derived-token
+    // rule; the insecure-forwarding flag lifts the https requirement for any matched host.
+    #[test]
+    fn config_auth_allowed_for_loopback_and_insecure_flag() {
+        let cfg = crate::backends::common::RequestConfig {
+            auth_hosts: vec!["127.0.0.1".into()],
+            ..Default::default()
+        };
+        assert!(
+            cfg.auth_allowed_for("http://127.0.0.1:8080/asset"),
+            "a host-matched loopback address is allowed over http"
+        );
+
+        let mut cfg = crate::backends::common::RequestConfig {
+            auth_base_host: Some("internal.example.com".into()),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.auth_allowed_for("http://internal.example.com/asset"),
+            "http to a matched non-loopback host is rejected by default"
+        );
+        cfg.allow_insecure_auth = true;
+        assert!(
+            cfg.auth_allowed_for("http://internal.example.com/asset"),
+            "allow_insecure_auth lifts the https requirement for a matched host"
+        );
+        assert!(
+            !cfg.auth_allowed_for("http://other.example.com/asset"),
+            "allow_insecure_auth still requires a host match"
+        );
     }
 
     // --- asset-name path-traversal guard (J1) ------------------------------------------------

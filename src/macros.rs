@@ -27,7 +27,7 @@ macro_rules! request_config_setters {
         /// strings work: `.request_header("X-Foo", "bar")` or
         /// `.request_header(self_update::http::header::ACCEPT, "application/json")`. A name or value
         /// that is not a valid HTTP header is reported as an `Error::InvalidHeader` from
-        /// [`build()`](Self::build) rather than panicking here.
+        /// `build()` rather than panicking here.
         pub fn request_header<N, V>(&mut self, name: N, value: V) -> &mut Self
         where
             N: ::core::convert::TryInto<crate::http_client::header::HeaderName>,
@@ -137,7 +137,7 @@ macro_rules! request_config_setters {
         /// download). Call multiple times to add more than one. Use this to reach a server behind a
         /// private/internal CA without injecting a whole pre-built client. A malformed certificate
         /// surfaces as an [`Error::InvalidCertificate`](crate::errors::Error::InvalidCertificate)
-        /// from [`build()`](Self::build). Construct the argument with
+        /// from `build()`. Construct the argument with
         /// [`Certificate::from_pem`](crate::Certificate::from_pem) or
         /// [`Certificate::from_der`](crate::Certificate::from_der).
         ///
@@ -257,7 +257,7 @@ macro_rules! impl_update_config_accessors {
                 self.common.checksum.as_ref()
             }
             #[cfg(feature = "signatures")]
-            fn verify_keys(&self) -> &[crate::VerifyingKey] {
+            fn verifying_keys(&self) -> &[crate::VerifyingKey] {
                 &self.common.verifying_keys
             }
         }
@@ -358,6 +358,69 @@ macro_rules! impl_sync_update_verbs {
             /// newest strictly-newer [`Release`](crate::Release), or `None` when already up to date.
             pub fn is_update_available(&self) -> crate::Result<Option<crate::Release>> {
                 Ok(self.get_newer_releases()?.into_vec().into_iter().next())
+            }
+        }
+    };
+}
+
+/// Emit the inherent async update verbs on a backend `AsyncUpdate(Update)` newtype.
+///
+/// `build_async()` returns the distinct `AsyncUpdate` newtype (not the blocking `Update`), so these
+/// inherent `async` methods let callers write `.build_async()?.update_async().await` without
+/// importing the sealed [`AsyncReleaseUpdate`](crate::AsyncReleaseUpdate) trait. Because the newtype
+/// exposes *only* the async verbs, a stray blocking `.update()` on an async-built updater is a
+/// compile error rather than a silent block of the executor. Each method forwards to the
+/// [`AsyncReleaseUpdate`] impl on the inner blocking `Update` at `self.0`.
+#[cfg(feature = "async")]
+macro_rules! impl_async_update_verbs {
+    ($t:ty) => {
+        impl $t {
+            /// Display release information and update the current binary to the latest release,
+            /// pending confirmation. Returns a [`VersionStatus`](crate::VersionStatus). See
+            /// [`AsyncReleaseUpdate::update_async`](crate::AsyncReleaseUpdate::update_async).
+            pub async fn update_async(&self) -> crate::Result<crate::VersionStatus> {
+                crate::AsyncReleaseUpdate::update_async(&self.0).await
+            }
+
+            /// Same as [`update_async`](Self::update_async) but returns a
+            /// [`ReleaseStatus`](crate::ReleaseStatus) with the full release details.
+            pub async fn update_extended_async(&self) -> crate::Result<crate::ReleaseStatus> {
+                crate::AsyncReleaseUpdate::update_extended_async(&self.0).await
+            }
+
+            /// Fetch the single newest release (raw, unfiltered). See
+            /// [`AsyncReleaseUpdate::get_latest_release_async`](crate::AsyncReleaseUpdate::get_latest_release_async).
+            pub async fn get_latest_release_async(&self) -> crate::Result<crate::Releases> {
+                crate::AsyncReleaseUpdate::get_latest_release_async(&self.0).await
+            }
+
+            /// Fetch the releases newer than the current version. See
+            /// [`AsyncReleaseUpdate::get_newer_releases_async`](crate::AsyncReleaseUpdate::get_newer_releases_async).
+            pub async fn get_newer_releases_async(&self) -> crate::Result<crate::Releases> {
+                crate::AsyncReleaseUpdate::get_newer_releases_async(&self.0).await
+            }
+
+            /// Fetch details of the release matching `ver`. See
+            /// [`AsyncReleaseUpdate::get_release_version_async`](crate::AsyncReleaseUpdate::get_release_version_async).
+            pub async fn get_release_version_async(
+                &self,
+                ver: &str,
+            ) -> crate::Result<crate::Release> {
+                crate::AsyncReleaseUpdate::get_release_version_async(&self.0, ver).await
+            }
+
+            /// Whether a release newer than the current version is available, returning it if so.
+            ///
+            /// A convenience over [`get_newer_releases_async`](Self::get_newer_releases_async):
+            /// returns the newest strictly-newer [`Release`](crate::Release), or `None` when already
+            /// up to date.
+            pub async fn is_update_available_async(&self) -> crate::Result<Option<crate::Release>> {
+                Ok(self
+                    .get_newer_releases_async()
+                    .await?
+                    .into_vec()
+                    .into_iter()
+                    .next())
             }
         }
     };
@@ -581,9 +644,9 @@ macro_rules! impl_common_builder_setters {
         ///
         /// This runs **last** in the verification chain and on the **extracted binary**, not the
         /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
-        /// of the archive) -> signature ([`verify_keys`](Self::verify_keys), over the archive) ->
+        /// of the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
         /// extract -> `verify_binary` (the extracted binary) -> replace. Use
-        /// `verify_checksum`/`verify_keys` to gate the download by content; use `verify_binary` to
+        /// `verify_checksum`/`verifying_keys` to gate the download by content; use `verify_binary` to
         /// gate it by running the new binary. A returned error's message becomes the reason of the
         /// resulting `Error::VerificationRejected`.
         pub fn verify_binary(

@@ -104,6 +104,12 @@ impl ReleaseListBuilder {
     /// Set the optional github url, e.g. for a github enterprise installation.
     /// The url should provide the path to your API endpoint and end without a trailing slash,
     /// for example `https://api.github.com` or `https://github.mycorp.com/api/v3`
+    ///
+    /// **Semantic note:** this setter takes the full API base URL (ending at the version prefix,
+    /// e.g. `.../api/v3`). The gitea and gitlab backends instead accept an instance host and
+    /// append the API path internally; the s3 backend uses an `endpoint` setter. The difference
+    /// is intentional: GitHub enterprise instances expose configurable API prefixes, whereas the
+    /// other backends have fixed API paths relative to their host.
     pub fn api_base_url(&mut self, url: impl Into<String>) -> &mut Self {
         self.custom_url = Some(url.into());
         self
@@ -321,13 +327,14 @@ impl UpdateBuilder {
         self.build_update()
     }
 
-    /// Confirm config and create a ready-to-use `Update` for the async API (`update_async`).
+    /// Confirm config and create a ready-to-use [`AsyncUpdate`] for the async API (`update_async`).
     ///
-    /// Unlike [`build`](Self::build) this returns the concrete `Update` (not a
-    /// `Box<dyn ReleaseUpdate>`) so the inherent `*_async` methods are reachable.
+    /// Unlike [`build`](Self::build) this returns the distinct [`AsyncUpdate`] newtype, which exposes
+    /// only the inherent `*_async` verbs, so a stray blocking `.update()` on an async-built updater
+    /// is a compile error rather than a silent block of the executor.
     #[cfg(feature = "async")]
-    pub fn build_async(&self) -> Result<Update> {
-        self.build_update()
+    pub fn build_async(&self) -> Result<AsyncUpdate> {
+        Ok(AsyncUpdate(self.build_update()?))
     }
 }
 
@@ -431,9 +438,22 @@ impl ReleaseUpdate for Update {
 
 impl_sync_update_verbs!(Update);
 
+/// Async-only updater returned by [`UpdateBuilder::build_async`].
+///
+/// A newtype over the blocking [`Update`] that exposes **only** the inherent `*_async` verbs. Using
+/// it (instead of returning `Update` from `build_async`) makes a blocking call on an async-built
+/// updater — e.g. `build_async()?.update()` — a compile error, so the async executor cannot be
+/// silently blocked.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct AsyncUpdate(Update);
+
+#[cfg(feature = "async")]
+impl_async_update_verbs!(AsyncUpdate);
+
 impl_update_config_accessors!(Update, {
-    fn api_headers(&self, auth_token: Option<&str>) -> Result<HeaderMap> {
-        api_headers(auth_token)
+    fn api_headers(&self, _auth_token: Option<&str>) -> Result<HeaderMap> {
+        api_headers()
     }
 });
 
@@ -450,7 +470,7 @@ fn releases_plan(
     auth_token: Option<&str>,
     stop_at: Option<&str>,
 ) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+    let headers = api_headers()?;
     let auth = auth_token.map(str::to_owned);
     let stop_at = stop_at.map(str::to_owned);
     Ok(release_array_page(
@@ -492,12 +512,7 @@ fn release_array_page(
                 items.push(release);
             }
             let next = next_link(resp_headers).map(|next_url| {
-                release_array_page(
-                    next_url,
-                    api_headers_for(&auth),
-                    auth.clone(),
-                    stop_at.clone(),
-                )
+                release_array_page(next_url, api_headers_for(), auth.clone(), stop_at.clone())
             });
             Ok(Page {
                 items,
@@ -510,8 +525,8 @@ fn release_array_page(
 
 /// Transport-free plan to fetch a single release *object* (the `/releases/latest` and
 /// `/releases/tags/{ver}` endpoints), parsed via the private `ReleaseDto` into a one-item page.
-fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Release>> {
-    let headers = api_headers(auth_token)?;
+fn single_plan(url: String, _auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+    let headers = api_headers()?;
     Ok(PageRequest {
         url,
         headers,
@@ -524,12 +539,12 @@ fn single_plan(url: String, auth_token: Option<&str>) -> Result<PageRequest<Rele
     })
 }
 
-/// Build the github request headers, panicking only on an internal user-agent bug (never on the
-/// caller's auth token, which is validated). Used when rebuilding a next-page request inside the
-/// parser, where returning a `Result` is not possible — the auth token was already validated when
-/// the first page's headers were built, so this re-parse cannot fail for a caller-supplied token.
-fn api_headers_for(auth: &Option<String>) -> HeaderMap {
-    api_headers(auth.as_deref()).unwrap_or_default()
+/// Build the github request headers for a continuation page. Used when rebuilding a next-page
+/// request inside the parser closure, where returning a `Result` is not possible. Panics only on
+/// an internal user-agent bug (the header value is a static string that is always valid); a
+/// silent `.unwrap_or_default()` would drop the User-Agent on that failure path.
+fn api_headers_for() -> HeaderMap {
+    api_headers().expect("api_headers builds from static values")
 }
 
 #[cfg(feature = "async")]
@@ -581,10 +596,8 @@ impl crate::update::AsyncReleaseUpdate for Update {
 /// Build github's base request headers (its `rust/self-update` User-Agent). The Authorization
 /// header is no longer set here: the auth scheme/token is applied centrally by the shared
 /// [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) on both the listing and
-/// download paths, which also honors a user `request_header(AUTHORIZATION, ..)` override. The
-/// `auth_token` argument is retained for signature compatibility but only gates whether an auth
-/// header *would* be added (it no longer is here).
-fn api_headers(_auth_token: Option<&str>) -> Result<header::HeaderMap> {
+/// download paths, which also honors a user `request_header(AUTHORIZATION, ..)` override.
+fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -609,11 +622,6 @@ mod tests {
     // The public config accessors (`api_headers`, `no_confirm`, `show_output`, ...) live on the
     // sealed `UpdateConfig` trait; bring it into scope so they resolve on the concrete `Update`.
     use crate::update::UpdateConfig;
-
-    // The async verbs are methods on the public sealed `AsyncReleaseUpdate` trait; bring it into
-    // scope so `upd.get_latest_release_async()` / `update_extended_async()` resolve in these tests.
-    #[cfg(feature = "async")]
-    use crate::update::AsyncReleaseUpdate;
 
     /// Test wrapper: drive the sans-io `releases_plan` through the sync `run_paginated` driver.
     /// `stop_at = None` => walk all pages (the unfiltered listing behavior).
@@ -1101,6 +1109,46 @@ mod tests {
             .unwrap();
         let status = upd.update_extended_async().await.unwrap();
         assert!(status.is_up_to_date(), "an older release means up-to-date");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn is_update_available_async_reports_newest_newer_or_none() {
+        // Exercises the inherent `AsyncUpdate::is_update_available_async` verb emitted by
+        // `impl_async_update_verbs!`: from an older current version it returns the newest
+        // strictly-newer release; from a current version at/above the newest it returns `None`.
+        let body = r#"[{"tag_name":"v2.0.0","created_at":"2020-01-01T00:00:00Z","name":"v2.0.0","assets":[]},{"tag_name":"v0.9.0","created_at":"2020-01-01T00:00:00Z","name":"v0.9.0","assets":[]}]"#;
+        let mk = |cur: &'static str| {
+            let base = stub(move |_| {
+                vec![Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: body.to_string(),
+                }]
+            });
+            super::Update::configure()
+                .repo_owner("o")
+                .repo_name("r")
+                .bin_name("app")
+                .current_version(cur)
+                .api_base_url(&base)
+                .build_async()
+                .unwrap()
+        };
+        let newer = mk("1.0.0").is_update_available_async().await.unwrap();
+        assert_eq!(
+            newer.map(|r| r.version().to_string()),
+            Some("2.0.0".to_string()),
+            "from 1.0.0 the 2.0.0 release is available"
+        );
+        assert!(
+            mk("2.0.0")
+                .is_update_available_async()
+                .await
+                .unwrap()
+                .is_none(),
+            "from 2.0.0 nothing newer => None"
+        );
     }
 
     #[test]
@@ -2116,7 +2164,7 @@ mod tests {
         .unwrap();
     }
 
-    // --- verify_keys builder setter and accessor -----------------------------------
+    // --- verifying_keys builder setter and accessor --------------------------------
 
     #[cfg(feature = "signatures")]
     #[test]
@@ -2133,14 +2181,103 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            upd.verify_keys().len(),
+            upd.verifying_keys().len(),
             1,
-            "verify_keys() must return the key that was set"
+            "verifying_keys() must return the key that was set"
         );
         assert_eq!(
-            upd.verify_keys()[0],
+            upd.verifying_keys()[0],
             key_bytes,
             "returned key bytes must match what was supplied"
         );
+    }
+
+    // --- I2: api_headers takes no auth param; I1: api_headers_for uses .expect not .unwrap_or_default ---
+
+    #[test]
+    fn api_headers_takes_no_auth_param_and_sets_user_agent() {
+        // I2: api_headers() is now a zero-arg function (the unused _auth_token param was removed).
+        // This test calls it with no arguments -- it would fail to compile against the old
+        // `api_headers(_auth_token: Option<&str>)` signature.
+        // The User-Agent assertion ensures a broken implementation cannot silently pass.
+        let headers = super::api_headers().unwrap();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust/self-update",
+            "api_headers() must set the rust/self-update User-Agent"
+        );
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_none(),
+            "api_headers() must not set an Authorization header"
+        );
+    }
+
+    #[test]
+    fn api_headers_for_takes_no_param_and_sets_user_agent() {
+        // I1+I2: api_headers_for() is now a zero-arg function that uses .expect instead of
+        // .unwrap_or_default, so a failure surfaces rather than silently producing empty headers.
+        // This test calls it with no arguments -- it would fail to compile against the old
+        // `api_headers_for(auth: &Option<String>)` signature. The User-Agent assertion proves
+        // headers are not silently empty (as .unwrap_or_default() would give on a failure path).
+        let headers = super::api_headers_for();
+        assert_eq!(
+            headers
+                .get(crate::http_client::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "rust/self-update",
+            "api_headers_for() must return headers with the rust/self-update User-Agent set"
+        );
+    }
+
+    #[test]
+    fn continuation_page_user_agent_header_is_present() {
+        // I1: the continuation-page header builder must not silently drop the User-Agent.
+        // Drive a two-page fetch via stub_capturing and assert the second page's request carries
+        // the User-Agent header -- if api_headers_for() silently returned empty headers (the old
+        // .unwrap_or_default() path), the User-Agent would be absent on page 2.
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/releases?page=2")),
+                    body: release_json("v2.0.0"),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: release_json("v1.0.0"),
+                },
+            ]
+        });
+        let releases = fetch_all_releases(
+            &format!("{base}/releases"),
+            None,
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 2, "both pages must be fetched");
+        let requests = captured.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "exactly two HTTP requests must be issued"
+        );
+        // Both requests must carry the User-Agent header.
+        for (i, req) in requests.iter().enumerate() {
+            assert!(
+                req.to_lowercase().contains("user-agent: rust/self-update"),
+                "page {} request is missing the User-Agent header:\n{}",
+                i + 1,
+                req
+            );
+        }
     }
 }
