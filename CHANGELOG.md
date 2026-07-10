@@ -2,6 +2,41 @@
 
 ## [unreleased]
 
+## [1.0.0-rc.4]
+API polish from a pre-1.0 consumer-experience review: three breaking changes (all folded into the
+[1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)) plus additive constructors, inherent
+async verbs on the custom backend, and doc fixes.
+
+### Added
+- `Error::verification_rejected(reason)`: build the rejection a `verify_binary` hook returns. The
+  update pipeline surfaces an already-`VerificationRejected` hook error as-is instead of re-wrapping
+  it (other hook errors are still wrapped with their message as the reason).
+- The custom backend's `AsyncUpdate<S>` exposes the `*_async` verbs (`update_async`,
+  `update_extended_async`, `get_latest_release_async`, `get_newer_releases_async`,
+  `get_release_version_async`) as inherent methods, matching the built-in backends' `AsyncUpdate`
+  types; `use self_update::AsyncReleaseUpdate` is no longer needed to drive a custom async update.
+
+### Changed
+- `ReleaseSource::get_latest_releases` / `AsyncReleaseSource::get_latest_releases` renamed
+  `get_releases`: it returns the source's full unfiltered candidate list (newest-first), which the
+  old name misstated. Migration: rename the method in `ReleaseSource`/`AsyncReleaseSource` impls;
+  the updater's `get_newer_releases` (the filtered fetch) is unchanged.
+- The `ChecksumMismatch` and `NotFound` error variants are `#[non_exhaustive]`, matching every
+  other struct variant on `Error`. Migration: add `..` to struct patterns
+  (`Error::NotFound { url, .. }`); construct a 404 via `Error::http_status_error(404, url)`.
+- The single-release endpoints (github `/releases/latest` and `/releases/tags/{ver}`, gitlab/gitea
+  by-tag) surface an unparseable response body as `Error::InvalidResponse`, matching the listing
+  endpoints (previously `Error::Json`, so detecting "unparseable backend response" required
+  matching two variants). Migration: match `Error::InvalidResponse` where `Error::Json` was
+  matched on `get_latest_release`/`get_release_version` failures.
+
+### Fixed
+- Doc fixes: `Releases::from_listing` documented the pre-rc.3 `Error::MissingField` (now
+  `Error::NoCurrentVersion`); two `update.rs` trait docs still described `build()` as returning
+  `Box<dyn ReleaseUpdate>` (concrete `Update` since rc.2); the `ureq` feature bullet implied
+  reqwest/ureq are mutually exclusive; the migration-guide `match` examples destructured
+  `#[non_exhaustive]` variants without `..`.
+
 ## [1.0.0-rc.3]
 Further 1.0 surface changes on top of rc.2: two API breaks (closing the async-blocking footgun and
 aligning the signature-key accessor name), plus correctness, security-hardening, and doc fixes. The
