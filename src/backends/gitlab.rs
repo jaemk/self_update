@@ -168,7 +168,6 @@ impl ReleaseListBuilder {
                 return Err(Error::MissingField { field: "repo_name" });
             },
             target: self.target.clone(),
-            auth_token: self.auth_token.clone(),
             request,
         })
     }
@@ -182,7 +181,6 @@ pub struct ReleaseList {
     repo_owner: String,
     repo_name: String,
     target: Option<String>,
-    auth_token: Option<String>,
     request: RequestConfig,
 }
 impl ReleaseList {
@@ -212,10 +210,7 @@ impl ReleaseList {
             urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
-        let releases = run_paginated(
-            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
-            &self.request,
-        )?;
+        let releases = run_paginated(releases_plan(&api_url, None)?, &self.request)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -236,11 +231,9 @@ impl ReleaseList {
             urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
-        let releases = crate::backends::run_paginated_async(
-            releases_plan(&api_url, self.auth_token.as_deref(), None)?,
-            &self.request,
-        )
-        .await?;
+        let releases =
+            crate::backends::run_paginated_async(releases_plan(&api_url, None)?, &self.request)
+                .await?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -386,10 +379,7 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = run_paginated(
-            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
+        let releases = run_paginated(newest_plan(&self.releases_url())?, &self.common.request)?;
         let release = releases
             .into_iter()
             .next()
@@ -400,21 +390,14 @@ impl ReleaseUpdate for Update {
     fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
-            releases_plan(
-                &self.releases_url(),
-                self.common.auth_token.as_deref(),
-                Some(&current_version),
-            )?,
+            releases_plan(&self.releases_url(), Some(&current_version))?,
             &self.common.request,
         )?;
         Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let releases = run_paginated(
-            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )?;
+        let releases = run_paginated(single_plan(self.tag_url(ver))?, &self.common.request)?;
         releases
             .into_iter()
             .next()
@@ -458,18 +441,12 @@ impl Default for UpdateBuilder {
 /// via the private `ReleaseDto` and following `Link: rel="next"`. `stop_at` filters per-item
 /// (releases not strictly newer are omitted but pagination continues); when `None` all pages are
 /// walked unfiltered.
-fn releases_plan(
-    base_url: &str,
-    auth_token: Option<&str>,
-    stop_at: Option<&str>,
-) -> Result<PageRequest<Release>> {
+fn releases_plan(base_url: &str, stop_at: Option<&str>) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
-    let auth = auth_token.map(str::to_owned);
     let stop_at = stop_at.map(str::to_owned);
     Ok(release_array_page(
         first_page_url(base_url),
         headers,
-        auth,
         stop_at,
     ))
 }
@@ -477,7 +454,6 @@ fn releases_plan(
 fn release_array_page(
     url: String,
     headers: HeaderMap,
-    auth: Option<String>,
     stop_at: Option<String>,
 ) -> PageRequest<Release> {
     PageRequest {
@@ -507,7 +483,6 @@ fn release_array_page(
                 release_array_page(
                     next_url,
                     api_headers().expect("api_headers builds from static values"),
-                    auth.clone(),
                     stop_at.clone(),
                 )
             });
@@ -522,7 +497,7 @@ fn release_array_page(
 
 /// Transport-free plan for the newest release: GitLab has no `/releases/latest`, so the listing's
 /// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
-fn newest_plan(base_url: &str, _auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
     Ok(PageRequest {
         url: first_page_url(base_url),
@@ -542,13 +517,15 @@ fn newest_plan(base_url: &str, _auth_token: Option<&str>) -> Result<PageRequest<
 }
 
 /// Transport-free plan to fetch a single release *object* (the `.../releases/{ver}` endpoint).
-fn single_plan(url: String, _auth_token: Option<&str>) -> Result<PageRequest<Release>> {
+fn single_plan(url: String) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
     Ok(PageRequest {
         url,
         headers,
         parse: Box::new(|body, _resp_headers| {
-            let dto: ReleaseDto = serde_json::from_slice(body)?;
+            // An unparseable body is `InvalidResponse`, matching the paginated listing parser.
+            let dto: ReleaseDto =
+                serde_json::from_slice(body).map_err(crate::errors::Error::invalid_response)?;
             Ok(Page::last(vec![dto.into_release()?]))
         }),
     })
@@ -559,11 +536,8 @@ impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = run_paginated_async(
-            newest_plan(&self.releases_url(), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )
-        .await?;
+        let releases =
+            run_paginated_async(newest_plan(&self.releases_url())?, &self.common.request).await?;
         let release = releases
             .into_iter()
             .next()
@@ -575,11 +549,7 @@ impl crate::update::AsyncReleaseUpdate for Update {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
-            releases_plan(
-                &self.releases_url(),
-                self.common.auth_token.as_deref(),
-                Some(&current_version),
-            )?,
+            releases_plan(&self.releases_url(), Some(&current_version))?,
             &self.common.request,
         )
         .await?;
@@ -588,11 +558,8 @@ impl crate::update::AsyncReleaseUpdate for Update {
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
         use crate::backends::run_paginated_async;
-        let releases = run_paginated_async(
-            single_plan(self.tag_url(ver), self.common.auth_token.as_deref())?,
-            &self.common.request,
-        )
-        .await?;
+        let releases =
+            run_paginated_async(single_plan(self.tag_url(ver))?, &self.common.request).await?;
         releases
             .into_iter()
             .next()
@@ -623,11 +590,21 @@ mod tests {
     #[cfg(feature = "async")]
     async fn fetch_all_releases_async(
         base_url: &str,
-        auth_token: Option<&str>,
         req: &crate::backends::common::RequestConfig,
     ) -> crate::errors::Result<Vec<super::Release>> {
-        crate::backends::run_paginated_async(super::releases_plan(base_url, auth_token, None)?, req)
-            .await
+        crate::backends::run_paginated_async(super::releases_plan(base_url, None)?, req).await
+    }
+
+    // The single-release endpoint (`.../releases/{ver}`) surfaces an unparseable body as
+    // `InvalidResponse`, matching the paginated listing parser (previously `Error::Json`).
+    #[test]
+    fn single_plan_parse_failure_is_invalid_response() {
+        let req = super::single_plan("https://example.test/releases/1.0.0".to_string()).unwrap();
+        let res = (req.parse)(b"not-json", &crate::http_client::HeaderMap::new());
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "a malformed single-release body must map to InvalidResponse"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -820,7 +797,6 @@ mod tests {
         });
         let releases = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
-            None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await
@@ -1235,7 +1211,6 @@ mod tests {
         });
         let res = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
-            None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await;
@@ -1264,7 +1239,6 @@ mod tests {
         });
         let res = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
-            None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await;
@@ -1290,7 +1264,6 @@ mod tests {
         });
         let releases = fetch_all_releases_async(
             &format!("{base}/api/v4/projects/o%2Fr/releases"),
-            None,
             &crate::backends::common::RequestConfig::default(),
         )
         .await

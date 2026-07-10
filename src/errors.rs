@@ -48,6 +48,7 @@ pub enum Error {
     ///
     /// `expected` is the configured digest; `computed` is the one actually produced from the
     /// downloaded file. Both are hex-encoded lowercase digests.
+    #[non_exhaustive]
     ChecksumMismatch {
         /// The expected digest (from the configured `Checksum`), hex-encoded.
         expected: String,
@@ -62,6 +63,7 @@ pub enum Error {
     /// A request completed and returned HTTP 404 (resource not found).
     ///
     /// `url` is the request URL that produced the 404.
+    #[non_exhaustive]
     NotFound {
         /// The URL whose response was HTTP 404.
         url: String,
@@ -289,6 +291,30 @@ impl Error {
     /// `Unauthorized` for 401/403, else `HttpStatus`.
     pub fn http_status_error(status: u16, url: impl Into<String>) -> Error {
         status_to_error(status, &url.into())
+    }
+
+    /// Construct a [`VerificationRejected`](Error::VerificationRejected) error with the given
+    /// reason, for rejecting the extracted binary from a `verify_binary` hook:
+    ///
+    /// ```rust
+    /// # fn check(path: &std::path::Path) -> bool { true }
+    /// # let hook =
+    /// |path: &std::path::Path| {
+    ///     if check(path) {
+    ///         Ok(())
+    ///     } else {
+    ///         Err(self_update::Error::verification_rejected("new binary failed --version"))
+    ///     }
+    /// }
+    /// # ;
+    /// ```
+    ///
+    /// The update pipeline surfaces this error as-is; any *other* error returned from the hook is
+    /// wrapped in a `VerificationRejected` whose `reason` is that error's message.
+    pub fn verification_rejected(reason: impl Into<String>) -> Error {
+        Error::VerificationRejected {
+            reason: Some(reason.into()),
+        }
     }
 }
 

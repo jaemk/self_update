@@ -530,7 +530,9 @@ fn single_plan(url: String) -> Result<PageRequest<Release>> {
         url,
         headers,
         parse: Box::new(|body, _resp_headers| {
-            let dto: ReleaseDto = serde_json::from_slice(body)?;
+            // An unparseable body is `InvalidResponse`, matching the paginated listing parser.
+            let dto: ReleaseDto =
+                serde_json::from_slice(body).map_err(crate::errors::Error::invalid_response)?;
             Ok(Page::last(vec![dto.into_release()?]))
         }),
     })
@@ -599,6 +601,19 @@ mod tests {
         req: &crate::backends::common::RequestConfig,
     ) -> crate::errors::Result<Vec<super::Release>> {
         crate::backends::run_paginated_async(super::releases_plan(base_url, None)?, req).await
+    }
+
+    // The single-release endpoint (`.../releases/tags/{ver}`) surfaces an unparseable body as
+    // `InvalidResponse`, matching the paginated listing parser (previously `Error::Json`).
+    #[test]
+    fn single_plan_parse_failure_is_invalid_response() {
+        let req =
+            super::single_plan("https://example.test/releases/tags/1.0.0".to_string()).unwrap();
+        let res = (req.parse)(b"not-json", &crate::http_client::HeaderMap::new());
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
+            "a malformed single-release body must map to InvalidResponse"
+        );
     }
 
     use std::io::{Read, Write};
