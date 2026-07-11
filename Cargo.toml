@@ -15,6 +15,7 @@ rust-version = "1.88"
 [package.metadata.docs.rs]
 features = [
   "reqwest",
+  "ureq",
   "native-tls",
   "archive-zip",
   "compression-zip-bzip2",

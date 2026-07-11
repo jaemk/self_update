@@ -22,12 +22,12 @@ struct AssetDto {
 
 impl AssetDto {
     fn into_asset(self) -> Result<ReleaseAsset> {
-        let download_url = self.browser_download_url.ok_or(Error::MissingAssetField {
-            field: "browser_download_url",
-        })?;
+        let download_url = self
+            .browser_download_url
+            .ok_or_else(|| Error::missing_asset_field("browser_download_url"))?;
         let name = self
             .name
-            .ok_or(Error::MissingAssetField { field: "name" })?;
+            .ok_or_else(|| Error::missing_asset_field("name"))?;
         Ok(ReleaseAsset::new(name, download_url))
     }
 }
@@ -47,13 +47,13 @@ impl ReleaseDto {
     fn into_release(self) -> Result<Release> {
         let tag = self
             .tag_name
-            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
-        let date = self.created_at.ok_or(Error::MissingAssetField {
-            field: "created_at",
-        })?;
+            .ok_or_else(|| Error::missing_asset_field("tag_name"))?;
+        let date = self
+            .created_at
+            .ok_or_else(|| Error::missing_asset_field("created_at"))?;
         let assets = self
             .assets
-            .ok_or(Error::MissingAssetField { field: "assets" })?;
+            .ok_or_else(|| Error::missing_asset_field("assets"))?;
         let name = self.name.unwrap_or_else(|| tag.clone());
         let assets = assets
             .into_iter()

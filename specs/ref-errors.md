@@ -16,26 +16,28 @@ pipeline, and the checksum module.
 `Error` is declared `#[derive(Debug)] #[non_exhaustive] pub enum` at `errors.rs`. Every variant,
 what produces it, and its feature gate:
 
-Struct-form variants added after 1.0 are marked `#[non_exhaustive]` (in addition to the
-enum-level `#[non_exhaustive]`) so fields can be added without a breaking change. Variants
-considered shape-final (`NotFound`, `ChecksumMismatch`) are not.
+Every struct-form variant is marked `#[non_exhaustive]` (in addition to the enum-level
+`#[non_exhaustive]`) so fields can be added without a breaking change. This includes
+`NotFound` and `ChecksumMismatch` (aligned with their siblings in 1.0.0-rc.4); downstream
+code builds them via the public constructors (`http_status_error(404, ..)`,
+`checksum_mismatch(..)`).
 
 | Variant | Produced by | Feature gate | Opaque/boxed? |
 | --- | --- | --- | --- |
 | `Internal { message: String, source: Option<Box<dyn Error + Send + Sync>> }` | Genuine internal invariants / task failures: extractor source has no file name (`lib.rs`), path not in archive, non-UTF-8 archive path (`lib.rs`), and blocking-task join failure (`custom.rs`, `update.rs`). The join sites carry the tokio `JoinError` as `source`; the invariant sites set `source: None`. `#[non_exhaustive]`. | none | source boxed when present |
 | `VerificationRejected { reason: Option<String> }` | The post-update `verify_binary` callback returned `Err(..)`, so nothing was installed (`update.rs`). `reason` carries `Some(<error message>)` from the callback's returned error. `#[non_exhaustive]`. | none | no (struct fields) |
-| `ChecksumMismatch { expected: String, computed: String }` | The downloaded artifact's digest did not match the configured `Checksum` (`checksum.rs`). Both fields are lowercase hex-encoded digests. | none (compiled unconditionally) | no (struct fields) |
+| `ChecksumMismatch { expected: String, computed: String }` | The downloaded artifact's digest did not match the configured `Checksum` (`checksum.rs`). Both fields are lowercase hex-encoded digests. `#[non_exhaustive]`. | none (compiled unconditionally) | no (struct fields) |
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
-| `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. | none | no (struct fields) |
+| `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. `#[non_exhaustive]`. | none | no (struct fields) |
 | `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
 | `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
 | `NoReleaseFound { target: Option<String> }` | The clean negative of a release lookup: no release / no matching release for a tag/version (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), or the resolved release had no asset for the requested target (`update.rs`, with `target: Some(...)`). `#[non_exhaustive]`. | none | no (struct fields) |
-| `MissingAssetField { field: &'static str }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's `from_value` (`github.rs`, `gitlab.rs`, `gitea.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidResponse { source: Box<dyn Error + Send + Sync> }` | A backend response could not be parsed: a malformed (non-array) JSON release-listing body (`github.rs`, `gitlab.rs`, `gitea.rs`), the S3 listing regex build failure, and the S3 XML parse failure (`s3.rs`). The underlying error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name` (`github.rs`, `gitlab.rs`, `gitea.rs`), `host` (`gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A request header (`request_header` on the builders or on `Download`) was not a valid HTTP header. The setters are infallible; the error is deferred and surfaced from `build()` (via `common.rs`) or from `Download::download_to` / `download_to_async` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
-| `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. `#[non_exhaustive]`. | none | yes (boxed source) |
+| `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. Exception: on a ureq-only build a malformed **DER** certificate is not caught at `build()` (ureq's `from_der` is infallible) and surfaces as `Transport` at connection time; PEM is validated at `build()` on both clients. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidProgressStyle { source: Box<dyn Error + Send + Sync> }` | A progress-bar template string was not valid; wraps the underlying `indicatif` template error (`lib.rs`). `#[non_exhaustive]`. | `progress-bar` | yes (boxed source) |
 | `Io(std::io::Error)` | Wraps a `std::io::Error`. Constructed directly and via `From<std::io::Error>`. | none | no (concrete `std::io::Error`) |
 | `Json(Box<dyn Error + Send + Sync>)` | `serde_json` failure, only via `From<serde_json::Error>`. | none | yes (boxed) |
@@ -220,11 +222,12 @@ type directly, since `std::io::Error` is stable std.)
 - `pub fn url(&self) -> Option<&str>` inherent method on `Error`.
 - Public constructors for custom `ReleaseSource` implementors (the release-flow variants are
   `#[non_exhaustive]`, so downstream code cannot build them with a struct literal):
-  `Error::no_release_found(target: Option<String>)`,
-  `Error::missing_asset_field(field: &'static str)`,
-  `Error::invalid_response(source: impl Into<Box<dyn Error + Send + Sync>>)`, and
+  `Error::no_release_found()` and `Error::no_release_found_for_target(target: impl Into<String>)`,
+  `Error::missing_asset_field(field: impl Into<String>)`,
+  `Error::invalid_response(source: impl Into<Box<dyn Error + Send + Sync>>)`,
   `Error::http_status_error(status: u16, url: impl Into<String>)` (routes through
-  `status_to_error`, so 404 -> `NotFound` and 401/403 -> `Unauthorized`).
+  `status_to_error`, so 404 -> `NotFound` and 401/403 -> `Unauthorized`), and
+  `Error::checksum_mismatch(expected: impl Into<String>, computed: impl Into<String>)`.
 - Trait impls: `Debug` (derived), `Display`, `std::error::Error` (with `source()`).
 - `From` impls: `std::io::Error`, `serde_json::Error`, `semver::Error` (always); `reqwest::Error`
   (`reqwest`), `ureq::Error` (`ureq`), `ZipError` (`archive-zip`), `ZipsignError` (`signatures`);
@@ -259,11 +262,10 @@ type directly, since `std::io::Error` is stable std.)
 - A checksum digest mismatch produces `Error::ChecksumMismatch { expected, computed }`. Both
   fields are lowercase hex-encoded digests.
 - A user-declined confirmation prompt produces `Error::Aborted`.
-- The struct-form variants carry `#[non_exhaustive]` on the variant (`Unauthorized`, `HttpStatus`,
-  `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`, `InvalidResponse`,
-  `MissingField`, `InvalidHeader`, `InvalidAuthToken`, `InvalidCertificate`,
-  `InvalidProgressStyle`, `InvalidAssetName`); shape-final variants (`NotFound`,
-  `ChecksumMismatch`) are not.
+- Every struct-form variant carries `#[non_exhaustive]` on the variant (`Unauthorized`,
+  `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
+  `InvalidResponse`, `MissingField`, `InvalidHeader`, `InvalidAuthToken`, `InvalidCertificate`,
+  `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`, `ChecksumMismatch`).
 - `Error::Internal` is reserved for genuine internal/invariant failures: extractor invariants,
   archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
   `source`).
@@ -282,8 +284,8 @@ type directly, since `std::io::Error` is stable std.)
   `Error::InvalidAssetName { name }` before any file is created.
 - `ChecksumMismatch` is compiled unconditionally (no feature gate).
 - Custom sources build the release-flow variants through the public constructors
-  (`no_release_found`, `missing_asset_field`, `invalid_response`, `http_status_error`), not
-  struct literals.
+  (`no_release_found` / `no_release_found_for_target`, `missing_asset_field`,
+  `invalid_response`, `http_status_error`, `checksum_mismatch`), not struct literals.
 - The signatures-gated unit variant is named `SignatureNonUTF8`; its Display is
   `"SignatureError: cannot verify signature of a file with a non-UTF-8 name"`.
 - `ArchiveNotEnabled` Display starts with `"ArchiveNotEnabledError: "`.

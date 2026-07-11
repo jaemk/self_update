@@ -2,6 +2,43 @@
 
 ## [unreleased]
 
+### Added
+- `Error::checksum_mismatch(expected, computed)`: build the `ChecksumMismatch` variant, which
+  became `#[non_exhaustive]` in rc.4 and had no public construction path.
+- `Error::no_release_found_for_target(target)`: the asset-scoped sibling of `no_release_found()`
+  (see the constructor change below).
+- The `futures_util` and `bytes` crates are re-exported at the root under the `async` feature:
+  their types appear in the `AsyncHttpClient`/`AsyncHttpResponse` signatures (`BoxFuture`,
+  `BoxStream`, `Bytes`), so a custom async transport no longer needs them as direct dependencies.
+- docs.rs builds with the `ureq` feature, so `ureq_agent`, `UreqClient`, and the `ureq` re-export
+  now appear in the rendered API docs.
+
+### Changed
+- `Error::no_release_found(target: Option<String>)` is split into `no_release_found()` (no
+  argument) and `no_release_found_for_target(impl Into<String>)`. Migration:
+  `no_release_found(None)` -> `no_release_found()`; `no_release_found(Some(t))` ->
+  `no_release_found_for_target(t)`.
+- `Error::missing_asset_field` takes `impl Into<String>` (was `&'static str`) and the
+  `MissingAssetField` variant's `field` is a `String`, so a custom source can report a dynamic
+  field path (e.g. `format!("assets[{i}].url")`). Migration: construction sites are
+  source-compatible; a `field` binding from a pattern match is now a `&String`.
+
+### Fixed
+- `verify_signature`'s "Verifying downloaded file..." message respects `show_output(false)`; it
+  was printed unconditionally.
+- An s3 `Endpoint::Generic` URL without a trailing slash is normalized at URL-build time; it
+  previously produced malformed (and, under `s3-auth`, wrongly signed) download URLs by
+  concatenating the key directly onto the endpoint.
+- The github backend percent-encodes `repo_owner`/`repo_name` in API URLs, matching gitlab/gitea
+  (no wire change for valid github.com names).
+- A header-build failure while following a github/gitlab pagination `Link` propagates as an error
+  instead of panicking (matching gitea).
+- Doc fixes: the `github`/`gitea` example run commands referenced the removed
+  `compression-flate2` feature (and gitea's omitted its required `gitea` feature); the github
+  example's Enterprise comment used the renamed-away `.url(...)` setter; both migration guides
+  claimed MSRV 1.85 (it is 1.88) and that `is_update_available_async()` was removed (it ships);
+  the rc.2 changelog entry claimed default-feature builds compile on 1.85.
+
 ## [1.0.0-rc.4]
 API polish from a pre-1.0 consumer-experience review: three breaking changes (all folded into the
 [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)) plus additive constructors, inherent
@@ -136,8 +173,8 @@ edition 2024 and raises the MSRV to 1.88 (the `zip` 8 dependency requires it).
   retry backoff (default 100ms base, ~3.2s cap).
 
 ### Changed
-- Edition 2024. MSRV raised from 1.85 to 1.88 (required by the `zip` 8 dependency, pulled by the
-  `archive-zip` and `signatures` features; default-feature builds still compile on 1.85).
+- Edition 2024. MSRV raised from 1.85 to 1.88 (required by the `zip` 8 dependency and by
+  1.88 language features used unconditionally in the crate).
 - Default features changed from `["reqwest", "default-tls"]` to
   `["reqwest", "rustls", "progress-bar", "github", "archive-tar", "compression-tar-gz"]`: default
   TLS is now `rustls`, only the `github` backend is on by default (gitlab/gitea/s3 opt-in), and the

@@ -1000,7 +1000,12 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     // scheme/token is applied below by the shared `apply_auth` so the download honors a user
     // `request_header(AUTHORIZATION, ..)` override exactly like the listing path.
     let mut headers = u.api_headers(u.auth_token())?;
-    headers.insert(header::ACCEPT, "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::ACCEPT,
+        "application/octet-stream"
+            .parse()
+            .expect("application/octet-stream is a valid header value"),
+    );
     // Apply the backend's derived Authorization (scheme + token), skipped when the user supplied
     // their own Authorization via `request_header`. The token is attached only when the asset
     // download URL is on the configured API host (or an allow_auth_host entry), so a server-supplied
@@ -1128,7 +1133,12 @@ fn finish_update_owned(
     }
 
     #[cfg(feature = "signatures")]
-    verify_signature(tmp_archive_path, &ctx.verify_keys)?;
+    {
+        if !ctx.verify_keys.is_empty() {
+            println(show_output, "Verifying downloaded file...");
+        }
+        verify_signature(tmp_archive_path, &ctx.verify_keys)?;
+    }
 
     print_flush(show_output, "Extracting archive... ")?;
 
@@ -1305,8 +1315,6 @@ fn verify_signature(
     if keys.is_empty() {
         return Ok(());
     }
-
-    println!("Verifying downloaded file...");
 
     let archive_kind = crate::detect_archive(archive_path)?;
     #[cfg(any(feature = "archive-tar", feature = "archive-zip"))]

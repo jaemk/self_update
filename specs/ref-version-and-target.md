@@ -83,19 +83,19 @@ Asset selection happens in `resolve_and_confirm` (`src/update.rs:716-722`):
   `Option<ReleaseAsset>` result is used directly; the built-in `target`/`identifier`
   matching is bypassed entirely (`src/update.rs:718-719`).
 - Otherwise `release.asset_for(target, asset_identifier())` runs the default matcher.
-- Either way, `None` becomes `Error::Release` ("No asset found for target: ...")
-  (`src/update.rs:722`).
+- Either way, `None` becomes `Error::NoReleaseFound { target: Some(..) }`
+  (`resolve_and_confirm`, `src/update.rs`).
 
-Default matcher `Release::asset_for` (`src/update.rs:86-114`) is substring-based and
+Default matcher `Release::asset_for` (`src/update.rs`) is substring-based and
 tries three passes in order, returning the **first** matching asset (cloned):
 
-1. First asset whose `name` contains `target` and (if set) `identifier`
-   (`src/update.rs:90-97`).
-2. Else first asset whose `name` contains both `OS` and `ARCH`
-   (`std::env::consts::OS` / `ARCH`, `src/update.rs:3`) and (if set) `identifier`
-   (`src/update.rs:99-108`).
+1. First asset whose `name` contains `target` and (if set) `identifier`.
+2. Else first asset whose `name` contains both the arch and os tokens derived from the
+   configured `target` string by `target_arch_os(target)` (`src/update.rs`) - not the
+   build host's `std::env::consts` values, so an explicitly configured cross-target
+   selects its own assets - and (if set) `identifier`.
 3. Else, only if `identifier` is set, the first asset whose `name` contains
-   `identifier` (`src/update.rs:110-112`).
+   `identifier`.
 
 `identifier` (set via `asset_identifier(...)`, `src/macros.rs:266`) disambiguates when
 multiple assets match the same target; if unset, the first target match wins.

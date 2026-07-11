@@ -260,6 +260,22 @@ mod tests {
     }
 
     #[test]
+    fn build_with_certs_accepts_garbage_der_deferring_validation() {
+        // ureq's `tls::Certificate::from_der` is infallible, so invalid DER bytes are accepted
+        // here and only surface at connection time. This is intentional and documented (on
+        // `add_root_certificate` and in the reference specs); the reqwest client rejects the same
+        // bytes at build time (`build_with_certs_rejects_garbage_der` in reqwest.rs). This test
+        // pins the asymmetry: if ureq ever gains eager DER validation, this fails and the
+        // deferred-validation caveat in the docs should be removed.
+        let res =
+            UreqClient::build_with_certs(&[crate::tls::Certificate::from_der(b"not der".to_vec())]);
+        assert!(
+            res.is_ok(),
+            "ureq DER validation is deferred to connection time; build must accept the bytes"
+        );
+    }
+
+    #[test]
     fn injected_agent_no_status_error_falls_through_to_is_success_check() {
         // 404 must still map to NotFound via the bottom-of-`get` is_success() path (not the
         // StatusCode arm, which never fires when http_status_as_error(false)).

@@ -101,11 +101,12 @@ pub enum Error {
     },
     /// A release or asset payload from the backend was missing a required field.
     ///
-    /// `field` is the name of the absent field (e.g. `"tag_name"`, `"browser_download_url"`).
+    /// `field` is the name of the absent field (e.g. `"tag_name"`, `"browser_download_url"`),
+    /// or a path to it (e.g. `"assets[2].url"`).
     #[non_exhaustive]
     MissingAssetField {
-        /// The name of the missing field in the release/asset payload.
-        field: &'static str,
+        /// The name of (or path to) the missing field in the release/asset payload.
+        field: String,
     },
     /// A backend response could not be parsed.
     ///
@@ -267,16 +268,38 @@ impl Error {
     // a struct literal. These constructors let a custom source return the canonical error for a
     // condition (no release, a malformed response, a bad status) instead of an opaque catch-all.
 
-    /// Construct a [`NoReleaseFound`](Error::NoReleaseFound) error. `target` is the requested target
-    /// triple when the lookup was asset-scoped, else `None`.
-    pub fn no_release_found(target: Option<String>) -> Error {
-        Error::NoReleaseFound { target }
+    /// Construct a [`NoReleaseFound`](Error::NoReleaseFound) error: the listing had no release, or
+    /// no release matched the requested tag/version. For a lookup that failed to find an asset for
+    /// a specific target triple, use
+    /// [`no_release_found_for_target`](Error::no_release_found_for_target).
+    pub fn no_release_found() -> Error {
+        Error::NoReleaseFound { target: None }
+    }
+
+    /// Construct a [`NoReleaseFound`](Error::NoReleaseFound) error for an asset-scoped lookup:
+    /// a release was resolved but had no asset matching `target`.
+    pub fn no_release_found_for_target(target: impl Into<String>) -> Error {
+        Error::NoReleaseFound {
+            target: Some(target.into()),
+        }
     }
 
     /// Construct a [`MissingAssetField`](Error::MissingAssetField) error for a release/asset payload
-    /// missing a required field.
-    pub fn missing_asset_field(field: &'static str) -> Error {
-        Error::MissingAssetField { field }
+    /// missing a required field. `field` names the absent field, or a path to it
+    /// (e.g. `format!("assets[{i}].url")`).
+    pub fn missing_asset_field(field: impl Into<String>) -> Error {
+        Error::MissingAssetField {
+            field: field.into(),
+        }
+    }
+
+    /// Construct a [`ChecksumMismatch`](Error::ChecksumMismatch) error from the expected and
+    /// computed digests (both hex-encoded lowercase).
+    pub fn checksum_mismatch(expected: impl Into<String>, computed: impl Into<String>) -> Error {
+        Error::ChecksumMismatch {
+            expected: expected.into(),
+            computed: computed.into(),
+        }
     }
 
     /// Construct an [`InvalidResponse`](Error::InvalidResponse) error wrapping the underlying parse
@@ -1221,7 +1244,7 @@ mod tests {
     // `MissingAssetField` Display names the absent payload field.
     #[test]
     fn missing_asset_field_display() {
-        let err = Error::MissingAssetField { field: "tag_name" };
+        let err = Error::missing_asset_field("tag_name");
         assert_eq!(
             err.to_string(),
             "ReleaseError: release/asset payload missing `tag_name`"
@@ -1562,7 +1585,7 @@ mod tests {
                 "VerificationRejectedError:",
             ),
             (Error::NoReleaseFound { target: None }, "ReleaseError:"),
-            (Error::MissingAssetField { field: "f" }, "ReleaseError:"),
+            (Error::missing_asset_field("f"), "ReleaseError:"),
             (
                 Error::InvalidResponse {
                     source: Box::new(MessageError("x".into())),

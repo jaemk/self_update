@@ -294,7 +294,7 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdateBuilder<S> {
     /// Confirm config and create a ready-to-use [`AsyncUpdate`].
     ///
     /// * Errors:
-    ///     * Config - no `source` was set, or an invalid `Update` configuration
+    ///     * `MissingField` - no `source` was set, or an invalid `Update` configuration
     pub fn build_async(&self) -> Result<AsyncUpdate<S>> {
         let source = self
             .source
