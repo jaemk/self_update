@@ -5,8 +5,9 @@
 //!
 //! ## What is and is not testable here
 //!
-//! The three struct variants newly annotated `#[non_exhaustive]` — `Unauthorized`, `HttpStatus`,
-//! `InvalidAssetName` — **cannot be constructed from outside the crate**. Attempting:
+//! Every struct variant is annotated `#[non_exhaustive]` (`Unauthorized`, `HttpStatus`,
+//! `NotFound`, `ChecksumMismatch`, `InvalidAssetName`, …) and **cannot be constructed with a
+//! struct literal from outside the crate**. Attempting:
 //!
 //! ```ignore
 //! // compile error: cannot create non-exhaustive struct with explicit field values from outside
@@ -20,7 +21,9 @@
 //! observable behaviour (Display strings, helpers, source() return values).
 //!
 //! What IS testable here:
-//! - Variants that are constructable from outside: `NotFound`, `Io`, `Aborted`, `Config`, …
+//! - The public constructors (`Error::http_status_error`, `Error::no_release_found`,
+//!   `Error::verification_rejected`, …) build the variants a downstream crate needs to return.
+//! - Tuple variants that remain constructable from outside: `Io`, `Aborted`, …
 //! - The enum-level `#[non_exhaustive]` forces a wildcard in any downstream `match`.
 //! - Error propagation through an injected `HttpClient` (error path not covered elsewhere).
 
@@ -57,14 +60,14 @@ impl HttpClient for IoErrorClient {
 // Tests
 // ---------------------------------------------------------------------------
 
-// `Error::NotFound` is not `#[non_exhaustive]` on the variant, so it can be constructed
-// and exhaustively destructured from outside. This pins the external constructability contract
-// and verifies `http_status()` / `url()` / `source()` from an external-crate perspective.
+// `Error::NotFound` is `#[non_exhaustive]` on the variant, so a downstream crate builds it via
+// the `http_status_error` constructor (404 maps to `NotFound`). This pins the constructor
+// contract and verifies `http_status()` / `url()` / `source()` from an external-crate
+// perspective.
 #[test]
 fn not_found_constructable_and_helpers_correct_from_outside() {
-    let err = Error::NotFound {
-        url: "https://example.com/missing".to_string(),
-    };
+    let err = Error::http_status_error(404, "https://example.com/missing");
+    assert!(matches!(err, Error::NotFound { .. }));
     assert_eq!(err.http_status(), Some(404));
     assert_eq!(err.url(), Some("https://example.com/missing"));
     // NotFound is field-only: no chained source.
@@ -74,6 +77,18 @@ fn not_found_constructable_and_helpers_correct_from_outside() {
     );
     let shown = err.to_string();
     assert!(shown.starts_with("NotFoundError: "), "got: {shown}");
+}
+
+// `Error::verification_rejected` builds the rejection a `verify_binary` hook returns; the
+// `VerificationRejected` variant itself is `#[non_exhaustive]` and not literal-constructable.
+#[test]
+fn verification_rejected_constructable_from_outside() {
+    let err = Error::verification_rejected("bad signature");
+    assert!(matches!(err, Error::VerificationRejected { .. }));
+    let shown = err.to_string();
+    assert!(shown.contains("bad signature"), "got: {shown}");
+    assert_eq!(err.http_status(), None);
+    assert_eq!(err.url(), None);
 }
 
 // `Error::Io` wraps `std::io::Error` which itself implements `std::error::Error`.
@@ -110,7 +125,7 @@ fn error_enum_match_requires_wildcard_arm() {
         }
     }
 
-    assert_eq!(classify(&Error::NotFound { url: "u".into() }), "not-found");
+    assert_eq!(classify(&Error::http_status_error(404, "u")), "not-found");
     assert_eq!(classify(&Error::Aborted), "aborted");
     assert_eq!(
         classify(&Error::Io(std::io::Error::other("x"))),

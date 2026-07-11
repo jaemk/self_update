@@ -301,7 +301,7 @@ impl Releases {
     /// Construct a `Releases` from a fetched (newest-first) release list with no associated current
     /// version, mirroring the bare-listing state the backends' `ReleaseList::fetch` returns.
     /// `current_version()` is `None` and `is_update_available()` errors with
-    /// [`Error::MissingField`], since there is nothing to compare against. Use
+    /// [`Error::NoCurrentVersion`], since there is nothing to compare against. Use
     /// [`from_releases`](Self::from_releases) when you have a current version to compare.
     pub fn from_listing(releases: Vec<Release>) -> Self {
         Self {
@@ -459,7 +459,7 @@ pub trait ReleaseSource: Send + Sync {
     /// "not compatible"). You therefore do **not** need to filter out the current or older versions
     /// (they are ignored) — but returning them is harmless, and returning the list newest-first
     /// ensures the right release is chosen.
-    fn get_latest_releases(&self) -> Result<Vec<Release>>;
+    fn get_releases(&self) -> Result<Vec<Release>>;
 
     /// Fetch the release for an explicit tag/version.
     fn get_release_version(&self, ver: &str) -> Result<Release>;
@@ -508,10 +508,8 @@ pub trait AsyncReleaseSource: Send + Sync {
     fn get_latest_release(&self) -> impl std::future::Future<Output = Result<Release>> + Send + '_;
 
     /// Fetch the candidate releases, **newest first**. See
-    /// [`ReleaseSource::get_latest_releases`] for how the updater treats the returned list.
-    fn get_latest_releases(
-        &self,
-    ) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + '_;
+    /// [`ReleaseSource::get_releases`] for how the updater treats the returned list.
+    fn get_releases(&self) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + '_;
 
     /// Fetch the release for an explicit tag/version.
     fn get_release_version<'a>(
@@ -594,8 +592,8 @@ pub trait AsyncReleaseUpdate: UpdateConfig + UpdateInternals {
 
 /// Implementation detail used to seal [`ReleaseUpdate`].
 ///
-/// Downstream code can *use* `ReleaseUpdate` (every backend's `build()` returns a
-/// `Box<dyn ReleaseUpdate>`) but cannot implement it for foreign types, which leaves the
+/// Downstream code can *use* `ReleaseUpdate` (every backend's `build()` returns a concrete
+/// `Update` implementing it) but cannot implement it for foreign types, which leaves the
 /// crate free to evolve the trait without a breaking change.
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -726,8 +724,9 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
 ///
 /// This trait is **sealed** (via its [`UpdateConfig`] supertrait): it is implemented only by this
 /// crate's backend `Update` types and cannot be implemented for types outside the crate. You
-/// consume it as the return type of each backend's `build()` (`Box<dyn ReleaseUpdate>`) — call
-/// `update()` / `update_extended()` on it — but you do not implement it yourself.
+/// consume it through the concrete `Update` each backend's `build()` returns (whose inherent
+/// `update()` / `update_extended()` verbs forward here), or as a generic bound — but you do not
+/// implement it yourself.
 ///
 /// The shared accessor methods live on the [`UpdateConfig`] supertrait. They resolve on a
 /// `dyn ReleaseUpdate` without importing it, and in generic code bounded `R: ReleaseUpdate` they
@@ -1252,9 +1251,14 @@ fn install_binary(
 ) -> Result<()> {
     if let Some(verify) = verify {
         // A hook that returns `Err` (an explicit rejection or a hook IO error) aborts the install;
-        // its message becomes the rejection reason.
-        verify(new_exe).map_err(|e| Error::VerificationRejected {
-            reason: Some(e.to_string()),
+        // its message becomes the rejection reason. An error that already is a
+        // `VerificationRejected` (e.g. built via `Error::verification_rejected`) passes through
+        // unwrapped so the reason is not nested inside another rejection message.
+        verify(new_exe).map_err(|e| match e {
+            Error::VerificationRejected { .. } => e,
+            other => Error::VerificationRejected {
+                reason: Some(other.to_string()),
+            },
         })?;
     }
     let current_exe = std::env::current_exe()?;
@@ -1407,6 +1411,41 @@ mod tests {
         assert!(
             !releases.is_update_available().unwrap(),
             "no release exceeds 1.0.0 => no update available"
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_propagates_semver_error() {
+        // The doc contract: the first release *reached* whose version fails to parse as semver
+        // propagates its error (unlike `choose_latest_release`, which silently skips unparseable
+        // versions). Nothing before the bad entry is strictly newer, so the scan reaches it.
+        let releases = Releases::new(
+            vec![rel("0.9.0"), rel("not-a-version"), rel("2.0.0")],
+            "1.0.0".to_string(),
+        );
+        let err = releases
+            .is_update_available()
+            .expect_err("an unparseable version reached by the scan must error");
+        assert!(
+            matches!(err, crate::errors::Error::SemVer(_)),
+            "expected Error::SemVer, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn releases_is_update_available_short_circuits_before_semver_error() {
+        // The complement: a strictly-newer release positioned before the unparseable one
+        // short-circuits to Ok(true); the bad entry is never examined.
+        let releases = Releases::new(
+            vec![rel("2.0.0"), rel("not-a-version")],
+            "1.0.0".to_string(),
+        );
+        assert!(
+            releases
+                .is_update_available()
+                .expect("a found update wins over a later parse error"),
+            "2.0.0 > 1.0.0 must return true before reaching the bad entry"
         );
     }
 
@@ -1940,7 +1979,7 @@ mod tests {
         async fn get_latest_release(&self) -> Result<Release> {
             Release::builder().version("2.0.0").build()
         }
-        async fn get_latest_releases(&self) -> Result<Vec<Release>> {
+        async fn get_releases(&self) -> Result<Vec<Release>> {
             Ok(vec![Release::builder().version("2.0.0").build()?])
         }
         async fn get_release_version(&self, ver: &str) -> Result<Release> {
@@ -2024,7 +2063,7 @@ mod tests {
         fn get_latest_release(&self) -> Result<Release> {
             Release::builder().version("1.0.0").build()
         }
-        fn get_latest_releases(&self) -> Result<Vec<Release>> {
+        fn get_releases(&self) -> Result<Vec<Release>> {
             Ok(vec![Release::builder().version("1.0.0").build()?])
         }
         fn get_release_version(&self, v: &str) -> Result<Release> {
@@ -2081,6 +2120,34 @@ mod tests {
             "nothing is installed when verification fails"
         );
         assert!(new_exe.exists(), "the extracted binary is left untouched");
+    }
+
+    #[test]
+    fn install_binary_passes_verification_rejected_through_unwrapped() {
+        // A hook rejecting via `Error::verification_rejected` surfaces its reason verbatim: the
+        // already-`VerificationRejected` error passes through instead of being re-wrapped with the
+        // full Display string ("VerificationRejectedError: ...") nested inside the reason.
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+        let dest = dir.path().join("installed");
+
+        let reject: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(crate::errors::Error::verification_rejected("bad signature"))
+        });
+        let err = install_binary(&new_exe, &dest, Some(&*reject))
+            .expect_err("a rejecting verify hook must abort the install");
+        match err {
+            crate::errors::Error::VerificationRejected { reason } => {
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("bad signature"),
+                    "the constructor's reason must pass through unwrapped"
+                );
+            }
+            other => panic!("expected Error::VerificationRejected, got {:?}", other),
+        }
+        assert!(!dest.exists());
     }
 
     #[test]

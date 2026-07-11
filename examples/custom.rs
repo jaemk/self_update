@@ -44,7 +44,7 @@ impl ReleaseSource for MyHost {
             .build()
     }
 
-    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
+    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
         // Return the full candidate list. The updater discards releases that are not
         // strictly newer than the current version and picks the newest semver-compatible
         // one, so you do not need to pre-filter by `current`.
@@ -80,7 +80,7 @@ impl ReleaseSource for MyHost {
 #[allow(dead_code)]
 mod async_update {
     use self_update::backends::custom::{AsyncUpdate, Blocking};
-    use self_update::{AsyncReleaseSource, AsyncReleaseUpdate, Release, ReleaseAsset};
+    use self_update::{AsyncReleaseSource, Release, ReleaseAsset};
 
     // A natively-async source: implement `AsyncReleaseSource` when your listing
     // transport is already async (e.g. you hold a `reqwest::Client`).
@@ -98,7 +98,7 @@ mod async_update {
                 .build()
         }
 
-        async fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
+        async fn get_releases(&self) -> self_update::Result<Vec<Release>> {
             Ok(vec![self.get_latest_release().await?])
         }
 

@@ -1563,7 +1563,7 @@ fn parse_s3_response<R: std::io::BufRead>(
                                 release.assets = vec![ReleaseAsset::new(exe_name, download_url)];
                                 debug!("Matched release: {:?}", release);
                             } else {
-                                debug!("Regex mismatch: {:?}", &txt);
+                                debug!("Regex mismatch: {:?}", txt);
                             }
                         }
                         Tag::LastModified => {

@@ -647,8 +647,10 @@ macro_rules! impl_common_builder_setters {
         /// of the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
         /// extract -> `verify_binary` (the extracted binary) -> replace. Use
         /// `verify_checksum`/`verifying_keys` to gate the download by content; use `verify_binary` to
-        /// gate it by running the new binary. A returned error's message becomes the reason of the
-        /// resulting `Error::VerificationRejected`.
+        /// gate it by running the new binary. Reject with
+        /// [`Error::verification_rejected("reason")`](crate::Error::verification_rejected), which is
+        /// surfaced as-is; any other returned error's message becomes the reason of the resulting
+        /// `Error::VerificationRejected`.
         pub fn verify_binary(
             &mut self,
             verify: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,

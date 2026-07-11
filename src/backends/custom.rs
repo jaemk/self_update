@@ -21,7 +21,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
+    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -60,7 +60,7 @@ transport, implement [`AsyncReleaseSource`](crate::AsyncReleaseSource) and drive
 ```no_run
 # #[cfg(feature = "async")]
 # mod demo {
-use self_update::{AsyncReleaseSource, AsyncReleaseUpdate, Release, ReleaseAsset, cargo_crate_version};
+use self_update::{AsyncReleaseSource, Release, ReleaseAsset, cargo_crate_version};
 use self_update::backends::custom::AsyncUpdate;
 
 struct MyHost;
@@ -72,7 +72,7 @@ impl AsyncReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    async fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
+    async fn get_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release().await?])
     }
     async fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
@@ -104,7 +104,7 @@ use self_update::backends::custom::{AsyncUpdate, Blocking};
 # struct MySyncHost;
 # impl self_update::ReleaseSource for MySyncHost {
 #     fn get_latest_release(&self) -> self_update::Result<self_update::Release> { unimplemented!() }
-#     fn get_latest_releases(&self) -> self_update::Result<Vec<self_update::Release>> { unimplemented!() }
+#     fn get_releases(&self) -> self_update::Result<Vec<self_update::Release>> { unimplemented!() }
 #     fn get_release_version(&self, _: &str) -> self_update::Result<self_update::Release> { unimplemented!() }
 # }
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -226,7 +226,7 @@ impl ReleaseUpdate for Update {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = self
             .source
-            .get_latest_releases()?
+            .get_releases()?
             .into_iter()
             .filter(|r| {
                 crate::version::bump_is_greater(&current_version, r.version()).unwrap_or(false)
@@ -310,7 +310,9 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdateBuilder<S> {
 /// Async sibling of [`Update`]: updates to a specified or latest release from a user-defined
 /// [`AsyncReleaseSource`](crate::AsyncReleaseSource).
 ///
-/// Generic over the source (no trait object), so the source's `async fn`s need no boxing.
+/// Generic over the source (no trait object), so the source's `async fn`s need no boxing. Like the
+/// built-in backends' `AsyncUpdate` types, the `*_async` verbs are inherent methods — no
+/// `AsyncReleaseUpdate` import is needed to call them.
 #[cfg(feature = "async")]
 #[non_exhaustive]
 pub struct AsyncUpdate<S: crate::update::AsyncReleaseSource> {
@@ -333,6 +335,37 @@ impl<S: crate::update::AsyncReleaseSource> AsyncUpdate<S> {
     /// Initialize a new [`AsyncUpdate`] builder.
     pub fn configure() -> AsyncUpdateBuilder<S> {
         AsyncUpdateBuilder::new()
+    }
+
+    /// Display release information and update the current binary to the latest release,
+    /// pending confirmation. Returns a [`VersionStatus`](crate::VersionStatus). See
+    /// [`AsyncReleaseUpdate::update_async`](crate::AsyncReleaseUpdate::update_async).
+    pub async fn update_async(&self) -> Result<crate::VersionStatus> {
+        crate::update::AsyncReleaseUpdate::update_async(self).await
+    }
+
+    /// Same as [`update_async`](Self::update_async) but returns a
+    /// [`ReleaseStatus`](crate::ReleaseStatus) with the full release details.
+    pub async fn update_extended_async(&self) -> Result<crate::ReleaseStatus> {
+        crate::update::AsyncReleaseUpdate::update_extended_async(self).await
+    }
+
+    /// Fetch the single newest release from the source. See
+    /// [`AsyncReleaseUpdate::get_latest_release_async`](crate::AsyncReleaseUpdate::get_latest_release_async).
+    pub async fn get_latest_release_async(&self) -> Result<Releases> {
+        crate::update::AsyncReleaseUpdate::get_latest_release_async(self).await
+    }
+
+    /// Fetch the releases newer than the current version. See
+    /// [`AsyncReleaseUpdate::get_newer_releases_async`](crate::AsyncReleaseUpdate::get_newer_releases_async).
+    pub async fn get_newer_releases_async(&self) -> Result<Releases> {
+        crate::update::AsyncReleaseUpdate::get_newer_releases_async(self).await
+    }
+
+    /// Fetch details of the release matching `ver`. See
+    /// [`AsyncReleaseUpdate::get_release_version_async`](crate::AsyncReleaseUpdate::get_release_version_async).
+    pub async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
+        crate::update::AsyncReleaseUpdate::get_release_version_async(self, ver).await
     }
 
     /// Whether a release newer than the current version is available, returning it if so.
@@ -369,7 +402,7 @@ impl<S: crate::update::AsyncReleaseSource> crate::update::AsyncReleaseUpdate for
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = self
             .source
-            .get_latest_releases()
+            .get_releases()
             .await?
             .into_iter()
             .filter(|r| {
@@ -422,9 +455,9 @@ impl<S: ReleaseSource + Clone + 'static> crate::update::AsyncReleaseSource for B
                 source: Some(Box::new(e)),
             })?
     }
-    async fn get_latest_releases(&self) -> Result<Vec<Release>> {
+    async fn get_releases(&self) -> Result<Vec<Release>> {
         let s = self.source.clone();
-        tokio::task::spawn_blocking(move || s.get_latest_releases())
+        tokio::task::spawn_blocking(move || s.get_releases())
             .await
             .map_err(|e| Error::Internal {
                 message: "blocking task failed".to_string(),
@@ -466,7 +499,7 @@ mod tests {
                 ))
                 .build()
         }
-        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+        fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
             Ok(vec![self.get_latest_release()?])
         }
         fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
@@ -532,7 +565,7 @@ mod tests {
         let tagged = upd.get_release_version("1.5.0").unwrap();
         assert_eq!(tagged.version(), "1.5.0");
 
-        // get_latest_release once + once inside get_latest_releases = 2.
+        // get_latest_release once + once inside get_releases = 2.
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -595,7 +628,7 @@ mod tests {
         fn get_latest_release(&self) -> crate::errors::Result<Release> {
             Release::builder().version("3.0.0").build()
         }
-        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+        fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
             Ok(vec![
                 Release::builder().version("3.0.0").build()?,
                 Release::builder().version("2.0.0").build()?,
@@ -684,7 +717,7 @@ mod tests {
     // submodule below. The async tests proved those paths work through `AsyncUpdate`; the tests here
     // prove the same paths work through the sync `Update` and its `update_extended()` orchestrator.
 
-    /// A sync source whose `get_latest_releases` returns several candidates (out of order, some
+    /// A sync source whose `get_releases` returns several candidates (out of order, some
     /// older than current) so `choose_latest_release` runs over real source data. Each release
     /// carries a single asset whose name embeds its version (`app-<ver>.bin`), letting an
     /// asset-matcher report which release the orchestrator actually selected.
@@ -705,7 +738,7 @@ mod tests {
         fn get_latest_release(&self) -> crate::errors::Result<Release> {
             self.get_release_version("9.9.9")
         }
-        fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+        fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
             // Newest-but-incompatible, current, older, and the compatible winner — out of order.
             // The orchestrator must drop current/older and pick the newest compatible (1.4.0),
             // not 2.0.0 and not 1.0.0.
@@ -833,7 +866,7 @@ mod tests {
                     ))
                     .build()
             }
-            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+            async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 tokio::task::yield_now().await;
                 self.releases_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![Release::builder().version("2.0.0").build()?])
@@ -918,7 +951,7 @@ mod tests {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Release::builder().version("3.0.0").build()
             }
-            fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+            fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![Release::builder().version("3.0.0").build()?])
             }
@@ -974,7 +1007,7 @@ mod tests {
             );
         }
 
-        /// An end-to-end async source whose `get_latest_releases` returns several candidates
+        /// An end-to-end async source whose `get_releases` returns several candidates
         /// (out of order, some older than current) so the async orchestrator's
         /// `choose_latest_release` selection runs over real source data. Each release carries a
         /// single asset whose name embeds its version (`app-<ver>.bin`), so a downstream
@@ -996,7 +1029,7 @@ mod tests {
             async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                 self.get_release_version("9.9.9").await
             }
-            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+            async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 tokio::task::yield_now().await;
                 // Newest-but-incompatible, current, older, and the compatible winner — out of
                 // order. The orchestrator must drop current/older and pick the newest compatible
@@ -1024,7 +1057,7 @@ mod tests {
                 async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     tokio::task::yield_now().await;
                     Ok(vec![
                         Release::builder().version("1.0.0").build()?,
@@ -1147,7 +1180,7 @@ mod tests {
                 async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Ok(vec![Release::builder().version("1.0.0").build()?])
                 }
                 async fn get_release_version(&self, ver: &str) -> crate::errors::Result<Release> {
@@ -1183,7 +1216,7 @@ mod tests {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Err(crate::errors::Error::NoReleaseFound { target: None })
                 }
-                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Err(crate::errors::Error::HttpStatus {
                         status: 503,
                         url: "u".into(),
@@ -1200,7 +1233,7 @@ mod tests {
                 Err(crate::errors::Error::NoReleaseFound { .. })
             ));
             assert!(matches!(
-                AsyncReleaseSource::get_latest_releases(&blk).await,
+                AsyncReleaseSource::get_releases(&blk).await,
                 Err(crate::errors::Error::HttpStatus { .. })
             ));
             assert!(matches!(
@@ -1221,7 +1254,7 @@ mod tests {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     panic!("boom in blocking task");
                 }
-                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     unreachable!()
                 }
                 fn get_release_version(&self, _ver: &str) -> crate::errors::Result<Release> {
@@ -1255,7 +1288,7 @@ mod tests {
                 fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     Release::builder().version("1.0.0").build()
                 }
-                fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     Ok(vec![])
                 }
                 fn get_release_version(&self, v: &str) -> crate::errors::Result<Release> {
@@ -1368,7 +1401,7 @@ mod tests {
             async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                 Release::builder().version("3.0.0").build()
             }
-            async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+            async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                 Ok(vec![
                     Release::builder().version("3.0.0").build()?,
                     Release::builder().version("2.0.0").build()?,
@@ -1487,7 +1520,7 @@ mod tests {
                 async fn get_latest_release(&self) -> crate::errors::Result<Release> {
                     self.get_release_version("9.9.9").await
                 }
-                async fn get_latest_releases(&self) -> crate::errors::Result<Vec<Release>> {
+                async fn get_releases(&self) -> crate::errors::Result<Vec<Release>> {
                     tokio::task::yield_now().await;
                     Ok(vec![
                         Release::builder()

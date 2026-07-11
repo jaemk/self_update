@@ -53,7 +53,7 @@ At least one HTTP client must be selected; having zero clients is a compile erro
 clients and multiple TLS backends may coexist (reqwest is preferred when both are present):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
-* `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client instead (set `default-features = false`);
+* `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client, either alongside reqwest or as a drop-in replacement (set `default-features = false` to drop reqwest);
 * `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
 * `native-tls`: opt-in native/OpenSSL TLS for the selected client;
 
@@ -293,7 +293,7 @@ impl ReleaseSource for MyHost {
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
             .build()?)
     }
-    fn get_latest_releases(&self) -> self_update::Result<Vec<Release>> {
+    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
         Ok(vec![self.get_latest_release()?])
     }
     fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
