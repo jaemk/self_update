@@ -1355,22 +1355,16 @@ fn build_s3_api_url(
             bucket_name, region_result?
         ),
         Endpoint::GCS => format!("https://storage.googleapis.com/{}/", bucket_name),
-        Endpoint::Generic(endpoint) => endpoint.clone(),
+        // Asset keys are appended directly to the base, so it must end with `/` like every
+        // crate-built base above; normalize a user-supplied endpoint that omits it.
+        Endpoint::Generic(endpoint) if endpoint.ends_with('/') => endpoint.clone(),
+        Endpoint::Generic(endpoint) => format!("{}/", endpoint),
     };
 
-    let api_url = match endpoint {
-        Endpoint::S3
-        | Endpoint::S3DualStack
-        | Endpoint::DigitalOceanSpaces
-        | Endpoint::Generic(..) => format!(
-            "{}?list-type=2&max-keys={}{}{}",
-            download_base_url, max_keys, prefix, continuation
-        ),
-        Endpoint::GCS => format!(
-            "{}?list-type=2&max-keys={}{}{}",
-            download_base_url, max_keys, prefix, continuation
-        ),
-    };
+    let api_url = format!(
+        "{}?list-type=2&max-keys={}{}{}",
+        download_base_url, max_keys, prefix, continuation
+    );
 
     #[cfg(feature = "s3-auth")]
     let api_url = auth::s3_signature_v4(&api_url, region, access_key, signature_ttl.as_secs())?;
@@ -3122,6 +3116,25 @@ mod tests {
         // consumed) and appends the v2 `list-type=2` listing query.
         let (base, url) = api_url(
             super::Endpoint::Generic("https://s3.example.com/bucket/".to_owned()),
+            "ignored-bucket",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(base, "https://s3.example.com/bucket/");
+        assert_eq!(
+            url,
+            "https://s3.example.com/bucket/?list-type=2&max-keys=1000"
+        );
+    }
+
+    #[test]
+    fn build_s3_api_url_generic_normalizes_missing_trailing_slash() {
+        // Asset keys are appended directly to the download base (`format!("{base}{key}")`), so a
+        // Generic endpoint supplied without a trailing `/` must be normalized; otherwise every
+        // download URL is malformed (`...buckethey-1.0.0-linux`) and, under s3-auth, signed wrong.
+        let (base, url) = api_url(
+            super::Endpoint::Generic("https://s3.example.com/bucket".to_owned()),
             "ignored-bucket",
             None,
             None,

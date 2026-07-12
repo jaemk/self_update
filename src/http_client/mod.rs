@@ -59,6 +59,10 @@ pub trait HttpResponse {
 
 /// Async sibling of [`HttpClient`] (reqwest + tokio only). Object-safe like the sync seam, so an
 /// async client can be injected as an `Arc<dyn AsyncHttpClient>`.
+///
+/// The signature types from foreign crates (`BoxFuture`, `BoxStream`, `Bytes`) are re-exported at
+/// the crate root (`self_update::futures_util`, `self_update::bytes`), so an implementation does
+/// not need them as direct dependencies.
 #[cfg(feature = "async")]
 pub trait AsyncHttpClient: Send + Sync {
     /// Issue a GET, returning a boxed future resolving to the status-checked response.

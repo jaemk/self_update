@@ -1,7 +1,7 @@
 /*!
 Example updating an executable to the latest version released via GitHub
 
-`cargo run --example github --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`.
+`cargo run --example github --features "archive-tar archive-zip compression-tar-gz compression-zip-deflate"`.
 
 Include `signatures` in the features list to enable zipsign verification
 */
@@ -38,7 +38,7 @@ fn run() -> Result<(), Box<dyn ::std::error::Error>> {
         //.no_confirm(true)
         //
         // For a GitHub Enterprise install, point at your API endpoint:
-        //.url("https://github.mycorp.com/api/v3")
+        //.api_base_url("https://github.mycorp.com/api/v3")
         //
         // For private repos, you will need to provide a GitHub auth token
         // **Make sure not to bake the token into your app**; it is recommended

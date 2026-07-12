@@ -23,10 +23,10 @@ struct AssetDto {
 
 impl AssetDto {
     fn into_asset(self) -> Result<ReleaseAsset> {
-        let download_url = self.url.ok_or(Error::MissingAssetField { field: "url" })?;
+        let download_url = self.url.ok_or_else(|| Error::missing_asset_field("url"))?;
         let name = self
             .name
-            .ok_or(Error::MissingAssetField { field: "name" })?;
+            .ok_or_else(|| Error::missing_asset_field("name"))?;
         Ok(ReleaseAsset::new(name, download_url))
     }
 }
@@ -46,13 +46,13 @@ impl ReleaseDto {
     fn into_release(self) -> Result<Release> {
         let tag = self
             .tag_name
-            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
-        let date = self.created_at.ok_or(Error::MissingAssetField {
-            field: "created_at",
-        })?;
+            .ok_or_else(|| Error::missing_asset_field("tag_name"))?;
+        let date = self
+            .created_at
+            .ok_or_else(|| Error::missing_asset_field("created_at"))?;
         let assets = self
             .assets
-            .ok_or(Error::MissingAssetField { field: "assets" })?;
+            .ok_or_else(|| Error::missing_asset_field("assets"))?;
         let name = self.name.unwrap_or_else(|| tag.clone());
         let assets = assets
             .into_iter()
@@ -197,8 +197,8 @@ impl ReleaseList {
             self.custom_url
                 .as_ref()
                 .unwrap_or(&"https://api.github.com".to_string()),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases = run_paginated(releases_plan(&api_url, None)?, &self.request)?;
@@ -220,8 +220,8 @@ impl ReleaseList {
             self.custom_url
                 .as_ref()
                 .unwrap_or(&"https://api.github.com".to_string()),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         );
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
         let releases =
@@ -363,8 +363,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 
@@ -373,8 +373,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name)
         )
     }
 
@@ -383,8 +383,8 @@ impl Update {
         format!(
             "{}/repos/{}/{}/releases/tags/{}",
             self.api_base(),
-            self.repo_owner,
-            self.repo_name,
+            urlencoding::encode(&self.repo_owner),
+            urlencoding::encode(&self.repo_name),
             urlencoding::encode(ver)
         )
     }
@@ -488,7 +488,14 @@ fn release_array_page(
                 items.push(release);
             }
             let next = next_link(resp_headers)
-                .map(|next_url| release_array_page(next_url, api_headers_for(), stop_at.clone()));
+                .map(|next_url| -> Result<PageRequest<Release>> {
+                    Ok(release_array_page(
+                        next_url,
+                        api_headers()?,
+                        stop_at.clone(),
+                    ))
+                })
+                .transpose()?;
             Ok(Page {
                 items,
                 next,
@@ -514,14 +521,6 @@ fn single_plan(url: String) -> Result<PageRequest<Release>> {
             Ok(Page::last(vec![dto.into_release()?]))
         }),
     })
-}
-
-/// Build the github request headers for a continuation page. Used when rebuilding a next-page
-/// request inside the parser closure, where returning a `Result` is not possible. Panics only on
-/// an internal user-agent bug (the header value is a static string that is always valid); a
-/// silent `.unwrap_or_default()` would drop the User-Agent on that failure path.
-fn api_headers_for() -> HeaderMap {
-    api_headers().expect("api_headers builds from static values")
 }
 
 #[cfg(feature = "async")]
@@ -1398,6 +1397,37 @@ mod tests {
     }
 
     #[test]
+    fn urls_percent_encode_repo_owner_and_name() {
+        // `releases_url()`/`latest_url()`/`tag_url()` percent-encode `repo_owner` and
+        // `repo_name`, matching the gitlab/gitea backends. github.com restricts these to
+        // URL-safe characters, but a GitHub Enterprise namespace (or a copy-paste of this URL
+        // construction) must not smuggle raw URL-special characters into the path.
+        let (base, captured) = stub_capturing(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: release_obj_json("v1.0.0"),
+            }]
+        });
+        let upd = super::Update::configure()
+            .repo_owner("own er")
+            .repo_name("re#po")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .api_base_url(&base)
+            .build()
+            .unwrap();
+        let _ = upd.get_release_version("v1.0.0").unwrap();
+        let request = &captured.lock().unwrap()[0];
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("/repos/own%20er/re%23po/releases/tags/"),
+            "owner and name must be percent-encoded in the request path, got: {}",
+            request_line
+        );
+    }
+
+    #[test]
     fn builder_stores_timeout_and_request_header() {
         use std::time::Duration;
         let upd = super::Update::configure()
@@ -2187,25 +2217,6 @@ mod tests {
                 .get(crate::http_client::header::AUTHORIZATION)
                 .is_none(),
             "api_headers() must not set an Authorization header"
-        );
-    }
-
-    #[test]
-    fn api_headers_for_takes_no_param_and_sets_user_agent() {
-        // I1+I2: api_headers_for() is now a zero-arg function that uses .expect instead of
-        // .unwrap_or_default, so a failure surfaces rather than silently producing empty headers.
-        // This test calls it with no arguments -- it would fail to compile against the old
-        // `api_headers_for(auth: &Option<String>)` signature. The User-Agent assertion proves
-        // headers are not silently empty (as .unwrap_or_default() would give on a failure path).
-        let headers = super::api_headers_for();
-        assert_eq!(
-            headers
-                .get(crate::http_client::header::USER_AGENT)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "rust/self-update",
-            "api_headers_for() must return headers with the rust/self-update User-Agent set"
         );
     }
 

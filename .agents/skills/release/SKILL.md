@@ -68,8 +68,9 @@ Check for:
   any helper traits) expose a consistent method set with consistent signatures
   (`&self` vs `&mut self`)?
 - **Feature-gate symmetry** — is each public item gated behind exactly the features it
-  needs? Are the `reqwest`/`ureq` and `default-tls`/`rustls` selections handled
-  consistently, and is the mutual exclusion surfaced clearly?
+  needs? Are the `reqwest`/`ureq` and `native-tls`/`rustls` selections handled
+  consistently, and is the coexistence model (both clients / both TLS providers can be
+  enabled; reqwest and rustls win) surfaced clearly?
 - **Doc / CHANGELOG alignment** — do the `src/lib.rs` docs, the `[unreleased]` CHANGELOG
   section, and any migration notes accurately describe the shipped API (named types,
   signatures, builder/setter names, feature gates)?
@@ -148,10 +149,11 @@ cargo readme --no-indent-headings > README.md
 Build the full feature set on both http clients and run the tests:
 
 ```bash
-cargo test --features "archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth"
-cargo build --no-default-features --features "ureq default-tls archive-tar archive-zip compression-flate2 compression-zip-deflate compression-zip-bzip2 signatures s3-auth"
+cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures checksums s3-auth"
+cargo build --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures checksums s3-auth"
 ```
 
+(`make ci` runs these lanes plus fmt/clippy/async and is preferred when time allows.)
 Fix any compilation errors before proceeding.
 
 ### 6. Commit or amend

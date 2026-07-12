@@ -305,7 +305,9 @@ macro_rules! impl_update_config_accessors {
             &self.common.progress_chars
         }
         fn auth_token(&self) -> Option<&str> {
-            self.common.auth_token.as_deref()
+            // Single source of truth: the resolved token lives on the request config, where
+            // `apply_auth` reads it for both the listing and download paths.
+            self.common.request.auth_token.as_deref()
         }
         }
     };

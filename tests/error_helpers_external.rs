@@ -91,6 +91,46 @@ fn verification_rejected_constructable_from_outside() {
     assert_eq!(err.url(), None);
 }
 
+// `Error::no_release_found` / `no_release_found_for_target` build the two shapes of
+// `NoReleaseFound` (which is `#[non_exhaustive]` and not literal-constructable) without the
+// caller spelling out an `Option`.
+#[test]
+fn no_release_found_constructors_from_outside() {
+    let plain = Error::no_release_found();
+    assert!(matches!(plain, Error::NoReleaseFound { .. }));
+
+    // `impl Into<String>`: a `&str` and a `format!` product both work.
+    let scoped = Error::no_release_found_for_target("x86_64-unknown-linux-gnu");
+    let shown = scoped.to_string();
+    assert!(shown.contains("x86_64-unknown-linux-gnu"), "got: {shown}");
+    let _ = Error::no_release_found_for_target(format!("{}-msvc", "x86_64"));
+}
+
+// `Error::missing_asset_field` accepts a dynamic field path, not just a `&'static str`.
+#[test]
+fn missing_asset_field_accepts_dynamic_paths_from_outside() {
+    let idx = 2;
+    let err = Error::missing_asset_field(format!("assets[{idx}].url"));
+    assert!(matches!(err, Error::MissingAssetField { .. }));
+    let shown = err.to_string();
+    assert!(shown.contains("assets[2].url"), "got: {shown}");
+}
+
+// `Error::checksum_mismatch` builds the `ChecksumMismatch` variant, which is
+// `#[non_exhaustive]` and otherwise unconstructable from outside the crate.
+#[test]
+fn checksum_mismatch_constructable_from_outside() {
+    let err = Error::checksum_mismatch("aa11", "bb22");
+    assert!(matches!(err, Error::ChecksumMismatch { .. }));
+    let shown = err.to_string();
+    assert!(
+        shown.contains("aa11") && shown.contains("bb22"),
+        "Display must carry both digests, got: {shown}"
+    );
+    assert_eq!(err.http_status(), None);
+    assert_eq!(err.url(), None);
+}
+
 // `Error::Io` wraps `std::io::Error` which itself implements `std::error::Error`.
 // The `source()` chain works end-to-end from outside the crate.
 #[test]

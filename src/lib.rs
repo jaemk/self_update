@@ -462,6 +462,16 @@ on the system OpenSSL cert layout.
 compile_error!("feature `async` requires the `reqwest` client - `ureq` has no async API");
 
 pub use http;
+// Re-export the crates whose types appear in the async transport-trait signatures
+// (`AsyncHttpClient` / `AsyncHttpResponse` name `BoxFuture`, `BoxStream`, and `Bytes`), so a
+// custom async transport can be implemented without adding `futures-util`/`bytes` as direct
+// dependencies (and without a version-skew risk against the ones this crate links).
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub use bytes;
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub use futures_util;
 // Re-export the selected HTTP client so callers can name the types accepted by the client-injection
 // setters (`reqwest_client` / `reqwest_async_client` / `ureq_agent`) without a separate dependency.
 #[cfg(feature = "reqwest")]

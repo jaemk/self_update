@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -15,6 +15,7 @@ rust-version = "1.88"
 [package.metadata.docs.rs]
 features = [
   "reqwest",
+  "ureq",
   "native-tls",
   "archive-zip",
   "compression-zip-bzip2",

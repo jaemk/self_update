@@ -23,10 +23,10 @@ struct AssetDto {
 
 impl AssetDto {
     fn into_asset(self) -> Result<ReleaseAsset> {
-        let download_url = self.url.ok_or(Error::MissingAssetField { field: "url" })?;
+        let download_url = self.url.ok_or_else(|| Error::missing_asset_field("url"))?;
         let name = self
             .name
-            .ok_or(Error::MissingAssetField { field: "name" })?;
+            .ok_or_else(|| Error::missing_asset_field("name"))?;
         Ok(ReleaseAsset::new(name, download_url))
     }
 }
@@ -54,13 +54,14 @@ impl ReleaseDto {
     fn into_release(self) -> Result<Release> {
         let tag = self
             .tag_name
-            .ok_or(Error::MissingAssetField { field: "tag_name" })?;
-        let date = self.created_at.ok_or(Error::MissingAssetField {
-            field: "created_at",
-        })?;
-        let links = self.assets.links.ok_or(Error::MissingAssetField {
-            field: "assets.links",
-        })?;
+            .ok_or_else(|| Error::missing_asset_field("tag_name"))?;
+        let date = self
+            .created_at
+            .ok_or_else(|| Error::missing_asset_field("created_at"))?;
+        let links = self
+            .assets
+            .links
+            .ok_or_else(|| Error::missing_asset_field("assets.links"))?;
         let name = self.name.unwrap_or_else(|| tag.clone());
         let assets = links
             .into_iter()
@@ -479,13 +480,15 @@ fn release_array_page(
                 }
                 items.push(release);
             }
-            let next = next_link(resp_headers).map(|next_url| {
-                release_array_page(
-                    next_url,
-                    api_headers().expect("api_headers builds from static values"),
-                    stop_at.clone(),
-                )
-            });
+            let next = next_link(resp_headers)
+                .map(|next_url| -> Result<PageRequest<Release>> {
+                    Ok(release_array_page(
+                        next_url,
+                        api_headers()?,
+                        stop_at.clone(),
+                    ))
+                })
+                .transpose()?;
             Ok(Page {
                 items,
                 next,

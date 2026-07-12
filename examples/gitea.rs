@@ -1,7 +1,7 @@
 /*!
 Example updating an executable to the latest version released via Gitea
 
-`cargo run --example gitea --features "archive-tar archive-zip compression-flate2 compression-zip-deflate"`
+`cargo run --example gitea --features "gitea archive-tar archive-zip compression-tar-gz compression-zip-deflate"`
 
 Unlike GitHub/GitLab, Gitea has no canonical public host, so the instance URL is required,
 set it with `.host(..)`.

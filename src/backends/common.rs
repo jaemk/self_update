@@ -1,9 +1,10 @@
 /*!
 Configuration shared by every backend's `Update` builder.
 
-Each backend (`github`, `gitlab`, `gitea`, `s3`) layers a small amount of
-backend-specific configuration (repo coordinates, host/url, bucket, credentials) on top of
-an identical set of common update options (target, bin name, version, progress style, …).
+Each backend (`github`, `gitlab`, `gitea`, `s3`, `custom`) layers a small amount of
+backend-specific configuration (repo coordinates, host/url, bucket, credentials, a release
+source) on top of an identical set of common update options (target, bin name, version,
+progress style, …).
 
 [`CommonBuilderConfig`] holds those common options while a backend builder is being
 configured; [`CommonBuilderConfig::build`] validates them and produces a resolved
@@ -457,7 +458,6 @@ impl CommonBuilderConfig {
             progress_template: self.progress_template.clone(),
             #[cfg(feature = "progress-bar")]
             progress_chars: self.progress_chars.clone(),
-            auth_token: self.auth_token.clone(),
             progress_callback: self.progress_callback.clone(),
             verify: self.verify.clone(),
             asset_matcher: self.asset_matcher.clone(),
@@ -487,7 +487,6 @@ pub(crate) struct CommonConfig {
     pub progress_template: String,
     #[cfg(feature = "progress-bar")]
     pub progress_chars: String,
-    pub auth_token: Option<String>,
     pub progress_callback: Option<crate::ProgressCallback>,
     pub verify: Option<crate::VerifyCallback>,
     pub asset_matcher: Option<crate::AssetMatcher>,
