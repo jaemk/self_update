@@ -2,6 +2,11 @@
 
 ## [unreleased]
 
+## [1.0.0-rc.5]
+Final polish from a full-surface review of rc.4: two breaking `Error`-constructor changes (folded
+into the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)), additive constructors and
+re-exports, and fixes for an s3 url bug, an ungated verify message, and stale docs.
+
 ### Added
 - `Error::checksum_mismatch(expected, computed)`: build the `ChecksumMismatch` variant, which
   became `#[non_exhaustive]` in rc.4 and had no public construction path.
