@@ -192,8 +192,8 @@ impl ReleaseListBuilder {
         self
     }
 
-    #[cfg(feature = "s3-auth")]
     /// Set the access key
+    #[cfg(feature = "s3-auth")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
         self
@@ -416,8 +416,8 @@ impl UpdateBuilder {
         self
     }
 
-    #[cfg(feature = "s3-auth")]
     /// Set the access key (an `(access_key_id, secret_access_key)` pair)
+    #[cfg(feature = "s3-auth")]
     pub fn access_key(&mut self, access_key: impl Into<auth::AccessKey>) -> &mut Self {
         self.access_key = Some(access_key.into());
         self
@@ -1888,12 +1888,12 @@ mod tests {
     /// path rather than a fully-buffered `String` (audit I7).
     struct XmlResponse {
         body: Vec<u8>,
+        headers: crate::http_client::HeaderMap,
     }
 
     impl crate::http_client::HttpResponse for XmlResponse {
         fn headers(&self) -> &crate::http_client::HeaderMap {
-            // Leak a fresh empty map so the borrow lives long enough; never read in this test.
-            Box::leak(Box::new(crate::http_client::HeaderMap::new()))
+            &self.headers
         }
         fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
             Box::new(std::io::Cursor::new(self.body))
@@ -1909,6 +1909,7 @@ mod tests {
         let xml = list_bucket_xml(&["myapp-1.2.3-x86_64-linux"]);
         let resp: Box<dyn crate::http_client::HttpResponse> = Box::new(XmlResponse {
             body: xml.into_bytes(),
+            headers: crate::http_client::HeaderMap::new(),
         });
         let reader = resp.body_buffered();
         let releases = parse_s3_response(
@@ -1968,11 +1969,15 @@ mod tests {
             .version("1.0.0")
             .build()
             .unwrap();
-        let empty_ver = Release::builder()
-            .name("myapp")
-            .version("")
-            .build()
-            .unwrap();
+        // An empty version cannot come out of `ReleaseBuilder::build` (it validates semver), but
+        // the s3 listing parser constructs `Release`s directly, so the guard is still reachable.
+        let empty_ver = Release {
+            name: "myapp".into(),
+            version: "".into(),
+            date: "".into(),
+            body: None,
+            assets: Vec::new(),
+        };
         super::add_to_releases_list(&mut releases, empty_name);
         super::add_to_releases_list(&mut releases, empty_ver);
         assert!(
@@ -2807,7 +2812,9 @@ mod tests {
     }
 
     fn rel(version: &str) -> Release {
-        Release::builder().version(version).build().unwrap()
+        // Raw construction: the junk-version tests below need versions `ReleaseBuilder::build`
+        // rejects (stored s3 keys are parsed directly, so junk can still reach the pipeline).
+        crate::update::testing::release_with_raw_version(version)
     }
 
     #[test]

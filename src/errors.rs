@@ -316,6 +316,15 @@ impl Error {
         status_to_error(status, &url.into())
     }
 
+    /// Construct a [`Transport`](Error::Transport) error wrapping the underlying
+    /// connection/TLS/timeout failure, for a custom [`HttpClient`](crate::http_client::HttpClient) /
+    /// [`AsyncHttpClient`](crate::http_client::AsyncHttpClient) whose request could not be
+    /// completed. Accepts an error value or a message string:
+    /// `Error::transport(io_err)` / `Error::transport("connection reset by proxy")`.
+    pub fn transport(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
+        Error::Transport(source.into())
+    }
+
     /// Construct a [`VerificationRejected`](Error::VerificationRejected) error with the given
     /// reason, for rejecting the extracted binary from a `verify_binary` hook:
     ///
@@ -411,7 +420,7 @@ impl std::fmt::Display for Error {
             Zip(e) => write!(f, "ZipError: {}", e),
             ArchiveNotEnabled(s) => write!(
                 f,
-                "ArchiveNotEnabledError: Archive extension '{}' not supported, please enable 'archive-{}' feature!",
+                "ArchiveNotEnabledError: archive extension '{}' not supported; enable the 'archive-{}' feature",
                 s, s
             ),
             CompressionNotEnabled(s) => write!(
@@ -1165,8 +1174,15 @@ mod tests {
             shown
         );
         assert!(
-            shown.contains("zip"),
-            "ArchiveNotEnabled Display must contain the extension, got: {}",
+            shown.contains("zip") && shown.contains("archive-zip"),
+            "ArchiveNotEnabled Display must contain the extension and the feature name, got: {}",
+            shown
+        );
+        // Message style matches the other variants: lowercase after the prefix, no trailing
+        // punctuation.
+        assert!(
+            !shown.ends_with('!') && !shown.ends_with('.'),
+            "ArchiveNotEnabled Display must not end with punctuation, got: {}",
             shown
         );
     }

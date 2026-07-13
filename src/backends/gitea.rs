@@ -324,6 +324,9 @@ impl UpdateBuilder {
             },
             common: {
                 let mut resolved = self.common.build()?;
+                // Gitea authenticates with `token <token>`; set the scheme explicitly rather than
+                // relying on `AuthScheme::default()` (gitlab overrides to `Bearer` the same way).
+                resolved.request.auth_scheme = crate::backends::common::AuthScheme::Token;
                 resolved.request.auth_base_host = self
                     .host
                     .as_deref()
@@ -581,7 +584,7 @@ fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust-reqwest/self-update"
+        crate::DEFAULT_USER_AGENT
             .parse()
             .expect("gitea invalid user-agent"),
     );
@@ -1239,7 +1242,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "rust-reqwest/self-update"
+            crate::DEFAULT_USER_AGENT
         );
         assert!(
             headers

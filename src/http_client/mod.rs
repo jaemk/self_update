@@ -10,10 +10,13 @@ mod reqwest;
 mod ureq;
 
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use reqwest::ReqwestAsyncClient;
 #[cfg(feature = "reqwest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub use reqwest::ReqwestClient;
 #[cfg(feature = "ureq")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ureq")))]
 pub use ureq::UreqClient;
 
 /// Object-safe HTTP transport seam. The crate only ever issues GETs, so `get` is the whole
@@ -64,6 +67,7 @@ pub trait HttpResponse {
 /// the crate root (`self_update::futures_util`, `self_update::bytes`), so an implementation does
 /// not need them as direct dependencies.
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub trait AsyncHttpClient: Send + Sync {
     /// Issue a GET, returning a boxed future resolving to the status-checked response.
     fn get<'a>(
@@ -77,6 +81,7 @@ pub trait AsyncHttpClient: Send + Sync {
 /// Async sibling of [`HttpResponse`]. Drives the streamed download (`bytes_stream`) instead of
 /// leaking a concrete `reqwest::Response`.
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub trait AsyncHttpResponse: Send {
     /// The response headers.
     fn headers(&self) -> &HeaderMap<HeaderValue>;

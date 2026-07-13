@@ -2,9 +2,11 @@
 Updates from a user-defined release source.
 
 Use this backend to update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`)
-don't cover. Implement [`ReleaseSource`] for your host — the three methods
-that say *where releases come from* — then configure a [`custom::Update`](Update) with the same
-shared options as any other backend (target, bin name, version, progress, transport, checksum,
+don't cover. Implement [`ReleaseSource`] for your host — only
+[`get_releases`](ReleaseSource::get_releases), which says *where releases come from*, is required
+(`get_latest_release` / `get_release_version` are derived from it by default; override them when
+your host has cheaper dedicated endpoints) — then configure a [`custom::Update`](Update) with the
+same shared options as any other backend (target, bin name, version, progress, transport, checksum,
 verify hook, asset matcher, …) and call `update()`. The crate runs its usual compare →
 select-asset → download → verify → extract → install flow over your source; you never touch the
 low-level `Download`/`Extract`/`Move` primitives.
@@ -14,18 +16,12 @@ use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
 
 struct MyHost;
 impl ReleaseSource for MyHost {
-    fn get_latest_release(&self) -> self_update::Result<Release> {
-        // ... your own HTTP request + parsing ...
-        Ok(Release::builder()
+    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
+        // ... your own HTTP request + parsing, one Release per available version ...
+        Ok(vec![Release::builder()
             .version("1.2.3")
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
-            .build()?)
-    }
-    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
-        Ok(vec![self.get_latest_release()?])
-    }
-    fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
-        self.get_latest_release()
+            .build()?])
     }
 }
 
@@ -65,18 +61,12 @@ use self_update::backends::custom::AsyncUpdate;
 
 struct MyHost;
 impl AsyncReleaseSource for MyHost {
-    async fn get_latest_release(&self) -> self_update::Result<Release> {
-        // ... your own async HTTP request + parsing ...
-        Ok(Release::builder()
+    async fn get_releases(&self) -> self_update::Result<Vec<Release>> {
+        // ... your own async HTTP request + parsing, one Release per available version ...
+        Ok(vec![Release::builder()
             .version("1.2.3")
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
-            .build()?)
-    }
-    async fn get_releases(&self) -> self_update::Result<Vec<Release>> {
-        Ok(vec![self.get_latest_release().await?])
-    }
-    async fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
-        self.get_latest_release().await
+            .build()?])
     }
 }
 
@@ -103,9 +93,7 @@ use self_update::backends::custom::{AsyncUpdate, Blocking};
 # #[derive(Clone)]
 # struct MySyncHost;
 # impl self_update::ReleaseSource for MySyncHost {
-#     fn get_latest_release(&self) -> self_update::Result<self_update::Release> { unimplemented!() }
 #     fn get_releases(&self) -> self_update::Result<Vec<self_update::Release>> { unimplemented!() }
-#     fn get_release_version(&self, _: &str) -> self_update::Result<self_update::Release> { unimplemented!() }
 # }
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let _builder = AsyncUpdate::configure()
