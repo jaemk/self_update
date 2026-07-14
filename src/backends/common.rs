@@ -52,8 +52,31 @@ impl AuthScheme {
     }
 }
 
+/// Rewrap a semver-validation failure from `Release::builder().build()` so the error names the
+/// offending release tag (`nightly`, `latest`, a date, ...) instead of surfacing a bare parse
+/// failure with no context. Non-`SemVer` errors pass through unchanged.
+///
+/// Only the forge backends (github/gitlab/gitea) funnel server-supplied tags through the builder;
+/// the attribute keeps builds without any of them warning-free.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
+pub(crate) fn name_tag_in_semver_error(tag: &str, err: Error) -> Error {
+    match err {
+        Error::SemVer(inner) => Error::SemVer(Box::new(crate::errors::MessageError(format!(
+            "release tag `{tag}` is not a semver version: {inner}"
+        )))),
+        other => other,
+    }
+}
+
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
 /// available, no `url` crate needed). Returns `None` when the URL has no host.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
 pub(crate) fn host_of(url: &str) -> Option<String> {
     url.parse::<http::Uri>().ok()?.host().map(|h| {
         h.trim_start_matches('[')

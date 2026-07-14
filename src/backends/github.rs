@@ -67,7 +67,9 @@ impl ReleaseDto {
         if let Some(body) = self.body {
             builder.body(body);
         }
-        builder.build()
+        builder
+            .build()
+            .map_err(|e| crate::backends::common::name_tag_in_semver_error(&tag, e))
     }
 }
 
@@ -479,7 +481,17 @@ fn release_array_page(
                 })?;
             let mut items = Vec::new();
             for dto in dtos {
-                let release = dto.into_release()?;
+                let release = match dto.into_release() {
+                    Ok(release) => release,
+                    // A non-semver tag (`nightly`, `latest`, a date tag) is not a release the
+                    // updater can compare; skip it rather than failing the whole listing, so a
+                    // repository mixing rolling tags with semver releases stays updatable.
+                    Err(e @ Error::SemVer(_)) => {
+                        log::debug!("self_update: skipping listed release: {e}");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 // Skip releases not strictly newer than the current version, but do NOT stop
                 // pagination. A backport release (older semver, newer creation date) must not
                 // halt the walk; a genuinely newer release on a later page must still be found.
@@ -604,6 +616,62 @@ mod tests {
             matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
             "a malformed single-release body must map to InvalidResponse"
         );
+    }
+
+    // A rolling non-semver tag (`nightly`) in the listing must be skipped, not fail the whole
+    // fetch: repositories commonly mix rolling tags with semver releases.
+    #[test]
+    fn listing_skips_non_semver_tags() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            None,
+        );
+        let body = releases_array_json(&["nightly", "v1.2.3", "2024-06-01", "v1.0.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["1.2.3", "1.0.0"],
+            "non-semver tags are skipped; the semver releases survive"
+        );
+    }
+
+    // The same skip applies on the filtered (`stop_at`) walk used by `get_newer_releases`,
+    // which feeds `update()`: a rolling tag must not abort an update check.
+    #[test]
+    fn filtered_listing_skips_non_semver_tags() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            Some("1.0.0".to_string()),
+        );
+        let body = releases_array_json(&["nightly", "v1.2.3", "v0.9.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["1.2.3"]);
+    }
+
+    // The single-release endpoints cannot skip: a pinned non-semver tag errors, and the error
+    // must name the offending tag rather than surfacing a bare semver parse failure.
+    #[test]
+    fn single_plan_non_semver_tag_errors_naming_the_tag() {
+        let req =
+            super::single_plan("https://example.test/releases/tags/nightly".to_string()).unwrap();
+        let res = (req.parse)(
+            release_obj_json("nightly").as_bytes(),
+            &crate::http_client::HeaderMap::new(),
+        );
+        match res {
+            Err(crate::errors::Error::SemVer(e)) => {
+                assert!(
+                    e.to_string().contains("nightly"),
+                    "the error must name the offending tag, got: {e}"
+                );
+            }
+            Err(other) => panic!("expected Error::SemVer, got {other:?}"),
+            Ok(_) => panic!("a non-semver pinned tag must error"),
+        }
     }
 
     /// Test wrapper: drive the sans-io `releases_plan` through the sync `run_paginated` driver.

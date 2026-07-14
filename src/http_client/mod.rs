@@ -28,6 +28,9 @@ pub use ureq::UreqClient;
 /// Object safety is what makes the transport injectable: a user can hand the crate any
 /// `Arc<dyn HttpClient>` (e.g. a test double or a wrapper around a custom client). Retries are
 /// **not** part of this trait — they stay in `backends::send`/`retry`, wrapping `client.get(...)`.
+///
+/// This trait is implemented by consumers, so new methods will only be added in minor releases
+/// with a default implementation; existing implementations keep compiling.
 pub trait HttpClient: Send + Sync {
     /// Issue a GET to `url` with the given `headers` and optional per-request `timeout`, returning
     /// the response (already status-checked) as a boxed [`HttpResponse`].
@@ -45,6 +48,10 @@ pub trait HttpClient: Send + Sync {
 /// sibling [`body_buffered`](Self::body_buffered)) consume `self: Box<Self>`, so single-use is
 /// enforced at the type level. A custom transport implements `headers` + `body`; the crate parses
 /// JSON/XML from the reader itself. There are no generic methods, so the trait stays object-safe.
+///
+/// This trait is implemented by consumers, so new methods will only be added in minor releases
+/// with a default implementation (as `body_buffered` already is); existing implementations keep
+/// compiling.
 pub trait HttpResponse {
     /// The response headers.
     fn headers(&self) -> &HeaderMap<HeaderValue>;
@@ -66,6 +73,9 @@ pub trait HttpResponse {
 /// The signature types from foreign crates (`BoxFuture`, `BoxStream`, `Bytes`) are re-exported at
 /// the crate root (`self_update::futures_util`, `self_update::bytes`), so an implementation does
 /// not need them as direct dependencies.
+///
+/// This trait is implemented by consumers, so new methods will only be added in minor releases
+/// with a default implementation; existing implementations keep compiling.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub trait AsyncHttpClient: Send + Sync {
@@ -80,6 +90,9 @@ pub trait AsyncHttpClient: Send + Sync {
 
 /// Async sibling of [`HttpResponse`]. Drives the streamed download (`bytes_stream`) instead of
 /// leaking a concrete `reqwest::Response`.
+///
+/// This trait is implemented by consumers, so new methods will only be added in minor releases
+/// with a default implementation; existing implementations keep compiling.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub trait AsyncHttpResponse: Send {

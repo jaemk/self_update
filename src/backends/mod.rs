@@ -26,6 +26,12 @@ pub mod s3;
 /// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Link
 /// header values may contain multiple values separated by commas
 /// `Link: <https://place.com>; rel="next", <https://wow.com>; rel="next"`
+// Only the forge backends walk Link-header pagination; the attribute keeps builds without any of
+// them (custom/s3-only) warning-free without cfg-gating shared code out of existence.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
 pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
     for link in link_str.split(',') {
         let mut uri = None;
@@ -54,12 +60,32 @@ pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
 
 /// Maximum number of `Link: rel="next"` pages walked when listing releases — a safety bound
 /// against pathological release histories.
+// The pagination machinery below is used by the listing backends (github/gitlab/gitea/s3); the
+// attributes keep a backend-less build (custom only) warning-free.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) const MAX_RELEASE_PAGES: usize = 100;
 
 /// Maximum number of bytes buffered for a single listing-page body. A per-page COUNT bound
 /// ([`MAX_RELEASE_PAGES`]) was already present; this per-page SIZE bound prevents a pathological
 /// or misconfigured endpoint from forcing unbounded memory use. Real GitHub/GitLab/Gitea release
 /// listing pages with 100 entries and many assets are well under 1 MiB; 4 MiB is a generous cap.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) const MAX_LISTING_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// A sans-io description of a single page request: *what* to fetch (`url` + `headers`) and *how*
@@ -69,6 +95,15 @@ pub(crate) const MAX_LISTING_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 ///
 /// `parse` is `+ Send` so [`run_paginated_async`]'s future stays `Send` (it is held across the
 /// await in the async driver).
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) struct PageRequest<T> {
     pub url: String,
     pub headers: http_client::HeaderMap,
@@ -80,6 +115,15 @@ pub(crate) struct PageRequest<T> {
 /// The parsed result of one [`PageRequest`]: the page's `items`, the optional `next` page request,
 /// and an early-`stop` flag. The driver appends `items`, then stops if `stop` is set, `next` is
 /// `None`, or the [`MAX_RELEASE_PAGES`] bound is hit.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) struct Page<T> {
     pub items: Vec<T>,
     pub next: Option<PageRequest<T>>,
@@ -88,6 +132,12 @@ pub(crate) struct Page<T> {
 
 impl<T> Page<T> {
     /// A terminal single-page result: these `items`, no next page, no early stop.
+    // Only the forge backends' single-release plans build terminal pages; s3 follows
+    // continuation tokens via `next` instead.
+    #[cfg_attr(
+        not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+        allow(dead_code)
+    )]
     pub(crate) fn last(items: Vec<T>) -> Self {
         Self {
             items,
@@ -103,6 +153,15 @@ impl<T> Page<T> {
 /// once, call `parse`, extend the accumulator, then stop if `page.stop`, `page.next` is `None`, or
 /// the [`MAX_RELEASE_PAGES`] bound is reached (logging a warning if a further page was still
 /// advertised at the bound).
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn run_paginated<T>(
     first: PageRequest<T>,
     config: &common::RequestConfig,
@@ -160,6 +219,15 @@ pub(crate) fn run_paginated<T>(
 /// transport. Reuses [`send_async`]'s retry/backoff machinery; reads the body bytes via the async
 /// response trait, then calls the same `parse` closure.
 #[cfg(feature = "async")]
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) async fn run_paginated_async<T>(
     first: PageRequest<T>,
     config: &common::RequestConfig,
@@ -216,6 +284,10 @@ pub(crate) async fn run_paginated_async<T>(
 /// Build the first-page request URL, defaulting the page size to 100 — unless the base URL
 /// already carries query parameters (e.g. a `Link`-header "next" URL), in which case it is used
 /// verbatim so an existing `page`/`per_page` is not clobbered.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
 pub(crate) fn first_page_url(base_url: &str) -> String {
     if base_url.contains('?') {
         base_url.to_owned()
@@ -225,6 +297,10 @@ pub(crate) fn first_page_url(base_url: &str) -> String {
 }
 
 /// Extract the `rel="next"` URL from a response's `Link` header(s), if present.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
 pub(crate) fn next_link(headers: &http_client::HeaderMap) -> Option<String> {
     headers
         .get_all(http_client::header::LINK)
@@ -315,6 +391,15 @@ where
 /// Issue a GET request, merging the per-request transport `config` (extra headers + timeout)
 /// on top of the supplied `base` headers, retrying a failed request up to `config.retries`
 /// times with exponential backoff.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn send(
     url: &str,
     mut base: http_client::HeaderMap,
@@ -359,6 +444,15 @@ pub(crate) fn send(
 /// Async sibling of [`send`]: issue a GET, merging the per-request transport `config` on top of
 /// `base`, retrying up to `config.retries` times with `tokio::time::sleep` backoff.
 #[cfg(feature = "async")]
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "s3"
+    )),
+    allow(dead_code)
+)]
 pub(crate) async fn send_async(
     url: &str,
     mut base: http_client::HeaderMap,

@@ -19,8 +19,12 @@
 ### Changed
 - `ReleaseBuilder::build()` validates that the version parses as bare semver and errors with
   `Error::SemVer` otherwise (a `v` prefix or a non-semver tag previously built fine and was
-  silently skipped, or errored opaquely, later in the update pipeline).
-- All requests send the same `self_update/<version>` User-Agent when the caller has not set one
+  silently skipped, or errored opaquely, later in the update pipeline). The github/gitlab/gitea
+  listings skip (and `log::debug!`) releases whose tag is not semver after trimming a leading
+  `v` -- e.g. a rolling `nightly` or `latest` tag alongside normal releases -- matching the
+  pre-1.0 behavior of ignoring them; fetching such a tag directly (`release_tag`) errors with
+  `Error::SemVer` naming the offending tag.
+- All requests send the same `self-update/<version>` User-Agent when the caller has not set one
   via `request_header`. Previously github sent `rust/self-update` and gitlab/gitea and the
   standalone `Download` sent `rust-reqwest/self-update` (wrong under the `ureq` client).
 - `ProgressStyle` is `#[non_exhaustive]`: construct with `ProgressStyle::new(template, chars)`
@@ -43,6 +47,9 @@
   pipeline prefers the newest semver-compatible one).
 - The github and gitea `Update` builders set their auth scheme explicitly instead of relying on
   `AuthScheme::default()` (no behavior change; removes a fragile implicit default).
+- The `HttpClient` / `HttpResponse` / `AsyncHttpClient` / `AsyncHttpResponse` docs state the
+  trait-evolution policy `ReleaseSource` already had: new methods are only added in minor
+  releases with a default implementation, so custom transports keep compiling.
 
 ## [1.0.0-rc.5]
 Final polish from a full-surface review of rc.4: two breaking `Error`-constructor changes (folded

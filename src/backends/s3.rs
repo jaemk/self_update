@@ -14,6 +14,8 @@ use quick_xml::events::Event;
 use regex::Regex;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+// `Duration` only appears in the `s3-auth`-gated presigning surface (`signature_ttl`).
+#[cfg(feature = "s3-auth")]
 use std::time::Duration;
 
 /// Filename -> `(name, version)` matcher for S3 asset keys, e.g. `myapp-v1.2.3-x86_64-linux`.
