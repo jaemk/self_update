@@ -195,8 +195,8 @@ impl ReleaseList {
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.custom_url
-                .as_ref()
-                .unwrap_or(&"https://api.github.com".to_string()),
+                .as_deref()
+                .unwrap_or("https://api.github.com"),
             urlencoding::encode(&self.repo_owner),
             urlencoding::encode(&self.repo_name)
         );
@@ -218,8 +218,8 @@ impl ReleaseList {
         let api_url = format!(
             "{}/repos/{}/{}/releases",
             self.custom_url
-                .as_ref()
-                .unwrap_or(&"https://api.github.com".to_string()),
+                .as_deref()
+                .unwrap_or("https://api.github.com"),
             urlencoding::encode(&self.repo_owner),
             urlencoding::encode(&self.repo_name)
         );
@@ -296,6 +296,9 @@ impl UpdateBuilder {
             custom_url: self.custom_url.clone(),
             common: {
                 let mut resolved = self.common.build()?;
+                // Github authenticates with `token <token>`; set the scheme explicitly rather than
+                // relying on `AuthScheme::default()` (gitlab overrides to `Bearer` the same way).
+                resolved.request.auth_scheme = crate::backends::common::AuthScheme::Token;
                 // The github API host (asset download URLs are on the same host) receives the token;
                 // a server-supplied URL on any other host does not.
                 resolved.request.auth_base_host = crate::backends::common::host_of(
@@ -559,15 +562,16 @@ impl crate::update::AsyncReleaseUpdate for Update {
     }
 }
 
-/// Build github's base request headers (its `rust/self-update` User-Agent). The Authorization
-/// header is no longer set here: the auth scheme/token is applied centrally by the shared
+/// Build github's base request headers (the shared `self_update/<version>` User-Agent; github
+/// rejects requests with no User-Agent). The Authorization header is no longer set here: the auth
+/// scheme/token is applied centrally by the shared
 /// [`apply_auth`](crate::backends::common::RequestConfig::apply_auth) on both the listing and
 /// download paths, which also honors a user `request_header(AUTHORIZATION, ..)` override.
 fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust/self-update"
+        crate::DEFAULT_USER_AGENT
             .parse()
             .expect("github invalid user-agent"),
     );
@@ -1474,9 +1478,9 @@ mod tests {
     #[test]
     fn api_headers_override_uses_github_user_agent() {
         // The `{api_headers}` override arm of `impl_update_config_accessors!` must wire github's
-        // custom `api_headers` (its `rust/self-update` User-Agent), not the trait default (which
-        // sets no User-Agent). After B5 the auth scheme/token is no longer baked into `api_headers`;
-        // it is applied centrally by `apply_auth` (asserted in
+        // custom `api_headers` (the shared `self_update/<version>` User-Agent), not the trait
+        // default (which sets no User-Agent). The auth scheme/token is not baked into
+        // `api_headers`; it is applied centrally by `apply_auth` (asserted in
         // `github_token_scheme_applied_to_both_paths`).
         let upd = super::Update::configure()
             .repo_owner("o")
@@ -1492,7 +1496,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "rust/self-update"
+            crate::DEFAULT_USER_AGENT
         );
         assert!(
             headers
@@ -2209,8 +2213,8 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "rust/self-update",
-            "api_headers() must set the rust/self-update User-Agent"
+            crate::DEFAULT_USER_AGENT,
+            "api_headers() must set the shared self_update User-Agent"
         );
         assert!(
             headers
@@ -2253,9 +2257,10 @@ mod tests {
             "exactly two HTTP requests must be issued"
         );
         // Both requests must carry the User-Agent header.
+        let expected_ua = format!("user-agent: {}", crate::DEFAULT_USER_AGENT.to_lowercase());
         for (i, req) in requests.iter().enumerate() {
             assert!(
-                req.to_lowercase().contains("user-agent: rust/self-update"),
+                req.to_lowercase().contains(&expected_ua),
                 "page {} request is missing the User-Agent header:\n{}",
                 i + 1,
                 req

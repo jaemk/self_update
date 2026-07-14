@@ -131,6 +131,28 @@ fn checksum_mismatch_constructable_from_outside() {
     assert_eq!(err.url(), None);
 }
 
+// `Error::transport` builds the `Transport` variant from either an error value or a message
+// string, so a custom `HttpClient` can report a failed request without spelling out the
+// `Box<dyn Error + Send + Sync>` conversion.
+#[test]
+fn transport_constructor_from_outside() {
+    // From an error value: source() chains to it.
+    let err = Error::transport(std::io::Error::other("connection reset"));
+    assert!(matches!(err, Error::Transport(_)));
+    let src = err.source().expect("Error::transport must chain source()");
+    assert!(src.to_string().contains("connection reset"), "got: {src}");
+    let shown = err.to_string();
+    assert!(shown.starts_with("TransportError: "), "got: {shown}");
+
+    // From a message string.
+    let err = Error::transport("proxy refused the request");
+    assert!(matches!(err, Error::Transport(_)));
+    assert!(
+        err.to_string().contains("proxy refused the request"),
+        "got: {err}"
+    );
+}
+
 // `Error::Io` wraps `std::io::Error` which itself implements `std::error::Error`.
 // The `source()` chain works end-to-end from outside the crate.
 #[test]

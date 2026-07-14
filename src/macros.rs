@@ -358,6 +358,11 @@ macro_rules! impl_sync_update_verbs {
             ///
             /// A convenience over [`get_newer_releases`](Self::get_newer_releases): returns the
             /// newest strictly-newer [`Release`](crate::Release), or `None` when already up to date.
+            ///
+            /// Note that the returned release is the newest *available*, which is not necessarily
+            /// the one [`update`](Self::update) would install: the update pipeline prefers the
+            /// newest semver-*compatible* release and falls back to the newest available only when
+            /// no compatible one exists.
             pub fn is_update_available(&self) -> crate::Result<Option<crate::Release>> {
                 Ok(self.get_newer_releases()?.into_vec().into_iter().next())
             }
@@ -416,6 +421,11 @@ macro_rules! impl_async_update_verbs {
             /// A convenience over [`get_newer_releases_async`](Self::get_newer_releases_async):
             /// returns the newest strictly-newer [`Release`](crate::Release), or `None` when already
             /// up to date.
+            ///
+            /// Note that the returned release is the newest *available*, which is not necessarily
+            /// the one [`update_async`](Self::update_async) would install: the update pipeline
+            /// prefers the newest semver-*compatible* release and falls back to the newest
+            /// available only when no compatible one exists.
             pub async fn is_update_available_async(&self) -> crate::Result<Option<crate::Release>> {
                 Ok(self
                     .get_newer_releases_async()

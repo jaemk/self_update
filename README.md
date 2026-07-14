@@ -57,6 +57,10 @@ clients and multiple TLS backends may coexist (reqwest is preferred when both ar
 * `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
 * `native-tls`: opt-in native/OpenSSL TLS for the selected client;
 
+Note that enabling a client with neither TLS feature compiles (plain-`http` release hosts remain
+reachable) but any `https` URL then fails at request time with a transport error; enable `rustls`
+or `native-tls` for `https`.
+
 The following [cargo features](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section)
 are enabled by default:
 
@@ -271,13 +275,15 @@ The custom backend has no `ReleaseList` by design: listing is performed entirely
 
 To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`) don't cover —
 another forge, a private artifact registry, a plain HTTP directory — implement the
-`ReleaseSource` trait (three fetch methods that say *where releases come from*) and drive a full
-update through the `backends::custom` backend, which reuses the crate's compare → select-asset →
-download → verify → extract → install flow. You build `Release`s with `Release::builder` and
+`ReleaseSource` trait and drive a full update through the `backends::custom` backend, which reuses
+the crate's compare → select-asset → download → verify → extract → install flow. Only
+`get_releases` (the fetch that says *where releases come from*) is required;
+`get_latest_release` / `get_release_version` are derived from it by default and can be overridden
+when the host has cheaper dedicated endpoints. You build `Release`s with `Release::builder` and
 `ReleaseAsset::new`; the `ReleaseUpdate` trait stays sealed.
 
 `ReleaseSource` is **synchronous**. For a natively-async source, implement `AsyncReleaseSource`
-(the same three fetches as `async fn`) and drive it through
+(the same fetches as `async fn`) and drive it through
 `backends::custom::AsyncUpdate` + `build_async()`; to reuse a
 `Clone` sync source from the async API, wrap it in
 `backends::custom::Blocking`.
@@ -287,17 +293,11 @@ use self_update::{Release, ReleaseAsset, ReleaseSource, cargo_crate_version};
 
 struct MyHost;
 impl ReleaseSource for MyHost {
-    fn get_latest_release(&self) -> self_update::Result<Release> {
-        Ok(Release::builder()
+    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
+        Ok(vec![Release::builder()
             .version("1.2.3")
             .asset(ReleaseAsset::new("app-x86_64-unknown-linux-gnu.tar.gz", "https://host/app.tar.gz"))
-            .build()?)
-    }
-    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
-        Ok(vec![self.get_latest_release()?])
-    }
-    fn get_release_version(&self, _ver: &str) -> self_update::Result<Release> {
-        self.get_latest_release()
+            .build()?])
     }
 }
 

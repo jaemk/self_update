@@ -2,6 +2,48 @@
 
 ## [unreleased]
 
+### Added
+- `ReleaseSource` / `AsyncReleaseSource`: `get_latest_release` and `get_release_version` have
+  default implementations derived from `get_releases` (newest-by-semver pick and exact version
+  match, both order-independent), so a custom source only has to implement `get_releases`.
+  Existing implementations are unaffected; override the defaults when the host has cheaper
+  dedicated endpoints. New trait methods will only be added with defaults, so implementations
+  keep compiling across minor releases.
+- `Releases::with_current_version(v)`: attach a current version to an already-fetched listing
+  (e.g. from `ReleaseList::fetch`) so `is_update_available()` works, without rebuilding via
+  `into_vec` / `from_releases`.
+- `Error::transport(source)`: build the `Transport` variant from an error value or a message
+  string, for custom `HttpClient` / `AsyncHttpClient` implementations.
+- `ReleaseBuilder::new()`, equivalent to `Release::builder()`.
+
+### Changed
+- `ReleaseBuilder::build()` validates that the version parses as bare semver and errors with
+  `Error::SemVer` otherwise (a `v` prefix or a non-semver tag previously built fine and was
+  silently skipped, or errored opaquely, later in the update pipeline).
+- All requests send the same `self_update/<version>` User-Agent when the caller has not set one
+  via `request_header`. Previously github sent `rust/self-update` and gitlab/gitea and the
+  standalone `Download` sent `rust-reqwest/self-update` (wrong under the `ureq` client).
+- `ProgressStyle` is `#[non_exhaustive]`: construct with `ProgressStyle::new(template, chars)`
+  instead of a struct literal. Field reads are unaffected.
+- The `ArchiveNotEnabled` Display message matches the other variants' style (lowercase after the
+  prefix, no trailing punctuation).
+
+### Fixed
+- The `ReleaseSource` / `AsyncReleaseSource` docs told implementors to construct error variants
+  with struct literals, which does not compile downstream (the variants are `#[non_exhaustive]`);
+  they now reference the public constructors (`Error::http_status_error`, `Error::transport`,
+  `Error::no_release_found`, ...).
+- docs.rs feature badges (`doc(cfg)`) on `AsyncHttpClient`, `AsyncHttpResponse`, and the
+  `ReqwestClient` / `ReqwestAsyncClient` / `UreqClient` re-exports.
+- The `MoveAll` doc example staged its sources in `/tmp`, which fails with a cross-device error
+  since `commit()` renames; it now stages next to the destinations.
+- The features docs note that a client without a TLS feature only supports plain-`http` URLs.
+- The updater `is_update_available` / `is_update_available_async` docs note that the returned
+  release is the newest available, which is not necessarily the release `update()` installs (the
+  pipeline prefers the newest semver-compatible one).
+- The github and gitea `Update` builders set their auth scheme explicitly instead of relying on
+  `AuthScheme::default()` (no behavior change; removes a fragile implicit default).
+
 ## [1.0.0-rc.5]
 Final polish from a full-surface review of rc.4: two breaking `Error`-constructor changes (folded
 into the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md)), additive constructors and

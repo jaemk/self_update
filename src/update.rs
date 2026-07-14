@@ -216,8 +216,14 @@ pub struct ReleaseBuilder {
 }
 
 impl ReleaseBuilder {
+    /// Create an empty builder; equivalent to [`Release::builder`].
+    pub fn new() -> ReleaseBuilder {
+        ReleaseBuilder::default()
+    }
+
     /// Set the release version (required), e.g. `"1.2.3"`. This is what the updater compares against
-    /// the current version, so it should be a bare semver string (no leading `v`).
+    /// the current version, so it must be a bare semver string (no leading `v`);
+    /// [`build`](Self::build) rejects anything `semver` cannot parse.
     pub fn version(&mut self, version: impl Into<String>) -> &mut Self {
         self.version = Some(version.into());
         self
@@ -253,12 +259,19 @@ impl ReleaseBuilder {
         self
     }
 
-    /// Validate and build the [`Release`]. Errors if `version` was not set.
+    /// Validate and build the [`Release`].
+    ///
+    /// Errors with [`Error::MissingField`] if `version` was not set, and with [`Error::SemVer`] if
+    /// it is not a bare semver string (e.g. a leading `v`, or a non-semver tag). Validating here
+    /// gives a clear error at construction time; an unparseable version stored in a `Release` would
+    /// otherwise surface only later, as a silently-skipped release or an opaque comparison error
+    /// inside the update pipeline.
     pub fn build(&self) -> Result<Release> {
         let version = self
             .version
             .clone()
             .ok_or(Error::MissingField { field: "version" })?;
+        semver::Version::parse(&version)?;
         Ok(Release {
             name: Arc::from(self.name.clone().unwrap_or_else(|| version.clone())),
             version: Arc::from(version),
@@ -322,6 +335,27 @@ impl Releases {
             releases,
             current_version: Some(current_version.into()),
         }
+    }
+
+    /// Attach (or replace) the current version to compare against, consuming and returning the
+    /// listing. Turns a bare listing (e.g. from `ReleaseList::fetch`) into one where
+    /// [`is_update_available`](Self::is_update_available) works, without tearing it down via
+    /// [`into_vec`](Self::into_vec) / [`from_releases`](Self::from_releases):
+    ///
+    /// ```rust,no_run
+    /// # fn run() -> self_update::Result<()> {
+    /// let available = self_update::backends::github::ReleaseList::configure()
+    ///     .repo_owner("jaemk")
+    ///     .repo_name("self_update")
+    ///     .build()?
+    ///     .fetch()?
+    ///     .with_current_version(self_update::cargo_crate_version!())
+    ///     .is_update_available()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_current_version(mut self, current_version: impl Into<String>) -> Self {
+        self.current_version = Some(current_version.into());
+        self
     }
 
     /// All fetched releases, newest-first.
@@ -441,17 +475,32 @@ impl<'a> IntoIterator for &'a Releases {
 /// sync `ReleaseSource` from the async API, wrap it in
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking).
 ///
-/// On failure, return one of the public [`Error`] variants. For a completed
-/// request with a non-2xx status use the structured variants — e.g.
-/// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
-/// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
-/// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
-/// failures use `Error::NoReleaseFound { target }` (no release / no matching asset) or
-/// `Error::MissingAssetField { field }` (a missing field in a release/asset payload), and for
-/// configuration errors `Error::MissingField { field }`.
+/// On failure, return one of the public [`Error`] variants via its constructor (the structured
+/// variants are `#[non_exhaustive]`, so they cannot be built with a struct literal from outside the
+/// crate). For a completed request with a non-2xx status use
+/// [`Error::http_status_error`] — e.g. `Error::http_status_error(503, url)` for a transient server
+/// error or `Error::http_status_error(404, url)` for a missing resource — and [`Error::transport`]
+/// for a request that could not be completed (connection refused, DNS, TLS, timeout). For
+/// release-level failures use [`Error::no_release_found`] /
+/// [`Error::no_release_found_for_target`] (no release / no matching asset) or
+/// [`Error::missing_asset_field`] (a missing field in a release/asset payload), and
+/// [`Error::invalid_response`] for a response body that failed to parse.
+///
+/// Only [`get_releases`](Self::get_releases) is required. The other two methods have default
+/// implementations derived from it; override them when your host offers a cheaper dedicated
+/// endpoint (e.g. a `/latest` route, or a fetch-by-tag lookup). New methods may be added to this
+/// trait in minor releases, but only with a default implementation, so implementations keep
+/// compiling.
 pub trait ReleaseSource: Send + Sync {
     /// Fetch the single newest release.
-    fn get_latest_release(&self) -> Result<Release>;
+    ///
+    /// The default implementation fetches [`get_releases`](Self::get_releases) and picks the
+    /// newest by semver comparison (order-independent, so an unsorted source is still correct).
+    /// Errors with [`Error::NoReleaseFound`](crate::Error::NoReleaseFound) when the source has no
+    /// releases. Override to use a dedicated latest-release endpoint.
+    fn get_latest_release(&self) -> Result<Release> {
+        newest_release(self.get_releases()?)
+    }
 
     /// Fetch the candidate releases, **newest first**. Return all the releases you want considered;
     /// the updater discards any that are not strictly newer than the current version, prefers the
@@ -461,8 +510,34 @@ pub trait ReleaseSource: Send + Sync {
     /// ensures the right release is chosen.
     fn get_releases(&self) -> Result<Vec<Release>>;
 
-    /// Fetch the release for an explicit tag/version.
-    fn get_release_version(&self, ver: &str) -> Result<Release>;
+    /// Fetch the release for an explicit version.
+    ///
+    /// The default implementation fetches [`get_releases`](Self::get_releases) and returns the
+    /// first release whose version equals `ver` exactly (the bare semver string, no leading `v`).
+    /// Errors with [`Error::NoReleaseFound`](crate::Error::NoReleaseFound) when nothing matches.
+    /// Override to use a dedicated fetch-by-tag endpoint.
+    fn get_release_version(&self, ver: &str) -> Result<Release> {
+        release_for_version(self.get_releases()?, ver)
+    }
+}
+
+/// The newest release by semver comparison, shared by the `ReleaseSource` /
+/// `AsyncReleaseSource` `get_latest_release` defaults. Order-independent; on a version tie the
+/// earliest-positioned release wins.
+fn newest_release(releases: Vec<Release>) -> Result<Release> {
+    releases
+        .into_iter()
+        .min_by(|a, b| version::cmp_releases_newest_first(a.version(), b.version()))
+        .ok_or_else(Error::no_release_found)
+}
+
+/// The first release whose version equals `ver` exactly, shared by the `ReleaseSource` /
+/// `AsyncReleaseSource` `get_release_version` defaults.
+fn release_for_version(releases: Vec<Release>, ver: &str) -> Result<Release> {
+    releases
+        .into_iter()
+        .find(|r| r.version() == ver)
+        .ok_or_else(Error::no_release_found)
 }
 
 /// An async source of releases for a custom update backend.
@@ -490,32 +565,54 @@ pub trait ReleaseSource: Send + Sync {
 /// [`backends::custom::Blocking`](crate::backends::custom::Blocking), which runs the sync fetches
 /// on [`tokio::task::spawn_blocking`].
 ///
-/// On failure, return one of the public [`Error`] variants. For a completed
-/// request with a non-2xx status use the structured variants — e.g.
-/// `Error::HttpStatus { status: 503, url: "…".into() }` for a transient server error, or
-/// `Error::NotFound { url: "…".into() }` for a missing resource — and `Error::Transport(…)` for a
-/// request that could not be completed (connection refused, DNS, TLS, timeout). For release-level
-/// failures use `Error::NoReleaseFound { target }` (no release / no matching asset) or
-/// `Error::MissingAssetField { field }` (a missing field in a release/asset payload), and for
-/// configuration errors `Error::MissingField { field }`.
+/// On failure, return one of the public [`Error`] variants via its constructor (the structured
+/// variants are `#[non_exhaustive]`, so they cannot be built with a struct literal from outside the
+/// crate). For a completed request with a non-2xx status use
+/// [`Error::http_status_error`] — e.g. `Error::http_status_error(503, url)` for a transient server
+/// error or `Error::http_status_error(404, url)` for a missing resource — and [`Error::transport`]
+/// for a request that could not be completed (connection refused, DNS, TLS, timeout). For
+/// release-level failures use [`Error::no_release_found`] /
+/// [`Error::no_release_found_for_target`] (no release / no matching asset) or
+/// [`Error::missing_asset_field`] (a missing field in a release/asset payload), and
+/// [`Error::invalid_response`] for a response body that failed to parse.
+///
+/// Only [`get_releases`](Self::get_releases) is required. The other two methods have default
+/// implementations derived from it; override them when your host offers a cheaper dedicated
+/// endpoint (e.g. a `/latest` route, or a fetch-by-tag lookup). New methods may be added to this
+/// trait in minor releases, but only with a default implementation, so implementations keep
+/// compiling.
 #[cfg(feature = "async")]
 pub trait AsyncReleaseSource: Send + Sync {
     /// Fetch the single newest release.
     ///
+    /// The default implementation fetches [`get_releases`](Self::get_releases) and picks the
+    /// newest by semver comparison (order-independent, so an unsorted source is still correct).
+    /// Errors with [`Error::NoReleaseFound`](crate::Error::NoReleaseFound) when the source has no
+    /// releases. Override to use a dedicated latest-release endpoint.
+    ///
     /// The returned future must be `Send` (it is awaited inside the updater). This is enforced at
     /// the impl site via the `+ Send` bound on the return type, so a non-`Send` implementation
     /// fails to compile here rather than later at the spawn site.
-    fn get_latest_release(&self) -> impl std::future::Future<Output = Result<Release>> + Send + '_;
+    fn get_latest_release(&self) -> impl std::future::Future<Output = Result<Release>> + Send + '_ {
+        async move { newest_release(self.get_releases().await?) }
+    }
 
     /// Fetch the candidate releases, **newest first**. See
     /// [`ReleaseSource::get_releases`] for how the updater treats the returned list.
     fn get_releases(&self) -> impl std::future::Future<Output = Result<Vec<Release>>> + Send + '_;
 
-    /// Fetch the release for an explicit tag/version.
+    /// Fetch the release for an explicit version.
+    ///
+    /// The default implementation fetches [`get_releases`](Self::get_releases) and returns the
+    /// first release whose version equals `ver` exactly (the bare semver string, no leading `v`).
+    /// Errors with [`Error::NoReleaseFound`](crate::Error::NoReleaseFound) when nothing matches.
+    /// Override to use a dedicated fetch-by-tag endpoint.
     fn get_release_version<'a>(
         &'a self,
         ver: &'a str,
-    ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a;
+    ) -> impl std::future::Future<Output = Result<Release>> + Send + 'a {
+        async move { release_for_version(self.get_releases().await?, ver) }
+    }
 }
 
 /// The async counterpart of [`ReleaseUpdate`], implemented by every backend's `Update` (and the
@@ -908,6 +1005,20 @@ pub(crate) mod testing {
         current_version: &str,
     ) -> Result<Option<Release>> {
         choose_latest_release(releases, current_version, false)
+    }
+
+    /// Construct a [`Release`] with a raw (possibly non-semver) version string, bypassing
+    /// [`ReleaseBuilder::build`]'s semver validation. The backends build `Release`s directly from
+    /// whatever tag a forge returns, so junk versions can reach the pipeline; tests of the
+    /// pipeline's junk tolerance need to fabricate them.
+    pub(crate) fn release_with_raw_version(version: &str) -> Release {
+        Release {
+            name: Arc::from(version),
+            version: Arc::from(version),
+            date: Arc::from(""),
+            body: None,
+            assets: Vec::new(),
+        }
     }
 }
 
@@ -1359,7 +1470,10 @@ mod tests {
     use crate::update::Release;
 
     fn rel(version: &str) -> Release {
-        Release::builder().version(version).build().unwrap()
+        // Raw construction: several tests below exercise the pipeline's tolerance of non-semver
+        // versions, which `ReleaseBuilder::build` rejects (the backends build `Release`s directly
+        // from forge tags, so junk can still reach the pipeline).
+        super::testing::release_with_raw_version(version)
     }
 
     // --- Releases (D1) ------------------------------------------------------------------------
@@ -1455,6 +1569,156 @@ mod tests {
                 .expect("a found update wins over a later parse error"),
             "2.0.0 > 1.0.0 must return true before reaching the bad entry"
         );
+    }
+
+    #[test]
+    fn releases_with_current_version_enables_is_update_available() {
+        // A bare listing (no current version) errors with NoCurrentVersion; attaching one via
+        // with_current_version turns it into a comparable listing without rebuilding.
+        let bare = Releases::from_listing(vec![rel("2.0.0"), rel("1.0.0")]);
+        assert!(matches!(
+            bare.is_update_available(),
+            Err(crate::errors::Error::NoCurrentVersion)
+        ));
+        let with_version = bare.with_current_version("1.0.0");
+        assert_eq!(with_version.current_version(), Some("1.0.0"));
+        assert!(with_version.is_update_available().unwrap());
+        // It also replaces an existing current version.
+        let replaced =
+            Releases::from_releases(vec![rel("2.0.0")], "1.0.0").with_current_version("2.0.0");
+        assert!(!replaced.is_update_available().unwrap());
+    }
+
+    #[test]
+    fn release_builder_new_matches_release_builder() {
+        // `ReleaseBuilder::new()` is the conventional entry; it must behave exactly like
+        // `Release::builder()`.
+        let a = super::ReleaseBuilder::new()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let b = Release::builder().version("1.2.3").build().unwrap();
+        assert_eq!(a.version(), b.version());
+        assert_eq!(a.name(), b.name());
+    }
+
+    #[test]
+    fn release_builder_build_rejects_non_semver_versions() {
+        // A `v` prefix or a non-semver tag must fail at build() with Error::SemVer instead of
+        // being stored and silently dropped (or erroring opaquely) later in the pipeline.
+        for bad in ["v1.2.3", "latest", "not-a-version", ""] {
+            let err = Release::builder()
+                .version(bad)
+                .build()
+                .expect_err(&format!("version {bad:?} must be rejected"));
+            assert!(
+                matches!(err, crate::errors::Error::SemVer(_)),
+                "expected Error::SemVer for {bad:?}, got {err:?}"
+            );
+        }
+        // Valid semver still builds, including pre-release and build metadata.
+        for good in ["1.2.3", "2.0.0-alpha.1", "1.0.0+build.5"] {
+            Release::builder()
+                .version(good)
+                .build()
+                .unwrap_or_else(|e| panic!("version {good:?} must build: {e}"));
+        }
+    }
+
+    #[test]
+    fn release_builder_missing_version_is_missing_field() {
+        // The unset-version error stays MissingField (not SemVer).
+        let err = Release::builder().name("x").build().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::errors::Error::MissingField { field } if field == "version"
+            ),
+            "expected MissingField {{ field: \"version\" }}"
+        );
+    }
+
+    // --- ReleaseSource default methods ----------------------------------------------------------
+
+    struct ListOnlySource(Vec<Release>);
+
+    impl super::ReleaseSource for ListOnlySource {
+        fn get_releases(&self) -> Result<Vec<Release>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn release_source_default_get_latest_release_picks_newest_unsorted() {
+        // Only get_releases is implemented; the default get_latest_release must pick the newest
+        // by semver even when the source returns an unsorted list.
+        use super::ReleaseSource;
+        let source = ListOnlySource(vec![rel("1.0.0"), rel("2.1.0"), rel("1.5.0")]);
+        assert_eq!(source.get_latest_release().unwrap().version(), "2.1.0");
+    }
+
+    #[test]
+    fn release_source_default_get_latest_release_errors_when_empty() {
+        use super::ReleaseSource;
+        let source = ListOnlySource(vec![]);
+        assert!(matches!(
+            source.get_latest_release(),
+            Err(crate::errors::Error::NoReleaseFound { .. })
+        ));
+    }
+
+    #[test]
+    fn release_source_default_get_release_version_finds_exact_match() {
+        use super::ReleaseSource;
+        let source = ListOnlySource(vec![rel("2.0.0"), rel("1.5.0"), rel("1.0.0")]);
+        assert_eq!(
+            source.get_release_version("1.5.0").unwrap().version(),
+            "1.5.0"
+        );
+        // No match (including a v-prefixed query; the default matches the stored bare semver
+        // exactly) errors with NoReleaseFound.
+        assert!(matches!(
+            source.get_release_version("v1.5.0"),
+            Err(crate::errors::Error::NoReleaseFound { .. })
+        ));
+        assert!(matches!(
+            source.get_release_version("9.9.9"),
+            Err(crate::errors::Error::NoReleaseFound { .. })
+        ));
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncListOnlySource(Vec<Release>);
+
+    #[cfg(feature = "async")]
+    impl super::AsyncReleaseSource for AsyncListOnlySource {
+        async fn get_releases(&self) -> Result<Vec<Release>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_release_source_default_methods_derive_from_get_releases() {
+        use super::AsyncReleaseSource;
+        let source = AsyncListOnlySource(vec![rel("1.0.0"), rel("2.1.0"), rel("1.5.0")]);
+        assert_eq!(
+            source.get_latest_release().await.unwrap().version(),
+            "2.1.0"
+        );
+        assert_eq!(
+            source.get_release_version("1.5.0").await.unwrap().version(),
+            "1.5.0"
+        );
+        assert!(matches!(
+            source.get_release_version("9.9.9").await,
+            Err(crate::errors::Error::NoReleaseFound { .. })
+        ));
+        let empty = AsyncListOnlySource(vec![]);
+        assert!(matches!(
+            empty.get_latest_release().await,
+            Err(crate::errors::Error::NoReleaseFound { .. })
+        ));
     }
 
     #[test]

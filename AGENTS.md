@@ -113,16 +113,31 @@ cargo fmt --check      # verify only
 ```
 
 ## Lint
+The Makefile is the source of truth for the verification lanes; prefer `make check/clippy`
+(runs all three lanes) over the raw commands. If the raw commands below ever disagree with the
+Makefile's `REQWEST_FEATURES` / `UREQ_FEATURES` / `ASYNC_FEATURES`, trust the Makefile.
 ```bash
+# reqwest lane:
 cargo clippy --all-targets --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+# ureq lane:
 cargo clippy --all-targets --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+# async lane (reqwest + async):
+cargo clippy --all-targets --features "async github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## Test
-Tests are in-module (`#[cfg(test)] mod tests` in `src/…`, including the backend modules) plus doctests in `src/lib.rs` and the backend modules. No external services are required.
+Tests live in three places: in-module `#[cfg(test)] mod tests` blocks in `src/…` (including the
+backend modules), doctests in `src/lib.rs` and the backend modules, and integration tests in
+`tests/` (`custom_transport.rs`, `error_helpers_external.rs`) that exercise the crate through its
+public API. No external services are required. Prefer `make tests` (runs the default, reqwest,
+ureq, and async lanes); the raw commands are a fallback:
 ```bash
+# reqwest lane:
 cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+# ureq lane:
 cargo test --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+# async lane (reqwest + async):
+cargo test --features "async github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
 ```
 
 ## README Sync
@@ -135,16 +150,21 @@ cargo test --no-default-features --features "ureq native-tls github gitlab gitea
 ---
 
 ## Mandatory Verification After Every Change
-After making **any** code change, run these in order and do not present the change as complete until all pass:
-1. **Format** — `cargo fmt`
-2. **Lint** — `cargo clippy` on **both** clients (commands above)
-3. **Test** — `cargo test` on **both** clients (commands above)
-4. If `src/lib.rs` changed — `./readme.sh && ./readme.sh check`
+The single command that runs everything CI enforces is **`make ci`** — fmt, README drift check,
+clippy and tests across every lane (reqwest, ureq, async), the `--all-features` build, and every
+backend example build. This is exactly what `.github/workflows/build.yml` runs, so a green
+`make ci` locally means green CI. Prefer it over running the steps by hand.
 
-The `pr-cycle` skill's helper bundles all of this: `.agents/skills/pr-cycle/pr.py 0 ci`.
-Equivalently, **`make ci`** runs fmt/clippy/tests on both http clients, the README drift
-check, and builds every backend example. Run `make help` to list all targets (e.g.
-`make check`, `make tests/ureq`, `make examples/s3`, `make docs/readme`).
+If you do run the steps individually, run these in order and do not present the change as complete
+until all pass:
+1. **Format** — `cargo fmt`
+2. **Lint** — `cargo clippy` on every lane: reqwest, ureq, async (commands above), or `make check/clippy`
+3. **Test** — `cargo test` on every lane: reqwest, ureq, async (commands above), or `make tests`
+4. If `src/lib.rs` changed — `./readme.sh && ./readme.sh check`, or `make check/readme`
+
+The `pr-cycle` skill's helper also bundles all of this: `.agents/skills/pr-cycle/pr.py 0 ci`.
+Run `make help` to list all targets (e.g. `make check`, `make tests/ureq`, `make examples/s3`,
+`make docs/readme`).
 
 ---
 
@@ -209,7 +229,9 @@ Claude sub-agent definitions used by these skills live in `.claude/agents/`
 | `src/macros.rs` | Crate macros (`cargo_crate_version!`; `impl_common_builder_setters!` + `impl_release_update_accessors!` for the shared backend surface; internal helpers) |
 | `src/version.rs` | Semver comparison helpers |
 | `src/errors.rs` | `Error` / `Result` types (`#[non_exhaustive]`; opaque `Transport` / `S3Auth` variants) |
-| `examples/` | Runnable usage examples, one per backend (`github`, `gitlab`, `gitea`, `s3`) |
+| `examples/` | Runnable usage examples (`github`, `gitlab`, `gitea`, `s3`, `custom`, `embedded_key`) |
+| `tests/` | Integration tests exercising the public API (`custom_transport.rs`, `error_helpers_external.rs`) |
+| `Makefile` | Source of truth for the CI lanes; `make ci` runs everything CI enforces. `make help` lists targets |
 | `readme.sh` | README generation/check wrapper around `cargo-readme` |
 | `CHANGELOG.md` | Keep-a-changelog style; always has an `[unreleased]` section on top |
 | `docs/migrations/` | Per-release migration guides; `PREV-to-X.Y.Z.md` (agent/automation) and `PREV-to-X.Y.Z-human.md` (human). Current: `0.x-to-1.0.md` / `0.x-to-1.0-human.md` |

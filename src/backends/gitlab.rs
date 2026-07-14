@@ -577,7 +577,7 @@ fn api_headers() -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
-        "rust-reqwest/self-update"
+        crate::DEFAULT_USER_AGENT
             .parse()
             .expect("gitlab invalid user-agent"),
     );
@@ -1356,7 +1356,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "rust-reqwest/self-update"
+            crate::DEFAULT_USER_AGENT
         );
         assert!(
             headers
@@ -1991,7 +1991,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "rust-reqwest/self-update",
+            crate::DEFAULT_USER_AGENT,
             "api_headers() (no-arg form) must still set the User-Agent header"
         );
         assert!(
@@ -2031,10 +2031,11 @@ mod tests {
 
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs.len(), 2, "both pages must have been requested");
+        let expected_ua = format!("user-agent: {}", crate::DEFAULT_USER_AGENT.to_lowercase());
         for (i, req) in reqs.iter().enumerate() {
             let lower = req.to_lowercase();
             assert!(
-                lower.contains("user-agent: rust-reqwest/self-update"),
+                lower.contains(&expected_ua),
                 "page {} request must carry User-Agent header; got:\n{}",
                 i + 1,
                 req
