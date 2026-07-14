@@ -619,7 +619,10 @@ mod tests {
     }
 
     // A rolling non-semver tag (`nightly`) in the listing must be skipped, not fail the whole
-    // fetch: repositories commonly mix rolling tags with semver releases.
+    // fetch: repositories commonly mix rolling tags with semver releases. Pre-release/build
+    // suffixes are valid semver and must NOT be skipped. A capital-`V` prefix is not trimmed
+    // (only lowercase `v` is), so a `V`-tagged release is skipped like any other unparseable
+    // tag; this documents the boundary of the trim.
     #[test]
     fn listing_skips_non_semver_tags() {
         let req = super::release_array_page(
@@ -627,14 +630,75 @@ mod tests {
             crate::http_client::HeaderMap::new(),
             None,
         );
-        let body = releases_array_json(&["nightly", "v1.2.3", "2024-06-01", "v1.0.0"]);
+        let body = releases_array_json(&[
+            "nightly",
+            "v2.0.0-rc.1+build",
+            "v1.2.3",
+            "2024-06-01",
+            "V1.1.0",
+            "v1.0.0",
+        ]);
         let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
         let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
         assert_eq!(
             versions,
-            vec!["1.2.3", "1.0.0"],
-            "non-semver tags are skipped; the semver releases survive"
+            vec!["2.0.0-rc.1+build", "1.2.3", "1.0.0"],
+            "non-semver (incl. capital-V) tags are skipped; semver incl. pre-release survives"
         );
+    }
+
+    // End-to-end over the loopback stub: a first page consisting entirely of non-semver tags
+    // (with a Link to page 2) must not stop the walk; page 2's release is still collected.
+    #[test]
+    fn fetch_continues_past_an_all_non_semver_page() {
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/repos/o/r/releases?page=2")),
+                    body: releases_array_json(&["nightly", "latest"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_array_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let releases = fetch_all_releases(
+            &format!("{base}/repos/o/r/releases"),
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["3.0.0"]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "an all-skipped page 1 must not stop pagination; page 2 must be requested"
+        );
+    }
+
+    // The async driver shares the same parse closures; pin that the skip behaves identically
+    // through `run_paginated_async`.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_async_skips_non_semver_tags() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_array_json(&["nightly", "v1.2.3"]),
+            }]
+        });
+        let releases = fetch_all_releases_async(
+            &format!("{base}/repos/o/r/releases"),
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["1.2.3"]);
     }
 
     // The same skip applies on the filtered (`stop_at`) walk used by `get_newer_releases`,

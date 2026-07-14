@@ -20,10 +20,14 @@
 - `ReleaseBuilder::build()` validates that the version parses as bare semver and errors with
   `Error::SemVer` otherwise (a `v` prefix or a non-semver tag previously built fine and was
   silently skipped, or errored opaquely, later in the update pipeline). The github/gitlab/gitea
-  listings skip (and `log::debug!`) releases whose tag is not semver after trimming a leading
-  `v` -- e.g. a rolling `nightly` or `latest` tag alongside normal releases -- matching the
-  pre-1.0 behavior of ignoring them; fetching such a tag directly (`release_tag`) errors with
-  `Error::SemVer` naming the offending tag.
+  listings skip releases whose tag is not semver after trimming a leading lowercase `v` -- e.g.
+  a rolling `nightly` or `latest` tag alongside normal releases -- matching the pre-1.0 behavior
+  of ignoring them; each skip is logged at `log::debug!` (enable e.g. `env_logger` with
+  `RUST_LOG=self_update=debug` to see which tags were dropped). Fetching such a tag directly
+  (`release_tag`) errors with `Error::SemVer` naming the offending tag, with the original parse
+  failure on the `source()` chain. github's `get_latest_release` uses the API's dedicated
+  `/releases/latest` endpoint and also errors (naming the tag) if that designated release is not
+  semver; gitlab/gitea derive "latest" from the listing, skipping unparseable tags.
 - All requests send the same `self-update/<version>` User-Agent when the caller has not set one
   via `request_header`. Previously github sent `rust/self-update` and gitlab/gitea and the
   standalone `Download` sent `rust-reqwest/self-update` (wrong under the `ureq` client).
