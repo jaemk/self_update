@@ -573,7 +573,7 @@ use http_client::header;
 /// The User-Agent sent on the crate's own requests (API listings and downloads) when the caller
 /// has not set one via `request_header`. One shared value so every backend and the standalone
 /// [`Download`] identify themselves the same way regardless of the compiled HTTP client.
-pub(crate) const DEFAULT_USER_AGENT: &str = concat!("self_update/", env!("CARGO_PKG_VERSION"));
+pub(crate) const DEFAULT_USER_AGENT: &str = concat!("self-update/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(feature = "progress-bar")]
 pub(crate) const DEFAULT_PROGRESS_TEMPLATE: &str =

@@ -67,7 +67,9 @@ impl ReleaseDto {
         if let Some(body) = self.body {
             builder.body(body);
         }
-        builder.build()
+        builder
+            .build()
+            .map_err(|e| crate::backends::common::name_tag_in_semver_error(&tag, e))
     }
 }
 
@@ -479,7 +481,17 @@ fn release_array_page(
                 })?;
             let mut items = Vec::new();
             for dto in dtos {
-                let release = dto.into_release()?;
+                let release = match dto.into_release() {
+                    Ok(release) => release,
+                    // A non-semver tag (`nightly`, `latest`, a date tag) is not a release the
+                    // updater can compare; skip it rather than failing the whole listing, so a
+                    // repository mixing rolling tags with semver releases stays updatable.
+                    Err(e @ Error::SemVer(_)) => {
+                        log::debug!("self_update: skipping listed release: {e}");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 // Skip releases not strictly newer than the current version, but do NOT stop
                 // pagination. A backport release (older semver, newer creation date) must not
                 // halt the walk; a genuinely newer release on a later page must still be found.
@@ -604,6 +616,126 @@ mod tests {
             matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
             "a malformed single-release body must map to InvalidResponse"
         );
+    }
+
+    // A rolling non-semver tag (`nightly`) in the listing must be skipped, not fail the whole
+    // fetch: repositories commonly mix rolling tags with semver releases. Pre-release/build
+    // suffixes are valid semver and must NOT be skipped. A capital-`V` prefix is not trimmed
+    // (only lowercase `v` is), so a `V`-tagged release is skipped like any other unparseable
+    // tag; this documents the boundary of the trim.
+    #[test]
+    fn listing_skips_non_semver_tags() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            None,
+        );
+        let body = releases_array_json(&[
+            "nightly",
+            "v2.0.0-rc.1+build",
+            "v1.2.3",
+            "2024-06-01",
+            "V1.1.0",
+            "v1.0.0",
+        ]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["2.0.0-rc.1+build", "1.2.3", "1.0.0"],
+            "non-semver (incl. capital-V) tags are skipped; semver incl. pre-release survives"
+        );
+    }
+
+    // End-to-end over the loopback stub: a first page consisting entirely of non-semver tags
+    // (with a Link to page 2) must not stop the walk; page 2's release is still collected.
+    #[test]
+    fn fetch_continues_past_an_all_non_semver_page() {
+        let (base, captured) = stub_capturing(|base| {
+            vec![
+                Resp {
+                    status: "200 OK",
+                    link: Some(format!("{base}/repos/o/r/releases?page=2")),
+                    body: releases_array_json(&["nightly", "latest"]),
+                },
+                Resp {
+                    status: "200 OK",
+                    link: None,
+                    body: releases_array_json(&["v3.0.0"]),
+                },
+            ]
+        });
+        let releases = fetch_all_releases(
+            &format!("{base}/repos/o/r/releases"),
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["3.0.0"]);
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "an all-skipped page 1 must not stop pagination; page 2 must be requested"
+        );
+    }
+
+    // The async driver shares the same parse closures; pin that the skip behaves identically
+    // through `run_paginated_async`.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn fetch_async_skips_non_semver_tags() {
+        let base = stub(|_| {
+            vec![Resp {
+                status: "200 OK",
+                link: None,
+                body: releases_array_json(&["nightly", "v1.2.3"]),
+            }]
+        });
+        let releases = fetch_all_releases_async(
+            &format!("{base}/repos/o/r/releases"),
+            &crate::backends::common::RequestConfig::default(),
+        )
+        .await
+        .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["1.2.3"]);
+    }
+
+    // The same skip applies on the filtered (`stop_at`) walk used by `get_newer_releases`,
+    // which feeds `update()`: a rolling tag must not abort an update check.
+    #[test]
+    fn filtered_listing_skips_non_semver_tags() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            Some("1.0.0".to_string()),
+        );
+        let body = releases_array_json(&["nightly", "v1.2.3", "v0.9.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["1.2.3"]);
+    }
+
+    // The single-release endpoints cannot skip: a pinned non-semver tag errors, and the error
+    // must name the offending tag rather than surfacing a bare semver parse failure.
+    #[test]
+    fn single_plan_non_semver_tag_errors_naming_the_tag() {
+        let req =
+            super::single_plan("https://example.test/releases/tags/nightly".to_string()).unwrap();
+        let res = (req.parse)(
+            release_obj_json("nightly").as_bytes(),
+            &crate::http_client::HeaderMap::new(),
+        );
+        match res {
+            Err(crate::errors::Error::SemVer(e)) => {
+                assert!(
+                    e.to_string().contains("nightly"),
+                    "the error must name the offending tag, got: {e}"
+                );
+            }
+            Err(other) => panic!("expected Error::SemVer, got {other:?}"),
+            Ok(_) => panic!("a non-semver pinned tag must error"),
+        }
     }
 
     /// Test wrapper: drive the sans-io `releases_plan` through the sync `run_paginated` driver.

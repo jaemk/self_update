@@ -262,10 +262,12 @@ impl ReleaseBuilder {
     /// Validate and build the [`Release`].
     ///
     /// Errors with [`Error::MissingField`] if `version` was not set, and with [`Error::SemVer`] if
-    /// it is not a bare semver string (e.g. a leading `v`, or a non-semver tag). Validating here
-    /// gives a clear error at construction time; an unparseable version stored in a `Release` would
-    /// otherwise surface only later, as a silently-skipped release or an opaque comparison error
-    /// inside the update pipeline.
+    /// it is not a bare semver string (e.g. a leading `v`, or a non-semver tag). For a custom
+    /// [`ReleaseSource`], validating here gives a clear error at construction time; an unparseable
+    /// version stored in a `Release` would otherwise surface only later, as a silently-skipped
+    /// release or an opaque comparison error inside the update pipeline. (The built-in forge
+    /// backends intentionally skip non-semver tags when parsing their *listings* — that skip
+    /// happens at the listing layer, before each `Release` is constructed through this builder.)
     pub fn build(&self) -> Result<Release> {
         let version = self
             .version
@@ -844,6 +846,14 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
     /// [`get_newer_releases`](Self::get_newer_releases), whose list is filtered to strictly-newer
     /// releases (there, `.latest()` is `None` when up to date and any present entry is a genuine
     /// update).
+    ///
+    /// How "newest" treats a non-semver rolling tag (`nightly`, `latest`, a date) differs per
+    /// backend: gitlab and gitea read the first page of the listing and skip unparseable tags,
+    /// returning the first release the updater can compare; github uses the API's dedicated
+    /// `/releases/latest` endpoint, which returns one designated release — if *that* release's
+    /// tag is not semver, this errors with [`Error::SemVer`](crate::errors::Error::SemVer) naming
+    /// the tag. Prefer [`get_newer_releases`](Self::get_newer_releases) for the skip-enabled path
+    /// that behaves identically on every backend.
     fn get_latest_release(&self) -> Result<Releases>;
 
     /// Fetch the candidate releases from the backend as a [`Releases`] (newest-first, carrying the
@@ -852,6 +862,13 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
     /// The list is filtered to releases strictly newer than the configured current version, so it
     /// is empty (`.latest()` is `None`) when already up to date, and any entry present is a genuine
     /// update.
+    ///
+    /// Releases whose tag is not a semver version after stripping a leading lowercase `v` (e.g. a
+    /// rolling `nightly` or `latest` tag) are skipped: the updater cannot compare them. Each skip
+    /// is logged at `log::debug!` level — hook up a logger (e.g. `env_logger` with
+    /// `RUST_LOG=self_update=debug`) to see which tags were dropped. A listing with *no*
+    /// parseable release behaves as an empty listing
+    /// ([`Error::NoReleaseFound`](crate::errors::Error::NoReleaseFound) on the update path).
     fn get_newer_releases(&self) -> Result<Releases>;
 
     /// Fetch details of the release matching the specified version

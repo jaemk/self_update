@@ -52,8 +52,62 @@ impl AuthScheme {
     }
 }
 
+/// The boxed inner error of an [`Error::SemVer`] produced from a server-supplied release tag:
+/// names the offending tag in its message and keeps the original `semver` parse failure
+/// reachable via [`std::error::Error::source`].
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
+#[derive(Debug)]
+pub(crate) struct NonSemverTagError {
+    tag: String,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl std::fmt::Display for NonSemverTagError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "release tag `{}` is not a semver version: {}",
+            self.tag, self.source
+        )
+    }
+}
+
+impl std::error::Error for NonSemverTagError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.source)
+    }
+}
+
+/// Rewrap a semver-validation failure from `Release::builder().build()` so the error names the
+/// offending release tag (`nightly`, `latest`, a date, ...) instead of surfacing a bare parse
+/// failure with no context. The original parse error stays on the `source()` chain. Non-`SemVer`
+/// errors pass through unchanged.
+///
+/// Only the forge backends (github/gitlab/gitea) funnel server-supplied tags through the builder;
+/// the attribute keeps builds without any of them warning-free.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
+pub(crate) fn name_tag_in_semver_error(tag: &str, err: Error) -> Error {
+    match err {
+        Error::SemVer(inner) => Error::SemVer(Box::new(NonSemverTagError {
+            tag: tag.to_owned(),
+            source: inner,
+        })),
+        other => other,
+    }
+}
+
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
 /// available, no `url` crate needed). Returns `None` when the URL has no host.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
 pub(crate) fn host_of(url: &str) -> Option<String> {
     url.parse::<http::Uri>().ok()?.host().map(|h| {
         h.trim_start_matches('[')
@@ -507,6 +561,39 @@ mod tests {
     #[cfg(feature = "async")]
     const BAD_PEM_CERT: &[u8] =
         b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
+
+    // `name_tag_in_semver_error` names the tag in the message and keeps the original
+    // `semver::Error` reachable through the `source()` chain (SemVer -> NonSemverTagError ->
+    // semver::Error), so callers walking the chain still find the parse failure.
+    #[test]
+    fn name_tag_in_semver_error_names_tag_and_keeps_source_chain() {
+        let parse_err = "nightly".parse::<semver::Version>().unwrap_err();
+        let parse_msg = parse_err.to_string();
+        let wrapped =
+            super::name_tag_in_semver_error("nightly", crate::errors::Error::from(parse_err));
+        let crate::errors::Error::SemVer(inner) = &wrapped else {
+            panic!("expected Error::SemVer, got {wrapped:?}");
+        };
+        assert!(
+            inner.to_string().contains("`nightly`"),
+            "the message must name the tag, got: {inner}"
+        );
+        let chained = inner
+            .source()
+            .expect("the original semver parse error must stay on the chain");
+        assert_eq!(chained.to_string(), parse_msg);
+    }
+
+    // Non-SemVer errors pass through `name_tag_in_semver_error` unchanged.
+    #[test]
+    fn name_tag_in_semver_error_passes_other_errors_through() {
+        let err = crate::errors::Error::MissingField { field: "version" };
+        let out = super::name_tag_in_semver_error("nightly", err);
+        assert!(
+            matches!(out, crate::errors::Error::MissingField { field: "version" }),
+            "non-SemVer errors must pass through unchanged, got {out:?}"
+        );
+    }
 
     #[test]
     fn insert_header_records_invalid_value_error() {

@@ -481,6 +481,12 @@ macro_rules! impl_common_builder_setters {
         /// latest available release is used. (Note that the `{{ version }}` substitution in
         /// [`bin_path_in_archive`](Self::bin_path_in_archive) is still the bare semver with any
         /// leading `v` stripped, regardless of what is passed here.)
+        ///
+        /// The tag must resolve to a semver version after stripping a leading `v`: pinning a
+        /// rolling tag like `nightly` or a date tag fails at update time with an
+        /// [`Error::SemVer`](crate::errors::Error::SemVer) naming the tag. (In release
+        /// *listings* such tags are skipped instead, so a repo mixing rolling and versioned
+        /// releases stays updatable.)
         pub fn release_tag(&mut self, ver: impl Into<String>) -> &mut Self {
             self.common.release_tag = Some(ver.into());
             self

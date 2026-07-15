@@ -68,7 +68,9 @@ impl ReleaseDto {
         if let Some(body) = self.body {
             builder.body(body);
         }
-        builder.build()
+        builder
+            .build()
+            .map_err(|e| crate::backends::common::name_tag_in_semver_error(&tag, e))
     }
 }
 
@@ -476,7 +478,17 @@ fn release_array_page(
                 })?;
             let mut items = Vec::new();
             for dto in dtos {
-                let release = dto.into_release()?;
+                let release = match dto.into_release() {
+                    Ok(release) => release,
+                    // A non-semver tag (`nightly`, `latest`, a date tag) is not a release the
+                    // updater can compare; skip it rather than failing the whole listing, so a
+                    // repository mixing rolling tags with semver releases stays updatable.
+                    Err(e @ Error::SemVer(_)) => {
+                        log::debug!("self_update: skipping listed release: {e}");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 // Skip releases not strictly newer than the current version, but do NOT stop
                 // pagination. A backport release (older semver, newer creation date) must not
                 // halt the walk; a genuinely newer release on a later page must still be found.
@@ -507,6 +519,8 @@ fn release_array_page(
 
 /// Transport-free plan for the newest release: Gitea has no `/releases/latest`, so the listing's
 /// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
+/// Entries with non-semver rolling tags (`nightly`, ...) are skipped like the full listing does,
+/// so "newest" is the first entry the updater can actually compare.
 fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
     Ok(PageRequest {
@@ -517,11 +531,16 @@ fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
                 serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
                     source: Box::new(e),
                 })?;
-            let first = dtos
-                .into_iter()
-                .next()
-                .ok_or_else(|| Error::NoReleaseFound { target: None })?;
-            Ok(Page::last(vec![first.into_release()?]))
+            for dto in dtos {
+                match dto.into_release() {
+                    Ok(release) => return Ok(Page::last(vec![release])),
+                    Err(e @ Error::SemVer(_)) => {
+                        log::debug!("self_update: skipping listed release: {e}");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(Error::NoReleaseFound { target: None })
         }),
     })
 }
@@ -619,6 +638,72 @@ mod tests {
         );
     }
 
+    // A rolling non-semver tag (`nightly`) in the listing must be skipped, not fail the whole
+    // fetch: repositories commonly mix rolling tags with semver releases.
+    #[test]
+    fn listing_skips_non_semver_tags() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            None,
+        );
+        let body = releases_json(&["nightly", "v1.2.3", "v1.0.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["1.2.3", "1.0.0"],
+            "non-semver tags are skipped; the semver releases survive"
+        );
+    }
+
+    // Gitea's "latest" is the listing's first entry; a rolling tag in that slot must be
+    // skipped so "newest" is the first release the updater can actually compare.
+    #[test]
+    fn newest_plan_skips_non_semver_tags() {
+        let req = super::newest_plan("https://example.test/releases").unwrap();
+        let body = releases_json(&["nightly", "v1.2.3", "v1.0.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(versions, vec!["1.2.3"]);
+    }
+
+    // With only non-semver tags there is nothing the updater can compare: NoReleaseFound.
+    #[test]
+    fn newest_plan_with_only_non_semver_tags_is_no_release_found() {
+        let req = super::newest_plan("https://example.test/releases").unwrap();
+        let body = releases_json(&["nightly", "latest"]);
+        let res = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new());
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::NoReleaseFound { target: None })
+            ),
+            "an all-rolling-tag listing must yield NoReleaseFound"
+        );
+    }
+
+    // The single-release endpoint cannot skip: a pinned non-semver tag errors, naming the tag.
+    #[test]
+    fn single_plan_non_semver_tag_errors_naming_the_tag() {
+        let req =
+            super::single_plan("https://example.test/releases/tags/nightly".to_string()).unwrap();
+        let res = (req.parse)(
+            release_obj_json("nightly").as_bytes(),
+            &crate::http_client::HeaderMap::new(),
+        );
+        match res {
+            Err(crate::errors::Error::SemVer(e)) => {
+                assert!(
+                    e.to_string().contains("nightly"),
+                    "the error must name the offending tag, got: {e}"
+                );
+            }
+            Err(other) => panic!("expected Error::SemVer, got {other:?}"),
+            Ok(_) => panic!("a non-semver pinned tag must error"),
+        }
+    }
+
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -686,7 +771,6 @@ mod tests {
 
     /// A bare JSON release object (not wrapped in an array). Gitea's `get_release_version[_async]`
     /// hits `/tags/{ver}`, which returns a single release object, so this is parsed directly.
-    #[cfg(feature = "async")]
     fn release_obj_json(tag: &str) -> String {
         format!(
             r#"{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":[],"body":null}}"#
