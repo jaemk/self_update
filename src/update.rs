@@ -3532,7 +3532,8 @@ mod tests {
         let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
 
         // Owned PathBuf argument exercises the `impl AsRef<Path>` signature.
-        crate::verify_signature(signed_file.path().to_path_buf(), &[vkey])?;
+        let owned: std::path::PathBuf = signed_file.path().into();
+        crate::verify_signature(owned, &[vkey])?;
 
         // An empty key slice is a no-op success (nothing to verify against).
         crate::verify_signature(signed_file.path(), &[])

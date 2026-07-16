@@ -915,8 +915,10 @@ pub struct Extract {
 /// crate downloads to a temp file.
 enum ArchiveReader {
     Plain(fs::File),
+    // Boxed: a `GzDecoder` is far larger than the other variants, so an unboxed variant would bloat
+    // every `ArchiveReader` to its size (clippy::large_enum_variant).
     #[cfg(feature = "compression-tar-gz")]
-    Gz(flate2::read::GzDecoder<fs::File>),
+    Gz(Box<flate2::read::GzDecoder<fs::File>>),
     #[cfg(feature = "compression-tar-xz")]
     Xz(io::Cursor<Vec<u8>>),
 }
@@ -958,7 +960,9 @@ impl Extract {
         match compression {
             None => Ok(ArchiveReader::Plain(source)),
             #[cfg(feature = "compression-tar-gz")]
-            Some(Compression::Gz) => Ok(ArchiveReader::Gz(flate2::read::GzDecoder::new(source))),
+            Some(Compression::Gz) => Ok(ArchiveReader::Gz(Box::new(flate2::read::GzDecoder::new(
+                source,
+            )))),
             #[cfg(feature = "compression-tar-xz")]
             Some(Compression::Xz) => {
                 // `lzma-rs` is a one-shot decoder (no streaming `Read` adapter), so decode the
