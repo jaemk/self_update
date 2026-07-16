@@ -115,8 +115,12 @@ each element:
 - `body` (optional `String`).
 - `assets` (required array, else `Error::MissingAssetField { field: "assets" }`), each parsed
   via asset DTO parsing.
-- `version` is `tag_name` with a single leading `v` stripped via
-  `trim_start_matches('v')`.
+- `version` is derived from `tag_name` via `backends::common::strip_tag_prefix`. With no
+  configured `tag_prefix` this strips a single leading `v` (the default). With a `tag_prefix` set
+  (via the builder's `tag_prefix(..)`), the tag must start with that prefix, which is stripped
+  (plus any leading `v` after it), so a monorepo tag `myapp-1.2.3` yields `1.2.3`; a tag lacking
+  the prefix is skipped from the listing (a `tag_prefix_mismatch_error`, an `Error::SemVer`).
+- `html_url` (optional) maps onto `Release::release_notes_url()`.
 
 Asset DTO parsing requires `url` (download URL, else `Error::MissingAssetField { field: "url" }`)
 and `name` (else `Error::MissingAssetField { field: "name" }`). The optional `digest`
@@ -188,7 +192,9 @@ The setter was renamed `url` -> `api_base_url` (and earlier `with_url` / `instan
   a cross-host asset `download_url` or pagination link does not receive it.
 - List per-page size defaults to 100 and pagination follows `Link: rel="next"`,
   bounded at 100 pages.
-- `version` strips exactly one leading `v` from `tag_name`.
+- `version` strips a single leading `v` from `tag_name` by default; with a configured
+  `tag_prefix`, only tags carrying that prefix are kept (the prefix, plus any inner `v`, is
+  stripped), and non-matching tags are skipped.
 
 ## Tests
 

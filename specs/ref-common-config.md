@@ -94,9 +94,18 @@ The `@shared` vocabulary (`macros.rs:231-462`):
   the typed `ProgressStyle { template, chars }` newtype (`ProgressStyle::new(template, chars)`).
 - `show_output(bool)` (`macros.rs:358`).
 - `no_confirm(bool)` (`macros.rs:370`).
+- `show_release_notes(bool)` - show the release notes URL (or the body when no URL is available)
+  in the confirmation prompt; default off.
+- `update_strategy(UpdateStrategy)` - `Compatible` (default, prefer the newest semver-compatible
+  release, else newest overall) or `Latest` (always newest, across a major bump).
 - `unattended()` (`macros.rs:378`) - one-call CI/daemon configuration: sets
   `no_confirm(true)` + `show_output(false)`. Without it the default
   (`no_confirm == false`) blocks on stdin waiting for confirmation.
+
+`tag_prefix(impl Into<String>)` is NOT a shared setter: it is defined per-backend on the
+github/gitlab/gitea `UpdateBuilder`s only (the tag-to-version derivation is forge-specific; s3
+parses versions from object keys and the custom backend supplies its own `Release`s). It writes
+`self.common.tag_prefix`, read by each forge's tag parser via `backends::common::strip_tag_prefix`.
 - `request_config_setters!(common.request)` - splices in
   `timeout`, `request_header`, `retries`, `retry_backoff(base, max)`,
   `http_client(Arc<dyn HttpClient>)` (and `http_client_async` under `async`),

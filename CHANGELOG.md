@@ -24,6 +24,10 @@
   gitlab); `None` for s3. The `show_release_notes(bool)` builder setter shows it (or the release
   body when no URL is available) in the confirmation prompt.
   ([#148](https://github.com/jaemk/self_update/issues/148))
+- `tag_prefix(..)` on the github/gitlab/gitea `Update` builders: derive the version from a
+  monorepo-style tag such as `myapp-1.2.3` (or `myapp-v1.2.3`). Defaults to unset, which trims a
+  leading `v` as before; when set, tags without the prefix are skipped from the listing rather than
+  mis-parsed. ([#76](https://github.com/jaemk/self_update/issues/76))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently

@@ -102,6 +102,41 @@ pub(crate) fn name_tag_in_semver_error(tag: &str, err: Error) -> Error {
     }
 }
 
+/// Strip the configured tag prefix (or the conventional leading `v`) from a release tag to get the
+/// bare version candidate.
+///
+/// With `prefix = None`, a single leading lowercase `v` is trimmed (the long-standing default) and
+/// the result is always `Some`. With `prefix = Some(p)`, the tag must start with `p`; `p` is
+/// stripped and a leading `v` after it is also trimmed (so `myapp-v1.2.3` and `myapp-1.2.3` both
+/// yield `Some("1.2.3")`). A tag that does not start with `p` yields `None`, so the caller skips it:
+/// with a prefix configured, only tags carrying it count as releases (a bare `1.0.0` tag is not
+/// silently accepted just because its remainder parses as semver).
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
+pub(crate) fn strip_tag_prefix(tag: &str, prefix: Option<&str>) -> Option<String> {
+    match prefix {
+        None => Some(tag.trim_start_matches('v').to_owned()),
+        Some(p) => tag
+            .strip_prefix(p)
+            .map(|rest| rest.trim_start_matches('v').to_owned()),
+    }
+}
+
+/// Build the skippable [`Error::SemVer`] returned when a tag does not carry the configured
+/// `tag_prefix`. It uses the `SemVer` variant so the forge listing walk drops the release (its skip
+/// arm keys on `Error::SemVer`), the same way it drops a non-semver tag.
+#[cfg_attr(
+    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    allow(dead_code)
+)]
+pub(crate) fn tag_prefix_mismatch_error(tag: &str, prefix: &str) -> Error {
+    Error::SemVer(Box::new(crate::errors::MessageError(format!(
+        "release tag `{tag}` does not start with the configured tag_prefix `{prefix}`"
+    ))))
+}
+
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
 /// available, no `url` crate needed). Returns `None` when the URL has no host.
 #[cfg_attr(
@@ -415,6 +450,10 @@ pub(crate) struct CommonBuilderConfig {
     pub no_confirm: bool,
     pub show_release_notes: bool,
     pub update_strategy: crate::update::UpdateStrategy,
+    /// Optional tag prefix used to derive the version from a release tag (e.g. `myapp-` for a
+    /// monorepo tag `myapp-1.2.3`). `None` keeps the default of trimming a leading `v`. Only the
+    /// forge backends (github/gitlab/gitea) consult it; set via their `tag_prefix` setter.
+    pub tag_prefix: Option<String>,
     pub current_version: Option<String>,
     pub release_tag: Option<String>,
     #[cfg(feature = "progress-bar")]
@@ -453,6 +492,7 @@ impl Default for CommonBuilderConfig {
             no_confirm: false,
             show_release_notes: false,
             update_strategy: crate::update::UpdateStrategy::default(),
+            tag_prefix: None,
             current_version: None,
             release_tag: None,
             #[cfg(feature = "progress-bar")]
@@ -501,6 +541,7 @@ impl CommonBuilderConfig {
                 field: "current_version",
             })?,
             release_tag: self.release_tag.clone(),
+            tag_prefix: self.tag_prefix.clone(),
             bin_name: self
                 .bin_name
                 .clone()
@@ -545,6 +586,7 @@ pub(crate) struct CommonConfig {
     pub asset_identifier: Option<String>,
     pub current_version: String,
     pub release_tag: Option<String>,
+    pub tag_prefix: Option<String>,
     pub bin_name: String,
     pub bin_install_path: PathBuf,
     pub bin_path_in_archive: String,
