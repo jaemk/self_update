@@ -79,7 +79,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
 * `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
-* `checksums`: verify a downloaded artifact against a known SHA-256/SHA-512 checksum (e.g. from a `SHA256SUMS` file) before installing it;
+* `checksums`: verify a downloaded artifact against a SHA-256/SHA-512 checksum before installing it -- automatically against the digest github publishes per release asset, and/or against a known checksum you pass in (e.g. from a `SHA256SUMS` file); see [Checksum verification](#checksum-verification) below;
 * `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest serves the async path, and the sync API prefers reqwest when both are present); see [Async](#async) below.
 
 `github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
@@ -211,11 +211,23 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Checksum verification
 
-With the `checksums` feature, pass a known digest (e.g. one published in a `SHA256SUMS` file
-alongside the release) and the crate verifies the downloaded artifact against it **before**
-installing — a mismatch aborts the update. The algorithm is chosen by the
-`Checksum` variant (`Sha256` / `Sha512`); it complements the `signatures`
-feature (zipsign), which verifies authenticity rather than a published digest.
+With the `checksums` feature, the crate verifies the downloaded artifact against a digest
+**before** installing — a mismatch aborts the update. Two sources of digests, independently
+applied (when both apply, both must pass):
+
+- **Release-published digests, automatic.** GitHub publishes a `sha256:<hex>` digest per release
+  asset; the updater verifies the download against it whenever the selected asset carries one.
+  This is on by default with the `checksums` feature — no configuration needed — and can be
+  disabled with `verify_release_digest(false)`. The other backends' APIs publish no digest, so
+  the check is a no-op there (a custom `ReleaseSource` can supply one via
+  `ReleaseAsset::with_digest`). Note this is an *integrity* check only — the forge recomputes
+  the digest if an asset is replaced — so it is not a substitute for the `signatures` feature.
+- **A known digest you pass explicitly** (e.g. one published in a `SHA256SUMS` file alongside
+  the release) via `verify_checksum`. The algorithm is chosen by the `Checksum` variant
+  (`Sha256` / `Sha512`).
+
+Both complement the `signatures` feature (zipsign), which verifies authenticity rather than a
+published digest.
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {
@@ -351,7 +363,7 @@ is intentionally not feature-gated: gating it behind `cfg(feature = "async")` wo
 successfully-compiling doctest in the crate's no-`async` test lanes, which a `compile_fail` block
 must never do):
 
-```rust,compile_fail
+```rust
 fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")

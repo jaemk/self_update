@@ -25,9 +25,10 @@ helpers and the same verify/extract/replace tail (`finish_update_owned`).
 
 The verify/extract/replace tail is `finish_update_owned(ctx, dir: TempDir, archive: &Path)`, which
 takes a `FinishCtx` of **owned** fields (install path, target, bin name, in-archive path,
-show_output, the verify callback, and under the features the owned checksum and verifying keys) and
-the `TempDir` moved in by value. The sync `finish_update(&U, release, dir, archive)` builds the ctx
-from the updater and calls the owned twin inline (no spawn). The async path builds the same ctx,
+show_output, the verify callback, and under the features the owned checksum, the selected asset's
+release-published digest plus the `verify_release_digest` flag, and verifying keys) and
+the `TempDir` moved in by value. The sync `finish_update(&U, release, &target_asset, dir, archive)`
+builds the ctx from the updater and the selected asset and calls the owned twin inline (no spawn). The async path builds the same ctx,
 moves the `TempDir` into the closure, and runs `finish_update_owned` inside
 `tokio::task::spawn_blocking(move || ...)`, awaiting the join handle and mapping a `JoinError` to
 `Error::Internal { message, source }`. So the async update never blocks the executor on the verify/extract/replace work,
@@ -85,19 +86,26 @@ the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>
 In `finish_update`, before any extraction or replacement:
 
 1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
-   on the downloaded archive; a mismatch aborts here (`update.rs:806-809`).
-2. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
-   (`update.rs:811`). Empty key set is a no-op; otherwise the archive is detected and verified
+   on the downloaded archive; a mismatch aborts here (`update.rs:1314-1316`).
+2. **Release digest** (feature `checksums`): if `verify_release_digest()` is on (the default) and
+   the selected asset carries a backend-published digest (`ReleaseAsset::digest()`, the
+   `algorithm:hex` form github publishes per asset), the digest is parsed via
+   `Checksum::parse_digest` and verified against the archive (`update.rs:1320-1324`). A digest
+   that is present but malformed or an unsupported algorithm aborts with
+   `Error::InvalidResponse` naming the digest (no silent skip); an absent digest skips the gate.
+   Independent of gate 1: when both apply, both must pass.
+3. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
+   (`update.rs:1328`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
-   archive file name as context; any other kind => `Error::NoSignatures(kind)`
-   (`update.rs:904-947`), whose message names the kind via its `Display` impl
+   archive file name as context; any other kind => `Error::NoSignatures(kind)`,
+   whose message names the kind via its `Display` impl
    (`tar.gz` / `zip` / `tar` / `gz` / `plain`), e.g. "signature verification is only
    implemented for `.tar.gz` and `.zip` assets, not gz files".
 
-Both run on the *downloaded archive bytes* and before extraction. The third hook,
-`verify_binary`, runs later inside `install_binary` (`update.rs:872`) on the *extracted binary*,
-immediately before the swap. Ordering: verify_checksum -> verify_keys -> extract -> verify_binary ->
-replace.
+All three run on the *downloaded archive bytes* and before extraction. The last hook,
+`verify_binary`, runs later inside `install_binary` on the *extracted binary*,
+immediately before the swap. Ordering: verify_checksum -> release digest -> verify_keys ->
+extract -> verify_binary -> replace.
 
 ### Replace
 
@@ -183,9 +191,12 @@ under feature `async`; the free `update::update_extended_async` they route to is
 
 ## Invariants and regression checklist
 
-- Verify-before-replace: checksum and signature both run on the downloaded archive *before*
-  extraction; `verify_binary` runs on the extracted binary *before* the swap. Nothing is
-  replaced if any of the three rejects (`update.rs:778-784`, `872-879`).
+- Verify-before-replace: checksum, release digest, and signature all run on the downloaded
+  archive *before* extraction; `verify_binary` runs on the extracted binary *before* the swap.
+  Nothing is replaced if any of the four rejects (`update.rs:1312-1332`, `1444-1451`).
+- The release-digest gate is on by default under `checksums` and only fires when the selected
+  asset carries a digest; `verify_release_digest(false)` opts out. A present-but-unparseable
+  digest is a hard `Error::InvalidResponse`, not a silent skip (`update.rs:1320-1324`).
 - Order independence: `choose_latest_release` sorts candidates semver-descending and filters
   to strictly-newer, so a custom source's unordered/stale list selects correctly and never
   re-installs the current version (`update.rs:640-711`).
@@ -212,7 +223,11 @@ under feature `async`; the free `update::update_extended_async` they route to is
 sorts-out-of-order / ignores-unparseable / falls-back-to-incompatible);
 `install_binary_aborts_when_verify_rejects`, `install_binary_installs_when_verify_accepts`;
 `finish_update_rejects_a_mismatched_checksum_before_extracting`,
-`finish_update_passes_a_matching_checksum_then_proceeds` (feature-gated). `lib.rs` `mod tests`:
+`finish_update_passes_a_matching_checksum_then_proceeds`,
+`finish_update_rejects_a_mismatched_release_digest_by_default`,
+`finish_update_passes_a_matching_release_digest_then_proceeds`,
+`finish_update_release_digest_opt_out_skips_the_gate`,
+`finish_update_rejects_an_unsupported_release_digest` (feature-gated). `lib.rs` `mod tests`:
 `detect_*` (archive detection), `unpack_*` / `test_extract_into` / `test_extract_file`
 (extraction), `move_all_commits_every_move`, `move_all_rolls_back_on_failure`,
 `move_all_installs_fresh_destinations`, `move_all_second_commit_is_a_noop`,

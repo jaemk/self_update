@@ -25,13 +25,15 @@ backend's `UpdateBuilder` is configured. Each backend's builder embeds it as a
 auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 `no_confirm`, `current_version`, `release_tag`, `progress_template`,
 `progress_chars`, `auth_token`, `progress_callback`, `verify`, `asset_matcher`,
-`checksum` (under `checksums`), and `verifying_keys` (under `signatures`).
+`checksum` and `verify_release_digest` (under `checksums`), and `verifying_keys`
+(under `signatures`).
 
 `Default` (`common.rs:113-140`) sets the non-`None` defaults:
 `bin_path_in_archive_auto = false`, `show_download_progress = false`,
 `show_output = true`, `no_confirm = false`,
 `progress_template = DEFAULT_PROGRESS_TEMPLATE`,
-`progress_chars = DEFAULT_PROGRESS_CHARS`, and `verifying_keys = vec![]`.
+`progress_chars = DEFAULT_PROGRESS_CHARS`, `verify_release_digest = true` (under
+`checksums`), and `verifying_keys = vec![]`.
 
 `build()` (`common.rs:142-190`) validates and resolves into `CommonConfig`
 (`common.rs:194-216`):
@@ -110,9 +112,12 @@ The `@shared` vocabulary (`macros.rs:231-462`):
   (`macros.rs:405`).
 - `verify_binary(impl Fn(&Path) -> Result<()> ...)` (`macros.rs:589`) - the post-update
   hook on the extracted binary; its doc records the full verification order
-  (`verify_checksum` -> signature/`verifying_keys` -> extract -> `verify_binary` -> replace),
-  so it runs last. `Err(..) => bail` with `Error::VerificationRejected { reason }`.
+  (`verify_checksum` -> release digest -> signature/`verifying_keys` -> extract ->
+  `verify_binary` -> replace), so it runs last. `Err(..) => bail` with
+  `Error::VerificationRejected { reason }`.
 - `verify_checksum(Checksum)` (under `checksums`).
+- `verify_release_digest(bool)` (under `checksums`, default on) - toggles verifying the
+  download against the selected asset's backend-published digest.
 - `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:617`, under
   `signatures`; renamed from `verify_keys`) - **replaces** the key set on each call
   (last call wins, unlike
@@ -133,8 +138,8 @@ for the toggles. The crate-private accessors (`macros.rs:226-263`) live on the
 `pub(crate) trait UpdateInternals` (not the public `UpdateConfig`):
 `request_timeout`, `request_headers`, `request_config`, `request_client`,
 `request_async_client` (`async`), `progress_callback`,
-`verify_callback`, `asset_matcher`, `verify_checksum` (`checksums`), and
-`verify_keys` (`signatures`, reading the `verifying_keys` field). See
+`verify_callback`, `asset_matcher`, `verify_checksum` and `verify_release_digest`
+(`checksums`), and `verify_keys` (`signatures`, reading the `verifying_keys` field). See
 `update-config-internal-accessors.md`.
 
 Three invocation forms: bare `($t)` (`macros.rs:109`) for the default

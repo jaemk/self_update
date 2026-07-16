@@ -36,6 +36,36 @@ pub enum Checksum {
 }
 
 impl Checksum {
+    /// Parse an `algorithm:hex` digest string (e.g. `sha256:2cf24d…`, the form GitHub's release
+    /// API publishes per asset) into a `Checksum`.
+    ///
+    /// Supported algorithms are `sha256` and `sha512` (case-insensitive, surrounding whitespace
+    /// ignored). Any other prefix — or a string with no `:` separator — is rejected with an error
+    /// naming the digest, rather than silently skipping verification.
+    ///
+    /// ```
+    /// use self_update::Checksum;
+    /// let c = Checksum::parse_digest(
+    ///     "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    /// ).unwrap();
+    /// assert!(matches!(c, Checksum::Sha256(_)));
+    /// assert!(Checksum::parse_digest("md5:abc123").is_err());
+    /// ```
+    pub fn parse_digest(digest: &str) -> Result<Self> {
+        let digest = digest.trim();
+        let unsupported = || {
+            Error::invalid_response(format!(
+                "unsupported asset digest `{digest}` (expected `sha256:<hex>` or `sha512:<hex>`)"
+            ))
+        };
+        let (algorithm, hex) = digest.split_once(':').ok_or_else(unsupported)?;
+        match algorithm.trim().to_ascii_lowercase().as_str() {
+            "sha256" => Ok(Checksum::Sha256(hex.to_string())),
+            "sha512" => Ok(Checksum::Sha512(hex.to_string())),
+            _ => Err(unsupported()),
+        }
+    }
+
     /// The expected digest, hex encoded.
     fn expected(&self) -> &str {
         match self {
@@ -99,6 +129,45 @@ mod tests {
         let path = dir.path().join("artifact");
         std::fs::write(&path, contents).unwrap();
         (dir, path)
+    }
+
+    // `parse_digest` maps the `algorithm:hex` forge form onto the matching variant, tolerating
+    // case and surrounding whitespace in the algorithm, and the parsed checksum verifies files.
+    #[test]
+    fn parse_digest_supports_sha256_and_sha512() {
+        let (_dir, path) = write_tmp(b"hello");
+        let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let parsed = Checksum::parse_digest(&format!("sha256:{sha256}")).unwrap();
+        assert!(matches!(parsed, Checksum::Sha256(_)));
+        parsed.verify(&path).unwrap();
+
+        let sha512 = "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043";
+        let parsed = Checksum::parse_digest(&format!("SHA512:{sha512}")).unwrap();
+        assert!(matches!(parsed, Checksum::Sha512(_)));
+        parsed.verify(&path).unwrap();
+
+        Checksum::parse_digest(&format!("  sha256:{sha256}  "))
+            .unwrap()
+            .verify(&path)
+            .unwrap();
+    }
+
+    // An unknown algorithm or a string without the `:` separator is rejected with
+    // `Error::InvalidResponse`, and the message names the offending digest.
+    #[test]
+    fn parse_digest_rejects_unsupported_or_malformed() {
+        for bad in ["md5:abc123", "2cf24dba", "sha256"] {
+            let err = Checksum::parse_digest(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::errors::Error::InvalidResponse { .. }),
+                "expected Error::InvalidResponse for {bad:?}, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains(bad),
+                "the error must name the digest, got: {}",
+                err
+            );
+        }
     }
 
     #[test]

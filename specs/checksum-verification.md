@@ -16,7 +16,9 @@ The crate hashes the downloaded artifact and compares before installing; a misma
 aborts with nothing installed. The hash algorithm is selected by the `Checksum`
 variant, which is `#[non_exhaustive]` so more algorithms can be added later. The
 caller pins or fetches the expected digest, so there is no extra network request and
-no sums-file parsing. Fetching the digest from a release asset is a separate deferred
-item (see `checksum-from-asset.md`).
+no sums-file parsing.
+
+Verifying against the digest the forge itself publishes per asset (rather than a
+caller-pinned one) is a related, now-implemented path: see `checksum-from-asset.md`.
 
 See the `checksums` feature in `Cargo.toml` and the CHANGELOG `[1.0.0]` Added entry.

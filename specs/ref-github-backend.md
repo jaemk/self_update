@@ -119,7 +119,10 @@ each element:
   `trim_start_matches('v')`.
 
 Asset DTO parsing requires `url` (download URL, else `Error::MissingAssetField { field: "url" }`)
-and `name` (else `Error::MissingAssetField { field: "name" }`).
+and `name` (else `Error::MissingAssetField { field: "name" }`). The optional `digest`
+(github's per-asset `algorithm:hex` content digest, published since mid-2025) maps onto
+`ReleaseAsset::digest()` when present, `None` otherwise; under `checksums` the update
+pipeline verifies the download against it by default (see `ref-signatures-and-checksums.md`).
 
 ### Ordering
 

@@ -428,6 +428,10 @@ pub(crate) struct CommonBuilderConfig {
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
+    /// Verify the download against the backend-published asset digest when one is present.
+    /// On by default; `verify_release_digest(false)` opts out.
+    #[cfg(feature = "checksums")]
+    pub verify_release_digest: bool,
     #[cfg(feature = "signatures")]
     pub verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }
@@ -458,6 +462,8 @@ impl Default for CommonBuilderConfig {
             asset_matcher: None,
             #[cfg(feature = "checksums")]
             checksum: None,
+            #[cfg(feature = "checksums")]
+            verify_release_digest: true,
             #[cfg(feature = "signatures")]
             verifying_keys: vec![],
         }
@@ -517,6 +523,8 @@ impl CommonBuilderConfig {
             asset_matcher: self.asset_matcher.clone(),
             #[cfg(feature = "checksums")]
             checksum: self.checksum.clone(),
+            #[cfg(feature = "checksums")]
+            verify_release_digest: self.verify_release_digest,
             #[cfg(feature = "signatures")]
             verifying_keys: self.verifying_keys.clone(),
         })
@@ -546,6 +554,8 @@ pub(crate) struct CommonConfig {
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
+    #[cfg(feature = "checksums")]
+    pub verify_release_digest: bool,
     #[cfg(feature = "signatures")]
     pub verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
 }

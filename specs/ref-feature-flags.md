@@ -102,9 +102,10 @@ Feature-gated public items:
   `pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH]` alias
   (`lib.rs:460-470`), plus the `verifying_keys` builder setter (`macros.rs:617`)
   and the doc-hidden `verify_keys()` accessor (`macros.rs:260`).
-- `checksums`: `pub use checksum::Checksum` (`lib.rs:498-500`) and the
-  `verify_checksum` builder setter (`macros.rs:438-442`) and accessor
-  (`macros.rs:191`).
+- `checksums`: `pub use checksum::Checksum` (`lib.rs:498-500`) with its
+  `parse_digest` associated fn, the `verify_checksum` and `verify_release_digest`
+  builder setters and accessors (`macros.rs`), and `ReleaseAsset::digest()` /
+  `with_digest()` for the backend-published asset digest.
 - All the gated crate-root re-exports above carry
   `#[cfg_attr(docsrs, doc(cfg(feature = "...")))]`, so docs.rs renders a
   feature-gate badge on each (`lib.rs:443,446,453,461,469,499`).
