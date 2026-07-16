@@ -42,8 +42,10 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
    Otherwise fetch the candidate list via `get_newer_releases()` and run
    `choose_latest_release`, which: filters to releases strictly newer
    than the current version (`bump_is_greater`), sorts them semver-descending so selection is
-   order-independent, prefers the newest semver-*compatible* release, else falls back to the
-   newest available (flagged "*NOT* compatible"), else returns `Ok(None)` => `UpToDate`
+   order-independent, then applies the `update_strategy()`: under `UpdateStrategy::Compatible`
+   (default) it prefers the newest semver-*compatible* release and falls back to the newest
+   available (flagged "*NOT* compatible"); under `UpdateStrategy::Latest` it always takes the
+   newest available, even across a major bump. Empty candidate list => `Ok(None)` => `UpToDate`
    (`update.rs:640-711`). Unparseable versions are dropped by the leading
    `.unwrap_or(false)` filter and never reach the comparator.
 3. `resolve_and_confirm` (`update.rs:716`) selects the asset: a custom `asset_matcher()` closure

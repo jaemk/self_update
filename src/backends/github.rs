@@ -46,6 +46,7 @@ struct ReleaseDto {
     created_at: Option<String>,
     name: Option<String>,
     body: Option<String>,
+    html_url: Option<String>,
     assets: Option<Vec<AssetDto>>,
 }
 
@@ -73,6 +74,9 @@ impl ReleaseDto {
             .assets(assets);
         if let Some(body) = self.body {
             builder.body(body);
+        }
+        if let Some(url) = self.html_url {
+            builder.release_notes_url(url);
         }
         builder
             .build()
@@ -827,6 +831,28 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         format!("[{objs}]")
+    }
+
+    // A release carrying `html_url` populates `Release::release_notes_url`; a release without it
+    // leaves the URL `None`.
+    #[test]
+    fn release_dto_populates_release_notes_url_from_html_url() {
+        let with_url: super::ReleaseDto = serde_json::from_str(
+            r#"{"tag_name":"v1.2.3","created_at":"2020-01-01T00:00:00Z","name":"v1.2.3",
+                "html_url":"https://github.com/o/r/releases/tag/v1.2.3","assets":[]}"#,
+        )
+        .unwrap();
+        let release = with_url.into_release().unwrap();
+        assert_eq!(
+            release.release_notes_url(),
+            Some("https://github.com/o/r/releases/tag/v1.2.3")
+        );
+
+        let without: super::ReleaseDto = serde_json::from_str(
+            r#"{"tag_name":"v1.2.3","created_at":"2020-01-01T00:00:00Z","name":"v1.2.3","assets":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(without.into_release().unwrap().release_notes_url(), None);
     }
 
     // --- git release-scan early-stop (selection parity + page-2 never requested) -------

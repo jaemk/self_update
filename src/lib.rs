@@ -499,7 +499,7 @@ pub use update::verify_signature;
 pub use update::{AsyncReleaseSource, AsyncReleaseUpdate};
 pub use update::{
     Release, ReleaseAsset, ReleaseBuilder, ReleaseSource, ReleaseStatus, ReleaseUpdate, Releases,
-    UpdateConfig,
+    UpdateConfig, UpdateStrategy,
 };
 #[cfg(feature = "ureq")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ureq")))]

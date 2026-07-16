@@ -40,6 +40,7 @@ struct ReleaseDto {
     created_at: Option<String>,
     name: Option<String>,
     body: Option<String>,
+    html_url: Option<String>,
     assets: Option<Vec<AssetDto>>,
 }
 
@@ -67,6 +68,9 @@ impl ReleaseDto {
             .assets(assets);
         if let Some(body) = self.body {
             builder.body(body);
+        }
+        if let Some(url) = self.html_url {
+            builder.release_notes_url(url);
         }
         builder
             .build()

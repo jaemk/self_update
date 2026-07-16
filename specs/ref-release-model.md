@@ -33,14 +33,18 @@ and `digest(&self) -> Option<&str>`.
 
 `Release` is a `#[non_exhaustive]` struct deriving `Clone, Debug, Default` with
 **encapsulated** (`pub(crate)`) fields `name: Arc<str>`, `version: Arc<str>`,
-`date: Arc<str>`, `body: Option<Arc<str>>`, and `assets: Vec<ReleaseAsset>`
+`date: Arc<str>`, `body: Option<Arc<str>>`, `release_notes_url: Option<Arc<str>>`,
+and `assets: Vec<ReleaseAsset>`
 (again `Arc<str>`-backed for cheap clones). It is built from outside the crate
 via `Release::builder()`, which returns a `ReleaseBuilder` (the builder stores
 `String`s and converts to `Arc<str>` at `build()`); only `version` is required,
-`name` defaults to the version, `date` defaults to empty, `body` to `None`. The
+`name` defaults to the version, `date` defaults to empty, `body` and
+`release_notes_url` to `None`. The
 fields are read through getters returning borrows: `name(&self) -> &str`,
 `version(&self) -> &str`, `date(&self) -> &str`, `body(&self) -> Option<&str>`,
-and `assets(&self) -> &[ReleaseAsset]`. Callers (in-crate and downstream) read
+`release_notes_url(&self) -> Option<&str>` (the release page URL; the forge
+backends fill it from the release's `html_url`, gitlab from `_links.self`; `None`
+for s3), and `assets(&self) -> &[ReleaseAsset]`. Callers (in-crate and downstream) read
 releases exclusively through these getters; the in-crate construction/write sites
 (the forge DTOs, the s3 parser) go through `Release::builder()` /
 `ReleaseAsset::new` / the crate-private fields.
@@ -221,10 +225,12 @@ with `into_vec()`.
   `with_digest(impl Into<String>)`; getters `name() -> &str`,
   `download_url() -> &str`, `digest() -> Option<&str>`.
 - `pub struct Release` `#[non_exhaustive]` with `pub(crate)` fields (`Arc<str>`
-  `name`/`version`/`date`, `Option<Arc<str>>` `body`, `Vec<ReleaseAsset>`
-  `assets`); `Release::builder()`, `has_target_asset`, `asset_for`; getters
-  `name() -> &str`, `version() -> &str`, `date() -> &str`, `body() -> Option<&str>`,
-  `assets() -> &[ReleaseAsset]`.
+  `name`/`version`/`date`, `Option<Arc<str>>` `body` and `release_notes_url`,
+  `Vec<ReleaseAsset>` `assets`); `Release::builder()`, `has_target_asset`,
+  `asset_for`; getters `name() -> &str`, `version() -> &str`, `date() -> &str`,
+  `body() -> Option<&str>`, `release_notes_url() -> Option<&str>`,
+  `assets() -> &[ReleaseAsset]`. `ReleaseBuilder` has a matching
+  `release_notes_url(impl Into<String>)` setter.
 - `pub struct Releases` `#[non_exhaustive]`; `all`, `len`, `is_empty`,
   `current_version() -> Option<&str>`, `latest`, `into_vec`, `is_update_available`;
   owned and borrowed `IntoIterator`. `Releases::new` is

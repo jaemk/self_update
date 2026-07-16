@@ -413,6 +413,8 @@ pub(crate) struct CommonBuilderConfig {
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
+    pub show_release_notes: bool,
+    pub update_strategy: crate::update::UpdateStrategy,
     pub current_version: Option<String>,
     pub release_tag: Option<String>,
     #[cfg(feature = "progress-bar")]
@@ -449,6 +451,8 @@ impl Default for CommonBuilderConfig {
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
+            show_release_notes: false,
+            update_strategy: crate::update::UpdateStrategy::default(),
             current_version: None,
             release_tag: None,
             #[cfg(feature = "progress-bar")]
@@ -514,6 +518,8 @@ impl CommonBuilderConfig {
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
+            show_release_notes: self.show_release_notes,
+            update_strategy: self.update_strategy,
             #[cfg(feature = "progress-bar")]
             progress_template: self.progress_template.clone(),
             #[cfg(feature = "progress-bar")]
@@ -545,6 +551,8 @@ pub(crate) struct CommonConfig {
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
+    pub show_release_notes: bool,
+    pub update_strategy: crate::update::UpdateStrategy,
     #[cfg(feature = "progress-bar")]
     pub progress_template: String,
     #[cfg(feature = "progress-bar")]
@@ -705,6 +713,32 @@ mod tests {
         let built = cfg.build().expect("all required fields present");
         assert_eq!(built.current_version, "0.1.0");
         assert_eq!(built.bin_name, "app");
+    }
+
+    #[test]
+    fn build_defaults_and_propagates_update_strategy() {
+        // Default is `Compatible`; an explicit `Latest` is carried into the resolved config.
+        let base = CommonBuilderConfig {
+            current_version: Some("0.1.0".to_string()),
+            bin_name: Some("app".to_string()),
+            bin_path_in_archive: Some("app".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().build().unwrap().update_strategy,
+            crate::update::UpdateStrategy::Compatible,
+            "the default update strategy must be Compatible"
+        );
+
+        let latest = CommonBuilderConfig {
+            update_strategy: crate::update::UpdateStrategy::Latest,
+            ..base
+        };
+        assert_eq!(
+            latest.build().unwrap().update_strategy,
+            crate::update::UpdateStrategy::Latest,
+            "an explicit Latest strategy must be carried into the resolved config"
+        );
     }
 
     #[test]

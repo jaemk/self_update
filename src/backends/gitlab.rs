@@ -46,8 +46,18 @@ struct ReleaseDto {
     created_at: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    #[serde(rename = "_links", default)]
+    links: LinksDto,
     #[serde(default)]
     assets: AssetsDto,
+}
+
+/// GitLab release `_links` object; `self` points at the release page (used as the release-notes
+/// URL). Only the `self` link is read.
+#[derive(Deserialize, Default)]
+struct LinksDto {
+    #[serde(rename = "self")]
+    self_url: Option<String>,
 }
 
 impl ReleaseDto {
@@ -75,6 +85,9 @@ impl ReleaseDto {
             .assets(assets);
         if let Some(body) = self.description {
             builder.body(body);
+        }
+        if let Some(url) = self.links.self_url {
+            builder.release_notes_url(url);
         }
         builder
             .build()
@@ -789,6 +802,29 @@ mod tests {
         format!(
             r#"[{{"tag_name":"{tag}","created_at":"2020-01-01T00:00:00Z","name":"{tag}","assets":{{"links":[]}},"description":null}}]"#
         )
+    }
+
+    // GitLab's release page URL is `_links.self`; it must populate `Release::release_notes_url`.
+    // A release with no `_links` leaves the URL `None`.
+    #[test]
+    fn release_dto_populates_release_notes_url_from_links_self() {
+        let with_url: super::ReleaseDto = serde_json::from_str(
+            r#"{"tag_name":"v1.2.3","created_at":"2020-01-01T00:00:00Z","name":"v1.2.3",
+                "assets":{"links":[]},"description":null,
+                "_links":{"self":"https://gitlab.com/g/p/-/releases/v1.2.3"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_url.into_release().unwrap().release_notes_url(),
+            Some("https://gitlab.com/g/p/-/releases/v1.2.3")
+        );
+
+        let without: super::ReleaseDto = serde_json::from_str(
+            r#"{"tag_name":"v1.2.3","created_at":"2020-01-01T00:00:00Z","name":"v1.2.3",
+                "assets":{"links":[]},"description":null}"#,
+        )
+        .unwrap();
+        assert_eq!(without.into_release().unwrap().release_notes_url(), None);
     }
 
     /// A GitLab-format releases JSON array containing one release per entry in `tags`.

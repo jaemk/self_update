@@ -15,6 +15,15 @@
 - `native-tls-vendored` feature: build OpenSSL from source and link it statically, for targets
   where a usable system OpenSSL is awkward (musl, some cross-compiles). Implies `native-tls`;
   applies to the reqwest client. ([#108](https://github.com/jaemk/self_update/issues/108))
+- `UpdateStrategy` and the `update_strategy(..)` builder setter: control which release the unpinned
+  "latest" path installs when several are newer. `Compatible` (default) prefers the newest
+  semver-compatible release, falling back to the newest overall; `Latest` always selects the newest
+  release, even across a major bump. ([#152](https://github.com/jaemk/self_update/issues/152))
+- `Release::release_notes_url()` and `ReleaseBuilder::release_notes_url(..)`: the release page URL,
+  filled by the github/gitlab/gitea backends from the release's `html_url` (`_links.self` for
+  gitlab); `None` for s3. The `show_release_notes(bool)` builder setter shows it (or the release
+  body when no URL is available) in the confirmation prompt.
+  ([#148](https://github.com/jaemk/self_update/issues/148))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently
