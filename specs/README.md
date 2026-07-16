@@ -4,9 +4,10 @@ Every feature is documented here before or as it lands, with its status.
 
 ## Feature status
 
-Status values: `done` (implemented and covered by tests), `pending` (documented,
-not yet built; the default), `research` (needs investigation or design before it
-can be built). Keep each row's status current with `spec.py set`.
+Status values: `done` (implemented and covered by tests), `partial` (the core is
+built and tested, with a documented sub-item still deferred), `pending`
+(documented, not yet built; the default), `research` (needs investigation or
+design before it can be built). Keep each row's status current with `spec.py set`.
 
 | Feature | Status | Spec |
 |---------|--------|------|
@@ -40,7 +41,7 @@ can be built). Keep each row's status current with `spec.py set`.
 | Error Variant Granularity | done | [error-variant-granularity.md](error-variant-granularity.md) |
 | S3 Max Keys Configurable | done | [s3-max-keys-configurable.md](s3-max-keys-configurable.md) |
 | Async Future Extensions | pending | [async-future-extensions.md](async-future-extensions.md) |
-| Checksum from Asset | pending | [checksum-from-asset.md](checksum-from-asset.md) |
+| Checksum from Asset | partial | [checksum-from-asset.md](checksum-from-asset.md) |
 | Update Config Internal Accessors | done | [update-config-internal-accessors.md](update-config-internal-accessors.md) |
 | Releases Test Constructor | done | [releases-test-constructor.md](releases-test-constructor.md) |
 | Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |

@@ -10,6 +10,9 @@ Two independent, opt-in mechanisms:
 - Checksum verification (`checksums` feature): the caller pins a content digest
   they already know (e.g. from a published `SHA256SUMS` file) and the download is
   hashed and compared against it.
+- Release-published digest verification (`checksums` feature): the backend-provided
+  digest of the selected asset (github's per-asset `sha256:<hex>`) is verified
+  automatically, on by default, when the asset carries one.
 - Signature verification (`signatures` feature): zipsign / ed25519ph signatures
   embedded in the archive are verified against caller-supplied public keys.
 
@@ -48,8 +51,30 @@ Verification (`Checksum::verify`, `src/checksum.rs:55`):
   `"ChecksumMismatchError: checksum mismatch (expected <e>, computed <c>)"`
   (`src/errors.rs:153`-`158`). Both fields are lowercase hex digests.
 
-In the pipeline the checksum gate runs first, only when a checksum was configured
-(`src/update.rs:806`-`809`).
+In the pipeline the pinned-checksum gate runs first, only when a checksum was
+configured (`src/update.rs:1314`-`1316`).
+
+### Release-published digest verification
+
+Also gated on the `checksums` feature. The selected asset may carry a
+backend-published content digest in `algorithm:hex` form (github fills
+`ReleaseAsset::digest()` from the release API's per-asset `digest` field;
+gitlab/gitea/s3 leave it `None`, since their APIs publish none). A custom
+`ReleaseSource` supplies one via `ReleaseAsset::with_digest(..)`.
+
+When `verify_release_digest()` is on (the default; opt out with the builder setter
+`verify_release_digest(false)`, `src/macros.rs:713`) and the selected asset carries
+a digest, the digest is parsed with `Checksum::parse_digest` (`src/checksum.rs:54`)
+and verified against the downloaded archive (`src/update.rs:1320`-`1324`).
+`parse_digest` splits on the first `:`, matching `sha256`/`sha512`
+(case-insensitive, surrounding whitespace ignored) onto the `Checksum` variant; an
+unsupported algorithm or a string with no `:` separator returns
+`Error::InvalidResponse` naming the digest, so a present-but-unparseable digest is
+a hard error rather than a silent skip. An absent digest skips the gate.
+
+This gate is independent of the pinned-checksum gate: when both apply, both must
+pass. The digest is an integrity check only (github recomputes it when an asset is
+replaced), so it is not a substitute for signature verification.
 
 ### Signature verification
 
@@ -94,29 +119,37 @@ falls through to `Error::NoSignatures`.
 
 ### Ordering within the pipeline
 
-Inside `finish_update` (`src/update.rs:798`), in order:
+Inside `finish_update_owned` (`src/update.rs:1305`), in order, under
+`#[cfg(feature = "checksums")]` (`src/update.rs:1312`-`1325`):
 
-1. Checksum gate (`#[cfg(feature = "checksums")]`, `src/update.rs:806`-`809`):
-   if a checksum is configured, verify it; mismatch returns immediately via `?`.
-2. Signature gate (`#[cfg(feature = "signatures")]`, `src/update.rs:811`-`812`):
-   `verify_signature` runs; any failure returns via `?`.
-3. Archive extraction of the target binary (`src/update.rs:830`).
-4. Install via `install_binary` (`src/update.rs:837`), which first runs the
-   post-update `verify_binary` callback (renamed from `verify_with`;
-   `src/update.rs:900`-`907`) and only then replaces / moves the binary
-   (`src/update.rs:909`-`912`).
+1. Pinned-checksum gate: if a checksum is configured, verify it; mismatch returns
+   immediately via `?` (`src/update.rs:1314`-`1316`).
+2. Release-digest gate: if `verify_release_digest` is on and the selected asset
+   carries a digest, parse and verify it; a mismatch or unparseable digest returns
+   via `?` (`src/update.rs:1320`-`1324`).
+3. Signature gate (`#[cfg(feature = "signatures")]`): `verify_signature` runs; any
+   failure returns via `?`.
+4. Archive extraction of the target binary.
+5. Install via `install_binary`, which first runs the post-update `verify_binary`
+   callback and only then replaces / moves the binary.
 
-So the full verification order is: checksum, then signature, then (after
-extraction) the `verify_binary` hook, then the binary replacement. The same
-`finish_update` tail is shared by both the sync and async flows
-(`src/update.rs:889`).
+So the full verification order is: pinned checksum, then release digest, then
+signature, then (after extraction) the `verify_binary` hook, then the binary
+replacement. The same `finish_update_owned` tail is shared by both the sync and
+async flows.
 
 ## Public surface
 
 - `self_update::Checksum` enum (`Sha256` / `Sha512`), re-exported under
   `checksums` (`src/lib.rs:500`); `#[non_exhaustive]`.
+- `Checksum::parse_digest("algorithm:hex")` associated fn (`src/checksum.rs:54`),
+  parsing the forge `sha256:<hex>` / `sha512:<hex>` form.
 - `Update::configure().verify_checksum(Checksum)` builder method
-  (`src/macros.rs:439`).
+  (`src/macros.rs:692`).
+- `Update::configure().verify_release_digest(bool)` builder method
+  (`src/macros.rs:713`), default on. `ReleaseAsset::digest()` getter and
+  `ReleaseAsset::with_digest(..)` (`src/update.rs:66`, `src/update.rs:44`) expose
+  and populate the `algorithm:hex` digest.
 - `self_update::VerifyingKey` type alias = `[u8; zipsign_api::PUBLIC_KEY_LENGTH]`,
   re-exported under `signatures` (`src/lib.rs:470`).
 - `self_update::zipsign_api` re-export of the underlying crate, under
@@ -135,7 +168,17 @@ extraction) the `verify_binary` hook, then the binary replacement. The same
   the executable (`src/update.rs:806`-`841`).
 - A checksum mismatch aborts the update: `Checksum::verify` returns
   `Error::ChecksumMismatch` (`src/checksum.rs:61`) propagated by `?`
-  (`src/update.rs:808`), so no extraction or install happens.
+  (`src/update.rs:1314`-`1316`), so no extraction or install happens.
+- The release-digest gate is on by default and only fires when the selected asset
+  carries a digest; `verify_release_digest(false)` skips it. A mismatch aborts via
+  `Error::ChecksumMismatch`, and a present-but-unparseable digest aborts via
+  `Error::InvalidResponse` naming the digest (not a silent skip)
+  (`src/update.rs:1320`-`1324`).
+- The pinned-checksum and release-digest gates are independent: when both apply,
+  both must pass.
+- `ReleaseAsset::digest()` is `None` on gitlab/gitea/s3 (their APIs publish no
+  per-asset digest); only github fills it. The digest is integrity-only (the forge
+  recomputes it if an asset is replaced), not a signature substitute.
 - A signature-verification failure aborts the update via `?`
   (`src/update.rs:812`).
 - Checksum comparison is case-insensitive and trims surrounding whitespace
@@ -163,12 +206,25 @@ extraction) the `verify_binary` hook, then the binary replacement. The same
   produces `Error::ChecksumMismatch` carrying the expected and computed digests;
   `src/checksum.rs:166` `mismatch_display_contains_expected_and_computed` checks the
   `Display` starts with `ChecksumMismatchError:` and embeds both digests.
-- `src/update.rs:1496` `finish_update_rejects_a_mismatched_checksum_before_extracting`:
+- `src/update.rs` `finish_update_rejects_a_mismatched_checksum_before_extracting`:
   a bad checksum aborts at the gate with a "checksum mismatch" message, before any
   extraction.
-- `src/update.rs:1525` `finish_update_passes_a_matching_checksum_then_proceeds`:
+- `src/update.rs` `finish_update_passes_a_matching_checksum_then_proceeds`:
   a matching checksum passes the gate, so the failure instead comes later from
   extraction (proving the gate did not abort).
+- `src/update.rs` `finish_update_rejects_a_mismatched_release_digest_by_default`:
+  with no pinned checksum, a mismatched asset digest aborts at the gate.
+- `src/update.rs` `finish_update_passes_a_matching_release_digest_then_proceeds`:
+  a matching asset digest passes the gate.
+- `src/update.rs` `finish_update_release_digest_opt_out_skips_the_gate`:
+  `verify_release_digest(false)` ignores a mismatched digest.
+- `src/update.rs` `finish_update_rejects_an_unsupported_release_digest`:
+  a `md5:` digest aborts with `Error::InvalidResponse` naming the digest.
+- `src/checksum.rs` `parse_digest_supports_sha256_and_sha512` /
+  `parse_digest_rejects_unsupported_or_malformed`: the `algorithm:hex` parser.
+- `src/backends/github.rs` `github_dto_parses_sample_payload_through_getters`:
+  the API `digest` field maps onto `ReleaseAsset::digest()`; a digest-less asset is
+  `None`.
 - `src/errors.rs:478` checks the signatures-gated non-UTF8 variant is named
   `SignatureNonUTF8`; `src/errors.rs:455` / `src/errors.rs:438` cover the boxed
   `Signature` error's `Display` and `source()`.

@@ -19,15 +19,17 @@ fetch-method contract they document; the orchestration helpers
 ### Release and ReleaseAsset
 
 `ReleaseAsset` is a `#[non_exhaustive]` struct deriving `Clone, Debug, Default`
-with two **encapsulated** (`pub(crate)`) fields, declared `name: Arc<str>` then
-`download_url: Arc<str>`. The fields are backed by `Arc<str>` (not `String`) so
-cloning a `ReleaseAsset` (and the `Release` that owns it) bumps a refcount rather
-than reallocating the strings. Because it is `#[non_exhaustive]`, outside code
-cannot build it with a struct literal; `ReleaseAsset::new(name, download_url)`
-(taking `impl Into<String>`, converted to `Arc<str>`) is the public constructor.
-The constructor argument order matches the field declaration order (`name`, then
-`download_url`). The fields are read through getters that return borrows:
-`name(&self) -> &str` and `download_url(&self) -> &str`.
+with three **encapsulated** (`pub(crate)`) fields, declared `name: Arc<str>`,
+`download_url: Arc<str>`, then `digest: Option<Arc<str>>`. The fields are backed by
+`Arc<str>` (not `String`) so cloning a `ReleaseAsset` (and the `Release` that owns
+it) bumps a refcount rather than reallocating the strings. Because it is
+`#[non_exhaustive]`, outside code cannot build it with a struct literal;
+`ReleaseAsset::new(name, download_url)` (taking `impl Into<String>`, converted to
+`Arc<str>`) is the public constructor, with `digest` defaulting to `None`. The
+`digest` (github's per-asset `algorithm:hex` content digest) is attached with the
+chainable `with_digest(impl Into<String>) -> Self`. The fields are read through
+getters that return borrows: `name(&self) -> &str`, `download_url(&self) -> &str`,
+and `digest(&self) -> Option<&str>`.
 
 `Release` is a `#[non_exhaustive]` struct deriving `Clone, Debug, Default` with
 **encapsulated** (`pub(crate)`) fields `name: Arc<str>`, `version: Arc<str>`,
@@ -213,9 +215,11 @@ with `into_vec()`.
 
 ## Public surface
 
-- `pub struct ReleaseAsset` `#[non_exhaustive]` with `pub(crate)` `Arc<str>`
-  fields `name`, `download_url`; `ReleaseAsset::new(name, download_url)`; getters
-  `name() -> &str`, `download_url() -> &str`.
+- `pub struct ReleaseAsset` `#[non_exhaustive]` with `pub(crate)` fields `name:
+  Arc<str>`, `download_url: Arc<str>`, `digest: Option<Arc<str>>`;
+  `ReleaseAsset::new(name, download_url)` and chainable
+  `with_digest(impl Into<String>)`; getters `name() -> &str`,
+  `download_url() -> &str`, `digest() -> Option<&str>`.
 - `pub struct Release` `#[non_exhaustive]` with `pub(crate)` fields (`Arc<str>`
   `name`/`version`/`date`, `Option<Arc<str>>` `body`, `Vec<ReleaseAsset>`
   `assets`); `Release::builder()`, `has_target_asset`, `asset_for`; getters
@@ -248,6 +252,9 @@ with `into_vec()`.
   backing rather than reallocating; both stay `Clone + Debug + Default`.
 - `Deserialize` is not part of the public `Release` / `ReleaseAsset` API; the forge
   backends parse through private per-backend DTOs.
+- `ReleaseAsset::digest()` is populated only by the github backend (from the API's
+  per-asset `digest` field); gitlab/gitea/s3 leave it `None`. A custom
+  `ReleaseSource` attaches one via `with_digest`.
 - `ReleaseList::fetch` returns `Releases` (built via `from_listing`, no current
   version); `into_vec()` recovers the `Vec<Release>`.
 - `asset_for` tier order is target+identifier, then OS+ARCH+identifier, then
