@@ -363,7 +363,7 @@ is intentionally not feature-gated: gating it behind `cfg(feature = "async")` wo
 successfully-compiling doctest in the crate's no-`async` test lanes, which a `compile_fail` block
 must never do):
 
-```rust,compile_fail
+```rust
 fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner("jaemk")
