@@ -256,6 +256,10 @@ macro_rules! impl_update_config_accessors {
             fn verify_checksum(&self) -> Option<&crate::Checksum> {
                 self.common.checksum.as_ref()
             }
+            #[cfg(feature = "checksums")]
+            fn verify_release_digest(&self) -> bool {
+                self.common.verify_release_digest
+            }
             #[cfg(feature = "signatures")]
             fn verifying_keys(&self) -> &[crate::VerifyingKey] {
                 &self.common.verifying_keys
@@ -662,7 +666,8 @@ macro_rules! impl_common_builder_setters {
         ///
         /// This runs **last** in the verification chain and on the **extracted binary**, not the
         /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
-        /// of the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
+        /// of the archive) -> release digest ([`verify_release_digest`](Self::verify_release_digest),
+        /// over the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
         /// extract -> `verify_binary` (the extracted binary) -> replace. Use
         /// `verify_checksum`/`verifying_keys` to gate the download by content; use `verify_binary` to
         /// gate it by running the new binary. Reject with
@@ -680,9 +685,33 @@ macro_rules! impl_common_builder_setters {
         /// Verify the downloaded artifact against an expected [`Checksum`](crate::Checksum)
         /// (e.g. one published in a `SHA256SUMS` file) before installing it. The algorithm is
         /// chosen by the `Checksum` variant.
+        ///
+        /// Independent of [`verify_release_digest`](Self::verify_release_digest): when both apply,
+        /// both must pass.
         #[cfg(feature = "checksums")]
         pub fn verify_checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
+            self
+        }
+
+        /// Verify the downloaded artifact against the digest the backend publishes for the
+        /// selected asset (github's per-asset `digest` field, `sha256:<hex>`), before installing
+        /// it. **On by default** whenever the `checksums` feature is enabled; pass `false` to opt
+        /// out.
+        ///
+        /// The check only runs when the selected asset actually carries a digest — github fills
+        /// it, the other backends don't (their APIs publish none), so it is a no-op there. A
+        /// digest that is present but malformed or uses an unsupported algorithm fails the update
+        /// (loudly, rather than silently skipping); opting out is the escape hatch if a forge
+        /// starts publishing digests this crate can't parse.
+        ///
+        /// Note this is an *integrity* check, not authenticity: the forge recomputes the digest
+        /// if an asset is replaced. Use the `signatures` feature
+        /// ([`verifying_keys`](Self::verifying_keys)) to verify authorship. Independent of
+        /// [`verify_checksum`](Self::verify_checksum): when both apply, both must pass.
+        #[cfg(feature = "checksums")]
+        pub fn verify_release_digest(&mut self, verify: bool) -> &mut Self {
+            self.common.verify_release_digest = verify;
             self
         }
 

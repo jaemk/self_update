@@ -3,6 +3,19 @@
 ## [unreleased]
 
 ### Added
+- Release-published digest verification (`checksums` feature): github publishes a `sha256:<hex>`
+  digest per release asset, and the updater now verifies the downloaded artifact against it
+  before installing whenever the selected asset carries one. On by default with the `checksums`
+  feature; opt out with `verify_release_digest(false)` on the builders. A digest that is present
+  but malformed or uses an unsupported algorithm fails the update rather than silently skipping.
+  Independent of `verify_checksum` (when both apply, both must pass), and an integrity check
+  only -- the forge recomputes the digest when an asset is replaced, so it is not a substitute
+  for the `signatures` feature. ([#159](https://github.com/jaemk/self_update/issues/159))
+- `ReleaseAsset::digest()`: the asset's content digest in `algorithm:hex` form, when the backend
+  publishes one (github fills it; gitlab/gitea/s3 have none). `ReleaseAsset::with_digest(..)`
+  attaches one when building assets in a custom `ReleaseSource`.
+- `Checksum::parse_digest("sha256:<hex>")`: parse an `algorithm:hex` digest string (the form
+  forges publish) into a `Checksum`; `sha256` and `sha512` are supported.
 - `ReleaseSource` / `AsyncReleaseSource`: `get_latest_release` and `get_release_version` have
   default implementations derived from `get_releases` (newest-by-semver pick and exact version
   match, both order-independent), so a custom source only has to implement `get_releases`.

@@ -19,6 +19,9 @@ use serde::Deserialize;
 struct AssetDto {
     name: Option<String>,
     url: Option<String>,
+    /// Content digest in `algorithm:hex` form (e.g. `sha256:2cf24d…`); github publishes one per
+    /// asset since mid-2025. Optional so older payloads (and enterprise instances) still parse.
+    digest: Option<String>,
 }
 
 impl AssetDto {
@@ -27,7 +30,11 @@ impl AssetDto {
         let name = self
             .name
             .ok_or_else(|| Error::missing_asset_field("name"))?;
-        Ok(ReleaseAsset::new(name, download_url))
+        let asset = ReleaseAsset::new(name, download_url);
+        Ok(match self.digest {
+            Some(digest) => asset.with_digest(digest),
+            None => asset,
+        })
     }
 }
 
@@ -1037,17 +1044,19 @@ mod tests {
 
     #[test]
     fn github_dto_parses_sample_payload_through_getters() {
-        // A realistic github release object (tag, name, created_at, body, one asset) must parse via
-        // the private `ReleaseDto` into a public `Release` whose getters return the expected values:
-        // the leading `v` is stripped from the version, the asset `url`/`name` map across, and the
-        // body is carried.
+        // A realistic github release object (tag, name, created_at, body, two assets) must parse
+        // via the private `ReleaseDto` into a public `Release` whose getters return the expected
+        // values: the leading `v` is stripped from the version, the asset `url`/`name`/`digest`
+        // map across (a missing `digest` maps to `None`), and the body is carried.
         let body = r#"{
             "tag_name": "v4.5.6",
             "name": "Release 4.5.6",
             "created_at": "2024-01-02T03:04:05Z",
             "body": "the release notes",
             "assets": [
-                { "name": "app-x86_64-unknown-linux-gnu.tar.gz", "url": "https://api/asset/1" }
+                { "name": "app-x86_64-unknown-linux-gnu.tar.gz", "url": "https://api/asset/1",
+                  "digest": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" },
+                { "name": "app-aarch64-apple-darwin.tar.gz", "url": "https://api/asset/2" }
             ]
         }"#;
         let base = stub(move |_| {
@@ -1066,12 +1075,22 @@ mod tests {
         assert_eq!(rel.name(), "Release 4.5.6");
         assert_eq!(rel.date(), "2024-01-02T03:04:05Z");
         assert_eq!(rel.body(), Some("the release notes"));
-        assert_eq!(rel.assets().len(), 1);
+        assert_eq!(rel.assets().len(), 2);
         assert_eq!(
             rel.assets()[0].name(),
             "app-x86_64-unknown-linux-gnu.tar.gz"
         );
         assert_eq!(rel.assets()[0].download_url(), "https://api/asset/1");
+        assert_eq!(
+            rel.assets()[0].digest(),
+            Some("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
+            "the API's per-asset digest field is carried onto the asset"
+        );
+        assert_eq!(
+            rel.assets()[1].digest(),
+            None,
+            "an asset without a digest field parses with digest None"
+        );
     }
 
     // --- sync/async fetch parity (same plans + parsers) ----------------------------------------

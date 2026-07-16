@@ -9,13 +9,16 @@ use crate::{Download, Extract, Move, VersionStatus, confirm, errors::*, version}
 /// Release asset information.
 ///
 /// The fields are encapsulated (`pub(crate)`, backed by `Arc<str>` to keep clones cheap) and read
-/// through the [`name`](ReleaseAsset::name) / [`download_url`](ReleaseAsset::download_url) getters,
-/// which return borrows. Build one with [`ReleaseAsset::new`].
+/// through the [`name`](ReleaseAsset::name) / [`download_url`](ReleaseAsset::download_url) /
+/// [`digest`](ReleaseAsset::digest) getters, which return borrows. Build one with
+/// [`ReleaseAsset::new`] (plus [`with_digest`](ReleaseAsset::with_digest) when the forge publishes
+/// a content digest for the asset).
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct ReleaseAsset {
     pub(crate) name: Arc<str>,
     pub(crate) download_url: Arc<str>,
+    pub(crate) digest: Option<Arc<str>>,
 }
 
 impl ReleaseAsset {
@@ -28,7 +31,19 @@ impl ReleaseAsset {
         Self {
             name: Arc::from(name.into()),
             download_url: Arc::from(download_url.into()),
+            digest: None,
         }
+    }
+
+    /// Attach the asset's content digest, in `algorithm:hex` form (e.g. `sha256:2cf24d…`).
+    ///
+    /// The github backend fills this from the API's per-asset `digest` field; a custom
+    /// [`ReleaseSource`] can chain this onto [`new`](ReleaseAsset::new) when its forge publishes
+    /// one. With the `checksums` feature the updater verifies the downloaded artifact against this
+    /// digest before installing (see `verify_release_digest` on the builders).
+    pub fn with_digest(mut self, digest: impl Into<String>) -> Self {
+        self.digest = Some(Arc::from(digest.into()));
+        self
     }
 
     /// The asset's file name (e.g. `app-x86_64-unknown-linux-gnu.tar.gz`).
@@ -39,6 +54,17 @@ impl ReleaseAsset {
     /// The asset's download URL.
     pub fn download_url(&self) -> &str {
         &self.download_url
+    }
+
+    /// The asset's content digest in `algorithm:hex` form (e.g. `sha256:2cf24d…`), when the
+    /// backend provides one.
+    ///
+    /// The github backend fills this from the release API's per-asset `digest` field; gitlab,
+    /// gitea, and s3 do not expose one, so it is `None` there. Note the digest is an *integrity*
+    /// check only — the forge recomputes it if an asset is replaced — so it is not a substitute
+    /// for signature verification (the `signatures` feature).
+    pub fn digest(&self) -> Option<&str> {
+        self.digest.as_deref()
     }
 }
 
@@ -812,6 +838,11 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
     #[cfg(feature = "checksums")]
     fn verify_checksum(&self) -> Option<&crate::Checksum>;
 
+    /// Whether to verify the download against the backend-published digest of the selected asset,
+    /// when one is present. On by default.
+    #[cfg(feature = "checksums")]
+    fn verify_release_digest(&self) -> bool;
+
     /// ed25519ph verifying keys to validate a download's authenticity
     #[cfg(feature = "signatures")]
     fn verifying_keys(&self) -> &[crate::VerifyingKey] {
@@ -916,7 +947,13 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
         println(show_output, "Downloading...");
         build_download(self, &target_asset)?.download_to(&mut tmp_archive)?;
 
-        finish_update(self, release, tmp_archive_dir, &tmp_archive_path)
+        finish_update(
+            self,
+            release,
+            &target_asset,
+            tmp_archive_dir,
+            &tmp_archive_path,
+        )
     }
 }
 
@@ -1207,14 +1244,28 @@ struct FinishCtx {
     verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
     #[cfg(feature = "checksums")]
     verify_checksum: Option<crate::Checksum>,
+    /// The selected asset's backend-published digest (`algorithm:hex`), if any, verified when
+    /// `verify_release_digest` is on.
+    #[cfg(feature = "checksums")]
+    asset_digest: Option<Arc<str>>,
+    #[cfg(feature = "checksums")]
+    verify_release_digest: bool,
     #[cfg(feature = "signatures")]
     verify_keys: Vec<crate::VerifyingKey>,
 }
 
 impl FinishCtx {
-    /// Capture the owned fields the finish tail needs from the updater and the resolved `release`.
-    fn capture<U: UpdateConfig + UpdateInternals + ?Sized>(u: &U, release: Release) -> Self {
+    /// Capture the owned fields the finish tail needs from the updater, the resolved `release`,
+    /// and the selected `target_asset` (its digest feeds the release-digest gate).
+    #[cfg_attr(not(feature = "checksums"), allow(unused_variables))]
+    fn capture<U: UpdateConfig + UpdateInternals + ?Sized>(
+        u: &U,
+        release: Release,
+        target_asset: &ReleaseAsset,
+    ) -> Self {
         Self {
+            #[cfg(feature = "checksums")]
+            asset_digest: target_asset.digest.clone(),
             release,
             bin_install_path: u.bin_install_path().to_path_buf(),
             target: u.target().to_string(),
@@ -1224,6 +1275,8 @@ impl FinishCtx {
             verify_callback: u.verify_callback(),
             #[cfg(feature = "checksums")]
             verify_checksum: u.verify_checksum().cloned(),
+            #[cfg(feature = "checksums")]
+            verify_release_digest: u.verify_release_digest(),
             #[cfg(feature = "signatures")]
             verify_keys: u.verifying_keys().to_vec(),
         }
@@ -1237,10 +1290,11 @@ impl FinishCtx {
 fn finish_update<U: UpdateConfig + UpdateInternals + ?Sized>(
     u: &U,
     release: Release,
+    target_asset: &ReleaseAsset,
     tmp_archive_dir: tempfile::TempDir,
     tmp_archive_path: &std::path::Path,
 ) -> Result<ReleaseStatus> {
-    let ctx = FinishCtx::capture(u, release);
+    let ctx = FinishCtx::capture(u, release, target_asset);
     finish_update_owned(ctx, tmp_archive_dir, tmp_archive_path)
 }
 
@@ -1256,8 +1310,18 @@ fn finish_update_owned(
     let show_output = ctx.show_output;
 
     #[cfg(feature = "checksums")]
-    if let Some(checksum) = ctx.verify_checksum.as_ref() {
-        checksum.verify(tmp_archive_path)?;
+    {
+        if let Some(checksum) = ctx.verify_checksum.as_ref() {
+            checksum.verify(tmp_archive_path)?;
+        }
+        // The backend-published digest of the selected asset (github's per-asset `digest` field),
+        // verified by default. A present-but-unparseable digest is a hard error rather than a
+        // silent skip; `verify_release_digest(false)` is the escape hatch.
+        if ctx.verify_release_digest
+            && let Some(digest) = ctx.asset_digest.as_deref()
+        {
+            crate::Checksum::parse_digest(digest)?.verify(tmp_archive_path)?;
+        }
     }
 
     #[cfg(feature = "signatures")]
@@ -1367,7 +1431,7 @@ where
     // Run the blocking finish tail (verify/extract/install) off the async executor. Copy out the
     // owned fields, MOVE the TempDir into the closure (it is dropped there), and `.await` the
     // join handle, mapping a JoinError to an update error.
-    let ctx = FinishCtx::capture(u, release);
+    let ctx = FinishCtx::capture(u, release, &target_asset);
     tokio::task::spawn_blocking(move || {
         finish_update_owned(ctx, tmp_archive_dir, &tmp_archive_path)
     })
@@ -1480,7 +1544,7 @@ fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{Releases, choose_latest_release, install_binary};
+    use super::{ReleaseAsset, Releases, choose_latest_release, install_binary};
     use crate::Download;
     use crate::DynVerifyFn;
     use crate::errors::Result;
@@ -2498,6 +2562,20 @@ mod tests {
             .unwrap()
     }
 
+    // Build a custom-backend `Update` with no explicit checksum and `verify_release_digest`
+    // as given, to drive the release-digest gate of `finish_update` directly.
+    #[cfg(feature = "checksums")]
+    fn update_with_release_digest(verify: bool) -> crate::backends::custom::Update {
+        crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .verify_release_digest(verify)
+            .build()
+            .unwrap()
+    }
+
     // A configured checksum is actually consulted by `finish_update`: a mismatch aborts the
     // update at the checksum gate, before any extraction or install. If the checksum block were
     // dropped, the bogus archive would instead fail later with a non-checksum error and this
@@ -2512,8 +2590,9 @@ mod tests {
         // A valid-length but wrong SHA-256 digest (the file's real digest is 2cf24dba…).
         let upd = update_with_checksum(crate::Checksum::Sha256("00".repeat(32)));
         let release = Release::builder().version("1.2.3").build().unwrap();
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
             .expect_err("a mismatched checksum must abort the update");
         let msg = err.to_string();
         assert!(
@@ -2542,14 +2621,129 @@ mod tests {
         let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let upd = update_with_checksum(crate::Checksum::Sha256(digest.to_string()));
         let release = Release::builder().version("1.2.3").build().unwrap();
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
             !msg.contains("checksum mismatch"),
             "a matching checksum must pass the gate; the failure should come from extraction, \
              got: {}",
+            msg
+        );
+    }
+
+    // The release-digest gate is on by default: an asset carrying a backend-published digest that
+    // does not match the download aborts the update at the gate, with no `verify_checksum`
+    // configured at all.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn finish_update_rejects_a_mismatched_release_digest_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_release_digest(true);
+        let release = Release::builder().version("1.2.3").build().unwrap();
+        // A valid-length but wrong digest (the file's real digest is 2cf24dba…).
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
+            .with_digest(format!("sha256:{}", "00".repeat(32)));
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+            .expect_err("a mismatched release digest must abort the update");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checksum mismatch"),
+            "expected a checksum-mismatch abort from the release digest, got: {}",
+            msg
+        );
+    }
+
+    // A matching release digest passes the gate and the flow proceeds (here into extraction,
+    // which fails on the bogus archive bytes — a non-checksum error).
+    #[cfg(all(
+        feature = "checksums",
+        feature = "archive-tar",
+        feature = "compression-tar-gz"
+    ))]
+    #[test]
+    fn finish_update_passes_a_matching_release_digest_then_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_release_digest(true);
+        let release = Release::builder().version("1.2.3").build().unwrap();
+        // The real SHA-256 of b"hello", in the forge's `algorithm:hex` form.
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
+            .with_digest("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("checksum mismatch"),
+            "a matching release digest must pass the gate; the failure should come from \
+             extraction, got: {}",
+            msg
+        );
+    }
+
+    // `verify_release_digest(false)` opts out: the same mismatched digest is ignored and the flow
+    // proceeds past the gate (failing later at extraction with a non-checksum error).
+    #[cfg(all(
+        feature = "checksums",
+        feature = "archive-tar",
+        feature = "compression-tar-gz"
+    ))]
+    #[test]
+    fn finish_update_release_digest_opt_out_skips_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_release_digest(false);
+        let release = Release::builder().version("1.2.3").build().unwrap();
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
+            .with_digest(format!("sha256:{}", "00".repeat(32)));
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("checksum mismatch"),
+            "opting out must skip the release-digest gate; the failure should come from \
+             extraction, got: {}",
+            msg
+        );
+    }
+
+    // A present-but-unsupported digest is a hard error at the gate (naming the digest), not a
+    // silent skip — a forge publishing an algorithm this crate can't parse must be surfaced.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn finish_update_rejects_an_unsupported_release_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_release_digest(true);
+        let release = Release::builder().version("1.2.3").build().unwrap();
+        let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
+            .with_digest("md5:abc123");
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+            .expect_err("an unsupported digest must abort the update");
+        assert!(
+            matches!(err, crate::errors::Error::InvalidResponse { .. }),
+            "expected Error::InvalidResponse, got {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("md5:abc123"),
+            "the error must name the offending digest, got: {}",
             msg
         );
     }
@@ -3374,6 +3568,10 @@ mod tests {
             verify_callback: None,
             #[cfg(feature = "checksums")]
             verify_checksum: None,
+            #[cfg(feature = "checksums")]
+            asset_digest: None,
+            #[cfg(feature = "checksums")]
+            verify_release_digest: true,
             #[cfg(feature = "signatures")]
             verify_keys: vec![],
         }
