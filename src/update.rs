@@ -1499,11 +1499,42 @@ fn println(show_output: bool, msg: &str) {
     }
 }
 
+/// Verify a downloaded archive's embedded signature against a set of ed25519 verifying keys, the
+/// same check [`update()`](ReleaseUpdate::update) runs internally when `verifying_keys` are set.
+///
+/// This is exposed so a caller that stages a download itself (for example an installer that fetches
+/// a companion binary via [`Download`](crate::Download) before the main update loop exists) can run
+/// the identical verification without reimplementing it.
+///
+/// `keys` are raw 32-byte ed25519 public keys ([`VerifyingKey`](crate::VerifyingKey)); verification
+/// uses any-of semantics, passing as soon as one key validates a signature in the archive (so a
+/// key-rotation window can list both the old and new keys). Signatures are produced and read with
+/// [`zipsign`](zipsign_api), which supports `.tar.gz` and `.zip` archives only.
+///
+/// # Errors
+///
+/// - Returns `Ok(())` immediately when `keys` is empty (nothing to verify against).
+/// - [`Error::NoSignatures`](crate::errors::Error::NoSignatures) if the archive format is not one
+///   zipsign can carry a signature in (anything other than `.tar.gz` / `.zip`).
+/// - [`Error::Signature`](crate::errors::Error::Signature) if no key validates a signature.
+/// - [`Error::SignatureNonUTF8`](crate::errors::Error::SignatureNonUTF8) if the archive's file name
+///   is not UTF-8 (zipsign binds the signature to the file name).
+/// - [`Error::Io`](crate::errors::Error::Io) if the archive cannot be opened.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// const KEY: self_update::VerifyingKey = *include_bytes!("../release.pub");
+/// self_update::Download::from_url(url).download_to(&mut file)?;
+/// self_update::verify_signature("downloaded-1.2.3.tar.gz", &[KEY])?;
+/// ```
 #[cfg(feature = "signatures")]
-fn verify_signature(
-    archive_path: &std::path::Path,
-    keys: &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]],
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
+pub fn verify_signature(
+    archive_path: impl AsRef<std::path::Path>,
+    keys: &[crate::VerifyingKey],
 ) -> crate::Result<()> {
+    let archive_path = archive_path.as_ref();
     if keys.is_empty() {
         return Ok(());
     }
@@ -3330,6 +3361,29 @@ mod tests {
         let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
 
         super::verify_signature(signed_file.path(), &[vkey])
+    }
+
+    /// The public crate-root `self_update::verify_signature` (exposed for callers that stage a
+    /// download themselves, e.g. an installer) verifies a signed archive, accepts a `VerifyingKey`
+    /// slice, and takes `impl AsRef<Path>` (here a `PathBuf`, not just `&Path`).
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn public_verify_signature_reexport_verifies_signed_archive() -> Result<()> {
+        let signing_key = zipsign_api::SigningKey::from_bytes(&[7u8; 32]);
+        let vkey: crate::VerifyingKey = signing_key.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
+
+        // Owned PathBuf argument exercises the `impl AsRef<Path>` signature.
+        crate::verify_signature(signed_file.path().to_path_buf(), &[vkey])?;
+
+        // An empty key slice is a no-op success (nothing to verify against).
+        crate::verify_signature(signed_file.path(), &[])
     }
 
     /// An archive dual-signed with two keys verifies independently against each key.

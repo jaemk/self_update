@@ -25,13 +25,15 @@ All features and their wiring (`Cargo.toml:76-106`):
 | `reqwest` | `dep:reqwest` (blocking, json, http2) | an HTTP client | may coexist with `ureq`; `reqwest` is the default-picked client when both are on (`Cargo.toml:86`) |
 | `ureq` | `dep:ureq` (gzip, json, socks-proxy, charset) | an HTTP client | to use `ureq` alone, set `--no-default-features` so `reqwest` (a default) is not pulled (`Cargo.toml:87`) |
 | `native-tls` | `reqwest?/native-tls`, `ureq?/native-tls` | a TLS backend | forwards native-TLS to whichever client is on (`Cargo.toml:83`) |
+| `native-tls-vendored` | `reqwest?/native-tls-vendored` | `native-tls` | builds OpenSSL from source and links it statically; applies to the reqwest client (a ureq-only build gets system `native-tls` without vendoring) |
 | `rustls` | `reqwest?/rustls`, `ureq?/rustls` | a TLS backend | may coexist with `native-tls`; `rustls` wins when both are on (`Cargo.toml:84`) |
 | `async` | `reqwest`, `reqwest?/stream`, `dep:tokio`, `dep:futures-util`, `dep:bytes` | `reqwest` | async update verbs; requires `reqwest` (`Cargo.toml:95`) |
 | `archive-zip` | `zip`, `zipsign-api?/verify-zip` | - | enables zip extraction; wires zip signature verify when `signatures` on (`Cargo.toml:70`) |
 | `archive-tar` | `tar`, `zipsign-api?/verify-tar` | - | enables tar extraction; wires tar signature verify when `signatures` on (`Cargo.toml:73`) |
 | `compression-zip-bzip2` | `zip/bzip2` | `archive-zip` | bzip2 inside zip (`Cargo.toml:71`) |
 | `compression-zip-deflate` | `zip/deflate` | `archive-zip` | deflate inside zip (`Cargo.toml:72`) |
-| `compression-tar-gz` | `flate2`, `either` | `archive-tar` | gzip; selects `Either<File, GzDecoder>` reader type (`Cargo.toml:74`, `lib.rs:665-668`) |
+| `compression-tar-gz` | `flate2` | `archive-tar` | gzip (`.tar.gz`, `.tgz`, plain `.gz`); adds the `Gz` arm to the `ArchiveReader` codec enum |
+| `compression-tar-xz` | `dep:lzma-rs` | `archive-tar` | xz (`.tar.xz`, `.txz`, plain `.xz`); pure-Rust `lzma-rs` (no C `liblzma`); adds `Compression::Xz` and the `Xz` arm to the `ArchiveReader` codec enum |
 | `progress-bar` | `dep:indicatif` | - | terminal progress bar in `Download`; the `progress_callback` byte hook is always-on and not gated (`Cargo.toml:77`) |
 | `signatures` | `dep:zipsign-api` | - | ed25519ph verify; `verify-zip`/`verify-tar` come from the archive features (`Cargo.toml:75`) |
 | `checksums` | `dep:sha2` | - | sha2 checksum verify (`Cargo.toml:76`) |
@@ -46,8 +48,9 @@ Implication notes:
 - `archive-zip` implies `zip`; the `compression-zip-*` features imply
   `archive-zip` and add a codec to the `zip` dep.
 - `archive-tar` implies `tar`; `compression-tar-gz` implies `archive-tar` and
-  adds `flate2` + `either` (gzip is the only `Compression` variant,
-  `lib.rs:582-586`).
+  adds `flate2`; `compression-tar-xz` implies `archive-tar` and adds `lzma-rs`.
+  `Compression` has two variants, `Gz` and `Xz`, each decoded only when its
+  feature is on; the `ArchiveReader` codec enum has one arm per enabled codec.
 - `signatures` only pulls `zipsign-api` (`dep:zipsign-api`). The actual
   `verify-zip` / `verify-tar` sub-features are pulled in by `archive-zip` /
   `archive-tar` via the optional `zipsign-api?/verify-*` syntax, so signature
@@ -75,10 +78,10 @@ The only `compile_error!` guards that remain:
 
 MSRV / edition: `rust-version = "1.85"`, `edition = "2024"` (`Cargo.toml:12-13`).
 
-docs.rs feature set (`Cargo.toml:17-33`): `reqwest`, `native-tls`,
+docs.rs feature set (`Cargo.toml:17-33`): `reqwest`, `ureq`, `native-tls`,
 `archive-zip`, `compression-zip-bzip2`, `compression-zip-deflate`,
-`archive-tar`, `compression-tar-gz`, `progress-bar`, `signatures`, `checksums`,
-`github`, `gitlab`, `gitea`, `s3`, `s3-auth`, `async`. This pins the documented
+`archive-tar`, `compression-tar-gz`, `compression-tar-xz`, `signatures`, `checksums`,
+`s3-auth`, `async`, `progress-bar`, `github`, `gitlab`, `gitea`, `s3`. This pins the documented
 client/TLS pair to `reqwest` + `native-tls` for a stable rendered surface. The same
 `[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
 (`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
@@ -118,7 +121,7 @@ Feature-gated public items:
 `ArchiveKind` and `Extract` are public unconditionally, but `ArchiveKind` is
 `#[non_exhaustive]` and its `Tar`/`Zip` variants only exist under their archive
 features (`lib.rs:572-580`). `ArchiveKind` implements `Display` (`lib.rs:589`),
-rendering `tar.gz` / `zip` / `tar` / `gz` / `plain`; the `Error::NoSignatures`
+rendering `tar.gz` / `tar.xz` / `zip` / `tar` / `gz` / `xz` / `plain`; the `Error::NoSignatures`
 message uses it instead of the `Debug` form. `detect_archive` returns
 `Error::ArchiveNotEnabled` for an extension whose archive feature is off
 (`lib.rs:600-603,611-614`).

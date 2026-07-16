@@ -22,6 +22,7 @@ features = [
   "compression-zip-deflate",
   "archive-tar",
   "compression-tar-gz",
+  "compression-tar-xz",
   "signatures",
   "checksums",
   "s3-auth",
@@ -39,10 +40,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 flate2 = { version = "1", optional = true }
+lzma-rs = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
 zip = { version = "8", default-features = false, features = ["time"], optional = true }
-either = { version = "1", optional = true }
 indicatif = { version = "0.18", optional = true }
 quick-xml = { version = "0.41", optional = true }
 regex = "1"
@@ -81,7 +82,8 @@ archive-zip = ["zip", "zipsign-api?/verify-zip"]
 compression-zip-bzip2 = ["archive-zip", "zip/bzip2"]
 compression-zip-deflate = ["archive-zip", "zip/deflate"]
 archive-tar = ["tar", "zipsign-api?/verify-tar"]
-compression-tar-gz = ["archive-tar", "flate2", "either"]
+compression-tar-gz = ["archive-tar", "flate2"]
+compression-tar-xz = ["archive-tar", "dep:lzma-rs"]
 signatures = ["dep:zipsign-api"]
 checksums = ["dep:sha2"]
 
@@ -97,6 +99,10 @@ async = ["reqwest", "reqwest?/stream", "dep:tokio", "dep:futures-util", "dep:byt
 
 
 native-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
+# Vendored OpenSSL: build OpenSSL from source and link it statically, for targets where a usable
+# system OpenSSL is awkward to obtain (musl, some cross-compiles). Implies `native-tls`. Applies to
+# the reqwest client; a ureq-only build gets `native-tls` (system OpenSSL) without vendoring.
+native-tls-vendored = ["native-tls", "reqwest?/native-tls-vendored"]
 rustls = ["reqwest?/rustls", "ureq?/rustls"]
 
 reqwest = ["dep:reqwest"]

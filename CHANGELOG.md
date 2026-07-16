@@ -3,8 +3,25 @@
 ## [unreleased]
 
 ### Added
+- `compression-tar-xz` feature: decode `.tar.xz` / `.txz` archives and plain `.xz` single-file
+  assets (pure-Rust `lzma-rs`, no C `liblzma` dependency, so it cross-compiles like the rest of the
+  default stack). Opt-in, mirroring `compression-tar-gz`. Adds `Compression::Xz`.
+  ([#143](https://github.com/jaemk/self_update/issues/143))
+- `self_update::verify_signature(archive_path, keys)`: run the same embedded-signature check
+  `update()` performs, standalone, for a caller that stages a download itself (e.g. an installer
+  fetching a companion binary before the update loop exists). Takes `impl AsRef<Path>` and a
+  `&[VerifyingKey]` slice; any-of key semantics, `.tar.gz` / `.zip` only (`signatures` feature).
+  ([#150](https://github.com/jaemk/self_update/issues/150))
+- `native-tls-vendored` feature: build OpenSSL from source and link it statically, for targets
+  where a usable system OpenSSL is awkward (musl, some cross-compiles). Implies `native-tls`;
+  applies to the reqwest client. ([#108](https://github.com/jaemk/self_update/issues/108))
 
 ### Changed
+- A recognized-but-unsupported compression extension now fails loudly instead of silently
+  installing the still-compressed bytes as the binary: a `.tar.xz` / `.txz` / `.xz` asset without
+  the `compression-tar-xz` feature returns `Error::CompressionNotEnabled("xz")` (matching the
+  existing `.gz` handling), rather than writing the compressed archive to the install path.
+  ([#143](https://github.com/jaemk/self_update/issues/143))
 
 ### Removed
 

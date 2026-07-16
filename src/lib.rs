@@ -55,6 +55,7 @@ clients and multiple TLS backends may coexist (reqwest is preferred when both ar
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client, either alongside reqwest or as a drop-in replacement (set `default-features = false` to drop reqwest);
 * `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
 * `native-tls`: opt-in native/OpenSSL TLS for the selected client;
+* `native-tls-vendored`: build OpenSSL from source and link it statically (for targets where a usable system OpenSSL is awkward, e.g. musl or some cross-compiles); implies `native-tls`, applies to the reqwest client;
 
 Note that enabling a client with neither TLS feature compiles (plain-`http` release hosts remain
 reachable) but any `https` URL then fails at request time with a transport error; enable `rustls`
@@ -74,7 +75,8 @@ The following are opt-in; activate the one(s) your release files need:
 * `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
 * `archive-tar`: support for _tar_ archive format;
 * `archive-zip`: support for _zip_ archive format;
-* `compression-tar-gz`: support for _gzip_ compression;
+* `compression-tar-gz`: support for _gzip_ compression (`.tar.gz`, `.tgz`, plain `.gz`);
+* `compression-tar-xz`: support for _xz_ compression (`.tar.xz`, `.txz`, plain `.xz`); pure-Rust, no C `liblzma` dependency;
 * `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
 * `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;
@@ -489,6 +491,9 @@ pub use futures_util;
 #[cfg(feature = "reqwest")]
 #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub use reqwest;
+#[cfg(feature = "signatures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
+pub use update::verify_signature;
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use update::{AsyncReleaseSource, AsyncReleaseUpdate};
@@ -540,8 +545,6 @@ pub use zipsign_api;
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH];
 
-#[cfg(feature = "compression-tar-gz")]
-use either::Either;
 #[cfg(feature = "progress-bar")]
 use indicatif::{ProgressBar, ProgressStyle as IndicatifProgressStyle};
 use log::debug;
@@ -717,11 +720,11 @@ impl std::fmt::Display for VersionStatus {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ArchiveKind {
-    /// A tarball, optionally compressed (e.g. `.tar`, `.tar.gz`). Requires `archive-tar`.
+    /// A tarball, optionally compressed (e.g. `.tar`, `.tar.gz`, `.tar.xz`). Requires `archive-tar`.
     #[cfg(feature = "archive-tar")]
     #[cfg_attr(docsrs, doc(cfg(feature = "archive-tar")))]
     Tar(Option<Compression>),
-    /// A bare file, optionally compressed (e.g. a plain binary, or a `.gz` of one).
+    /// A bare file, optionally compressed (e.g. a plain binary, or a `.gz` / `.xz` of one).
     Plain(Option<Compression>),
     /// A zip archive (`.zip`). Requires `archive-zip`.
     #[cfg(feature = "archive-zip")]
@@ -735,8 +738,11 @@ impl std::fmt::Display for ArchiveKind {
             #[cfg(feature = "archive-tar")]
             ArchiveKind::Tar(Some(Compression::Gz)) => write!(f, "tar.gz"),
             #[cfg(feature = "archive-tar")]
+            ArchiveKind::Tar(Some(Compression::Xz)) => write!(f, "tar.xz"),
+            #[cfg(feature = "archive-tar")]
             ArchiveKind::Tar(None) => write!(f, "tar"),
             ArchiveKind::Plain(Some(Compression::Gz)) => write!(f, "gz"),
+            ArchiveKind::Plain(Some(Compression::Xz)) => write!(f, "xz"),
             ArchiveKind::Plain(None) => write!(f, "plain"),
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => write!(f, "zip"),
@@ -744,13 +750,14 @@ impl std::fmt::Display for ArchiveKind {
     }
 }
 
-/// A compression codec applied to an [`ArchiveKind`]. `#[non_exhaustive]`; `Gz` (gzip) is currently
-/// the only variant.
+/// A compression codec applied to an [`ArchiveKind`]. `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Compression {
     /// gzip (`.gz`); decoding the stream requires the `compression-tar-gz` feature.
     Gz,
+    /// xz / LZMA2 (`.xz`); decoding the stream requires the `compression-tar-xz` feature.
+    Xz,
 }
 
 fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
@@ -830,6 +837,55 @@ fn detect_archive(path: &path::Path) -> Result<ArchiveKind> {
                 }
             }
         },
+        Some(extension) if extension == std::ffi::OsStr::new("txz") => {
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+            {
+                debug!("Detected .txz archive");
+                Ok(ArchiveKind::Tar(Some(Compression::Xz)))
+            }
+            #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-xz")))]
+            {
+                Err(Error::CompressionNotEnabled("xz".to_string()))
+            }
+            #[cfg(not(feature = "archive-tar"))]
+            {
+                Err(Error::ArchiveNotEnabled("tar".to_string()))
+            }
+        }
+        Some(extension) if extension == std::ffi::OsStr::new("xz") => match path
+            .file_stem()
+            .map(path::Path::new)
+            .and_then(|f| f.extension())
+        {
+            Some(extension) if extension == std::ffi::OsStr::new("tar") => {
+                #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+                {
+                    debug!("Detected .tar.xz archive");
+                    Ok(ArchiveKind::Tar(Some(Compression::Xz)))
+                }
+                #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-xz")))]
+                {
+                    Err(Error::CompressionNotEnabled("xz".to_string()))
+                }
+                #[cfg(not(feature = "archive-tar"))]
+                {
+                    Err(Error::ArchiveNotEnabled("tar".to_string()))
+                }
+            }
+            // A plain `.xz` single-file asset: decoding the xz layer requires the
+            // `compression-tar-xz` feature. Without it, refuse rather than installing the still
+            // compressed bytes as the binary.
+            _ => {
+                #[cfg(feature = "compression-tar-xz")]
+                {
+                    Ok(ArchiveKind::Plain(Some(Compression::Xz)))
+                }
+                #[cfg(not(feature = "compression-tar-xz"))]
+                {
+                    Err(Error::CompressionNotEnabled("xz".to_string()))
+                }
+            }
+        },
         _ => Ok(ArchiveKind::Plain(None)),
     };
 
@@ -850,10 +906,32 @@ pub struct Extract {
     source: path::PathBuf,
     archive: Option<ArchiveKind>,
 }
-#[cfg(feature = "compression-tar-gz")]
-type GetArchiveReaderResult = Either<fs::File, flate2::read::GzDecoder<fs::File>>;
-#[cfg(not(feature = "compression-tar-gz"))]
-type GetArchiveReaderResult = fs::File;
+/// A [`Read`](io::Read) over an archive's bytes with any single compression layer (`.gz`, `.xz`)
+/// transparently decoded, so the tar/plain readers above it see the decompressed stream. `Plain`
+/// is the undecoded passthrough. Each compressed variant exists only when its `compression-tar-*`
+/// feature is enabled; [`detect_archive`] rejects a compression whose feature is off before this
+/// is ever built. The gzip layer decodes as a stream; the xz layer is decoded up front into memory
+/// (the `lzma-rs` decoder is one-shot), which is fine for the modestly sized release artifacts this
+/// crate downloads to a temp file.
+enum ArchiveReader {
+    Plain(fs::File),
+    #[cfg(feature = "compression-tar-gz")]
+    Gz(flate2::read::GzDecoder<fs::File>),
+    #[cfg(feature = "compression-tar-xz")]
+    Xz(io::Cursor<Vec<u8>>),
+}
+
+impl io::Read for ArchiveReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            ArchiveReader::Plain(r) => r.read(buf),
+            #[cfg(feature = "compression-tar-gz")]
+            ArchiveReader::Gz(r) => r.read(buf),
+            #[cfg(feature = "compression-tar-xz")]
+            ArchiveReader::Xz(r) => r.read(buf),
+        }
+    }
+}
 
 impl Extract {
     /// Create an `Extract`or from a source path. Accepts anything path-like (`&Path`, `PathBuf`,
@@ -876,14 +954,28 @@ impl Extract {
     fn get_archive_reader(
         source: fs::File,
         compression: Option<Compression>,
-    ) -> GetArchiveReaderResult {
-        #[cfg(feature = "compression-tar-gz")]
+    ) -> Result<ArchiveReader> {
         match compression {
-            Some(Compression::Gz) => Either::Right(flate2::read::GzDecoder::new(source)),
-            None => Either::Left(source),
+            None => Ok(ArchiveReader::Plain(source)),
+            #[cfg(feature = "compression-tar-gz")]
+            Some(Compression::Gz) => Ok(ArchiveReader::Gz(flate2::read::GzDecoder::new(source))),
+            #[cfg(feature = "compression-tar-xz")]
+            Some(Compression::Xz) => {
+                // `lzma-rs` is a one-shot decoder (no streaming `Read` adapter), so decode the
+                // whole `.xz` stream into memory and hand the tar/plain layer a cursor over it.
+                let mut input = io::BufReader::new(source);
+                let mut decoded = Vec::new();
+                lzma_rs::xz_decompress(&mut input, &mut decoded).map_err(|e| Error::Internal {
+                    message: format!("failed to decode xz stream: {e}"),
+                    source: None,
+                })?;
+                Ok(ArchiveReader::Xz(io::Cursor::new(decoded)))
+            }
+            // A compression whose decoder feature is disabled is rejected by `detect_archive`
+            // before extraction, so this is unreachable in practice.
+            #[allow(unreachable_patterns)]
+            Some(_) => Err(Error::CompressionNotEnabled("unsupported".to_string())),
         }
-        #[cfg(not(feature = "compression-tar-gz"))]
-        source
     }
 
     /// Extract an entire source archive into a specified path. If the source is a single compressed
@@ -900,7 +992,7 @@ impl Extract {
         // We cannot use a feature flag in a match arm. To bypass this the code block is
         // isolated in a closure and called accordingly.
         let extract_into_plain_or_tar = |source: fs::File, compression: Option<Compression>| {
-            let mut reader = Self::get_archive_reader(source, compression);
+            let mut reader = Self::get_archive_reader(source, compression)?;
 
             match archive {
                 ArchiveKind::Plain(_) => {
@@ -1016,7 +1108,7 @@ impl Extract {
         // We cannot use a feature flag in a match arm. To bypass this the code block is
         // isolated in a closure and called accordingly.
         let extract_file_plain_or_tar = |source: fs::File, compression: Option<Compression>| {
-            let mut reader = Self::get_archive_reader(source, compression);
+            let mut reader = Self::get_archive_reader(source, compression)?;
 
             match archive {
                 ArchiveKind::Plain(_) => {
@@ -1946,12 +2038,17 @@ mod tests {
     fn archive_kind_display_is_human_readable() {
         assert_eq!(ArchiveKind::Plain(None).to_string(), "plain");
         assert_eq!(ArchiveKind::Plain(Some(Compression::Gz)).to_string(), "gz");
+        assert_eq!(ArchiveKind::Plain(Some(Compression::Xz)).to_string(), "xz");
         #[cfg(feature = "archive-tar")]
         {
             assert_eq!(ArchiveKind::Tar(None).to_string(), "tar");
             assert_eq!(
                 ArchiveKind::Tar(Some(Compression::Gz)).to_string(),
                 "tar.gz"
+            );
+            assert_eq!(
+                ArchiveKind::Tar(Some(Compression::Xz)).to_string(),
+                "tar.xz"
             );
         }
         #[cfg(feature = "archive-zip")]
@@ -2897,6 +2994,54 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "compression-tar-xz")]
+    #[test]
+    fn detect_plain_xz() {
+        assert_eq!(
+            ArchiveKind::Plain(Some(Compression::Xz)),
+            detect_archive(&PathBuf::from("Something.exe.xz")).unwrap()
+        );
+    }
+
+    // Without the xz feature, a plain `.xz` asset must be rejected with `CompressionNotEnabled`
+    // rather than silently installed as still-compressed bytes (the original #143 footgun).
+    #[cfg(not(feature = "compression-tar-xz"))]
+    #[test]
+    fn detect_plain_xz_without_feature_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.exe.xz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
+    }
+
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+    #[test]
+    fn detect_tar_xz() {
+        // Both the `.tar.xz` double extension and the `.txz` short form resolve to a gzip-free tar.
+        assert_eq!(
+            ArchiveKind::Tar(Some(Compression::Xz)),
+            detect_archive(&PathBuf::from("Something.tar.xz")).unwrap()
+        );
+        assert_eq!(
+            ArchiveKind::Tar(Some(Compression::Xz)),
+            detect_archive(&PathBuf::from("Something.txz")).unwrap()
+        );
+    }
+
+    // `.tar.xz` / `.txz` with the tar container but no xz codec must error, not fall through.
+    #[cfg(all(feature = "archive-tar", not(feature = "compression-tar-xz")))]
+    #[test]
+    fn detect_tar_xz_without_compression_errors() {
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.tar.xz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
+        assert!(matches!(
+            detect_archive(&PathBuf::from("Something.txz")),
+            Err(Error::CompressionNotEnabled(_))
+        ));
+    }
+
     #[cfg(not(feature = "archive-tar"))]
     #[test]
     #[ignore]
@@ -3060,6 +3205,86 @@ mod tests {
             "self_update_unpack_file_tar_gzip_src",
             "archive.tar.gz",
             ArchiveKind::Tar(Some(Compression::Gz)),
+        );
+    }
+
+    // --- xz (#143) round-trips, mirroring the gzip coverage above -----------------------------
+
+    // A plain single-file `.xz` decodes to the file with the `.xz` extension stripped.
+    #[cfg(feature = "compression-tar-xz")]
+    #[test]
+    fn unpack_plain_xz() {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_xz_src")
+            .tempdir()
+            .expect("tempdir fail");
+        let fp = tmp_dir.path().with_file_name("temp.xz");
+        {
+            let mut tmp_file = File::create(&fp).expect("temp file create fail");
+            lzma_rs::xz_compress(&mut &b"This is a test!"[..], &mut tmp_file)
+                .expect("xz encode fail");
+        }
+
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_plain_xz_outdir")
+            .tempdir()
+            .expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&fp)
+            .extract_into(out_path)
+            .expect("extract fail");
+        let out_file = out_path.join("temp");
+        assert!(out_file.exists());
+        cmp_content(out_file, "This is a test!");
+    }
+
+    // A plain `.xz` extracted via `extract_file` is written under the requested name.
+    #[cfg(feature = "compression-tar-xz")]
+    #[test]
+    fn unpack_file_plain_xz() {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_plain_xz_src")
+            .tempdir()
+            .expect("tempdir fail");
+        let fp = tmp_dir.path().with_file_name("temp.xz");
+        {
+            let mut tmp_file = File::create(&fp).expect("temp file create fail");
+            lzma_rs::xz_compress(&mut &b"This is a test!"[..], &mut tmp_file)
+                .expect("xz encode fail");
+        }
+
+        let out_tmp = tempfile::Builder::new()
+            .prefix("self_update_unpack_file_plain_xz_outdir")
+            .tempdir()
+            .expect("tempdir fail");
+        let out_path = out_tmp.path();
+        Extract::from_source(&fp)
+            .extract_file(out_path, "renamed_file")
+            .expect("extract fail");
+        let out_file = out_path.join("renamed_file");
+        assert!(out_file.exists());
+        cmp_content(out_file, "This is a test!");
+    }
+
+    // A `.tar.xz` unpacks its full tree, exercising the streamed tar-over-xz path end to end.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+    #[test]
+    fn unpack_tar_xz() {
+        test_extract_into(
+            "self_update_unpack_tar_xz_src",
+            "archive.tar.xz",
+            ArchiveKind::Tar(Some(Compression::Xz)),
+        );
+    }
+
+    // A single member of a `.tar.xz` is extractable by path.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+    #[test]
+    fn unpack_file_tar_xz() {
+        test_extract_file(
+            "self_update_unpack_file_tar_xz_src",
+            "archive.tar.xz",
+            ArchiveKind::Tar(Some(Compression::Xz)),
         );
     }
 
@@ -3254,6 +3479,32 @@ mod tests {
                 io::copy(&mut tar_writer.as_slice(), &mut e)
                     .expect("failed writing from tar archive to gz encoder");
                 e.finish().expect("gz finish fail");
+            }
+
+            #[cfg(all(feature = "archive-tar", feature = "compression-tar-xz"))]
+            ArchiveKind::Tar(Some(Compression::Xz)) => {
+                let tmp_tar_path = archive_file_path
+                    .parent()
+                    .expect("Missing archive file path parent")
+                    .join("tar_contents_xz");
+                let tmp_tar_inner_path = tmp_tar_path.join("inner_archive");
+                fs::create_dir_all(&tmp_tar_inner_path).expect("Failed to create temp tar path");
+
+                let fp = tmp_tar_path.join("temp.txt");
+                let mut tmp_file = File::create(fp).expect("temp file create fail");
+                tmp_file.write_all(b"This is a test!").unwrap();
+
+                let fp = tmp_tar_inner_path.join("temp2.txt");
+                let mut tmp_file = File::create(fp).expect("temp file create fail");
+                tmp_file.write_all(b"This is a second test!").unwrap();
+
+                let mut ar = tar::Builder::new(vec![]);
+                ar.append_dir_all(".", &tmp_tar_path)
+                    .expect("tar append dir all fail");
+                let tar_writer = ar.into_inner().expect("failed getting tar writer");
+
+                lzma_rs::xz_compress(&mut tar_writer.as_slice(), &mut archive_file)
+                    .expect("failed writing from tar archive to xz encoder");
             }
 
             #[cfg(feature = "archive-zip")]
