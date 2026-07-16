@@ -3,6 +3,17 @@
 ## [unreleased]
 
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.0.0-rc.6]
+Additive over rc.5: automatic verification against github's per-asset release digests, default
+`ReleaseSource` trait methods, and assorted constructors; plus non-semver-tag skipping in the
+forge listings and a unified User-Agent. No breaking changes vs rc.5, so no migration is needed.
+
+### Added
 - Release-published digest verification (`checksums` feature): github publishes a `sha256:<hex>`
   digest per release asset, and the updater now verifies the downloaded artifact against it
   before installing whenever the selected asset carries one. On by default with the `checksums`
