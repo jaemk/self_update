@@ -36,6 +36,27 @@
   (`Error::InvalidAssetKeyPattern`); a captured version that does not parse as semver skips the
   key. Unset keeps the existing matcher unchanged.
   ([#61](https://github.com/jaemk/self_update/issues/61))
+- `self_update::restart` module: `restart()` and `restart_with(args)` relaunch the (already
+  replaced) executable after an update so a long-running process picks up the new binary
+  immediately. `restart()` reuses the current arguments; `restart_with(args)` supplies a fresh
+  argument list (e.g. to drop an `--upgrade` flag so the restarted process does not update again).
+  On unix the process image is replaced with `exec`; on windows the new binary is spawned and the
+  current process exits. No feature gate, no new dependencies.
+  ([#62](https://github.com/jaemk/self_update/issues/62))
+- `self_update::check_interval::UpdateCheckGuard`: a small stamp-file guard that throttles how often
+  an application checks for updates. `should_check()` reports whether the configured interval has
+  elapsed since the last recorded check (a missing, corrupt, or future-dated stamp counts as due);
+  `record_check()` stamps the current time via a write-to-temp-then-rename so a concurrent reader
+  never sees a partial stamp. The caller owns the stamp-file path; it is a guard, not a scheduler,
+  and pulls in no time/date dependency. ([#79](https://github.com/jaemk/self_update/issues/79))
+- Docs: a "GitHub rate limits" section in the crate docs covering GitHub's 60/hour (unauthenticated)
+  vs 5000/hour (authenticated) API limits, that a rate-limited response surfaces as
+  `Error::Unauthorized { status: 403, .. }`, and how to mitigate (a token, and checking less often
+  via `UpdateCheckGuard`). ([#78](https://github.com/jaemk/self_update/issues/78))
+- Docs: the Features section now names the exact `no HTTP client selected` compile error a
+  client-less build (e.g. `default-features = false, features = ["rustls"]`) produces, and shows the
+  fix (add a client, e.g. `features = ["ureq", "rustls", "github"]`).
+  ([#168](https://github.com/jaemk/self_update/issues/168))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently

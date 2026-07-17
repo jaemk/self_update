@@ -48,8 +48,12 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Features
 
-At least one HTTP client must be selected; having zero clients is a compile error. Multiple
-clients and multiple TLS backends may coexist (reqwest is preferred when both are present):
+At least one HTTP client must be selected. A build with **no** client -- for example
+`default-features = false` with only a TLS feature such as `features = ["rustls"]` -- fails to
+compile with `no HTTP client selected - enable at least one of the reqwest (default) or ureq
+features`. Add a client explicitly, e.g. `default-features = false, features = ["ureq", "rustls",
+"github"]`. Multiple clients and multiple TLS backends may coexist (reqwest is preferred when both
+are present):
 
 * `reqwest` (default): use the [`reqwest`](https://docs.rs/reqwest) HTTP client;
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client, either alongside reqwest or as a drop-in replacement (set `default-features = false` to drop reqwest);
@@ -273,6 +277,44 @@ fn check() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Restarting after an update
+
+After `update()` returns [`VersionStatus::Updated`](crate::VersionStatus::Updated) the on-disk
+executable has been replaced, but the running process keeps executing the old code until it exits.
+To relaunch into the new binary immediately, use the [`restart`](crate::restart) module:
+`restart::restart()` re-runs with the current arguments, and `restart::restart_with(args)` re-runs
+with a fresh argument list (e.g. to drop an `--upgrade` flag so the new process does not update
+again). On unix the process image is replaced with `exec` (the PID is preserved); on windows the new
+binary is spawned and the current process exits. See the module docs for the platform details.
+
+### Periodic update checks
+
+Every `update()` / `is_update_available()` call makes a network request. To avoid checking on every
+run, gate the check behind [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard), a small
+stamp-file guard: `should_check()` reports whether the configured interval has elapsed since the
+last recorded check, and `record_check()` stamps the current time. The caller owns the stamp-file
+path. It is a guard, not a scheduler -- no threads or timers, and no extra dependencies. See the
+[`check_interval`](crate::check_interval) module for the semantics.
+
+### GitHub rate limits
+
+Requests to the GitHub REST API are rate limited by GitHub itself, not by this crate:
+
+- **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
+  requests (set any personal access token via `auth_token`) get **5000 per hour**. A token needs no
+  scopes to raise the limit for a public repository.
+- An update check costs **one** API request (the latest-release lookup, or one request per page of a
+  paginated listing). The asset **download** itself is a CDN redirect and does not count against the
+  core API limit.
+- When you are rate limited, GitHub responds with **HTTP 403** (and an `x-ratelimit-remaining: 0`
+  header), which this crate surfaces as `Error::Unauthorized { status: 403, .. }` -- the same
+  variant as a genuine auth failure, so recognize it by the symptom (a 403 that appears only under
+  frequent checking).
+- To avoid it: set an `auth_token` (5000/hour), and check less often -- the
+  [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
+  The retry/backoff setters do **not** help here; retrying a rate-limited request only consumes more
+  quota.
 
 ### Listing releases (`ReleaseList`)
 
@@ -557,10 +599,12 @@ use std::path;
 #[macro_use]
 mod macros;
 pub mod backends;
+pub mod check_interval;
 #[cfg(feature = "checksums")]
 mod checksum;
 pub mod errors;
 pub mod http_client;
+pub mod restart;
 mod tls;
 pub mod update;
 pub mod version;

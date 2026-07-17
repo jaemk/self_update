@@ -47,6 +47,8 @@ design before it can be built). Keep each row's status current with `spec.py set
 | Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
 | Embedded Key Verification | done | [embedded-key-verification.md](embedded-key-verification.md) |
 | Corporate Network Config | pending | [corporate-network-config.md](corporate-network-config.md) |
+| Restart After Update | done | [ref-restart.md](ref-restart.md) |
+| Update-check Interval Guard | done | [ref-check-interval.md](ref-check-interval.md) |
 
 ## Conventions
 

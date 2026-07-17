@@ -141,6 +141,9 @@ impl ReleaseListBuilder {
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
+    ///
+    /// A token also raises GitHub's API rate limit from 60 to 5000 requests/hour (no scopes are
+    /// needed for a public repo); see the crate-level "GitHub rate limits" section.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
         self.auth_token = Some(auth_token.into());
         self

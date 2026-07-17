@@ -70,7 +70,10 @@ The only `compile_error!` guards that remain:
 
 - neither `reqwest` nor `ureq` -> error (`http_client/mod.rs:111`):
   "no HTTP client selected - enable at least one of the `reqwest` (default) or
-  `ureq` features". A build with no client cannot service any request.
+  `ureq` features". A build with no client cannot service any request. This is the exact failure a
+  `default-features = false` manifest that enables only a TLS feature (e.g. `features = ["rustls"]`)
+  hits; the crate-level Features section (`src/lib.rs`) names the error and shows the fix (add a
+  client, e.g. `features = ["ureq", "rustls", "github"]`).
 - `async` without `reqwest` -> error (`lib.rs:434`):
   "feature `async` requires the `reqwest` client - `ureq` has no async API".
   (`async` implies `reqwest` in `Cargo.toml`, so this only fires on a manual
