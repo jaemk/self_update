@@ -88,6 +88,19 @@ host does not receive the token; `dangerously_allow_non_https_auth_forwarding()`
 https requirement for a host-matched request. A user-set `Authorization` via `request_header`
 overrides the crate's token header.
 
+### Rate limits
+
+GitHub rate limits its REST API: 60 requests/hour/IP unauthenticated, 5000/hour with a token (no
+scopes needed for a public repo). This crate does not track the limit; it is documented in the
+crate-level "GitHub rate limits" section (`src/lib.rs`) and pointed at from the `auth_token` setter
+rustdoc (`github.rs:138-149`). An update check costs one API request (a `/latest` or `/tags/{tag}`
+lookup, or one per page of a listing); the asset download is a CDN redirect and does not count
+against the core limit. A rate-limited response is HTTP 403 (with `x-ratelimit-remaining: 0`), which
+maps through `status_to_error` to `Error::Unauthorized { status: 403, .. }` (the same variant as a
+genuine auth failure). Mitigation is an `auth_token` and checking less often (the
+`check_interval::UpdateCheckGuard` throttle); the retry/backoff setters do not help, since retrying
+a rate-limited request only consumes more quota.
+
 ### Pagination
 
 The listing is described transport-free as a `PageRequest<Release>` via `releases_plan(base,
