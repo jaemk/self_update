@@ -51,6 +51,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `InvalidAssetName { name: String }` | The server-supplied asset name is empty, `.`, `..`, contains a `/` or `\` path separator, or is an absolute path; the file is never created (`update.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `SignatureNonUTF8` | Generated archive path contains non-UTF-8 characters so its signature cannot be verified. Unit variant. | `signatures` | no (unit) |
 | `S3Auth(Box<dyn Error + Send + Sync>)` | S3 SigV4 request-signing failure, including the host-extraction case (a signed URL with no extractable host). Via `From<SystemTimeError>`, `From<hmac::digest::InvalidLength>`, `From<url::ParseError>`, `From<time::error::ComponentRange>`, and direct construction at the host-extraction sites (`s3.rs`). | `s3-auth` | yes (boxed) |
+| `InvalidAssetKeyPattern { source: Box<dyn Error + Send + Sync> }` | A user-supplied `asset_key_pattern` on the s3 builders did not compile or lacks a required named capture group (`name` / `version`). Raised from `build()` via `compile_asset_key_pattern` (`s3.rs`); the source is the regex-compile error or a `MessageError` naming the missing group. `#[non_exhaustive]`. | `s3` | yes (boxed source) |
 
 ### Reclassification of construction sites
 
@@ -141,6 +142,7 @@ Each variant renders with a specific Display string:
 - `Signature(e)` -> `"SignatureError: {e}"` (dereferences the box, `signatures`)
 - `SignatureNonUTF8` -> `"SignatureError: cannot verify signature of a file with a non-UTF-8 name"` (`signatures`)
 - `S3Auth(e)` -> `"S3AuthError: {e}"` (dereferences the box, `s3-auth`)
+- `InvalidAssetKeyPattern { source }` -> `"ConfigError: invalid asset_key_pattern: {source}"` (`s3`)
 
 Note: `ArchiveNotEnabled` was corrected from `"ArchiveNotEnabled: ..."` to `"ArchiveNotEnabledError: ..."`;
 `SignatureNonUTF8` was corrected from the bare message to `"SignatureError: ..."`, consistent with
@@ -151,7 +153,8 @@ every other variant using a `<Name>Error:` prefix.
 `source()` returns the inner error for the wrapping variants: `Io` (the concrete io error); the
 boxed `Json`, `Transport`, `SemVer`, `Zip` (gated), `Signature` (gated), `S3Auth` (gated); the
 boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
-`InvalidCertificate`, `InvalidProgressStyle` (gated); and `Internal` when its `source` is `Some`
+`InvalidCertificate`, `InvalidProgressStyle` (gated), `InvalidAssetKeyPattern` (gated); and
+`Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
 (`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
 `NoReleaseFound`, `MissingAssetField`, `MissingField`, `ArchiveNotEnabled`,

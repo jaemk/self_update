@@ -19,6 +19,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Filename -> `(name, version)` matcher for S3 asset keys, e.g. `myapp-v1.2.3-x86_64-linux`.
+/// The default used when no [`asset_key_pattern`](UpdateBuilder::asset_key_pattern) is configured.
 ///
 /// Hoisted to a process-wide `LazyLock` so it is compiled once rather than on every listing page
 /// parsed by [`parse_s3_response`]. The pattern is a compile-time literal and is known-valid, so
@@ -27,6 +28,30 @@ static ASSET_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+")
         .expect("the S3 asset-key regex is a valid compile-time literal")
 });
+
+/// Compile a user-supplied [`asset_key_pattern`](UpdateBuilder::asset_key_pattern) at `build()`
+/// time, so a bad pattern surfaces as [`Error::InvalidAssetKeyPattern`] from `build()` rather
+/// than a panic (or a per-page failure) at fetch time. Requires the `name` and `version` named
+/// capture groups the parser reads; `None` in -> `None` out (use the default
+/// [`ASSET_KEY_REGEX`]).
+fn compile_asset_key_pattern(pattern: &Option<String>) -> Result<Option<Regex>> {
+    let Some(pattern) = pattern else {
+        return Ok(None);
+    };
+    let regex = Regex::new(pattern).map_err(|e| Error::InvalidAssetKeyPattern {
+        source: Box::new(e),
+    })?;
+    for group in ["name", "version"] {
+        if !regex.capture_names().flatten().any(|n| n == group) {
+            return Err(Error::InvalidAssetKeyPattern {
+                source: Box::new(crate::errors::MessageError(format!(
+                    "asset_key_pattern must define a `(?P<{group}>...)` named capture group"
+                ))),
+            });
+        }
+    }
+    Ok(Some(regex))
+}
 
 /// Default number of items to retrieve per S3 listing request. The S3 ListObjectsV2 API caps a
 /// single request at 1000 keys.
@@ -116,6 +141,7 @@ pub struct ReleaseListBuilder {
     endpoint: Endpoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
+    asset_key_pattern: Option<String>,
     target: Option<String>,
     region: Option<String>,
     max_keys: u16,
@@ -157,6 +183,15 @@ impl ReleaseListBuilder {
     /// `releases/` prefix lets you keep assets in a subdirectory.
     pub fn asset_prefix(&mut self, prefix: impl Into<String>) -> &mut Self {
         self.asset_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Set a custom regex for deriving `(name, version)` from object keys.
+    ///
+    /// See [`UpdateBuilder::asset_key_pattern`] for the pattern requirements and an example; the
+    /// same rules apply here. Compiled and validated by [`build`](Self::build).
+    pub fn asset_key_pattern(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.asset_key_pattern = Some(pattern.into());
         self
     }
 
@@ -220,6 +255,7 @@ impl ReleaseListBuilder {
             },
             region: self.region.clone(),
             asset_prefix: self.asset_prefix.clone(),
+            asset_key_pattern: compile_asset_key_pattern(&self.asset_key_pattern)?,
             target: self.target.clone(),
             max_keys: self.max_keys,
             #[cfg(feature = "s3-auth")]
@@ -238,6 +274,7 @@ pub struct ReleaseList {
     endpoint: Endpoint,
     bucket_name: String,
     asset_prefix: Option<String>,
+    asset_key_pattern: Option<Regex>,
     target: Option<String>,
     region: Option<String>,
     max_keys: u16,
@@ -255,6 +292,7 @@ impl ReleaseList {
             endpoint: Endpoint::default(),
             bucket_name: None,
             asset_prefix: None,
+            asset_key_pattern: None,
             target: None,
             region: None,
             max_keys: DEFAULT_MAX_KEYS,
@@ -278,6 +316,7 @@ impl ReleaseList {
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            &self.asset_key_pattern,
             self.max_keys,
             #[cfg(feature = "s3-auth")]
             self.signature_ttl,
@@ -303,6 +342,7 @@ impl ReleaseList {
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            &self.asset_key_pattern,
             self.max_keys,
             #[cfg(feature = "s3-auth")]
             self.signature_ttl,
@@ -331,6 +371,7 @@ pub struct UpdateBuilder {
     endpoint: Endpoint,
     bucket_name: Option<String>,
     asset_prefix: Option<String>,
+    asset_key_pattern: Option<String>,
     region: Option<String>,
     max_keys: u16,
     #[cfg(feature = "s3-auth")]
@@ -346,6 +387,7 @@ impl Default for UpdateBuilder {
             endpoint: Endpoint::default(),
             bucket_name: None,
             asset_prefix: None,
+            asset_key_pattern: None,
             region: None,
             max_keys: DEFAULT_MAX_KEYS,
             #[cfg(feature = "s3-auth")]
@@ -407,6 +449,39 @@ impl UpdateBuilder {
         self
     }
 
+    /// Set a custom regex for deriving `(name, version)` from object keys.
+    ///
+    /// The default matcher expects `name-[v]<major>.<minor>.<patch>-<suffix>` keys and captures
+    /// a bare `major.minor.patch` version, so a pre-release key such as
+    /// `mybin-0.1.2-beta-x86_64-unknown-linux-gnu` parses as `0.1.2`, dropping the `-beta`. In a
+    /// flat key the pre-release delimiter and the target delimiter are both `-`, so no built-in
+    /// pattern can tell where the version ends; supply one tuned to your key layout instead.
+    ///
+    /// The pattern must define `name` and `version` named capture groups (a directory prefix in
+    /// the key, if any, must be accounted for by the pattern). It is compiled and validated by
+    /// [`build`](Self::build), which returns [`Error::InvalidAssetKeyPattern`] for a pattern that
+    /// does not compile or lacks a required group. A captured version must parse as semver after
+    /// trimming a leading `v`; keys whose capture does not are skipped from the listing.
+    ///
+    /// E.g., to keep `alpha`/`beta`/`rc` pre-release segments in the version:
+    ///
+    /// ```no_run
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater = self_update::backends::s3::Update::configure()
+    ///     .bucket_name("my-releases")
+    ///     .region("us-east-1")
+    ///     // keys look like `mybin-0.1.2-beta.1-x86_64-unknown-linux-gnu`
+    ///     .asset_key_pattern(r"(?P<name>.+?)-v?(?P<version>\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)[.0-9]*)?)-")
+    ///     .bin_name("mybin")
+    ///     .current_version("0.1.0")
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn asset_key_pattern(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.asset_key_pattern = Some(pattern.into());
+        self
+    }
+
     /// Set the S3 region embedded in the endpoint host.
     ///
     /// Required for the `S3`, `S3DualStack`, and `DigitalOceanSpaces` endpoints (it is part of
@@ -445,6 +520,7 @@ impl UpdateBuilder {
             #[cfg(feature = "s3-auth")]
             access_key: self.access_key.clone(),
             asset_prefix: self.asset_prefix.clone(),
+            asset_key_pattern: compile_asset_key_pattern(&self.asset_key_pattern)?,
             common: self.common.build()?,
         })
     }
@@ -475,6 +551,7 @@ pub struct Update {
     endpoint: Endpoint,
     bucket_name: String,
     asset_prefix: Option<String>,
+    asset_key_pattern: Option<Regex>,
     region: Option<String>,
     max_keys: u16,
     #[cfg(feature = "s3-auth")]
@@ -498,6 +575,7 @@ impl Update {
             &self.bucket_name,
             &self.region,
             &self.asset_prefix,
+            &self.asset_key_pattern,
             self.max_keys,
             #[cfg(feature = "s3-auth")]
             self.signature_ttl,
@@ -1383,6 +1461,7 @@ fn s3_listing_plan(
     bucket_name: &str,
     region: &Option<String>,
     asset_prefix: &Option<String>,
+    asset_key_pattern: &Option<Regex>,
     max_keys: u16,
     #[cfg(feature = "s3-auth")] signature_ttl: Duration,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
@@ -1392,6 +1471,7 @@ fn s3_listing_plan(
     let bucket_name = bucket_name.to_owned();
     let region = region.clone();
     let asset_prefix = asset_prefix.clone();
+    let asset_key_pattern = asset_key_pattern.clone();
     #[cfg(feature = "s3-auth")]
     let access_key = access_key.clone();
 
@@ -1400,6 +1480,7 @@ fn s3_listing_plan(
         bucket_name,
         region,
         asset_prefix,
+        asset_key_pattern,
         max_keys,
         None,
         #[cfg(feature = "s3-auth")]
@@ -1418,6 +1499,7 @@ fn s3_page(
     bucket_name: String,
     region: Option<String>,
     asset_prefix: Option<String>,
+    asset_key_pattern: Option<Regex>,
     max_keys: u16,
     continuation_token: Option<String>,
     #[cfg(feature = "s3-auth")] signature_ttl: Duration,
@@ -1444,6 +1526,7 @@ fn s3_page(
             let (items, next_token) = parse_s3_response(
                 body,
                 &download_base_url,
+                asset_key_pattern.as_ref(),
                 #[cfg(feature = "s3-auth")]
                 &region,
                 #[cfg(feature = "s3-auth")]
@@ -1459,6 +1542,7 @@ fn s3_page(
                     bucket_name,
                     region,
                     asset_prefix,
+                    asset_key_pattern,
                     max_keys,
                     Some(token),
                     #[cfg(feature = "s3-auth")]
@@ -1485,6 +1569,7 @@ fn s3_page(
 fn parse_s3_response<R: std::io::BufRead>(
     body: R,
     download_base_url: &str,
+    asset_key_pattern: Option<&Regex>,
     #[cfg(feature = "s3-auth")] region: &Option<String>,
     #[cfg(feature = "s3-auth")] signature_ttl: Duration,
     #[cfg(feature = "s3-auth")] access_key: &Option<auth::AccessKey>,
@@ -1506,9 +1591,10 @@ fn parse_s3_response<R: std::io::BufRead>(
     let mut current_release: Option<Release> = None;
     let mut is_truncated = false;
     let mut next_continuation_token: Option<String> = None;
-    // The filename matcher is compiled once, process-wide (see `ASSET_KEY_REGEX`), rather than on
-    // every page parsed.
-    let regex = &*ASSET_KEY_REGEX;
+    // A user-supplied `asset_key_pattern` (compiled once at `build()`) replaces the default
+    // matcher, which is compiled once process-wide (see `ASSET_KEY_REGEX`) rather than on every
+    // page parsed.
+    let regex = asset_key_pattern.unwrap_or(&*ASSET_KEY_REGEX);
 
     // inspecting each XML element we populate our releases list
     let mut buf = Vec::new();
@@ -1541,23 +1627,37 @@ fn parse_s3_response<R: std::io::BufRead>(
                             };
 
                             if let Some(captures) = regex.captures(&txt) {
-                                let release = current_release.get_or_insert(Release::default());
-                                release.name = std::sync::Arc::from(captures["name"].to_string());
-                                release.version = std::sync::Arc::from(
-                                    captures["version"].trim_start_matches('v').to_string(),
-                                );
-                                let download_url = format!("{}{}", download_base_url, txt);
+                                let version =
+                                    captures["version"].trim_start_matches('v').to_string();
+                                // A user-supplied pattern can capture arbitrary text; require
+                                // real semver so a mis-tuned pattern skips the key (like the
+                                // forge backends skip non-semver tags) rather than producing a
+                                // garbage version. The default pattern's version group only
+                                // matches a `\d+.\d+.\d+` triple, so it is exempt to keep its
+                                // long-standing behavior unchanged.
+                                if asset_key_pattern.is_some()
+                                    && semver::Version::parse(&version).is_err()
+                                {
+                                    debug!("Non-semver version {:?} in key: {:?}", version, txt);
+                                } else {
+                                    let release = current_release.get_or_insert(Release::default());
+                                    release.name =
+                                        std::sync::Arc::from(captures["name"].to_string());
+                                    release.version = std::sync::Arc::from(version);
+                                    let download_url = format!("{}{}", download_base_url, txt);
 
-                                #[cfg(feature = "s3-auth")]
-                                let download_url = auth::s3_signature_v4(
-                                    &download_url,
-                                    region,
-                                    access_key,
-                                    signature_ttl.as_secs(),
-                                )?;
+                                    #[cfg(feature = "s3-auth")]
+                                    let download_url = auth::s3_signature_v4(
+                                        &download_url,
+                                        region,
+                                        access_key,
+                                        signature_ttl.as_secs(),
+                                    )?;
 
-                                release.assets = vec![ReleaseAsset::new(exe_name, download_url)];
-                                debug!("Matched release: {:?}", release);
+                                    release.assets =
+                                        vec![ReleaseAsset::new(exe_name, download_url)];
+                                    debug!("Matched release: {:?}", release);
+                                }
                             } else {
                                 debug!("Regex mismatch: {:?}", txt);
                             }
@@ -1642,12 +1742,37 @@ mod tests {
         super::parse_s3_response(
             body,
             download_base_url,
+            None,
             #[cfg(feature = "s3-auth")]
             region,
             #[cfg(feature = "s3-auth")]
             Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS),
             #[cfg(feature = "s3-auth")]
             access_key,
+        )
+        .map(|(releases, _next)| releases)
+    }
+
+    /// Like [`parse_s3_response`], but with a custom `asset_key_pattern` (as `build()` would
+    /// compile it) in place of the default key matcher.
+    fn parse_s3_response_with_pattern<R: std::io::BufRead>(
+        body: R,
+        download_base_url: &str,
+        pattern: &str,
+    ) -> crate::errors::Result<Vec<Release>> {
+        let regex = super::compile_asset_key_pattern(&Some(pattern.to_owned()))
+            .expect("test pattern must compile")
+            .expect("Some(pattern) in, Some(regex) out");
+        super::parse_s3_response(
+            body,
+            download_base_url,
+            Some(&regex),
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            Duration::from_secs(super::DEFAULT_SIGNATURE_TTL_SECS),
+            #[cfg(feature = "s3-auth")]
+            &None,
         )
         .map(|(releases, _next)| releases)
     }
@@ -1819,6 +1944,170 @@ mod tests {
         assert_eq!(releases[0].version(), "1.0.0");
     }
 
+    // ---------------------------------------------------------------------------
+    // Custom `asset_key_pattern` (#61: pre-release versions in s3 keys)
+    // ---------------------------------------------------------------------------
+
+    /// The doc example's pre-release-aware pattern (keeps `alpha`/`beta`/`rc` segments).
+    const PRERELEASE_PATTERN: &str =
+        r"(?P<name>.+?)-v?(?P<version>\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)[.0-9]*)?)-";
+
+    #[test]
+    fn parse_s3_response_custom_pattern_keeps_prerelease() {
+        // The #61 case: with a user-supplied pattern whose `version` group admits a pre-release
+        // segment, `mybin-0.1.2-beta-...` parses as `0.1.2-beta` (and a dotted pre-release like
+        // `0.1.2-beta.1` round-trips), instead of the default pattern's lossy `0.1.2`.
+        let xml = list_bucket_xml(&[
+            "mybin-0.1.2-beta-x86_64-unknown-linux-gnu",
+            "mybin-0.1.2-beta.1-x86_64-unknown-linux-gnu",
+            "mybin-1.2.3-x86_64-unknown-linux-gnu",
+        ]);
+        let releases =
+            parse_s3_response_with_pattern(xml.as_bytes(), "https://bucket/", PRERELEASE_PATTERN)
+                .unwrap();
+        let versions: Vec<&str> = releases.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["0.1.2-beta", "0.1.2-beta.1", "1.2.3"],
+            "pre-release segments survive; a plain version still parses"
+        );
+        assert!(
+            releases.iter().all(|r| r.name() == "mybin"),
+            "the name group must not swallow the version/pre-release"
+        );
+    }
+
+    #[test]
+    fn parse_s3_response_custom_pattern_merges_prerelease_assets() {
+        // Two targets of the same pre-release version merge into one release, exactly as the
+        // default pattern's releases do (`add_to_releases_list` keys on name+version).
+        let xml = list_bucket_xml(&[
+            "mybin-0.1.2-beta-x86_64-unknown-linux-gnu",
+            "mybin-0.1.2-beta-aarch64-apple-darwin",
+        ]);
+        let releases =
+            parse_s3_response_with_pattern(xml.as_bytes(), "https://bucket/", PRERELEASE_PATTERN)
+                .unwrap();
+        assert_eq!(releases.len(), 1, "same name+version merges");
+        assert_eq!(releases[0].version(), "0.1.2-beta");
+        assert_eq!(releases[0].assets.len(), 2);
+    }
+
+    #[test]
+    fn parse_s3_response_custom_pattern_skips_non_semver_capture() {
+        // A user pattern can capture arbitrary text as `version`; captures that don't parse as
+        // semver must skip the key (like non-matching keys), not produce a garbage release.
+        let xml = list_bucket_xml(&["mybin-notaversion-x86_64-linux", "mybin-1.2.3-x86_64-linux"]);
+        let releases = parse_s3_response_with_pattern(
+            xml.as_bytes(),
+            "https://bucket/",
+            r"(?P<name>.+?)-(?P<version>[^-]+)-",
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1, "non-semver capture is skipped");
+        assert_eq!(releases[0].version(), "1.2.3");
+    }
+
+    #[test]
+    fn parse_s3_response_default_pattern_drops_prerelease() {
+        // Regression pin for the unset-pattern default: the built-in matcher captures only the
+        // `major.minor.patch` triple, so a pre-release key parses lossily as `0.1.2` (the #61
+        // limitation `asset_key_pattern` exists to work around). If this changes, the default
+        // behavior changed under existing users.
+        let xml = list_bucket_xml(&["mybin-0.1.2-beta-x86_64-unknown-linux-gnu"]);
+        let releases = parse_s3_response(
+            xml.as_bytes(),
+            "https://bucket/",
+            #[cfg(feature = "s3-auth")]
+            &None,
+            #[cfg(feature = "s3-auth")]
+            &None,
+        )
+        .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].version(),
+            "0.1.2",
+            "the default pattern drops the pre-release segment"
+        );
+    }
+
+    #[test]
+    fn asset_key_pattern_bad_regex_errors_from_build() {
+        // An invalid regex surfaces as `Error::InvalidAssetKeyPattern` from `build()` (not a
+        // panic, not a fetch-time failure), with the regex error chained as `source()`.
+        use std::error::Error as _;
+        let err = Update::configure()
+            .endpoint(super::Endpoint::Generic("https://s3.example.com/".into()))
+            .bucket_name("b")
+            .asset_key_pattern("(unbalanced")
+            .bin_name("mybin")
+            .current_version("0.1.0")
+            .build()
+            .expect_err("a bad pattern must fail build()");
+        match &err {
+            crate::errors::Error::InvalidAssetKeyPattern { .. } => {}
+            other => panic!("expected InvalidAssetKeyPattern, got {:?}", other),
+        }
+        assert!(
+            err.source().is_some(),
+            "the regex-compile error must be chained as source()"
+        );
+    }
+
+    #[test]
+    fn asset_key_pattern_missing_version_group_errors_from_build() {
+        // A pattern without the `version` named group can never yield a version; `build()` must
+        // reject it, naming the missing group.
+        let err = Update::configure()
+            .endpoint(super::Endpoint::Generic("https://s3.example.com/".into()))
+            .bucket_name("b")
+            .asset_key_pattern(r"(?P<name>.+?)-\d+\.\d+\.\d+-")
+            .bin_name("mybin")
+            .current_version("0.1.0")
+            .build()
+            .expect_err("a pattern without a `version` group must fail build()");
+        assert!(
+            err.to_string().contains("version"),
+            "the error must name the missing group, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn asset_key_pattern_missing_name_group_errors_from_build() {
+        // Same for the `name` group: the parser indexes `captures["name"]`, so accepting a
+        // pattern without it would panic at fetch time.
+        let err = Update::configure()
+            .endpoint(super::Endpoint::Generic("https://s3.example.com/".into()))
+            .bucket_name("b")
+            .asset_key_pattern(r".+?-(?P<version>\d+\.\d+\.\d+)-")
+            .bin_name("mybin")
+            .current_version("0.1.0")
+            .build()
+            .expect_err("a pattern without a `name` group must fail build()");
+        assert!(
+            err.to_string().contains("name"),
+            "the error must name the missing group, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn asset_key_pattern_bad_regex_errors_from_release_list_build() {
+        // The `ReleaseList` builder validates the pattern at `build()` the same way.
+        let err = super::ReleaseList::configure()
+            .endpoint(super::Endpoint::Generic("https://s3.example.com/".into()))
+            .bucket_name("b")
+            .asset_key_pattern("(unbalanced")
+            .build()
+            .expect_err("a bad pattern must fail ReleaseList build()");
+        match err {
+            crate::errors::Error::InvalidAssetKeyPattern { .. } => {}
+            other => panic!("expected InvalidAssetKeyPattern, got {:?}", other),
+        }
+    }
+
     #[test]
     fn parse_s3_response_prefix_path_stripped_to_filename() {
         // When the <Key> contains a directory prefix (e.g. "releases/myapp-1.0.0-linux"),
@@ -1940,6 +2229,7 @@ mod tests {
         let (releases, next_token) = super::parse_s3_response(
             page1.as_bytes(),
             "https://storage.googleapis.com/gbucket/",
+            None,
             #[cfg(feature = "s3-auth")]
             &None,
             #[cfg(feature = "s3-auth")]
@@ -2399,6 +2689,56 @@ mod tests {
             releases.is_update_available().unwrap(),
             "2.1.0 > 1.0.0 via the one-element Releases pre-check"
         );
+    }
+
+    #[test]
+    fn asset_key_pattern_threads_from_build_to_listing_fetch() {
+        // End-to-end over the loopback stub: an `Update` built with `asset_key_pattern` uses the
+        // custom matcher for the listing it fetches, so a pre-release key surfaces with its full
+        // semver version (the #61 scenario) instead of the default matcher's truncated triple.
+        let xml = list_bucket_xml(&[
+            "mybin-0.1.1-x86_64-unknown-linux-gnu",
+            "mybin-0.1.2-beta-x86_64-unknown-linux-gnu",
+        ]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let upd = Update::configure()
+            .endpoint(super::Endpoint::Generic(base))
+            .bucket_name("test-bucket")
+            .asset_key_pattern(PRERELEASE_PATTERN)
+            .bin_name("mybin")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let releases = upd.get_latest_release().unwrap();
+        assert_eq!(
+            releases.latest().unwrap().version(),
+            "0.1.2-beta",
+            "the custom pattern's pre-release version must survive the full fetch path"
+        );
+    }
+
+    #[test]
+    fn asset_key_pattern_threads_through_release_list_fetch() {
+        // Same threading proof for the `ReleaseList` path.
+        let xml = list_bucket_xml(&["mybin-0.1.2-beta-x86_64-unknown-linux-gnu"]);
+        let base = stub(vec![Resp {
+            status: "200 OK",
+            body: xml,
+        }]);
+        let releases = super::ReleaseList::configure()
+            .endpoint(super::Endpoint::Generic(base))
+            .bucket_name("test-bucket")
+            .asset_key_pattern(PRERELEASE_PATTERN)
+            .build()
+            .unwrap()
+            .fetch()
+            .unwrap()
+            .into_vec();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version(), "0.1.2-beta");
     }
 
     #[test]

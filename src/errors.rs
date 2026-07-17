@@ -237,6 +237,17 @@ pub enum Error {
     /// to inspect the underlying error.
     #[cfg(feature = "s3-auth")]
     S3Auth(Box<dyn std::error::Error + Send + Sync>),
+    /// A user-supplied `asset_key_pattern` on the s3 builders was not a valid regex, or was
+    /// missing a required named capture group (`name` / `version`).
+    ///
+    /// Returned from `build()`. Wraps the underlying regex-compile error (or a message naming
+    /// the missing group), surfaced via [`std::error::Error::source`].
+    #[cfg(feature = "s3")]
+    #[non_exhaustive]
+    InvalidAssetKeyPattern {
+        /// The underlying regex-compile error, or a message naming the missing capture group.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl Error {
@@ -449,6 +460,10 @@ impl std::fmt::Display for Error {
             }
             #[cfg(feature = "s3-auth")]
             S3Auth(e) => write!(f, "S3AuthError: {}", e),
+            #[cfg(feature = "s3")]
+            InvalidAssetKeyPattern { source } => {
+                write!(f, "ConfigError: invalid asset_key_pattern: {}", source)
+            }
         }
     }
 }
@@ -476,6 +491,8 @@ impl std::error::Error for Error {
             Error::Signature(ref e) => &**e,
             #[cfg(feature = "s3-auth")]
             Error::S3Auth(ref e) => &**e,
+            #[cfg(feature = "s3")]
+            Error::InvalidAssetKeyPattern { ref source } => &**source,
             _ => return None,
         })
     }
