@@ -91,7 +91,11 @@ from `verify_keys`), stored on the common config's `verifying_keys` field
 `UpdateConfig::verify_keys` (`src/update.rs:710`, `src/macros.rs:260`), which
 defaults to an empty slice.
 
-`verify_signature(archive_path, keys)` (`src/update.rs:933`):
+`verify_signature(archive_path, keys)` (`src/update.rs:933`) is public and
+re-exported at the crate root under `signatures`
+(`self_update::verify_signature`, `src/lib.rs`), so a caller that stages a
+download itself (e.g. an installer fetching a companion binary) can run the same
+check `update()` runs. It takes `impl AsRef<Path>` and a `&[VerifyingKey]` slice:
 - If no keys are supplied it is a no-op returning `Ok(())`
   (`src/update.rs:937`-`939`). Verification only happens when the feature is on
   AND at least one key is provided.
@@ -156,6 +160,9 @@ async flows.
   `signatures` (`src/lib.rs:462`).
 - `verifying_keys(impl Into<Vec<VerifyingKey>>)` builder method
   (`src/macros.rs:617`); the doc-hidden `verify_keys()` accessor keeps its name.
+- `self_update::verify_signature(impl AsRef<Path>, &[VerifyingKey])` free
+  function, re-exported under `signatures` (`src/update.rs`, `src/lib.rs`), for
+  running the signature check standalone (e.g. from an installer).
 - Errors: `Error::ChecksumMismatch { expected, computed }` (checksum mismatch,
   `src/errors.rs:29`), `Error::Signature` (wrapped `ZipsignError`,
   `src/errors.rs:110`), `Error::SignatureNonUTF8` (`src/errors.rs:114`),

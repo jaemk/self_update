@@ -40,11 +40,12 @@ struct ReleaseDto {
     created_at: Option<String>,
     name: Option<String>,
     body: Option<String>,
+    html_url: Option<String>,
     assets: Option<Vec<AssetDto>>,
 }
 
 impl ReleaseDto {
-    fn into_release(self) -> Result<Release> {
+    fn into_release(self, tag_prefix: Option<&str>) -> Result<Release> {
         let tag = self
             .tag_name
             .ok_or_else(|| Error::missing_asset_field("tag_name"))?;
@@ -59,14 +60,24 @@ impl ReleaseDto {
             .into_iter()
             .map(AssetDto::into_asset)
             .collect::<Result<Vec<ReleaseAsset>>>()?;
+        let version =
+            crate::backends::common::strip_tag_prefix(&tag, tag_prefix).ok_or_else(|| {
+                crate::backends::common::tag_prefix_mismatch_error(
+                    &tag,
+                    tag_prefix.unwrap_or_default(),
+                )
+            })?;
         let mut builder = Release::builder();
         builder
             .name(name)
-            .version(tag.trim_start_matches('v').to_owned())
+            .version(version)
             .date(date)
             .assets(assets);
         if let Some(body) = self.body {
             builder.body(body);
+        }
+        if let Some(url) = self.html_url {
+            builder.release_notes_url(url);
         }
         builder
             .build()
@@ -218,7 +229,7 @@ impl ReleaseList {
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
-        let releases = run_paginated(releases_plan(&api_url, None)?, &self.request)?;
+        let releases = run_paginated(releases_plan(&api_url, None, None)?, &self.request)?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -240,9 +251,11 @@ impl ReleaseList {
         );
 
         // An unfiltered listing must walk ALL pages: `stop_at = None`.
-        let releases =
-            crate::backends::run_paginated_async(releases_plan(&api_url, None)?, &self.request)
-                .await?;
+        let releases = crate::backends::run_paginated_async(
+            releases_plan(&api_url, None, None)?,
+            &self.request,
+        )
+        .await?;
         let releases = match self.target {
             None => releases,
             Some(ref target) => releases
@@ -299,6 +312,15 @@ impl UpdateBuilder {
     /// Required. Set the repo name, used to build a gitea api url
     pub fn repo_name(&mut self, name: impl Into<String>) -> &mut Self {
         self.repo_name = Some(name.into());
+        self
+    }
+
+    /// Set the tag prefix used to derive a release version from its tag. Defaults to unset, which
+    /// trims a leading `v` (so `v1.2.3` and `1.2.3` both yield `1.2.3`). Set it to, e.g., `myapp-`
+    /// for a monorepo whose tags look like `myapp-1.2.3` (or `myapp-v1.2.3`); tags without the
+    /// prefix are then skipped from the listing rather than mis-parsed.
+    pub fn tag_prefix(&mut self, prefix: impl Into<String>) -> &mut Self {
+        self.common.tag_prefix = Some(prefix.into());
         self
     }
 
@@ -395,7 +417,10 @@ impl Update {
 impl ReleaseUpdate for Update {
     fn get_latest_release(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases = run_paginated(newest_plan(&self.releases_url())?, &self.common.request)?;
+        let releases = run_paginated(
+            newest_plan(&self.releases_url(), self.common.tag_prefix.as_deref())?,
+            &self.common.request,
+        )?;
         let release = releases
             .into_iter()
             .next()
@@ -406,14 +431,21 @@ impl ReleaseUpdate for Update {
     fn get_newer_releases(&self) -> Result<Releases> {
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated(
-            releases_plan(&self.releases_url(), Some(&current_version))?,
+            releases_plan(
+                &self.releases_url(),
+                Some(&current_version),
+                self.common.tag_prefix.as_deref(),
+            )?,
             &self.common.request,
         )?;
         Ok(Releases::new(releases, current_version))
     }
 
     fn get_release_version(&self, ver: &str) -> Result<Release> {
-        let releases = run_paginated(single_plan(self.tag_url(ver))?, &self.common.request)?;
+        let releases = run_paginated(
+            single_plan(self.tag_url(ver), self.common.tag_prefix.as_deref())?,
+            &self.common.request,
+        )?;
         releases
             .into_iter()
             .next()
@@ -451,13 +483,18 @@ impl_update_config_accessors!(Update, {
 /// regardless (a backport release -- older semver, newer creation date -- must not halt the walk
 /// and cause a genuinely newer release on a later page to be missed). When `None` the listing is
 /// unfiltered and every page is walked (used by `ReleaseList`).
-fn releases_plan(base_url: &str, stop_at: Option<&str>) -> Result<PageRequest<Release>> {
+fn releases_plan(
+    base_url: &str,
+    stop_at: Option<&str>,
+    tag_prefix: Option<&str>,
+) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
     let stop_at = stop_at.map(str::to_owned);
     Ok(release_array_page(
         first_page_url(base_url),
         headers,
         stop_at,
+        tag_prefix.map(str::to_owned),
     ))
 }
 
@@ -465,6 +502,7 @@ fn release_array_page(
     url: String,
     headers: HeaderMap,
     stop_at: Option<String>,
+    tag_prefix: Option<String>,
 ) -> PageRequest<Release> {
     PageRequest {
         url,
@@ -478,7 +516,7 @@ fn release_array_page(
                 })?;
             let mut items = Vec::new();
             for dto in dtos {
-                let release = match dto.into_release() {
+                let release = match dto.into_release(tag_prefix.as_deref()) {
                     Ok(release) => release,
                     // A non-semver tag (`nightly`, `latest`, a date tag) is not a release the
                     // updater can compare; skip it rather than failing the whole listing, so a
@@ -505,6 +543,7 @@ fn release_array_page(
                         next_url,
                         api_headers()?,
                         stop_at.clone(),
+                        tag_prefix.clone(),
                     ))
                 })
                 .transpose()?;
@@ -521,18 +560,19 @@ fn release_array_page(
 /// first element (newest-first order) is "latest". Fetches just the first page (no pagination).
 /// Entries with non-semver rolling tags (`nightly`, ...) are skipped like the full listing does,
 /// so "newest" is the first entry the updater can actually compare.
-fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
+fn newest_plan(base_url: &str, tag_prefix: Option<&str>) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
+    let tag_prefix = tag_prefix.map(str::to_owned);
     Ok(PageRequest {
         url: first_page_url(base_url),
         headers,
-        parse: Box::new(|body, _resp_headers| {
+        parse: Box::new(move |body, _resp_headers| {
             let dtos: Vec<ReleaseDto> =
                 serde_json::from_slice(body).map_err(|e| Error::InvalidResponse {
                     source: Box::new(e),
                 })?;
             for dto in dtos {
-                match dto.into_release() {
+                match dto.into_release(tag_prefix.as_deref()) {
                     Ok(release) => return Ok(Page::last(vec![release])),
                     Err(e @ Error::SemVer(_)) => {
                         log::debug!("self_update: skipping listed release: {e}");
@@ -546,16 +586,17 @@ fn newest_plan(base_url: &str) -> Result<PageRequest<Release>> {
 }
 
 /// Transport-free plan to fetch a single release *object* (the `.../releases/tags/{ver}` endpoint).
-fn single_plan(url: String) -> Result<PageRequest<Release>> {
+fn single_plan(url: String, tag_prefix: Option<&str>) -> Result<PageRequest<Release>> {
     let headers = api_headers()?;
+    let tag_prefix = tag_prefix.map(str::to_owned);
     Ok(PageRequest {
         url,
         headers,
-        parse: Box::new(|body, _resp_headers| {
+        parse: Box::new(move |body, _resp_headers| {
             // An unparseable body is `InvalidResponse`, matching the paginated listing parser.
             let dto: ReleaseDto =
                 serde_json::from_slice(body).map_err(crate::errors::Error::invalid_response)?;
-            Ok(Page::last(vec![dto.into_release()?]))
+            Ok(Page::last(vec![dto.into_release(tag_prefix.as_deref())?]))
         }),
     })
 }
@@ -565,8 +606,11 @@ impl crate::update::AsyncReleaseUpdate for Update {
     async fn get_latest_release_async(&self) -> Result<Releases> {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
-        let releases =
-            run_paginated_async(newest_plan(&self.releases_url())?, &self.common.request).await?;
+        let releases = run_paginated_async(
+            newest_plan(&self.releases_url(), self.common.tag_prefix.as_deref())?,
+            &self.common.request,
+        )
+        .await?;
         let release = releases
             .into_iter()
             .next()
@@ -578,7 +622,11 @@ impl crate::update::AsyncReleaseUpdate for Update {
         use crate::backends::run_paginated_async;
         let current_version = crate::update::UpdateConfig::current_version(self).to_owned();
         let releases = run_paginated_async(
-            releases_plan(&self.releases_url(), Some(&current_version))?,
+            releases_plan(
+                &self.releases_url(),
+                Some(&current_version),
+                self.common.tag_prefix.as_deref(),
+            )?,
             &self.common.request,
         )
         .await?;
@@ -587,8 +635,11 @@ impl crate::update::AsyncReleaseUpdate for Update {
 
     async fn get_release_version_async(&self, ver: &str) -> Result<Release> {
         use crate::backends::run_paginated_async;
-        let releases =
-            run_paginated_async(single_plan(self.tag_url(ver))?, &self.common.request).await?;
+        let releases = run_paginated_async(
+            single_plan(self.tag_url(ver), self.common.tag_prefix.as_deref())?,
+            &self.common.request,
+        )
+        .await?;
         releases
             .into_iter()
             .next()
@@ -622,15 +673,15 @@ mod tests {
         base_url: &str,
         req: &crate::backends::common::RequestConfig,
     ) -> crate::errors::Result<Vec<super::Release>> {
-        crate::backends::run_paginated_async(super::releases_plan(base_url, None)?, req).await
+        crate::backends::run_paginated_async(super::releases_plan(base_url, None, None)?, req).await
     }
 
     // The single-release endpoint (`.../releases/tags/{ver}`) surfaces an unparseable body as
     // `InvalidResponse`, matching the paginated listing parser (previously `Error::Json`).
     #[test]
     fn single_plan_parse_failure_is_invalid_response() {
-        let req =
-            super::single_plan("https://example.test/releases/tags/1.0.0".to_string()).unwrap();
+        let req = super::single_plan("https://example.test/releases/tags/1.0.0".to_string(), None)
+            .unwrap();
         let res = (req.parse)(b"not-json", &crate::http_client::HeaderMap::new());
         assert!(
             matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
@@ -646,6 +697,7 @@ mod tests {
             "https://example.test/releases".to_string(),
             crate::http_client::HeaderMap::new(),
             None,
+            None,
         );
         let body = releases_json(&["nightly", "v1.2.3", "v1.0.0"]);
         let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
@@ -657,11 +709,31 @@ mod tests {
         );
     }
 
+    // A configured `tag_prefix` derives the version from monorepo-style tags (`myapp-1.2.3`,
+    // `myapp-v1.3.0`); tags without the prefix are skipped rather than mis-parsed.
+    #[test]
+    fn listing_with_tag_prefix_parses_prefixed_tags_and_skips_others() {
+        let req = super::release_array_page(
+            "https://example.test/releases".to_string(),
+            crate::http_client::HeaderMap::new(),
+            None,
+            Some("myapp-".to_string()),
+        );
+        let body = releases_json(&["myapp-1.2.3", "otherapp-2.0.0", "myapp-v1.3.0", "1.0.0"]);
+        let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
+        let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
+        assert_eq!(
+            versions,
+            vec!["1.2.3", "1.3.0"],
+            "only `myapp-`-prefixed tags are parsed (with an optional inner `v`); the rest are skipped"
+        );
+    }
+
     // Gitea's "latest" is the listing's first entry; a rolling tag in that slot must be
     // skipped so "newest" is the first release the updater can actually compare.
     #[test]
     fn newest_plan_skips_non_semver_tags() {
-        let req = super::newest_plan("https://example.test/releases").unwrap();
+        let req = super::newest_plan("https://example.test/releases", None).unwrap();
         let body = releases_json(&["nightly", "v1.2.3", "v1.0.0"]);
         let page = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new()).unwrap();
         let versions: Vec<&str> = page.items.iter().map(|r| r.version()).collect();
@@ -671,7 +743,7 @@ mod tests {
     // With only non-semver tags there is nothing the updater can compare: NoReleaseFound.
     #[test]
     fn newest_plan_with_only_non_semver_tags_is_no_release_found() {
-        let req = super::newest_plan("https://example.test/releases").unwrap();
+        let req = super::newest_plan("https://example.test/releases", None).unwrap();
         let body = releases_json(&["nightly", "latest"]);
         let res = (req.parse)(body.as_bytes(), &crate::http_client::HeaderMap::new());
         assert!(
@@ -686,8 +758,11 @@ mod tests {
     // The single-release endpoint cannot skip: a pinned non-semver tag errors, naming the tag.
     #[test]
     fn single_plan_non_semver_tag_errors_naming_the_tag() {
-        let req =
-            super::single_plan("https://example.test/releases/tags/nightly".to_string()).unwrap();
+        let req = super::single_plan(
+            "https://example.test/releases/tags/nightly".to_string(),
+            None,
+        )
+        .unwrap();
         let res = (req.parse)(
             release_obj_json("nightly").as_bytes(),
             &crate::http_client::HeaderMap::new(),

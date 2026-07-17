@@ -17,6 +17,7 @@
 ARCHIVE_FEATURES = archive-tar \
                    archive-zip \
                    compression-tar-gz \
+                   compression-tar-xz \
                    compression-zip-deflate \
                    compression-zip-bzip2 \
                    signatures \

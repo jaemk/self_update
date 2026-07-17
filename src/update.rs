@@ -150,6 +150,7 @@ pub struct Release {
     pub(crate) version: Arc<str>,
     pub(crate) date: Arc<str>,
     pub(crate) body: Option<Arc<str>>,
+    pub(crate) release_notes_url: Option<Arc<str>>,
     pub(crate) assets: Vec<ReleaseAsset>,
 }
 
@@ -172,6 +173,14 @@ impl Release {
     /// The release body / notes, if any.
     pub fn body(&self) -> Option<&str> {
         self.body.as_deref()
+    }
+
+    /// A URL to the release notes / release page, if the backend provides one. The forge backends
+    /// (github, gitlab, gitea) fill it from the release's `html_url`; s3 has none. Shown in the
+    /// confirmation prompt when [`show_release_notes(true)`](crate::backends) is set, and readable
+    /// directly for a caller that wants to surface it itself.
+    pub fn release_notes_url(&self) -> Option<&str> {
+        self.release_notes_url.as_deref()
     }
 
     /// The release's downloadable assets.
@@ -238,6 +247,7 @@ pub struct ReleaseBuilder {
     version: Option<String>,
     date: Option<String>,
     body: Option<String>,
+    release_notes_url: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
 
@@ -273,6 +283,13 @@ impl ReleaseBuilder {
         self
     }
 
+    /// Set a URL to the release notes / release page (the forge backends fill this from the
+    /// release's `html_url`). Optional; unset means no notes URL is available.
+    pub fn release_notes_url(&mut self, url: impl Into<String>) -> &mut Self {
+        self.release_notes_url = Some(url.into());
+        self
+    }
+
     /// Add a single downloadable asset.
     pub fn asset(&mut self, asset: ReleaseAsset) -> &mut Self {
         self.assets.push(asset);
@@ -305,6 +322,7 @@ impl ReleaseBuilder {
             version: Arc::from(version),
             date: Arc::from(self.date.clone().unwrap_or_default()),
             body: self.body.clone().map(Arc::from),
+            release_notes_url: self.release_notes_url.clone().map(Arc::from),
             assets: self.assets.clone(),
         })
     }
@@ -738,6 +756,26 @@ pub(crate) mod sealed {
 /// bounded `R: ReleaseUpdate` they are in scope via the supertrait bound (also no import). It is
 /// only needed in scope (`use self_update::UpdateConfig;`) to call an accessor on a concrete
 /// backend `Update` value.
+/// How the "latest" update path chooses which release to install when several are newer than the
+/// current version.
+///
+/// Only affects the unpinned path (`update()` / `update_extended()` with no `release_tag`); a
+/// `release_tag(..)` fetch always installs exactly that tag. Set via `update_strategy(..)` on the
+/// builders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UpdateStrategy {
+    /// Prefer the newest release that is semver-compatible with the current version (no major
+    /// bump); fall back to the newest release overall when none is compatible. This is the default
+    /// and matches the pre-1.0 behavior: given `1.1.0, 1.1.1, 1.1.2, 2.0.0` from `1.1.1`, it picks
+    /// `1.1.2` (updating to `2.0.0` would take a second invocation once on a `2.x` line).
+    #[default]
+    Compatible,
+    /// Always select the newest release overall, even across an incompatible (major) version bump.
+    /// Given `1.1.0, 1.1.1, 1.1.2, 2.0.0` from `1.1.1`, it picks `2.0.0`.
+    Latest,
+}
+
 pub trait UpdateConfig: sealed::Sealed {
     /// Current version of binary being updated
     fn current_version(&self) -> &str;
@@ -771,6 +809,18 @@ pub trait UpdateConfig: sealed::Sealed {
 
     /// Flag indicating if the user shouldn't be prompted to confirm an update
     fn no_confirm(&self) -> bool;
+
+    /// Strategy for choosing which release the unpinned "latest" path installs (set via
+    /// `update_strategy`). Defaults to [`UpdateStrategy::Compatible`].
+    fn update_strategy(&self) -> UpdateStrategy {
+        UpdateStrategy::Compatible
+    }
+
+    /// Flag indicating whether the release notes URL (or body) should be shown in the confirmation
+    /// prompt (set via `show_release_notes`). Defaults to `false`.
+    fn show_release_notes(&self) -> bool {
+        false
+    }
 
     /// Message template to use if `show_download_progress` is set (see `indicatif::ProgressStyle`)
     #[cfg(feature = "progress-bar")]
@@ -927,7 +977,12 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
             None => {
                 print_flush(show_output, "Checking latest released version... ")?;
                 let releases = self.get_newer_releases()?;
-                match choose_latest_release(releases.into_vec(), current_version, show_output)? {
+                match choose_latest_release(
+                    releases.into_vec(),
+                    current_version,
+                    show_output,
+                    self.update_strategy(),
+                )? {
                     Some(release) => release,
                     None => return Ok(ReleaseStatus::UpToDate),
                 }
@@ -973,6 +1028,7 @@ fn choose_latest_release(
     releases: Vec<Release>,
     current_version: &str,
     show_output: bool,
+    strategy: UpdateStrategy,
 ) -> Result<Option<Release>> {
     // Only consider releases strictly newer than the current version. The built-in backends already
     // pre-filter this way, so this is a no-op for them; it matters for `backends::custom`, whose
@@ -989,11 +1045,16 @@ fn choose_latest_release(
     // release comparator (also used by `backends::s3::sort_newer`/`pick_latest`).
     releases.sort_by(|x, y| version::cmp_releases_newest_first(x.version(), y.version()));
 
-    // Filter to versions compatible with the current one.
-    let compatible_releases = releases
-        .iter()
-        .filter(|r| version::bump_is_compatible(current_version, r.version()).unwrap_or(false))
-        .collect::<Vec<_>>();
+    // Under `Latest`, install the newest release overall (ignoring semver compatibility). Under
+    // `Compatible` (default), prefer the newest semver-compatible release and only fall back to the
+    // newest overall when none is compatible.
+    let compatible_releases = match strategy {
+        UpdateStrategy::Latest => Vec::new(),
+        _ => releases
+            .iter()
+            .filter(|r| version::bump_is_compatible(current_version, r.version()).unwrap_or(false))
+            .collect::<Vec<_>>(),
+    };
 
     let release = if let Some(release) = compatible_releases.first() {
         println(
@@ -1058,7 +1119,7 @@ pub(crate) mod testing {
         releases: Vec<Release>,
         current_version: &str,
     ) -> Result<Option<Release>> {
-        choose_latest_release(releases, current_version, false)
+        choose_latest_release(releases, current_version, false, UpdateStrategy::Compatible)
     }
 
     /// Construct a [`Release`] with a raw (possibly non-semver) version string, bypassing
@@ -1071,6 +1132,7 @@ pub(crate) mod testing {
             version: Arc::from(version),
             date: Arc::from(""),
             body: None,
+            release_notes_url: None,
             assets: Vec::new(),
         }
     }
@@ -1143,6 +1205,13 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
             "  * New exe download url: {:?}",
             crate::errors::redact_url(target_asset.download_url())
         );
+        if u.show_release_notes() {
+            if let Some(url) = release.release_notes_url() {
+                println!("  * Release notes: {}", url);
+            } else if let Some(body) = release.body() {
+                println!("  * Release notes:\n{}", body);
+            }
+        }
         println!(
             "\nThe new release will be downloaded/extracted and the existing binary will be replaced."
         );
@@ -1406,7 +1475,12 @@ where
         None => {
             print_flush(show_output, "Checking latest released version... ")?;
             let releases = u.get_newer_releases_async().await?;
-            match choose_latest_release(releases.into_vec(), current_version, show_output)? {
+            match choose_latest_release(
+                releases.into_vec(),
+                current_version,
+                show_output,
+                u.update_strategy(),
+            )? {
                 Some(release) => release,
                 None => return Ok(ReleaseStatus::UpToDate),
             }
@@ -1499,11 +1573,42 @@ fn println(show_output: bool, msg: &str) {
     }
 }
 
+/// Verify a downloaded archive's embedded signature against a set of ed25519 verifying keys, the
+/// same check [`update()`](ReleaseUpdate::update) runs internally when `verifying_keys` are set.
+///
+/// This is exposed so a caller that stages a download itself (for example an installer that fetches
+/// a companion binary via [`Download`](crate::Download) before the main update loop exists) can run
+/// the identical verification without reimplementing it.
+///
+/// `keys` are raw 32-byte ed25519 public keys ([`VerifyingKey`](crate::VerifyingKey)); verification
+/// uses any-of semantics, passing as soon as one key validates a signature in the archive (so a
+/// key-rotation window can list both the old and new keys). Signatures are produced and read with
+/// [`zipsign`](zipsign_api), which supports `.tar.gz` and `.zip` archives only.
+///
+/// # Errors
+///
+/// - Returns `Ok(())` immediately when `keys` is empty (nothing to verify against).
+/// - [`Error::NoSignatures`](crate::errors::Error::NoSignatures) if the archive format is not one
+///   zipsign can carry a signature in (anything other than `.tar.gz` / `.zip`).
+/// - [`Error::Signature`](crate::errors::Error::Signature) if no key validates a signature.
+/// - [`Error::SignatureNonUTF8`](crate::errors::Error::SignatureNonUTF8) if the archive's file name
+///   is not UTF-8 (zipsign binds the signature to the file name).
+/// - [`Error::Io`](crate::errors::Error::Io) if the archive cannot be opened.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// const KEY: self_update::VerifyingKey = *include_bytes!("../release.pub");
+/// self_update::Download::from_url(url).download_to(&mut file)?;
+/// self_update::verify_signature("downloaded-1.2.3.tar.gz", &[KEY])?;
+/// ```
 #[cfg(feature = "signatures")]
-fn verify_signature(
-    archive_path: &std::path::Path,
-    keys: &[[u8; zipsign_api::PUBLIC_KEY_LENGTH]],
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
+pub fn verify_signature(
+    archive_path: impl AsRef<std::path::Path>,
+    keys: &[crate::VerifyingKey],
 ) -> crate::Result<()> {
+    let archive_path = archive_path.as_ref();
     if keys.is_empty() {
         return Ok(());
     }
@@ -1544,7 +1649,7 @@ fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseAsset, Releases, choose_latest_release, install_binary};
+    use super::{ReleaseAsset, Releases, UpdateStrategy, choose_latest_release, install_binary};
     use crate::Download;
     use crate::DynVerifyFn;
     use crate::errors::Result;
@@ -1681,6 +1786,23 @@ mod tests {
         let b = Release::builder().version("1.2.3").build().unwrap();
         assert_eq!(a.version(), b.version());
         assert_eq!(a.name(), b.name());
+    }
+
+    #[test]
+    fn release_builder_release_notes_url_roundtrips() {
+        // Set via the builder, read via the getter; unset stays None.
+        let with_url = Release::builder()
+            .version("1.2.3")
+            .release_notes_url("https://example.com/releases/v1.2.3")
+            .build()
+            .unwrap();
+        assert_eq!(
+            with_url.release_notes_url(),
+            Some("https://example.com/releases/v1.2.3")
+        );
+
+        let without = Release::builder().version("1.2.3").build().unwrap();
+        assert_eq!(without.release_notes_url(), None);
     }
 
     #[test]
@@ -2168,15 +2290,20 @@ mod tests {
     fn choose_latest_release_up_to_date_when_nothing_newer() {
         // No releases at all.
         assert!(
-            choose_latest_release(vec![], "1.0.0", false)
+            choose_latest_release(vec![], "1.0.0", false, UpdateStrategy::Compatible)
                 .unwrap()
                 .is_none()
         );
 
         // A source (e.g. a custom backend) that returns the current and older versions must be
         // treated as up-to-date — not re-install the current version. (Regression test.)
-        let chosen =
-            choose_latest_release(vec![rel("1.0.0"), rel("0.9.0")], "1.0.0", false).unwrap();
+        let chosen = choose_latest_release(
+            vec![rel("1.0.0"), rel("0.9.0")],
+            "1.0.0",
+            false,
+            UpdateStrategy::Compatible,
+        )
+        .unwrap();
         assert!(
             chosen.is_none(),
             "current/older releases must not be offered as an update"
@@ -2189,6 +2316,7 @@ mod tests {
             vec![rel("1.2.0"), rel("1.1.0"), rel("1.0.0")],
             "1.0.0",
             false,
+            UpdateStrategy::Compatible,
         )
         .unwrap()
         .expect("a compatible newer release is chosen");
@@ -2203,6 +2331,7 @@ mod tests {
             vec![rel("1.1.0"), rel("1.4.2"), rel("1.0.5"), rel("1.3.0")],
             "1.0.0",
             false,
+            UpdateStrategy::Compatible,
         )
         .unwrap()
         .expect("the newest compatible release is chosen regardless of input order");
@@ -2213,6 +2342,7 @@ mod tests {
             vec![rel("1.3.0"), rel("1.0.5"), rel("1.4.2"), rel("1.1.0")],
             "1.0.0",
             false,
+            UpdateStrategy::Compatible,
         )
         .unwrap()
         .expect("the newest compatible release is chosen regardless of input order");
@@ -2233,6 +2363,7 @@ mod tests {
             ],
             "1.0.0",
             false,
+            UpdateStrategy::Compatible,
         )
         .unwrap()
         .expect("the newest parseable compatible release is chosen");
@@ -2240,9 +2371,14 @@ mod tests {
 
         // Only junk versions -> nothing selectable -> up-to-date.
         assert!(
-            choose_latest_release(vec![rel("junk"), rel("garbage")], "1.0.0", false)
-                .unwrap()
-                .is_none()
+            choose_latest_release(
+                vec![rel("junk"), rel("garbage")],
+                "1.0.0",
+                false,
+                UpdateStrategy::Compatible,
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -2250,10 +2386,57 @@ mod tests {
     fn choose_latest_release_falls_back_to_incompatible_newer() {
         // Only a major bump is available: newer than current but not semver-compatible. It is still
         // offered (flagged "*NOT* compatible" in the messages), exercising the fallback branch.
-        let chosen = choose_latest_release(vec![rel("2.0.0")], "1.0.0", false)
-            .unwrap()
-            .expect("an incompatible-but-newer release is still offered");
+        let chosen = choose_latest_release(
+            vec![rel("2.0.0")],
+            "1.0.0",
+            false,
+            UpdateStrategy::Compatible,
+        )
+        .unwrap()
+        .expect("an incompatible-but-newer release is still offered");
         assert_eq!(chosen.version(), "2.0.0");
+    }
+
+    #[test]
+    fn choose_latest_release_compatible_prefers_compatible_over_newer_major() {
+        // Default `Compatible` strategy: with a newer compatible release AND a newer major both
+        // available, the compatible one wins (the #152 scenario: 1.1.x vs 2.0.0 from 1.1.1).
+        let releases = vec![rel("2.0.0"), rel("1.1.2"), rel("1.1.0")];
+        let chosen =
+            choose_latest_release(releases.clone(), "1.1.1", false, UpdateStrategy::Compatible)
+                .unwrap()
+                .expect("a newer compatible release is chosen");
+        assert_eq!(
+            chosen.version(),
+            "1.1.2",
+            "Compatible must prefer the newest semver-compatible release over a newer major"
+        );
+
+        // Same inputs under `Latest`: the newest overall wins, jumping the major.
+        let chosen = choose_latest_release(releases, "1.1.1", false, UpdateStrategy::Latest)
+            .unwrap()
+            .expect("the newest release overall is chosen");
+        assert_eq!(
+            chosen.version(),
+            "2.0.0",
+            "Latest must select the newest release overall, across a major bump"
+        );
+    }
+
+    #[test]
+    fn choose_latest_release_latest_still_up_to_date_when_nothing_newer() {
+        // `Latest` still respects the strictly-newer guard: nothing newer than current => up-to-date.
+        assert!(
+            choose_latest_release(
+                vec![rel("1.0.0"), rel("0.9.0")],
+                "1.0.0",
+                false,
+                UpdateStrategy::Latest,
+            )
+            .unwrap()
+            .is_none(),
+            "Latest must not re-install the current or an older release"
+        );
     }
 
     // --- Bound-narrowing compile locks (gap #3) -----------------------------------------------
@@ -3330,6 +3513,30 @@ mod tests {
         let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
 
         super::verify_signature(signed_file.path(), &[vkey])
+    }
+
+    /// The public crate-root `self_update::verify_signature` (exposed for callers that stage a
+    /// download themselves, e.g. an installer) verifies a signed archive, accepts a `VerifyingKey`
+    /// slice, and takes `impl AsRef<Path>` (here a `PathBuf`, not just `&Path`).
+    #[test]
+    #[cfg(all(
+        feature = "signatures",
+        feature = "archive-tar",
+        feature = "compression-tar-gz",
+    ))]
+    fn public_verify_signature_reexport_verifies_signed_archive() -> Result<()> {
+        let signing_key = zipsign_api::SigningKey::from_bytes(&[7u8; 32]);
+        let vkey: crate::VerifyingKey = signing_key.verifying_key().to_bytes();
+
+        let unsigned = make_tar_gz()?;
+        let signed_file = sign_tar_gz(&unsigned, &[signing_key])?;
+
+        // Owned PathBuf argument exercises the `impl AsRef<Path>` signature.
+        let owned: std::path::PathBuf = signed_file.path().into();
+        crate::verify_signature(owned, &[vkey])?;
+
+        // An empty key slice is a no-op success (nothing to verify against).
+        crate::verify_signature(signed_file.path(), &[])
     }
 
     /// An archive dual-signed with two keys verifies independently against each key.

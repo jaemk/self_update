@@ -3,8 +3,38 @@
 ## [unreleased]
 
 ### Added
+- `compression-tar-xz` feature: decode `.tar.xz` / `.txz` archives and plain `.xz` single-file
+  assets (pure-Rust `lzma-rs`, no C `liblzma` dependency, so it cross-compiles like the rest of the
+  default stack). Opt-in, mirroring `compression-tar-gz`. Adds `Compression::Xz`.
+  ([#143](https://github.com/jaemk/self_update/issues/143))
+- `self_update::verify_signature(archive_path, keys)`: run the same embedded-signature check
+  `update()` performs, standalone, for a caller that stages a download itself (e.g. an installer
+  fetching a companion binary before the update loop exists). Takes `impl AsRef<Path>` and a
+  `&[VerifyingKey]` slice; any-of key semantics, `.tar.gz` / `.zip` only (`signatures` feature).
+  ([#150](https://github.com/jaemk/self_update/issues/150))
+- `native-tls-vendored` feature: build OpenSSL from source and link it statically, for targets
+  where a usable system OpenSSL is awkward (musl, some cross-compiles). Implies `native-tls`;
+  applies to the reqwest client. ([#108](https://github.com/jaemk/self_update/issues/108))
+- `UpdateStrategy` and the `update_strategy(..)` builder setter: control which release the unpinned
+  "latest" path installs when several are newer. `Compatible` (default) prefers the newest
+  semver-compatible release, falling back to the newest overall; `Latest` always selects the newest
+  release, even across a major bump. ([#152](https://github.com/jaemk/self_update/issues/152))
+- `Release::release_notes_url()` and `ReleaseBuilder::release_notes_url(..)`: the release page URL,
+  filled by the github/gitlab/gitea backends from the release's `html_url` (`_links.self` for
+  gitlab); `None` for s3. The `show_release_notes(bool)` builder setter shows it (or the release
+  body when no URL is available) in the confirmation prompt.
+  ([#148](https://github.com/jaemk/self_update/issues/148))
+- `tag_prefix(..)` on the github/gitlab/gitea `Update` builders: derive the version from a
+  monorepo-style tag such as `myapp-1.2.3` (or `myapp-v1.2.3`). Defaults to unset, which trims a
+  leading `v` as before; when set, tags without the prefix are skipped from the listing rather than
+  mis-parsed. ([#76](https://github.com/jaemk/self_update/issues/76))
 
 ### Changed
+- A recognized-but-unsupported compression extension now fails loudly instead of silently
+  installing the still-compressed bytes as the binary: a `.tar.xz` / `.txz` / `.xz` asset without
+  the `compression-tar-xz` feature returns `Error::CompressionNotEnabled("xz")` (matching the
+  existing `.gz` handling), rather than writing the compressed archive to the install path.
+  ([#143](https://github.com/jaemk/self_update/issues/143))
 
 ### Removed
 

@@ -1978,6 +1978,7 @@ mod tests {
             version: "".into(),
             date: "".into(),
             body: None,
+            release_notes_url: None,
             assets: Vec::new(),
         };
         super::add_to_releases_list(&mut releases, empty_name);

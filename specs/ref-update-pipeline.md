@@ -42,8 +42,10 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
    Otherwise fetch the candidate list via `get_newer_releases()` and run
    `choose_latest_release`, which: filters to releases strictly newer
    than the current version (`bump_is_greater`), sorts them semver-descending so selection is
-   order-independent, prefers the newest semver-*compatible* release, else falls back to the
-   newest available (flagged "*NOT* compatible"), else returns `Ok(None)` => `UpToDate`
+   order-independent, then applies the `update_strategy()`: under `UpdateStrategy::Compatible`
+   (default) it prefers the newest semver-*compatible* release and falls back to the newest
+   available (flagged "*NOT* compatible"); under `UpdateStrategy::Latest` it always takes the
+   newest available, even across a major bump. Empty candidate list => `Ok(None)` => `UpToDate`
    (`update.rs:640-711`). Unparseable versions are dropped by the leading
    `.unwrap_or(false)` filter and never reach the comparator.
 3. `resolve_and_confirm` (`update.rs:716`) selects the asset: a custom `asset_matcher()` closure
@@ -73,12 +75,16 @@ binary path comes from `bin_path_in_archive()` with `{{ version }}`, `{{ target 
 `Extract::from_source(archive).extract_file(tmpdir, bin_path)` (`update.rs:802`). Archive kind
 is detected from the file extension by `detect_archive` (`lib.rs:588`) unless overridden via
 `Extract::archive`: `.zip` => `Zip`; `.tar` => `Tar(None)`; `.tgz` and `.tar.gz` =>
-`Tar(Some(Gz))`; a bare `.gz` => `Plain(Some(Gz))`; anything else => `Plain(None)`. A kind
-whose feature is not enabled yields `Error::ArchiveNotEnabled` (`lib.rs:602`). `ArchiveKind`
-(`lib.rs:574`) and `Compression` (`lib.rs:584`, only `Gz`) are `#[non_exhaustive]`; the `Tar`
-and `Zip` variants are feature-gated on `archive-tar` / `archive-zip`. `Plain` files are
-copied (gz-decoded if `compression-tar-gz`), `Tar` is unpacked via the `tar` crate, `Zip` via
-the `zip` crate (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
+`Tar(Some(Gz))`; a bare `.gz` => `Plain(Some(Gz))`; `.txz` and `.tar.xz` => `Tar(Some(Xz))`;
+a bare `.xz` => `Plain(Some(Xz))`; anything else => `Plain(None)`. A kind whose archive
+feature is not enabled yields `Error::ArchiveNotEnabled`, and a recognized compression whose
+codec feature is off (a `.gz` without `compression-tar-gz`, a `.xz` without
+`compression-tar-xz`) yields `Error::CompressionNotEnabled` rather than installing the still
+-compressed bytes (`lib.rs:602`). `ArchiveKind` (`lib.rs:574`) and `Compression` (`Gz`, `Xz`)
+are `#[non_exhaustive]`; the `Tar` and `Zip` variants are feature-gated on `archive-tar` /
+`archive-zip`. `Plain` files are copied (gz/xz-decoded when the matching codec feature is on),
+`Tar` is unpacked via the `tar` crate over the decoded stream, `Zip` via the `zip` crate
+(`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
 (`update.rs:803`).
 
 ### Verify ordering
@@ -181,7 +187,8 @@ via `into_version_status`.
   arguments take `impl AsRef<Path>` (as do `Move` / `MoveAll`), with no lifetime
   parameter on the types.
 - `ArchiveKind` (`#[non_exhaustive]`): `Plain(Option<Compression>)`, `Tar(...)` (feature
-  `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`.
+  `archive-tar`), `Zip` (feature `archive-zip`). `Compression` (`#[non_exhaustive]`): `Gz`
+  (feature `compression-tar-gz`), `Xz` (feature `compression-tar-xz`).
 - `Move`: `from_source`, `replace_using_temp`, `to_dest`.
 - `MoveAll` (`#[must_use]`, `#[non_exhaustive]`): `from_temp`, `add`, `commit`.
 

@@ -56,6 +56,7 @@ clients and multiple TLS backends may coexist (reqwest is preferred when both ar
 * `ureq`: use the [`ureq`](https://docs.rs/ureq) HTTP client, either alongside reqwest or as a drop-in replacement (set `default-features = false` to drop reqwest);
 * `rustls` (default): [pure-Rust TLS](https://github.com/rustls/rustls); does _not_ support 32-bit macOS;
 * `native-tls`: opt-in native/OpenSSL TLS for the selected client;
+* `native-tls-vendored`: build OpenSSL from source and link it statically (for targets where a usable system OpenSSL is awkward, e.g. musl or some cross-compiles); implies `native-tls`, applies to the reqwest client;
 
 Note that enabling a client with neither TLS feature compiles (plain-`http` release hosts remain
 reachable) but any `https` URL then fails at request time with a transport error; enable `rustls`
@@ -75,7 +76,8 @@ The following are opt-in; activate the one(s) your release files need:
 * `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
 * `archive-tar`: support for _tar_ archive format;
 * `archive-zip`: support for _zip_ archive format;
-* `compression-tar-gz`: support for _gzip_ compression;
+* `compression-tar-gz`: support for _gzip_ compression (`.tar.gz`, `.tgz`, plain `.gz`);
+* `compression-tar-xz`: support for _xz_ compression (`.tar.xz`, `.txz`, plain `.xz`); pure-Rust, no C `liblzma` dependency;
 * `compression-zip-deflate`: support for _zip_'s _deflate_ compression format;
 * `compression-zip-bzip2`: support for _zip_'s _bzip2_ compression format;
 * `signatures`: use [zipsign](https://github.com/Kijewski/zipsign) to verify `.zip` and `.tar.gz` artifacts. Artifacts are assumed to have been signed using zipsign;

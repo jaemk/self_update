@@ -300,6 +300,12 @@ macro_rules! impl_update_config_accessors {
         fn no_confirm(&self) -> bool {
             self.common.no_confirm
         }
+        fn update_strategy(&self) -> crate::update::UpdateStrategy {
+            self.common.update_strategy
+        }
+        fn show_release_notes(&self) -> bool {
+            self.common.show_release_notes
+        }
         #[cfg(feature = "progress-bar")]
         fn progress_template(&self) -> &str {
             &self.common.progress_template
@@ -614,6 +620,28 @@ macro_rules! impl_common_builder_setters {
         /// requires `show_output(false)` as well.
         pub fn no_confirm(&mut self, no_confirm: bool) -> &mut Self {
             self.common.no_confirm = no_confirm;
+            self
+        }
+
+        /// Choose which release the unpinned "latest" path installs when several are newer than the
+        /// current version. Defaults to [`UpdateStrategy::Compatible`](crate::UpdateStrategy::Compatible)
+        /// (prefer the newest semver-compatible release); pass
+        /// [`UpdateStrategy::Latest`](crate::UpdateStrategy::Latest) to always jump to the newest
+        /// release, even across an incompatible (major) bump. No effect when a `release_tag(..)` is
+        /// pinned.
+        pub fn update_strategy(&mut self, strategy: crate::update::UpdateStrategy) -> &mut Self {
+            self.common.update_strategy = strategy;
+            self
+        }
+
+        /// Show the release notes in the confirmation prompt (defaults to `false`). When enabled,
+        /// the release status block includes the release notes URL if the backend provides one
+        /// (github/gitlab/gitea fill it from the release page; see
+        /// [`Release::release_notes_url`](crate::Release::release_notes_url)), otherwise the release
+        /// body if present. No effect when `no_confirm` and `show_output` are both off (nothing is
+        /// printed).
+        pub fn show_release_notes(&mut self, show: bool) -> &mut Self {
+            self.common.show_release_notes = show;
             self
         }
 
