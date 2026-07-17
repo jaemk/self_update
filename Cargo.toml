@@ -31,6 +31,7 @@ features = [
   "github",
   "gitlab",
   "gitea",
+  "manifest",
   "s3",
 ]
 rustdoc-args = ["--cfg", "docsrs"]
@@ -91,6 +92,9 @@ progress-bar = ["dep:indicatif"]
 github = []
 gitlab = []
 gitea = []
+# Service-agnostic backend: update from a static JSON release manifest served over HTTP(S). Uses
+# the already-present serde/serde_json deps, so it pulls in nothing new.
+manifest = []
 s3 = ["dep:quick-xml"]
 
 # Async update API (tokio-only, reqwest-only). Adds `*_async` verbs alongside the unchanged
@@ -130,6 +134,10 @@ required-features = ["gitea"]
 [[example]]
 name = "s3"
 required-features = ["s3"]
+
+[[example]]
+name = "manifest"
+required-features = ["manifest"]
 
 [[example]]
 name = "embedded_key"

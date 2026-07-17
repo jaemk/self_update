@@ -24,16 +24,16 @@ ARCHIVE_FEATURES = archive-tar \
                    checksums \
                    s3-auth
 # Full feature set for the default `reqwest` client:
-REQWEST_FEATURES = github gitlab gitea s3 $(ARCHIVE_FEATURES)
+REQWEST_FEATURES = github gitlab gitea manifest s3 $(ARCHIVE_FEATURES)
 # Full feature set for the `ureq` client (needs `--no-default-features`):
-UREQ_FEATURES    = ureq native-tls github gitlab gitea s3 $(ARCHIVE_FEATURES)
+UREQ_FEATURES    = ureq native-tls github gitlab gitea manifest s3 $(ARCHIVE_FEATURES)
 # Full reqwest feature set plus the async API (reqwest-only):
-ASYNC_FEATURES   = async github gitlab gitea s3 $(ARCHIVE_FEATURES)
+ASYNC_FEATURES   = async github gitlab gitea manifest s3 $(ARCHIVE_FEATURES)
 
 # The backends, one runnable example each. NOTE: unlike a typical example,
 # running one performs a REAL self-update (network + replaces the binary), so
 # the `examples` goals BUILD them rather than run them.
-SELF_UPDATE_EXAMPLES = github gitlab gitea s3 custom embedded_key
+SELF_UPDATE_EXAMPLES = github gitlab gitea manifest s3 custom embedded_key
 SELF_UPDATE_EXAMPLE_TARGETS = $(addprefix examples/, $(SELF_UPDATE_EXAMPLES))
 
 EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)

@@ -8,9 +8,10 @@
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
-Supported backends: **GitHub**, **GitLab**, **Gitea**, and **S3** (Amazon S3, Google GCS,
-DigitalOcean Spaces, or any S3-compatible endpoint). Each exposes the same `Update`
-(configure -> build -> update) and `ReleaseList` builder API.
+Supported backends: **GitHub**, **GitLab**, **Gitea**, **S3** (Amazon S3, Google GCS,
+DigitalOcean Spaces, or any S3-compatible endpoint), and **Manifest** (any static file server).
+The forge and S3 backends each expose a `ReleaseList` builder alongside the `Update`
+(configure -> build -> update) API; the manifest backend exposes `Update` only.
 
 ## Quick start
 
@@ -78,6 +79,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `gitea`: the Gitea Releases backend;
 * `s3`: the S3-compatible backend (Amazon S3, GCS, DigitalOcean Spaces, etc.);
 * `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
+* `manifest`: the static-file manifest backend; fetches releases from a `manifest.json` served by any HTTP endpoint; no new dependencies;
 * `archive-tar`: support for _tar_ archive format;
 * `archive-zip`: support for _zip_ archive format;
 * `compression-tar-gz`: support for _gzip_ compression (`.tar.gz`, `.tgz`, plain `.gz`);
@@ -88,7 +90,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `checksums`: verify a downloaded artifact against a SHA-256/SHA-512 checksum before installing it -- automatically against the digest github publishes per release asset, and/or against a known checksum you pass in (e.g. from a `SHA256SUMS` file); see [Checksum verification](#checksum-verification) below;
 * `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest serves the async path, and the sync API prefers reqwest when both are present); see [Async](#async) below.
 
-`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab` and `gitea` each require their own feature.
+`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab`, `gitea`, and `manifest` each require their own feature.
 
 ### Example
 
@@ -126,6 +128,27 @@ fn update() -> Result<(), Box<dyn ::std::error::Error>> {
         .build()?
         .update()?;
     println!("S3 Update status: `{}`!", status.version());
+    Ok(())
+}
+```
+
+The `manifest` backend (`manifest` feature) serves releases from a `manifest.json` file hosted
+on any static file server. The tool author publishes the manifest at a stable URL; assets may be
+absolute URLs or relative paths resolved against that URL. Asset `digest` fields (`sha256:<hex>`)
+plug into the existing checksum verification path when the `checksums` feature is on. See
+`specs/ref-manifest-backend.md` for the full schema.
+
+```rust
+use self_update::cargo_crate_version;
+
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::manifest::Update::configure()
+        .manifest_url("https://example.net/releases/manifest.json")
+        .bin_name("app")
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("Manifest update status: `{}`!", status.version());
     Ok(())
 }
 ```
@@ -364,13 +387,18 @@ so they are reached through their backend modules rather than re-exported at the
 * `backends::gitea::ReleaseList`
 * `backends::s3::ReleaseList`
 
+The `manifest` backend has no separate `ReleaseList` struct. Its `ManifestSource` is a
+`ReleaseSource` implementation that can be used directly, or listing can be driven through the
+inherent verbs (`get_latest_release`, `get_newer_releases`, `is_update_available`) on a built
+`manifest::Update`.
+
 The custom backend has no `ReleaseList` by design: listing is performed entirely by your
 `ReleaseSource` (or `AsyncReleaseSource`) implementation, which already returns
 `Release` values directly.
 
 ### Custom backends
 
-To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`) don't cover —
+To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`, `manifest`) don't cover —
 another forge, a private artifact registry, a plain HTTP directory — implement the
 `ReleaseSource` trait and drive a full update through the `backends::custom` backend, which reuses
 the crate's compare → select-asset → download → verify → extract → install flow. Only
