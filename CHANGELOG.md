@@ -28,6 +28,14 @@
   monorepo-style tag such as `myapp-1.2.3` (or `myapp-v1.2.3`). Defaults to unset, which trims a
   leading `v` as before; when set, tags without the prefix are skipped from the listing rather than
   mis-parsed. ([#76](https://github.com/jaemk/self_update/issues/76))
+- `asset_key_pattern(..)` on the s3 `Update`/`ReleaseList` builders: a custom regex for deriving
+  `(name, version)` from object keys, replacing the built-in matcher whose version group only
+  captures a `major.minor.patch` triple. Lets a pre-release key such as
+  `mybin-0.1.2-beta-x86_64-unknown-linux-gnu` parse as `0.1.2-beta` instead of `0.1.2`. The
+  pattern must define `name` and `version` named capture groups and is validated at `build()`
+  (`Error::InvalidAssetKeyPattern`); a captured version that does not parse as semver skips the
+  key. Unset keeps the existing matcher unchanged.
+  ([#61](https://github.com/jaemk/self_update/issues/61))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently

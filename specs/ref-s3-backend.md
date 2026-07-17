@@ -23,8 +23,9 @@ Two builders, each reached through a `configure()` entry point:
   `async` feature, `ReleaseList::fetch_async` (`s3.rs:282`). The result is a bare listing
   (`current_version()` is `None`); recover the `Vec<Release>` with `into_vec()`.
   `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
-  `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`, and (under `s3-auth`)
-  `access_key` and `signature_ttl`; plus the shared `request_config_setters!(request)`.
+  `asset_prefix`, `asset_key_pattern`, `region`, `endpoint`, `filter_target`, `max_keys`, and
+  (under `s3-auth`) `access_key` and `signature_ttl`; plus the shared
+  `request_config_setters!(request)`.
   There is **no** `auth_token` setter on this builder (the deprecated no-op was removed);
   the credential setter is `access_key`.
 - `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
@@ -32,7 +33,7 @@ Two builders, each reached through a `configure()` entry point:
   `build` (`s3.rs:433`) and `build_async` (under `async`, `s3.rs:442`) both return
   the concrete `Update` (which is `Send` and exposes the update verbs as inherent
   methods, so no trait import is needed). Backend setters mirror the list builder
-  (`endpoint`, `bucket_name`, `asset_prefix`, `region`, `access_key`); the common
+  (`endpoint`, `bucket_name`, `asset_prefix`, `asset_key_pattern`, `region`, `access_key`); the common
   setters come from `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`).
   As on the list builder, there is **no** `auth_token` setter (the deprecated shim was
   removed); use `access_key`.
@@ -119,12 +120,26 @@ with their assets concatenated (`s3.rs:923`); otherwise it pushes a new release.
 
 ### Version derivation
 
-A single case-insensitive regex parses object keys (`s3.rs:834`):
+By default a single case-insensitive regex parses object keys (`ASSET_KEY_REGEX`):
 `(?i)(?P<prefix>.*/)*(?P<name>.+)-[v]{0,1}(?P<version>\d+\.\d+\.\d+)-.+`.
 The key must contain a `name-[v]<major>.<minor>.<patch>-<suffix>` shape: `name`
 becomes the release name and the dotted triple becomes the version, with any
-leading `v` stripped (`s3.rs:874`). Keys lacking this shape produce no release.
-Regex construction failure surfaces as `Error::InvalidResponse` (`s3.rs:836`).
+leading `v` stripped. Keys lacking this shape produce no release. The default
+version group captures only the `major.minor.patch` triple, so a pre-release key
+like `mybin-0.1.2-beta-x86_64-...` parses lossily as `0.1.2` (#61).
+
+`asset_key_pattern(impl Into<String>)` on both builders replaces the default
+matcher with a user-supplied regex tuned to the bucket's key layout (e.g. one
+whose `version` group admits a pre-release segment, so `0.1.2-beta` /
+`0.1.2-beta.1` round-trip). The pattern must define `name` and `version` named
+capture groups; `compile_asset_key_pattern` compiles and validates it at
+`build()`, surfacing a pattern that does not compile or lacks a required group as
+`Error::InvalidAssetKeyPattern` (a `#[non_exhaustive]` variant gated on the `s3`
+feature, `Display` prefix "ConfigError:", underlying error chained via
+`source()`). At parse time a custom pattern's captured version (after the same
+leading-`v` trim) must parse as semver or the key is skipped like a non-matching
+key; the default pattern is exempt from that check since its version group only
+matches a numeric triple. When unset, behavior is unchanged.
 
 `ReleaseUpdate` selection helpers operate on the parsed list: `pick_latest`
 (`s3.rs:498`) picks the highest version (ignoring unparseable ones, erroring
@@ -184,9 +199,9 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
   `S3DualStack`, `GCS`, `DigitalOceanSpaces`, `Generic(String)`; plus
   `From<&str>` / `From<String>` -> `Generic`.
 - `s3::ReleaseList`, `s3::ReleaseListBuilder` (setters: `bucket_name`,
-  `asset_prefix`, `region`, `endpoint`, `filter_target`, `max_keys`,
-  `access_key` / `signature_ttl` [s3-auth], request-config setters, `build`);
-  `ReleaseList::fetch` and `fetch_async` [async].
+  `asset_prefix`, `asset_key_pattern`, `region`, `endpoint`, `filter_target`,
+  `max_keys`, `access_key` / `signature_ttl` [s3-auth], request-config setters,
+  `build`); `ReleaseList::fetch` and `fetch_async` [async].
 - `s3::UpdateBuilder`, `s3::Update` (`#[non_exhaustive]`); `Update::configure`,
   `build` -> `Update`, `build_async` -> `Update` [async]. `Update` is `Send` with
   the inherent verbs (`update`, `update_extended`, `get_latest_release`,
@@ -206,8 +221,13 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
   `s3-auth` each continuation URL is freshly signed; `signature_ttl` sets the `X-Amz-Expires`.
 - `asset_prefix` appended as `&prefix=<value>`; absent when unset.
 - Asset `name` is the key's filename component, not the full key path.
-- Version regex requires a `\d+\.\d+\.\d+` triple; leading `v` stripped; keys not
-  matching produce no release.
+- Default version regex requires a `\d+\.\d+\.\d+` triple; leading `v` stripped;
+  keys not matching produce no release. A pre-release key parses lossily as the
+  bare triple (`0.1.2-beta` -> `0.1.2`); that default is pinned.
+- `asset_key_pattern` replaces the default matcher on both builders; it must
+  define `name` and `version` named groups, is validated at `build()`
+  (`Error::InvalidAssetKeyPattern`, source chained), and a custom capture that is
+  not semver (after the leading-`v` trim) skips the key.
 - Releases with the same `name`+`version` merge their assets; empty name/version
   dropped.
 - Non-2xx listing response is an `Err`, never `Ok` from the error body.
@@ -222,7 +242,11 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 
 In-module tests (`s3.rs:938`): `parse_s3_response` cases (single/multi asset,
 v-prefix strip, multiple releases, non-matching-key skip, path-stripped filename,
-malformed-XML error, empty body); `add_to_releases_list` empty-name/version drop;
+malformed-XML error, empty body); custom `asset_key_pattern` cases (pre-release
+kept and merged, non-semver capture skipped, default lossy pre-release pinned,
+bad-pattern / missing-group `build()` errors on both builders, end-to-end
+threading through `Update::get_latest_release` and `ReleaseList::fetch` over the
+loopback stub); `add_to_releases_list` empty-name/version drop;
 loopback-TCP stub tests for the sync and async `ReleaseUpdate` fetch methods
 (`get_latest_release`, `get_newer_releases`, `get_release_version`,
 `is_update_available`, multi-asset merge); the non-2xx error contract
