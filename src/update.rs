@@ -798,6 +798,12 @@ pub trait UpdateConfig: sealed::Sealed {
     /// Installation path for the binary being updated
     fn bin_install_path(&self) -> &std::path::Path;
 
+    /// Whether to run the opt-in preflight writability probe of `bin_install_path` before
+    /// downloading (set via `check_install_path_writable`). Defaults to `false`.
+    fn check_install_path_writable(&self) -> bool {
+        false
+    }
+
     /// Path of the binary to be extracted from release package
     fn bin_path_in_archive(&self) -> &str;
 
@@ -994,6 +1000,11 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
         };
 
         let target_asset = resolve_and_confirm(self, &release)?;
+
+        // Opt-in preflight: bail before downloading if the install path is definitely not writable.
+        if self.check_install_path_writable() {
+            probe_install_path_writable(self.bin_install_path())?;
+        }
 
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
@@ -1493,6 +1504,12 @@ where
 
     let target_asset = resolve_and_confirm(u, &release)?;
 
+    // Opt-in preflight: bail before downloading if the install path is definitely not writable.
+    // Shares the sync probe for exact parity with `update_extended`.
+    if u.check_install_path_writable() {
+        probe_install_path_writable(u.bin_install_path())?;
+    }
+
     let tmp_archive_dir = tempfile::TempDir::new()?;
     let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
     let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -1538,12 +1555,81 @@ fn install_binary(
         })?;
     }
     let current_exe = std::env::current_exe()?;
+    // Only the two install-step writes are wrapped with path context (not `current_exe()` or the
+    // verify hook above): a permission failure here becomes `InstallPathNotWritable` naming the
+    // path, and any other IO error is rewrapped so the path shows up while the `ErrorKind` stays
+    // inspectable. This annotation is always on, independent of the opt-in preflight probe.
     if same_file(bin_install_path, &current_exe) {
-        self_replace::self_replace(new_exe)?;
+        self_replace::self_replace(new_exe)
+            .map_err(|e| map_install_io_error(e, bin_install_path))?;
     } else {
-        Move::from_source(new_exe).to_dest(bin_install_path)?;
+        Move::from_source(new_exe)
+            .to_dest(bin_install_path)
+            .map_err(|e| match e {
+                Error::Io(io) => map_install_io_error(io, bin_install_path),
+                other => other,
+            })?;
     }
     Ok(())
+}
+
+/// Map an IO error from an install-step write into the crate error, always naming the install path.
+///
+/// A `PermissionDenied` becomes [`Error::InstallPathNotWritable`] carrying the path; any other kind
+/// is rewrapped as [`Error::Io`] whose message names the path (`"installing to {path}: {orig}"`)
+/// while preserving the original [`std::io::ErrorKind`] so callers can still inspect it. Non-permission
+/// failures (e.g. a full disk) are deliberately NOT reclassified as `InstallPathNotWritable`.
+fn map_install_io_error(e: std::io::Error, bin_install_path: &std::path::Path) -> Error {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        Error::InstallPathNotWritable {
+            path: bin_install_path.to_path_buf(),
+        }
+    } else {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("installing to {}: {}", bin_install_path.display(), e),
+        ))
+    }
+}
+
+/// Best-effort preflight probe of whether `bin_install_path` can be written, run before any
+/// download when `check_install_path_writable` is set.
+///
+/// Filesystem-only and conservative. If the path already exists, probe the file by opening it for
+/// append; otherwise probe its parent directory by creating and immediately dropping a temporary
+/// sibling (a `.self_update_writecheck` prefix). ONLY a definite
+/// [`PermissionDenied`](std::io::ErrorKind::PermissionDenied) maps to
+/// [`Error::InstallPathNotWritable`]; success or ANY other error kind (a missing parent, an unusual
+/// filesystem, etc.) returns `Ok(())` so the update proceeds and the real install step surfaces the
+/// outcome. The create/delete probe is the honest test under Windows ACLs too, so no `cfg` split is
+/// needed.
+pub(crate) fn probe_install_path_writable(bin_install_path: &std::path::Path) -> Result<()> {
+    let probe: std::io::Result<()> = if bin_install_path.exists() {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(bin_install_path)
+            .map(|_| ())
+    } else {
+        // `parent()` is `Some("")` for a bare file name; treat that (and `None`) as the CWD.
+        let parent = match bin_install_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        };
+        tempfile::Builder::new()
+            .prefix(".self_update_writecheck")
+            .tempfile_in(parent)
+            .map(|_| ())
+    };
+    match probe {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(Error::InstallPathNotWritable {
+                path: bin_install_path.to_path_buf(),
+            })
+        }
+        // Indeterminate (missing parent, weird fs, etc.): proceed and let the real op surface it.
+        Err(_) => Ok(()),
+    }
 }
 
 /// Whether two paths refer to the same file. Compares canonicalized paths (resolving symlinks and
@@ -1652,6 +1738,7 @@ mod tests {
     use super::{ReleaseAsset, Releases, UpdateStrategy, choose_latest_release, install_binary};
     use crate::Download;
     use crate::DynVerifyFn;
+    use crate::errors::Error;
     use crate::errors::Result;
     use crate::update::Release;
 
@@ -2730,6 +2817,114 @@ mod tests {
             "binary is installed when verification passes"
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"new binary");
+    }
+
+    // Installing into a read-only (0555) directory fails with a permission error at the move step;
+    // `install_binary` must annotate it as `InstallPathNotWritable` naming the install path, not
+    // leak a bare `Io(Permission denied)`. Pins the always-on install-error path context.
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_maps_permission_denied_to_install_path_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+
+        let ro_dir = dir.path().join("ro");
+        std::fs::create_dir(&ro_dir).unwrap();
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let dest = ro_dir.join("installed");
+
+        let res = install_binary(&new_exe, &dest, None);
+        // Restore write perms so the tempdir can be cleaned up regardless of the assertion outcome.
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = res.expect_err("installing into a 0555 dir must fail");
+        match err {
+            Error::InstallPathNotWritable { path } => {
+                assert_eq!(
+                    path, dest,
+                    "InstallPathNotWritable must carry the exact install path"
+                );
+            }
+            other => panic!("expected Error::InstallPathNotWritable, got {:?}", other),
+        }
+    }
+
+    // A non-permission install failure (here: the destination's parent directory does not exist,
+    // so the move fails `NotFound`) must NOT be reclassified as `InstallPathNotWritable`; it stays
+    // an `Error::Io` whose message names the install path and whose `ErrorKind` is preserved.
+    #[test]
+    fn install_binary_wraps_non_permission_io_error_with_path_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_exe = dir.path().join("new");
+        std::fs::write(&new_exe, b"new binary").unwrap();
+        // Parent directory intentionally absent -> rename fails with NotFound, not PermissionDenied.
+        let dest = dir.path().join("no-such-dir").join("installed");
+
+        let err = install_binary(&new_exe, &dest, None)
+            .expect_err("moving into a missing parent dir must fail");
+        match err {
+            Error::Io(io) => {
+                assert_ne!(
+                    io.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "a NotFound failure must not be reported as permission denied"
+                );
+                let msg = io.to_string();
+                assert!(
+                    msg.contains(&dest.display().to_string()),
+                    "the rewrapped Io error must name the install path, got: {msg}"
+                );
+            }
+            other => panic!(
+                "a non-permission failure must stay Error::Io, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // The preflight probe returns `Ok(())` for a writable directory (a not-yet-existing target
+    // whose parent is writable: the temp-sibling create/delete succeeds).
+    #[test]
+    fn probe_install_path_writable_ok_for_writable_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+        super::probe_install_path_writable(&target).expect("a writable parent dir must probe Ok");
+    }
+
+    // The preflight probe returns `InstallPathNotWritable` when the parent dir is read-only (0555):
+    // the temp-sibling create fails with PermissionDenied.
+    #[cfg(unix)]
+    #[test]
+    fn probe_install_path_writable_errors_for_readonly_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("ro");
+        std::fs::create_dir(&ro_dir).unwrap();
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let target = ro_dir.join("app");
+
+        let res = super::probe_install_path_writable(&target);
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match res {
+            Err(Error::InstallPathNotWritable { path }) => {
+                assert_eq!(path, target, "the probe must name the probed install path");
+            }
+            other => panic!("expected InstallPathNotWritable, got {:?}", other),
+        }
+    }
+
+    // The preflight probe is conservative: a missing parent directory is indeterminate (the temp
+    // create fails with NotFound, not PermissionDenied), so the probe returns `Ok(())` and lets the
+    // real install step surface any error.
+    #[test]
+    fn probe_install_path_writable_ok_for_missing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("no-such-dir").join("app");
+        super::probe_install_path_writable(&target)
+            .expect("a missing parent dir is indeterminate and must probe Ok");
     }
 
     // Build a custom-backend `Update` carrying `checksum`, to drive `finish_update` directly.

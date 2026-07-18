@@ -440,6 +440,10 @@ pub(crate) struct CommonBuilderConfig {
     pub asset_identifier: Option<String>,
     pub bin_name: Option<String>,
     pub bin_install_path: Option<PathBuf>,
+    /// Opt-in preflight: probe `bin_install_path` writability before any download, failing early
+    /// with [`Error::InstallPathNotWritable`] on a definite permission refusal. Default `false`;
+    /// set via `check_install_path_writable(true)`.
+    pub check_install_path_writable: bool,
     pub bin_path_in_archive: Option<String>,
     /// `true` when `bin_path_in_archive` was auto-derived from `bin_name` (not set explicitly by
     /// the user). Used by `bin_name` to re-derive when called again, while leaving an explicitly
@@ -485,6 +489,7 @@ impl Default for CommonBuilderConfig {
             asset_identifier: None,
             bin_name: None,
             bin_install_path: None,
+            check_install_path_writable: false,
             bin_path_in_archive: None,
             bin_path_in_archive_auto: false,
             show_download_progress: false,
@@ -550,6 +555,7 @@ impl CommonBuilderConfig {
                 Some(p) => p.clone(),
                 None => std::env::current_exe()?,
             },
+            check_install_path_writable: self.check_install_path_writable,
             bin_path_in_archive: self
                 .bin_path_in_archive
                 .clone()
@@ -589,6 +595,8 @@ pub(crate) struct CommonConfig {
     pub tag_prefix: Option<String>,
     pub bin_name: String,
     pub bin_install_path: PathBuf,
+    /// Opt-in preflight writability probe of `bin_install_path` (default `false`).
+    pub check_install_path_writable: bool,
     pub bin_path_in_archive: String,
     pub show_download_progress: bool,
     pub show_output: bool,
