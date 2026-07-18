@@ -56,7 +56,12 @@ impl AuthScheme {
 /// names the offending tag in its message and keeps the original `semver` parse failure
 /// reachable via [`std::error::Error::source`].
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 #[derive(Debug)]
@@ -89,7 +94,12 @@ impl std::error::Error for NonSemverTagError {
 /// Only the forge backends (github/gitlab/gitea) funnel server-supplied tags through the builder;
 /// the attribute keeps builds without any of them warning-free.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn name_tag_in_semver_error(tag: &str, err: Error) -> Error {
@@ -112,7 +122,12 @@ pub(crate) fn name_tag_in_semver_error(tag: &str, err: Error) -> Error {
 /// with a prefix configured, only tags carrying it count as releases (a bare `1.0.0` tag is not
 /// silently accepted just because its remainder parses as semver).
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn strip_tag_prefix(tag: &str, prefix: Option<&str>) -> Option<String> {
@@ -128,7 +143,12 @@ pub(crate) fn strip_tag_prefix(tag: &str, prefix: Option<&str>) -> Option<String
 /// `tag_prefix`. It uses the `SemVer` variant so the forge listing walk drops the release (its skip
 /// arm keys on `Error::SemVer`), the same way it drops a non-semver tag.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn tag_prefix_mismatch_error(tag: &str, prefix: &str) -> Error {
@@ -140,7 +160,12 @@ pub(crate) fn tag_prefix_mismatch_error(tag: &str, prefix: &str) -> Error {
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
 /// available, no `url` crate needed). Returns `None` when the URL has no host.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn host_of(url: &str) -> Option<String> {
