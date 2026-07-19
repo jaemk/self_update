@@ -23,8 +23,9 @@ Non-goals). Phase C (relaunch) shipped as `restart()` / `restart_with()`
   tests `lib.rs:3469`, `lib.rs:2737`). Tar unpacks via `tar::Archive::unpack`
   (`lib.rs:1068`), which preserves modes and symlinks. Zip-slip is rejected via
   `enclosed_name` (`lib.rs:1097`).
-- Gap: the zip branch materializes symlink entries as regular files containing
-  the link target text (`lib.rs:1105-1117`, no `S_IFLNK` branch). See BNDL-4.
+- Zip symlink entries are restored as symlinks on unix, with escape-target
+  rejection and a physical-parent canonicalization backstop (fixed in PR #199).
+  See BNDL-4.
 - `MoveAll` (`lib.rs:1400`): all-or-nothing multi-file swap. Stashes each
   displaced destination under `temp`, rolls back applied moves in reverse on the
   first failure, returns the original error; rollback is best-effort (failures
@@ -161,15 +162,17 @@ applied masked to `0o777` (`lib.rs:1118-1130`); tar preserves modes via
 `unpack`. Recorded here because #145's userland code applies `unix_mode()`
 manually; upstream already does.
 
-BNDL-4-2. Zip symlinks (bug, fix independently of bundle mode): a zip entry
-whose `unix_mode()` has `S_IFLNK` set must be restored as a symlink on unix
-(target = entry contents), not written as a regular file as today
-(`lib.rs:1105-1117`). A symlink whose target escapes the extraction root
-(absolute, or `..`-resolving outside) is rejected, consistent with the
-`enclosed_name` zip-slip defense. On windows, symlink entries are written as
-regular files (documented; `.app` is not a windows concern). Without this fix
-a zipped `.app`'s `Frameworks/*/Versions/Current` links are corrupted and the
-publisher's code signature breaks.
+BNDL-4-2. Zip symlinks: FIXED in PR #199 (independently of bundle mode). A zip
+entry whose `unix_mode()` has `S_IFLNK` set is restored as a symlink on unix
+(target = entry contents); previously the target text was written as a regular
+file, corrupting a zipped `.app`'s `Frameworks/*/Versions/Current` links and
+the publisher's code signature. A symlink whose target escapes the extraction
+root (absolute, or `..`-resolving outside) is rejected, consistent with the
+`enclosed_name` zip-slip defense, and every file/symlink entry's physical
+parent must canonicalize to exactly `canonical_root/<lexical parent>` as a
+backstop against symlinked-parent traversal. On windows, symlink entries are
+written as regular files (documented; `.app` is not a windows concern). See
+`ref-update-pipeline.md` for the current-behavior citations.
 
 ## BNDL-5: errors and guarantees
 
@@ -249,8 +252,8 @@ Q5. Cross-device / staging fallback: none (spec's position: staging in the
 Q6. `verify_binary` hook target in bundle mode: staged bundle root (spec's
     position), staged exe path, or skip the hook in bundle mode.
 Q7. Error variant names for BNDL-5-1.
-Q8. Land the zip-symlink fix (BNDL-4-2) as a standalone bug-fix PR ahead of
-    bundle mode? Spec recommends yes.
+Q8. RESOLVED: the zip-symlink fix (BNDL-4-2) landed as a standalone bug-fix
+    PR (#199) ahead of bundle mode.
 Q9. App Translocation: detect (`/AppTranslocation/` path component) and fail
     with a specific error, or document-only. Spec leans detect-and-error.
 
