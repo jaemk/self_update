@@ -62,6 +62,15 @@
   writability before the download; only a definite `PermissionDenied` refusal errors, indeterminate
   results proceed. The install step also raises this error on a permission failure, always naming
   the path. ([#112](https://github.com/jaemk/self_update/issues/112))
+- `backends::manifest` (`manifest` feature): fetch and install releases from a static
+  `manifest.json` served by any HTTP endpoint, with no forge-specific API. `ManifestSource`
+  implements `ReleaseSource` (and `AsyncReleaseSource` under `async`); the facade
+  `Update::configure()` wraps it with the standard update pipeline. Release entries with a
+  non-semver `version` are skipped with a debug log. Relative asset `url` values resolve against
+  the manifest URL's directory (truncated at the last `/`). An asset `digest` field
+  (`sha256:<hex>`) maps to `ReleaseAsset::digest()` and plugs into the existing release-digest
+  verification path (`checksums` feature). No new dependencies.
+  ([#74](https://github.com/jaemk/self_update/issues/74))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently

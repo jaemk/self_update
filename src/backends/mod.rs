@@ -13,6 +13,8 @@ pub mod gitea;
 pub mod github;
 #[cfg(feature = "gitlab")]
 pub mod gitlab;
+#[cfg(feature = "manifest")]
+pub mod manifest;
 #[cfg(feature = "s3")]
 pub mod s3;
 
@@ -396,7 +398,8 @@ where
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
-        feature = "s3"
+        feature = "s3",
+        feature = "manifest"
     )),
     allow(dead_code)
 )]
@@ -449,7 +452,8 @@ pub(crate) fn send(
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
-        feature = "s3"
+        feature = "s3",
+        feature = "manifest"
     )),
     allow(dead_code)
 )]
