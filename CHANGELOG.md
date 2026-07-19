@@ -88,6 +88,23 @@
   install path embedded in the message (the `ErrorKind` is preserved).
   ([#112](https://github.com/jaemk/self_update/issues/112))
 
+### Fixed
+- Zip extraction (`Extract::extract_into`) now restores symlink entries as real symlinks on unix
+  instead of writing the link's target path out as a regular file. Materializing the target string
+  corrupted directory trees that rely on symlinks (for example a macOS `.app` bundle whose
+  `Frameworks/*/Versions/Current` links are load-bearing for the code signature), so a signed app
+  extracted from a zip failed to launch. Tar extraction already handled symlinks correctly. A
+  symlink target that would escape the extraction root (an absolute target, or a relative one whose
+  `..` components resolve above the destination) is rejected, matching the existing zip-slip defense
+  on entry names. That per-entry check is lexical, so as a backstop every zip entry's physical
+  parent is canonicalized after its directories are created and must equal the canonical extraction
+  root joined with the entry's lexical parent; this rejects a symlinked-parent traversal (an entry
+  `d/sl -> ..` followed by `d/sl/evil -> ../../x`, lexically in-bounds but physically above the
+  root) that the lexical check alone cannot catch, while descent through real directories is
+  unaffected. On windows, where creating symlinks needs elevated privileges, symlink entries
+  keep the previous regular-file behavior. `Extract::extract_file` now errors on a symlink entry
+  rather than writing its target string out as the requested file.
+
 ### Removed
 
 ## [1.0.0-rc.6]

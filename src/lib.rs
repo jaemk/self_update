@@ -1103,6 +1103,31 @@ impl Extract {
     /// Extract an entire source archive into a specified path. If the source is a single compressed
     /// file and not an archive, it will be extracted into a file with the same name inside of
     /// `into_dir`.
+    ///
+    /// # Symlink handling
+    ///
+    /// Zip entries that are symbolic links (their unix mode carries `S_IFLNK`) are restored as
+    /// real symlinks on unix, with the link target read from the entry contents. This preserves
+    /// directory trees that rely on symlinks (for example a macOS `.app` bundle whose
+    /// `Frameworks/*/Versions/Current` links are load-bearing for code signatures) instead of
+    /// materializing the target string as a regular file. A symlink target that would escape the
+    /// extraction root -- an absolute target, or a relative target whose `..` components resolve
+    /// above `into_dir` -- is rejected with an error, mirroring the zip-slip defense applied to
+    /// entry names.
+    ///
+    /// That per-entry target check is purely lexical, so it cannot see a symlinked intermediate
+    /// directory that aliases an entry's parent to a shallower physical path (the classic
+    /// symlinked-parent traversal: an entry `d/sl -> ..` followed by `d/sl/evil -> ../../x`, where
+    /// the second link is lexically in-bounds yet physically lands above the root). As a backstop,
+    /// for every zip entry -- symlink or regular file -- after its parent directories are
+    /// materialized the physical parent is canonicalized and must equal the canonical extraction
+    /// root joined with the entry's lexical parent; any descent through a symlinked ancestor (or a
+    /// canonicalize failure) is rejected with an `Error::Internal`, while descent through real
+    /// directories is unaffected.
+    ///
+    /// On non-unix platforms (creating symlinks requires elevated privileges on Windows) symlink
+    /// entries are written as regular files containing the target path. Tar archives restore
+    /// symlinks via `tar`'s own unpack logic.
     pub fn extract_into(&self, into_dir: impl AsRef<path::Path>) -> Result<()> {
         let into_dir = into_dir.as_ref();
         let source = fs::File::open(&self.source)?;
@@ -1161,6 +1186,14 @@ impl Extract {
             #[cfg(feature = "archive-zip")]
             ArchiveKind::Zip => {
                 let mut archive = zip::ZipArchive::new(source)?;
+
+                // The destination must exist so its canonical (symlink-free) form can be
+                // captured once up front. Each entry's physical parent is later checked against
+                // this root to reject any descent through a symlinked directory (the
+                // symlinked-parent traversal that a per-entry lexical check cannot catch).
+                fs::create_dir_all(into_dir)?;
+                let canonical_root = fs::canonicalize(into_dir)?;
+
                 for i in 0..archive.len() {
                     let mut file = archive.by_index(i)?;
 
@@ -1172,17 +1205,97 @@ impl Extract {
                             source: None,
                         });
                     };
-                    let output_path = into_dir.join(rel_path);
+                    let output_path = into_dir.join(&rel_path);
 
                     if file.is_dir() {
                         fs::create_dir_all(&output_path)?;
                         continue;
                     }
-                    if let Some(parent_dir) = output_path.parent()
-                        && let Err(e) = fs::create_dir_all(parent_dir)
-                        && e.kind() != io::ErrorKind::AlreadyExists
-                    {
-                        return Err(Error::Io(e));
+                    if let Some(parent_dir) = output_path.parent() {
+                        match fs::create_dir_all(parent_dir) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                            Err(e) => return Err(Error::Io(e)),
+                        }
+
+                        // Physical-parent verification (symlinked-parent traversal defense).
+                        // The per-entry lexical target check cannot catch an intermediate
+                        // symlinked directory (e.g. an earlier `d/sl -> ..` entry) that aliases
+                        // this entry's parent to a shallower real path, which would let a later
+                        // entry be created outside the root through the alias. After the parents
+                        // are materialized, require the parent to canonicalize to exactly its
+                        // expected location: the canonical root joined with the entry's lexical
+                        // (only-`Normal`) parent. A prefix/`start_with` check alone is
+                        // insufficient -- `d/sl` canonicalizes to the root, which trivially lies
+                        // within the root -- so compare for equality: real directories match
+                        // their lexical path, while any symlinked ancestor resolves elsewhere and
+                        // is rejected. A canonicalize failure is treated as a rejection too,
+                        // matching the zip-slip/escape error style. This guards both the
+                        // symlink-creation path and the regular-file path below.
+                        let lexical_parent =
+                            rel_path.parent().unwrap_or_else(|| path::Path::new(""));
+                        let expected_parent = canonical_root.join(lexical_parent);
+                        let physical_parent =
+                            fs::canonicalize(parent_dir).map_err(|e| Error::Internal {
+                                message: format!(
+                                    "could not resolve the parent directory of zip entry {:?}: {}",
+                                    file.name(),
+                                    e
+                                ),
+                                source: Some(Box::new(e)),
+                            })?;
+                        if physical_parent != expected_parent {
+                            return Err(Error::Internal {
+                                message: format!(
+                                    "zip entry {:?} descends through a symlinked directory that escapes the extraction dir",
+                                    file.name()
+                                ),
+                                source: None,
+                            });
+                        }
+                    }
+
+                    // On unix, restore a symlink entry as a real symlink instead of writing its
+                    // target string out as a regular file. The escaping-target check mirrors the
+                    // `enclosed_name` zip-slip defense above. On non-unix targets this block is
+                    // compiled out and the entry falls through to the regular-file path.
+                    #[cfg(unix)]
+                    if file.is_symlink() {
+                        use std::ffi::OsStr;
+                        use std::io::Read;
+                        use std::os::unix::ffi::OsStrExt;
+
+                        let entry_name = file.name().to_string();
+                        let mut target_bytes = Vec::new();
+                        file.read_to_end(&mut target_bytes)?;
+                        let target = path::Path::new(OsStr::from_bytes(&target_bytes));
+
+                        // The link lives at `into_dir/rel_path`; a relative target resolves against
+                        // the link's parent directory. Reject any target (absolute, or `..`
+                        // climbing above `into_dir`) whose lexical resolution escapes the root.
+                        let link_parent = rel_path.parent().unwrap_or_else(|| path::Path::new(""));
+                        if symlink_target_escapes(link_parent, target) {
+                            return Err(Error::Internal {
+                                message: format!(
+                                    "zip symlink entry {:?} points outside the extraction dir: {:?}",
+                                    entry_name, target
+                                ),
+                                source: None,
+                            });
+                        }
+
+                        // A duplicate entry may already have created a file/link here; `symlink`
+                        // fails on an existing path, so remove it first (regular-file entries
+                        // truncate via `File::create`, so match that "last entry wins" behavior).
+                        match fs::remove_file(&output_path) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(Error::Io(e)),
+                        }
+                        std::os::unix::fs::symlink(target, &output_path)?;
+                        // A symlink carries no meaningful permission bits of its own; do not call
+                        // `set_permissions` (it would follow the link and alter the target).
+                        continue;
                     }
 
                     let mut output = fs::File::create(&output_path)?;
@@ -1209,6 +1322,12 @@ impl Extract {
     /// Extract a single file from a source and save to a file of the same name in `into_dir`.
     /// If the source is a single compressed file, it will be saved with the name `file_to_extract`
     /// in the specified `into_dir`.
+    ///
+    /// If the named zip entry is a symbolic link (its unix mode carries `S_IFLNK`), extraction
+    /// fails with an error rather than writing the link's target string out as the requested file:
+    /// this API returns a single concrete file, and silently substituting the target path text for
+    /// the payload would be surprising. Callers who need symlinks preserved should use
+    /// [`extract_into`](Self::extract_into), which restores them as real links on unix.
     pub fn extract_file<T: AsRef<path::Path>>(
         &self,
         into_dir: impl AsRef<path::Path>,
@@ -1309,6 +1428,20 @@ impl Extract {
                         source: None,
                     });
                 };
+                // A symlink entry has no regular-file payload; its "contents" are the link target
+                // path. Rather than write that target string out as `file_to_extract`, reject it
+                // (see the rustdoc): use `extract_into` to restore symlinks. Rejecting on every
+                // platform keeps the single-file API's behavior uniform.
+                if file.is_symlink() {
+                    return Err(Error::Internal {
+                        message: format!(
+                            "zip entry {:?} is a symlink; use extract_into to restore symlinks",
+                            file.name()
+                        ),
+                        source: None,
+                    });
+                }
+
                 let output_path = into_dir.join(rel_path);
                 if let Some(parent_dir) = output_path.parent()
                     && let Err(e) = fs::create_dir_all(parent_dir)
@@ -1331,6 +1464,49 @@ impl Extract {
         };
         Ok(())
     }
+}
+
+/// Lexically decide whether a zip symlink target escapes the extraction root.
+///
+/// `link_parent` is the link entry's parent directory expressed relative to the extraction root
+/// (derived from the already zip-slip-checked entry name, so it contains only normal components).
+/// `target` is the raw link target read from the entry contents. Returns `true` if the target is
+/// absolute or if resolving its `..`/`.` components against `link_parent` climbs above the root.
+/// This is a purely lexical check (no filesystem access), matching the intent of the
+/// `enclosed_name` defense used for entry names.
+#[cfg(all(feature = "archive-zip", unix))]
+fn symlink_target_escapes(link_parent: &path::Path, target: &path::Path) -> bool {
+    use std::path::Component;
+
+    // Seed the virtual stack with the link's parent directory (only normal components).
+    let mut depth: usize = 0;
+    for comp in link_parent.components() {
+        match comp {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            // `link_parent` comes from an enclosed (relative, `..`-free) name, so other
+            // components should not occur; treat any as unsafe to be conservative.
+            _ => return true,
+        }
+    }
+
+    for comp in target.components() {
+        match comp {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Climbing above the root escapes the extraction dir.
+                let Some(next) = depth.checked_sub(1) else {
+                    return true;
+                };
+                depth = next;
+            }
+            // An absolute target (root dir or a drive prefix) always escapes.
+            Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+
+    false
 }
 
 /// Moves a file from the given path to the specified destination.
@@ -3565,6 +3741,610 @@ mod tests {
             "the executable bit must be preserved, got mode {:o}",
             mode
         );
+    }
+
+    // A zip entry that is a relative symlink (target inside the tree) must be restored as a real
+    // symlink, not written out as a regular file containing the target string. The file it points
+    // at must be readable through the link. Guards the `.app` framework-symlink regression.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_restores_relative_zip_symlink() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("links.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // A real file, and a sibling symlink pointing at it by relative path.
+            zip.start_file("dir/real.txt", options).expect("start");
+            zip.write_all(b"payload").expect("write");
+            zip.add_symlink("dir/link.txt", "real.txt", options)
+                .expect("add_symlink");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+
+        let link_path = out_tmp.path().join("dir/link.txt");
+        let meta = fs::symlink_metadata(&link_path).expect("lstat link");
+        assert!(
+            meta.file_type().is_symlink(),
+            "the entry must be restored as a symlink, not a regular file"
+        );
+        // Sanity: it must not be some other special file type either.
+        assert!(!meta.file_type().is_fifo());
+        // The link target must be the stored relative path, and reading through it yields the file.
+        let target = fs::read_link(&link_path).expect("readlink");
+        assert_eq!(target, Path::new("real.txt"));
+        let via_link = fs::read_to_string(&link_path).expect("read through link");
+        assert_eq!(via_link, "payload");
+    }
+
+    // A zip symlink whose target is absolute must be rejected (it would escape the extraction root),
+    // and no symlink or file may be left at the entry path.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_rejects_absolute_zip_symlink() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("abs.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.add_symlink("evil", "/etc/passwd", options)
+                .expect("add_symlink");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_into(out_tmp.path());
+        assert!(res.is_err(), "an absolute-target symlink must be rejected");
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("evil")).is_err(),
+            "no link/file may be left behind for a rejected symlink entry"
+        );
+    }
+
+    // A zip symlink whose relative target climbs above the extraction root with `..` must be
+    // rejected, matching the entry-name zip-slip defense.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_rejects_escaping_zip_symlink() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("escape.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // `add_symlink` preserves the raw target string (unlike `add_symlink_from_path`, which
+            // would normalize the `..` away), so the escaping target reaches the extractor intact.
+            zip.add_symlink("dir/escape", "../../outside", options)
+                .expect("add_symlink");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_into(out_tmp.path());
+        assert!(
+            res.is_err(),
+            "a `..`-escaping symlink target must be rejected"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("dir/escape")).is_err(),
+            "no link/file may be left behind for a rejected symlink entry"
+        );
+    }
+
+    // A `..` target that stays within the root after resolving against the link's parent dir must
+    // be allowed (the lexical check must not over-reject legitimate relative links).
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_allows_in_bounds_dotdot_zip_symlink() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("inbounds.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("top.txt", options).expect("start");
+            zip.write_all(b"top-payload").expect("write");
+            // Link at `dir/up`; target `../top.txt` resolves to `top.txt` inside the root.
+            zip.add_symlink("dir/up", "../top.txt", options)
+                .expect("add_symlink");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        let link_path = out_tmp.path().join("dir/up");
+        let meta = fs::symlink_metadata(&link_path).expect("lstat link");
+        assert!(meta.file_type().is_symlink(), "must be a symlink");
+        let via_link = fs::read_to_string(&link_path).expect("read through link");
+        assert_eq!(via_link, "top-payload");
+    }
+
+    // extract_file must not write a symlink entry's target string out as the requested file; it
+    // errors instead (documented behavior; use extract_into to restore links).
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_file_rejects_zip_symlink_entry() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("single.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.add_symlink("link", "target.txt", options)
+                .expect("add_symlink");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_file(out_tmp.path(), "link");
+        assert!(
+            res.is_err(),
+            "extracting a symlink entry as a file must error"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("link")).is_err(),
+            "no file may be written for a rejected symlink entry"
+        );
+    }
+
+    // --- symlink_target_escapes: lexical edge cases (private fn, adversarial) ---------------
+    // These exercise the pure lexical resolver directly so the boundary logic is pinned
+    // independently of zip fixture plumbing.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn symlink_target_escapes_lexical_edges() {
+        use std::path::Path;
+        let esc = symlink_target_escapes;
+
+        // A bare `..` from a top-level link (parent depth 0) climbs above the root -> escapes.
+        assert!(
+            esc(Path::new(""), Path::new("..")),
+            "top-level `..` escapes"
+        );
+        // `..` from a depth-1 parent resolves exactly to the root -> allowed (boundary, in-bounds).
+        assert!(
+            !esc(Path::new("dir"), Path::new("..")),
+            "`..` back to root is in-bounds"
+        );
+        // A deep link climbing exactly back to the root then descending stays in-bounds.
+        assert!(
+            !esc(Path::new("a/b"), Path::new("../../x")),
+            "climb exactly to root then descend is in-bounds"
+        );
+        // One `..` past the root escapes.
+        assert!(
+            esc(Path::new("a/b"), Path::new("../../..")),
+            "climbing one past root escapes"
+        );
+        // Mixed `./` current-dir components must not be miscounted as depth.
+        assert!(
+            !esc(Path::new("dir"), Path::new("./real.txt")),
+            "`./` component is a no-op, stays in-bounds"
+        );
+        assert!(
+            !esc(Path::new("dir"), Path::new("./../a")),
+            "`./` then `..` from depth 1 stays in-bounds"
+        );
+        // An empty target string has no components -> resolves to the link's own parent, in-bounds.
+        assert!(
+            !esc(Path::new("dir"), Path::new("")),
+            "empty target is in-bounds"
+        );
+        // Interior `..` that dips and re-descends but never passes the root is in-bounds.
+        assert!(
+            !esc(Path::new(""), Path::new("a/../b")),
+            "dip and re-descend within root is in-bounds"
+        );
+        // Interior `..` that transiently passes the root escapes even if it would re-descend.
+        assert!(
+            esc(Path::new(""), Path::new("a/../../b")),
+            "transiently passing root escapes"
+        );
+        // An absolute target always escapes regardless of parent depth.
+        assert!(
+            esc(Path::new("a/b/c"), Path::new("/etc/passwd")),
+            "absolute target escapes"
+        );
+        assert!(
+            esc(Path::new(""), Path::new("/")),
+            "bare root target escapes"
+        );
+    }
+
+    // A symlink chain fully inside the archive (link A -> link B -> real file) must be restored as
+    // two real links, readable through the chain. The checks are lexical and per-entry, so an
+    // in-tree chain must extract cleanly regardless of order.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_restores_symlink_chain() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("chain.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("real.txt", options).expect("start");
+            zip.write_all(b"chain-payload").expect("write");
+            // b -> real.txt, a -> b (all siblings at root).
+            zip.add_symlink("b", "real.txt", options).expect("b");
+            zip.add_symlink("a", "b", options).expect("a");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        let a = out_tmp.path().join("a");
+        assert!(
+            fs::symlink_metadata(&a)
+                .expect("lstat a")
+                .file_type()
+                .is_symlink(),
+            "a must be a symlink"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("b"))
+                .expect("lstat b")
+                .file_type()
+                .is_symlink(),
+            "b must be a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&a).expect("read through chain"),
+            "chain-payload"
+        );
+    }
+
+    // A link entry whose parent directory has no explicit archive entry (and thus no entry ordered
+    // before it) must still extract: the loop's `create_dir_all(parent)` must materialize the path.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_symlink_with_implicit_parent_dir() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("implicit.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("target.txt", options).expect("start");
+            zip.write_all(b"impl-payload").expect("write");
+            // No `nested/` directory entry precedes this link.
+            zip.add_symlink("nested/deep/link", "../../target.txt", options)
+                .expect("link");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        let link = out_tmp.path().join("nested/deep/link");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "link must be created under implicitly-created parents"
+        );
+        assert_eq!(fs::read_to_string(&link).expect("read"), "impl-payload");
+    }
+
+    // NOTE on duplicate-path entries: the handoff asked to probe two entries at the same path
+    // (regular file then symlink, and symlink then regular file, the latter a possible
+    // write-through-link vuln). `zip::ZipWriter` (8.6.0) rejects a second entry at an existing
+    // name with `InvalidArchive("Duplicate filename")`, so a duplicate-path fixture cannot be
+    // built through the crate's own writer; that code path (the `remove_file` before `symlink`,
+    // and `File::create` over a pre-existing link) is only reachable via a hand-forged archive.
+    // It is left uncovered here rather than hand-assembling raw zip bytes -- see certification.
+    // The stronger, writer-buildable escape is the symlinked-parent bypass below, which needs no
+    // duplicate paths.
+
+    // SECURITY: the per-entry lexical `symlink_target_escapes` check alone can be bypassed by
+    // first creating a symlinked intermediate directory that aliases to a shallower path. The
+    // lexical depth counted for a later link over-estimates the real filesystem depth, so an
+    // escaping target would pass the lexical check. The physical-parent verification (canonicalize
+    // the entry's parent and require it to equal `canonical_root/<lexical parent>`) is the backstop
+    // that rejects any descent through a symlinked ancestor. This pins the rejection.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_rejects_symlink_through_symlinked_parent() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("bypass.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // 1) `d/sl` -> `..`  (link_parent depth 1, `..` -> depth 0, lexically allowed).
+            //    Physically aliases `d/sl` to the root.
+            zip.add_symlink("d/sl", "..", options).expect("sl");
+            // 2) `d/sl/evil` -> `../../x`. Lexically in-bounds, but `d/sl` aliases the root so the
+            //    link would land at <root>/evil pointing ABOVE the root. The physical-parent check
+            //    rejects it: canonicalize(<root>/d/sl) == <root>, but the expected parent is
+            //    <root>/d/sl, so they differ.
+            zip.add_symlink("d/sl/evil", "../../x", options)
+                .expect("evil");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_into(out_tmp.path());
+        assert!(
+            res.is_err(),
+            "a symlink descending through a symlinked parent must be rejected"
+        );
+        // No escaping link may be left behind, at the aliased root location or under `d/sl`.
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("evil")).is_err(),
+            "no escaping link may be planted at the aliased root path"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("d/sl/evil")).is_err(),
+            "no escaping link may be planted under the symlinked parent"
+        );
+    }
+
+    // A regular-file entry that descends through a symlinked parent must also be rejected: even
+    // though the write would land inside the root through the alias (an in-bounds target is all a
+    // link can hold), the physical-parent check rejects the descent so nothing is written through
+    // an aliased directory.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_rejects_regular_file_through_symlinked_parent() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("filebypass.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // `d/sl` -> `..` aliases to the root; then a regular file under it.
+            zip.add_symlink("d/sl", "..", options).expect("sl");
+            zip.start_file("d/sl/file.txt", options).expect("start");
+            zip.write_all(b"through-alias").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_into(out_tmp.path());
+        assert!(
+            res.is_err(),
+            "a regular file descending through a symlinked parent must be rejected"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("file.txt")).is_err(),
+            "no file may be written at the aliased root path"
+        );
+    }
+
+    // Positive control: a benign tree whose files legitimately descend through REAL directories
+    // (a normal nested layout, plus a symlink to a real in-tree directory used only as a leaf link,
+    // never descended through) still extracts fine. The physical-parent check must not over-reject.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_allows_files_through_real_directories() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("benign.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("a/b/c/deep.txt", options).expect("start");
+            zip.write_all(b"deep-payload").expect("write");
+            zip.start_file("a/b/sibling.txt", options).expect("start");
+            zip.write_all(b"sibling-payload").expect("write");
+            // A symlink to a real in-tree directory (leaf link, not descended through).
+            zip.add_symlink("a/link-to-b", "b", options).expect("link");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        assert_eq!(
+            fs::read_to_string(out_tmp.path().join("a/b/c/deep.txt")).expect("read deep"),
+            "deep-payload"
+        );
+        assert_eq!(
+            fs::read_to_string(out_tmp.path().join("a/b/sibling.txt")).expect("read sibling"),
+            "sibling-payload"
+        );
+        // The leaf symlink resolves to the real directory and reads the same content through it.
+        assert_eq!(
+            fs::read_to_string(out_tmp.path().join("a/link-to-b/sibling.txt"))
+                .expect("read through link"),
+            "sibling-payload"
+        );
+    }
+
+    // ADVERSARIAL (deeper chain): a symlinked ancestor aliases the root, then a file entry
+    // descends TWO real levels below the alias (`a/sl -> ..`, then `a/sl/b/c/deep.txt`). The
+    // lexical depth of the entry (a/sl/b/c) over-counts the physical depth (root/b/c), so the
+    // per-entry lexical check would pass; the physical-parent equality check must still reject the
+    // descent through the symlinked ancestor. Pins that the guard holds across multi-level descents,
+    // not just a single level below the symlink.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_rejects_file_deep_below_symlinked_ancestor() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("deepchain.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // `a/sl` -> `..` aliases `a/sl` to the extraction root.
+            zip.add_symlink("a/sl", "..", options).expect("sl");
+            // Two levels below the alias. Lexically in-bounds (no `..`), physically root/b/c.
+            zip.start_file("a/sl/b/c/deep.txt", options).expect("start");
+            zip.write_all(b"deep-through-alias").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let res = Extract::from_source(&archive_path).extract_into(out_tmp.path());
+        assert!(
+            res.is_err(),
+            "a file two levels below a symlinked ancestor must be rejected"
+        );
+        // Nothing may be planted at the aliased root location (root/b/c/deep.txt) either.
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("b/c/deep.txt")).is_err(),
+            "no file may be written at the aliased (shallower) root path"
+        );
+        assert!(
+            fs::symlink_metadata(out_tmp.path().join("a/sl/b/c/deep.txt")).is_err(),
+            "no file may be written below the symlinked ancestor"
+        );
+    }
+
+    // ADVERSARIAL (symlinked destination): the caller's own `into_dir` may legitimately contain a
+    // symlink component (e.g. `/tmp/link-to-real`). `canonical_root` captures its resolved
+    // (symlink-free) form up front, so a benign nested archive must extract without being falsely
+    // rejected: every entry's physical parent resolves to `canonical_root/<lexical parent>` by
+    // construction. Guards against the equality check tripping on a symlink the CALLER supplied
+    // rather than one an archive entry created.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_allows_symlinked_destination() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("benign-nested.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("sub/deep/file.txt", options).expect("start");
+            zip.write_all(b"nested-payload").expect("write");
+            zip.finish().expect("finish");
+        }
+        // The destination handed to `extract_into` is itself a symlink to the real output dir.
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let real_dest = out_tmp.path().join("real-dest");
+        fs::create_dir(&real_dest).expect("mkdir real dest");
+        let link_dest = out_tmp.path().join("link-to-dest");
+        std::os::unix::fs::symlink(&real_dest, &link_dest).expect("symlink dest");
+
+        Extract::from_source(&archive_path)
+            .extract_into(&link_dest)
+            .expect("extraction into a symlinked destination must not be rejected");
+        // The file lands under the real destination, reachable through the caller's symlink.
+        assert_eq!(
+            fs::read_to_string(real_dest.join("sub/deep/file.txt")).expect("read real"),
+            "nested-payload"
+        );
+        assert_eq!(
+            fs::read_to_string(link_dest.join("sub/deep/file.txt")).expect("read via link"),
+            "nested-payload"
+        );
+    }
+
+    // ADVERSARIAL (unguarded dir branch): the `is_dir()` branch runs `create_dir_all` WITHOUT the
+    // physical-parent check, on the reasoning that a symlinked ancestor only aliases in-bounds (its
+    // target was validated by `symlink_target_escapes`), so directories created through it stay in
+    // bounds, and any later FILE entry under it is rejected by the parent check. This probes that
+    // reasoning with a symlink aliasing a real in-tree sibling directory: the dir entry created
+    // through the alias must land in-bounds, nothing may be created outside the root, and a file
+    // entry descending through the same alias must be rejected even though it too would land
+    // in-bounds (the equality check is strict, not a mere prefix/containment check).
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_into_dir_through_symlink_stays_in_bounds_and_file_rejected() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("dirthrough.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // Real in-tree directory `a/b` (materialized by a file entry).
+            zip.start_file("a/b/keep.txt", options).expect("start keep");
+            zip.write_all(b"keep").expect("write keep");
+            // `a/sl` -> `b`: a symlink aliasing a real sibling directory (in-bounds target).
+            zip.add_symlink("a/sl", "b", options).expect("sl");
+            // Directory entry descending through the alias. The unguarded dir branch creates it.
+            zip.add_directory("a/sl/planted", options)
+                .expect("dir entry");
+            // A file entry under the alias must be rejected by the physical-parent equality check
+            // even though it would land in-bounds (root/a/b/planted/f.txt).
+            zip.start_file("a/sl/planted/f.txt", options)
+                .expect("start f");
+            zip.write_all(b"through-alias-file").expect("write f");
+            zip.finish().expect("finish");
+        }
+        // Extract into a nested dest so we can assert nothing escapes into the parent.
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        let dest = out_tmp.path().join("dest");
+        let res = Extract::from_source(&archive_path).extract_into(&dest);
+        assert!(
+            res.is_err(),
+            "a file descending through a symlinked directory must be rejected"
+        );
+        // The file must not exist at the aliased location, the lexical location, or anywhere.
+        assert!(
+            fs::symlink_metadata(dest.join("a/b/planted/f.txt")).is_err(),
+            "no file may be written at the aliased in-bounds path"
+        );
+        assert!(
+            fs::symlink_metadata(dest.join("a/sl/planted/f.txt")).is_err(),
+            "no file may be written at the lexical path under the symlink"
+        );
+        // The dir branch is unguarded, so `planted` was materialized through the alias -- but it
+        // must be IN-BOUNDS (root/a/b/planted), never outside the extraction root.
+        if let Ok(meta) = fs::symlink_metadata(dest.join("a/b/planted")) {
+            assert!(
+                meta.file_type().is_dir(),
+                "planted, if present, is a real dir"
+            );
+        }
+        // Nothing may have been created outside `dest`: the extraction parent holds only `dest`.
+        let mut stray: Vec<String> = fs::read_dir(out_tmp.path())
+            .expect("read parent")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        stray.retain(|name| name != "dest");
+        assert!(
+            stray.is_empty(),
+            "nothing may be created outside the extraction root, found: {:?}",
+            stray
+        );
+    }
+
+    // extract_file on a normal executable-mode regular zip entry is unaffected by the symlink
+    // rejection: it extracts and preserves the exec bit.
+    #[cfg(all(feature = "archive-zip", unix))]
+    #[test]
+    fn extract_file_regular_exec_entry_unaffected() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("exec.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            zip.start_file("bin", options).expect("start");
+            zip.write_all(b"#!/bin/sh\n").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_file(out_tmp.path(), "bin")
+            .expect("extract_file");
+        let out = out_tmp.path().join("bin");
+        let mode = fs::metadata(&out).expect("stat").permissions().mode();
+        assert!(mode & 0o111 != 0, "exec bit preserved, got {:o}", mode);
+        assert_eq!(fs::read_to_string(&out).expect("read"), "#!/bin/sh\n");
     }
 
     fn build_test_archive<T: AsRef<Path>>(

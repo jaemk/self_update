@@ -1735,7 +1735,11 @@ pub fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseAsset, Releases, UpdateStrategy, choose_latest_release, install_binary};
+    use super::{Releases, UpdateStrategy, choose_latest_release, install_binary};
+    // `ReleaseAsset` is only referenced unqualified by the checksum tests below; gate the import so
+    // a build without `checksums` (e.g. `--features s3` alone) does not trip the unused-import lint.
+    #[cfg(feature = "checksums")]
+    use super::ReleaseAsset;
     use crate::Download;
     use crate::DynVerifyFn;
     use crate::errors::Error;
