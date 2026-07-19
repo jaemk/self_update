@@ -288,6 +288,9 @@ macro_rules! impl_update_config_accessors {
         fn bin_install_path(&self) -> &std::path::Path {
             &self.common.bin_install_path
         }
+        fn check_install_path_writable(&self) -> bool {
+            self.common.check_install_path_writable
+        }
         fn bin_path_in_archive(&self) -> &str {
             &self.common.bin_path_in_archive
         }
@@ -556,6 +559,22 @@ macro_rules! impl_common_builder_setters {
         ) -> &mut Self {
             self.common.bin_install_path =
                 Some(std::path::PathBuf::from(bin_install_path.as_ref()));
+            self
+        }
+
+        /// Opt-in preflight: probe whether `bin_install_path` is writable *before* anything is
+        /// downloaded, failing fast with
+        /// [`Error::InstallPathNotWritable`](crate::errors::Error::InstallPathNotWritable) when it
+        /// is definitely not (so a long download is not wasted only to hit a permission error at
+        /// the final replace step). Defaults to `false` (off).
+        ///
+        /// The probe is conservative: only a definite permission refusal errors. Indeterminate
+        /// results (a missing parent directory, an unusual filesystem, any non-permission IO error)
+        /// are treated as "proceed" and let the real install step surface the outcome. It never
+        /// escalates privileges. Regardless of this setting, the install step always annotates a
+        /// permission failure as `InstallPathNotWritable` naming the path.
+        pub fn check_install_path_writable(&mut self, check: bool) -> &mut Self {
+            self.common.check_install_path_writable = check;
             self
         }
 

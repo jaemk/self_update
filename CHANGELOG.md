@@ -57,6 +57,11 @@
   client-less build (e.g. `default-features = false, features = ["rustls"]`) produces, and shows the
   fix (add a client, e.g. `features = ["ureq", "rustls", "github"]`).
   ([#168](https://github.com/jaemk/self_update/issues/168))
+- `check_install_path_writable(bool)` builder setter (default `false`) and
+  `Error::InstallPathNotWritable { path: PathBuf }`: opt-in preflight that probes `bin_install_path`
+  writability before the download; only a definite `PermissionDenied` refusal errors, indeterminate
+  results proceed. The install step also raises this error on a permission failure, always naming
+  the path. ([#112](https://github.com/jaemk/self_update/issues/112))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently
@@ -64,6 +69,10 @@
   the `compression-tar-xz` feature returns `Error::CompressionNotEnabled("xz")` (matching the
   existing `.gz` handling), rather than writing the compressed archive to the install path.
   ([#143](https://github.com/jaemk/self_update/issues/143))
+- Install-step IO failures now name the install path: `PermissionDenied` becomes
+  `Error::InstallPathNotWritable { path }` and any other IO error becomes `Error::Io` with the
+  install path embedded in the message (the `ErrorKind` is preserved).
+  ([#112](https://github.com/jaemk/self_update/issues/112))
 
 ### Removed
 

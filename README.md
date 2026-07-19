@@ -283,6 +283,47 @@ with a fresh argument list (e.g. to drop an `--upgrade` flag so the new process 
 again). On unix the process image is replaced with `exec` (the PID is preserved); on windows the new
 binary is spawned and the current process exits. See the module docs for the platform details.
 
+### Permissions
+
+The crate never escalates privileges. There is no sudo re-exec, no polkit interaction, and no UAC
+prompt. Privilege escalation is always the caller's choice.
+
+An install into an unwritable location fails with
+[`Error::InstallPathNotWritable`](crate::errors::Error::InstallPathNotWritable) naming the path
+(the configured `bin_install_path`). Any other IO failure at the install step surfaces as
+[`Error::Io`](crate::errors::Error::Io) with a message naming the install path, so the path is
+visible in the error regardless of the kind.
+
+Setting `check_install_path_writable(true)` on the builder opts into a preflight probe that runs
+immediately before the download. Only a definite `PermissionDenied` refusal errors early;
+indeterminate results (a missing parent directory, an unusual filesystem) are treated as "proceed"
+and let the real install step surface the outcome. The default is `false`.
+
+```rust
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    match self_update::backends::github::Update::configure()
+        .repo_owner("owner")
+        .repo_name("repo")
+        .bin_name("app")
+        .current_version(self_update::cargo_crate_version!())
+        .check_install_path_writable(true)
+        .build()?
+        .update()
+    {
+        Ok(status) => println!("updated: {}", status.version()),
+        Err(self_update::Error::InstallPathNotWritable { .. }) => {
+            // The install path is not writable by this process. Elevation is the
+            // application's choice: re-run under sudo, spawn a UAC-elevated child, etc.
+            // Use the `restart` module for the exec/spawn mechanics when relaunching
+            // with a modified argument list.
+            eprintln!("install path not writable; re-run with elevated privileges");
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+```
+
 ### Periodic update checks
 
 Every `update()` / `is_update_available()` call makes a network request. To avoid checking on every

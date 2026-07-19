@@ -59,8 +59,12 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 ### Download
 
 `resolve_and_confirm` prints the release-status block and (unless `no_confirm`) prompts
-(see below). Then a `tempfile::TempDir` is created and the asset is downloaded to
-`<tmpdir>/<asset.name>` (`update.rs:608-613`). `build_download` (`update.rs:741`) builds the
+(see below). If `check_install_path_writable()` is `true`, `probe_install_path_writable`
+(`update.rs:1606`) runs immediately after the confirmation and before any download
+(`update.rs:1005-1009` sync, `update.rs:1509-1510` async): only a definite `PermissionDenied`
+errors as `Error::InstallPathNotWritable { path }`; any other result (missing parent directory,
+unusual filesystem, `Ok`) proceeds. Default is `false` (off). Then a `tempfile::TempDir` is
+created and the asset is downloaded to `<tmpdir>/<asset.name>` (`update.rs:608-613`). `build_download` (`update.rs:741`) builds the
 `Download` from the asset URL, applies auth/`api_headers`, sets `ACCEPT:
 application/octet-stream`, merges the user's `request_headers()` *after* (so a same-named
 user header overrides), forwards the injected HTTP client, per-request timeout, progress
@@ -125,6 +129,13 @@ if `bin_install_path()` equals `std::env::current_exe()`, the swap goes through
 and renames it back if the source->dest rename fails (rollback). `rename` cannot cross
 filesystems, so source, dest, and temp must share one. The high-level flow does not call
 `replace_using_temp`.
+
+Both the `self_replace` call and the `Move::to_dest` call have their IO errors wrapped by
+`map_install_io_error` (`update.rs:1582`): a `PermissionDenied` becomes
+`Error::InstallPathNotWritable { path }` naming the install path; any other `io::Error` kind is
+rewrapped as `Error::Io` with the message `"installing to {path}: {orig}"`, preserving the
+original `ErrorKind` for inspection. This annotation is always on, independent of the opt-in
+preflight probe (`check_install_path_writable`).
 
 ### Multi-file install
 
@@ -216,6 +227,13 @@ under feature `async`; the free `update::update_extended_async` they route to is
   `!no_confirm`. Suppressing one does not suppress the other.
 - The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
+- When `check_install_path_writable` is `true`, the preflight probe (`probe_install_path_writable`,
+  `update.rs:1606`) runs after confirmation and before any download; only a definite
+  `PermissionDenied` errors, indeterminate results proceed. Default is `false`.
+- The install step always annotates IO failures with the install path: `PermissionDenied` becomes
+  `Error::InstallPathNotWritable { path }` and other kinds become `Error::Io` with the path in the
+  message, `ErrorKind` preserved (`map_install_io_error`, `update.rs:1582`). Independent of the
+  preflight probe.
 - `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).
 - The async path never blocks the executor on the finish tail: `finish_update_owned` runs inside

@@ -125,6 +125,18 @@ pub enum Error {
         /// The name of the missing required field.
         field: &'static str,
     },
+    /// The binary's install path (or its parent directory) is not writable by this process.
+    ///
+    /// Returned either by the opt-in preflight writability check
+    /// (`check_install_path_writable(true)`), which probes before any download, or by the install
+    /// step itself when the replace/move fails with a permission error. `path` is the configured
+    /// `bin_install_path`. Re-run with elevated privileges, or choose a user-writable
+    /// `bin_install_path`; the crate never escalates privileges itself.
+    #[non_exhaustive]
+    InstallPathNotWritable {
+        /// The install path (`bin_install_path`) that could not be written.
+        path: std::path::PathBuf,
+    },
     /// A bare release listing ([`ReleaseList::fetch`](crate::backends)) carries no current version,
     /// so [`Releases::is_update_available`](crate::update::Releases::is_update_available) has nothing
     /// to compare its releases against.
@@ -407,6 +419,12 @@ impl std::fmt::Display for Error {
             }
             InvalidResponse { source } => write!(f, "ReleaseError: invalid response: {}", source),
             MissingField { field } => write!(f, "ConfigError: `{}` required", field),
+            InstallPathNotWritable { path } => write!(
+                f,
+                "InstallPathNotWritableError: cannot write to install path {}: run with elevated \
+                 privileges or choose a user-writable bin_install_path",
+                path.display()
+            ),
             NoCurrentVersion => write!(
                 f,
                 "ReleaseError: this Releases has no current_version to compare against; use \
@@ -1233,6 +1251,49 @@ mod tests {
         );
         assert_eq!(err.http_status(), None);
         assert_eq!(err.url(), None);
+    }
+
+    // `InstallPathNotWritable` Display names the path and suggests elevated privileges or a
+    // user-writable bin_install_path. It carries no source and exposes no http_status()/url().
+    #[test]
+    fn install_path_not_writable_display_and_no_source() {
+        let err = Error::InstallPathNotWritable {
+            path: std::path::PathBuf::from("/usr/local/bin/app"),
+        };
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("InstallPathNotWritableError: "),
+            "InstallPathNotWritable Display must keep the greppable prefix, got: {shown}"
+        );
+        assert!(
+            shown.contains("/usr/local/bin/app"),
+            "InstallPathNotWritable Display must name the path, got: {shown}"
+        );
+        assert!(
+            shown.contains("elevated privileges") && shown.contains("bin_install_path"),
+            "InstallPathNotWritable Display must suggest elevated privileges or a user-writable \
+             bin_install_path, got: {shown}"
+        );
+        assert!(
+            err.source().is_none(),
+            "InstallPathNotWritable carries no source, got {:?}",
+            err.source()
+        );
+        assert_eq!(err.http_status(), None);
+        assert_eq!(err.url(), None);
+    }
+
+    // `InstallPathNotWritable` is `#[non_exhaustive]`; a `..`-destructure that reads `path` must
+    // compile (adding a field stays non-breaking for downstream matchers).
+    #[test]
+    fn install_path_not_writable_is_non_exhaustive_struct_variant() {
+        let err = Error::InstallPathNotWritable {
+            path: std::path::PathBuf::from("/opt/app"),
+        };
+        let Error::InstallPathNotWritable { path, .. } = err else {
+            panic!("expected InstallPathNotWritable");
+        };
+        assert_eq!(path, std::path::PathBuf::from("/opt/app"));
     }
 
     // `NoCurrentVersion` is a distinct, self-describing variant (not `MissingField`): its Display

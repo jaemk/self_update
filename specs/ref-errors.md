@@ -35,6 +35,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidResponse { source: Box<dyn Error + Send + Sync> }` | A backend response could not be parsed: a malformed (non-array) JSON release-listing body (`github.rs`, `gitlab.rs`, `gitea.rs`), the S3 listing regex build failure, and the S3 XML parse failure (`s3.rs`). The underlying error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name` (`github.rs`, `gitlab.rs`, `gitea.rs`), `host` (`gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `InstallPathNotWritable { path: PathBuf }` | The opt-in preflight probe (`check_install_path_writable(true)`, `probe_install_path_writable` at `update.rs:1606`) when the path is definitely not writable, or the install step (`map_install_io_error` at `update.rs:1582`) when the replace/move fails with `PermissionDenied`. `path` is the configured `bin_install_path`. `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A request header (`request_header` on the builders or on `Download`) was not a valid HTTP header. The setters are infallible; the error is deferred and surfaced from `build()` (via `common.rs`) or from `Download::download_to` / `download_to_async` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. Exception: on a ureq-only build a malformed **DER** certificate is not caught at `build()` (ureq's `from_der` is infallible) and surfaces as `Transport` at connection time; PEM is validated at `build()` on both clients. `#[non_exhaustive]`. | none | yes (boxed source) |
@@ -126,6 +127,7 @@ Each variant renders with a specific Display string:
 - `MissingAssetField { field }` -> `"ReleaseError: release/asset payload missing \`{field}\`"`
 - `InvalidResponse { source }` -> `"ReleaseError: invalid response: {source}"`
 - `MissingField { field }` -> `"ConfigError: \`{field}\` required"`
+- `InstallPathNotWritable { path }` -> `"InstallPathNotWritableError: cannot write to install path {path}: run with elevated privileges or choose a user-writable bin_install_path"`
 - `InvalidHeader { source }` -> `"ConfigError: invalid HTTP header: {source}"`
 - `InvalidAuthToken { source }` -> `"ConfigError: failed to parse auth token: {source}"`
 - `InvalidCertificate { source }` -> `"ConfigError: invalid root certificate: {source}"`
@@ -157,8 +159,9 @@ boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
 `Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
 (`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
-`NoReleaseFound`, `MissingAssetField`, `MissingField`, `ArchiveNotEnabled`,
-`CompressionNotEnabled`, `InvalidAssetName`, `NoSignatures`, `SignatureNonUTF8`) return `None`. The concrete inner error of
+`NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`,
+`ArchiveNotEnabled`, `CompressionNotEnabled`, `InvalidAssetName`, `NoSignatures`,
+`SignatureNonUTF8`) return `None`. The concrete inner error of
 a boxed variant is reachable at runtime through `source()` and `downcast_ref::<ConcreteType>()`
 (e.g. `err.source().and_then(|s| s.downcast_ref::<reqwest::Error>())`).
 
@@ -267,8 +270,9 @@ type directly, since `std::io::Error` is stable std.)
 - A user-declined confirmation prompt produces `Error::Aborted`.
 - Every struct-form variant carries `#[non_exhaustive]` on the variant (`Unauthorized`,
   `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
-  `InvalidResponse`, `MissingField`, `InvalidHeader`, `InvalidAuthToken`, `InvalidCertificate`,
-  `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`, `ChecksumMismatch`).
+  `InvalidResponse`, `MissingField`, `InstallPathNotWritable`, `InvalidHeader`, `InvalidAuthToken`,
+  `InvalidCertificate`, `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`,
+  `ChecksumMismatch`).
 - `Error::Internal` is reserved for genuine internal/invariant failures: extractor invariants,
   archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
   `source`).
@@ -276,6 +280,12 @@ type directly, since `std::io::Error` is stable std.)
 - The sites that previously stringified-and-discarded a source now chain it via `source()`: the
   S3 XML/regex parse (`InvalidResponse`), the auth-token header-value parse (`InvalidAuthToken`),
   and the tokio `JoinError` sites (`Internal`).
+- `Error::InstallPathNotWritable { path }` names the `bin_install_path` that could not be
+  written. It carries no source and exposes no `http_status()`/`url()`. Display prefix is
+  `"InstallPathNotWritableError: "`. Raised by the opt-in preflight probe
+  (`check_install_path_writable(true)`) on a definite `PermissionDenied`, and always by the
+  install step on a permission failure. Other install-step IO errors map to `Error::Io` with the
+  path embedded in the message, `ErrorKind` preserved.
 - `Error::Config(String)` no longer exists. Its former producers route to structured variants:
   the `s3-auth` SigV4 host-extraction site (`s3.rs`) -> `S3Auth`; the root-certificate/client-build
   failures in `RequestConfig::check()` (`common.rs`) and `Download::download_to` /
