@@ -51,6 +51,7 @@ design before it can be built). Keep each row's status current with `spec.py set
 | Restart After Update | done | [ref-restart.md](ref-restart.md) |
 | Update-check Interval Guard | done | [ref-check-interval.md](ref-check-interval.md) |
 | Manifest Backend | done | [ref-manifest-backend.md](ref-manifest-backend.md) |
+| Bundle Install | research | [bundle-install.md](bundle-install.md) |
 
 ## Conventions
 
