@@ -91,6 +91,27 @@ are `#[non_exhaustive]`; the `Tar` and `Zip` variants are feature-gated on `arch
 (`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
 (`update.rs:803`).
 
+Zip entry names that would escape `into_dir` are rejected via `enclosed_name` (zip-slip defense,
+`lib.rs:1108`). On unix, `extract_into` restores a zip symlink entry (unix mode carrying
+`S_IFLNK`, detected by `ZipFile::is_symlink`) as a real symlink rather than writing its target
+string out as a regular file (`lib.rs:1132`), preserving symlink-dependent trees such as a macOS
+`.app` bundle's `Frameworks/*/Versions/Current` links; `tar` extraction already restores symlinks
+itself. A symlink target that escapes the extraction root (absolute, or `..` resolving above
+`into_dir`) is rejected by `symlink_target_escapes` with an `Error::Internal`, mirroring the
+entry-name defense; a duplicate entry at the link path is removed before the link is created, and
+no permission bits are applied to the link. That target check is purely lexical, so it cannot catch
+a symlinked intermediate directory that aliases an entry's parent to a shallower physical path (the
+symlinked-parent traversal: `d/sl -> ..` then `d/sl/evil -> ../../x`, lexically in-bounds but
+physically above the root). As a backstop, the extraction root is canonicalized once up front and,
+for every zip entry (symlink or regular file), after its parents are materialized the physical
+parent is canonicalized and must equal `canonical_root` joined with the entry's lexical parent;
+descent through a symlinked ancestor (or a canonicalize failure) is rejected with an
+`Error::Internal`, while descent through real directories is allowed. On non-unix targets the
+symlink-restore
+block is compiled out and such an entry is written as a regular file (creating symlinks needs
+elevated privileges on windows). `extract_file` errors on a symlink entry (`lib.rs:1304`) rather
+than writing its target string as the requested file.
+
 ### Verify ordering
 
 In `finish_update`, before any extraction or replacement:

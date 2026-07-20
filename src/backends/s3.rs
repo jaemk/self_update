@@ -1724,6 +1724,10 @@ fn add_to_releases_list(releases: &mut Vec<Release>, mut rel: Release) {
 mod tests {
     use super::Update;
     use crate::update::{Release, UpdateConfig};
+    // Every module-level use of `Duration` here is inside an `s3-auth`-gated test or helper (the
+    // clamp test brings its own local import), so gate the import to keep a plain `--features s3`
+    // build free of the unused-import lint.
+    #[cfg(feature = "s3-auth")]
     use std::time::Duration;
 
     // ---------------------------------------------------------------------------
