@@ -31,6 +31,7 @@ features = [
   "github",
   "gitlab",
   "gitea",
+  "gitee",
   "manifest",
   "s3",
 ]
@@ -92,6 +93,7 @@ progress-bar = ["dep:indicatif"]
 github = []
 gitlab = []
 gitea = []
+gitee = []
 # Service-agnostic backend: update from a static JSON release manifest served over HTTP(S). Uses
 # the already-present serde/serde_json deps, so it pulls in nothing new.
 manifest = []
@@ -130,6 +132,10 @@ required-features = ["gitlab"]
 [[example]]
 name = "gitea"
 required-features = ["gitea"]
+
+[[example]]
+name = "gitee"
+required-features = ["gitee"]
 
 [[example]]
 name = "s3"

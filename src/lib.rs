@@ -7,7 +7,7 @@
 `self_update` provides updaters for updating rust executables in-place from various release
 distribution backends.
 
-Supported backends: **GitHub**, **GitLab**, **Gitea**, **S3** (Amazon S3, Google GCS,
+Supported backends: **GitHub**, **GitLab**, **Gitea**, **Gitee**, **S3** (Amazon S3, Google GCS,
 DigitalOcean Spaces, or any S3-compatible endpoint), and **Manifest** (any static file server).
 The forge and S3 backends each expose a `ReleaseList` builder alongside the `Update`
 (configure -> build -> update) API; the manifest backend exposes `Update` only.
@@ -76,6 +76,7 @@ The following are opt-in; activate the one(s) your release files need:
 
 * `gitlab`: the GitLab Releases backend;
 * `gitea`: the Gitea Releases backend;
+* `gitee`: the Gitee Releases backend;
 * `s3`: the S3-compatible backend (Amazon S3, GCS, DigitalOcean Spaces, etc.);
 * `s3-auth`: sign S3 requests (AWS SigV4) for private buckets; implies `s3`;
 * `manifest`: the static-file manifest backend; fetches releases from a `manifest.json` served by any HTTP endpoint; no new dependencies;
@@ -89,7 +90,7 @@ The following are opt-in; activate the one(s) your release files need:
 * `checksums`: verify a downloaded artifact against a SHA-256/SHA-512 checksum before installing it -- automatically against the digest github publishes per release asset, and/or against a known checksum you pass in (e.g. from a `SHA256SUMS` file); see [Checksum verification](#checksum-verification) below;
 * `async`: add async (`*_async`) update methods alongside the unchanged blocking API; tokio-only, requires `reqwest` (ureq and reqwest can coexist -- reqwest serves the async path, and the sync API prefers reqwest when both are present); see [Async](#async) below.
 
-`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab`, `gitea`, and `manifest` each require their own feature.
+`github` is the only backend in the default feature set. The S3 backend requires the `s3` feature; `s3-auth` implies `s3`. `gitlab`, `gitea`, `gitee`, and `manifest` each require their own feature.
 
 ### Example
 
@@ -97,7 +98,7 @@ Run the following example to see `self_update` in action:
 
 `cargo run --example github --features "signatures archive-tar compression-tar-gz"`.
 
-There are equivalent examples for the other backends (`gitlab`, `gitea`, `s3`), e.g.:
+There are equivalent examples for the other backends (`gitlab`, `gitea`, `gitee`, `s3`), e.g.:
 
 `cargo run --example gitlab --features "gitlab archive-tar compression-tar-gz"`.
 
@@ -393,6 +394,7 @@ so they are reached through their backend modules rather than re-exported at the
 * `backends::github::ReleaseList`
 * `backends::gitlab::ReleaseList`
 * `backends::gitea::ReleaseList`
+* `backends::gitee::ReleaseList`
 * `backends::s3::ReleaseList`
 
 The `manifest` backend has no separate `ReleaseList` struct. Its `ManifestSource` is a
@@ -406,7 +408,7 @@ The custom backend has no `ReleaseList` by design: listing is performed entirely
 
 ### Custom backends
 
-To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `s3`, `manifest`) don't cover —
+To update from a host the built-in backends (`github`, `gitlab`, `gitea`, `gitee`, `s3`, `manifest`) don't cover —
 another forge, a private artifact registry, a plain HTTP directory — implement the
 `ReleaseSource` trait and drive a full update through the `backends::custom` backend, which reuses
 the crate's compare → select-asset → download → verify → extract → install flow. Only

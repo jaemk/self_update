@@ -71,6 +71,11 @@
   (`sha256:<hex>`) maps to `ReleaseAsset::digest()` and plugs into the existing release-digest
   verification path (`checksums` feature). No new dependencies.
   ([#74](https://github.com/jaemk/self_update/issues/74))
+- `gitee` backend: `backends::gitee::ReleaseList`, `Update`, and `AsyncUpdate` for Gitee releases,
+  mirroring the `gitea` backend. Default host `https://gitee.com` with an optional `.host()` setter
+  for enterprise instances. Bearer-token auth via `auth_token`. Nameless source-archive assets are
+  skipped with a debug log rather than erroring.
+  ([#121](https://github.com/jaemk/self_update/issues/121))
 
 ### Changed
 - A recognized-but-unsupported compression extension now fails loudly instead of silently

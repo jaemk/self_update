@@ -9,6 +9,8 @@ pub(crate) mod common;
 pub mod custom;
 #[cfg(feature = "gitea")]
 pub mod gitea;
+#[cfg(feature = "gitee")]
+pub mod gitee;
 #[cfg(feature = "github")]
 pub mod github;
 #[cfg(feature = "gitlab")]
@@ -31,7 +33,12 @@ pub mod s3;
 // Only the forge backends walk Link-header pagination; the attribute keeps builds without any of
 // them (custom/s3-only) warning-free without cfg-gating shared code out of existence.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
@@ -69,6 +76,7 @@ pub(crate) fn find_rel_next_link(link_str: &str) -> Option<&str> {
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -84,6 +92,7 @@ pub(crate) const MAX_RELEASE_PAGES: usize = 100;
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -102,6 +111,7 @@ pub(crate) const MAX_LISTING_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -122,6 +132,7 @@ pub(crate) struct PageRequest<T> {
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -137,7 +148,12 @@ impl<T> Page<T> {
     // Only the forge backends' single-release plans build terminal pages; s3 follows
     // continuation tokens via `next` instead.
     #[cfg_attr(
-        not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+        not(any(
+            feature = "github",
+            feature = "gitlab",
+            feature = "gitea",
+            feature = "gitee"
+        )),
         allow(dead_code)
     )]
     pub(crate) fn last(items: Vec<T>) -> Self {
@@ -160,6 +176,7 @@ impl<T> Page<T> {
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -226,6 +243,7 @@ pub(crate) fn run_paginated<T>(
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3"
     )),
     allow(dead_code)
@@ -287,7 +305,12 @@ pub(crate) async fn run_paginated_async<T>(
 /// already carries query parameters (e.g. a `Link`-header "next" URL), in which case it is used
 /// verbatim so an existing `page`/`per_page` is not clobbered.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn first_page_url(base_url: &str) -> String {
@@ -300,7 +323,12 @@ pub(crate) fn first_page_url(base_url: &str) -> String {
 
 /// Extract the `rel="next"` URL from a response's `Link` header(s), if present.
 #[cfg_attr(
-    not(any(feature = "github", feature = "gitlab", feature = "gitea")),
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn next_link(headers: &http_client::HeaderMap) -> Option<String> {
@@ -398,6 +426,7 @@ where
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3",
         feature = "manifest"
     )),
@@ -452,6 +481,7 @@ pub(crate) fn send(
         feature = "github",
         feature = "gitlab",
         feature = "gitea",
+        feature = "gitee",
         feature = "s3",
         feature = "manifest"
     )),

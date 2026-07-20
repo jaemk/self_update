@@ -19,6 +19,7 @@ design before it can be built). Keep each row's status current with `spec.py set
 | GitHub Backend | done | [ref-github-backend.md](ref-github-backend.md) |
 | GitLab Backend | done | [ref-gitlab-backend.md](ref-gitlab-backend.md) |
 | Gitea Backend | done | [ref-gitea-backend.md](ref-gitea-backend.md) |
+| Gitee Backend | done | [ref-gitee-backend.md](ref-gitee-backend.md) |
 | S3 Backend | done | [ref-s3-backend.md](ref-s3-backend.md) |
 | Custom Backend | done | [ref-custom-backend.md](ref-custom-backend.md) |
 | Signatures and Checksums | done | [ref-signatures-and-checksums.md](ref-signatures-and-checksums.md) |
