@@ -1,6 +1,7 @@
 # Bundle Install (directory bundles, #145 phase A)
 
-Status: research (design for maintainer sign-off; not implemented)
+Status: pending (design signed off 2026-07-26, see Design decisions; not
+implemented)
 
 ## Problem
 
@@ -42,7 +43,7 @@ Non-goals). Phase C (relaunch) shipped as `restart()` / `restart_with()`
 
 ## BNDL-1: builder API
 
-BNDL-1-1. `bundle_root_in_archive(path: impl Into<String>) -> &mut Self` is added
+BNDL-1-1. `bundle_path_in_archive(path: impl Into<String>) -> &mut Self` is added
 to the common builder setters (`src/macros.rs`), available on every backend's
 `UpdateBuilder`. It names the bundle root directory inside the archive, relative
 to the archive root (e.g. `MyApp.app` or `{{ bin }}-{{ version }}/MyApp.app`).
@@ -53,7 +54,7 @@ substitution and `is_safe_asset_name` traversal defense as `bin_path_in_archive`
 BNDL-1-2. `bundle_install_path(path: impl AsRef<Path>) -> &mut Self` names the
 installed bundle directory to replace (e.g. `/Applications/MyApp.app`).
 
-BNDL-1-3. Setting `bundle_root_in_archive` selects bundle mode. Default
+BNDL-1-3. Setting `bundle_path_in_archive` selects bundle mode. Default
 `bundle_install_path` on macOS: the nearest ancestor of
 `std::env::current_exe()` whose file name ends in `.app`. Resolution happens in
 `build()`; no `.app` ancestor and no explicit path => a config error naming the
@@ -98,7 +99,7 @@ There is no cross-device case by construction, and phase A has no copy
 fallback (open question Q5).
 
 BNDL-2-3. Extraction: `Extract::from_source(archive).extract_into(staging)`.
-The staged bundle root is `staging/<substituted bundle_root_in_archive>`.
+The staged bundle root is `staging/<substituted bundle_path_in_archive>`.
 Missing or not a directory => error, nothing touched.
 
 BNDL-2-4. The `verify_binary` hook, when set, runs against the staged bundle
@@ -176,13 +177,22 @@ written as regular files (documented; `.app` is not a windows concern). See
 
 ## BNDL-5: errors and guarantees
 
-BNDL-5-1. New error variants (naming open, Q7):
+BNDL-5-1. New error variants. `Error` is `#[non_exhaustive]`
+(`src/errors.rs:21`), so each addition is a minor-version change:
 - `Error::NoAppBundle { exe: PathBuf }` ("ConfigError: no `.app` ancestor of
   <exe>; set bundle_install_path explicitly") for failed macOS default
-  detection.
-- A config-conflict error for BNDL-1-4 (either a new
-  `Error::ConflictingConfig { .. }` or reuse of the `MissingField` display
-  family; decide with the maintainer).
+  detection. Matchable so a caller can prompt for a path instead of failing.
+- `Error::ConflictingConfig { field, conflict }` for BNDL-1-4.
+- `Error::AppTranslocated { exe: PathBuf }` for BNDL-5-3.
+
+BNDL-5-3. App Translocation: a quarantined `.app` runs from a read-only
+randomized mount, so the detected bundle path cannot be swapped. Detection
+checks for an `AppTranslocation` path component in `current_exe()` during
+default-path resolution and returns `Error::AppTranslocated`, naming the
+translocated exe and directing the user to move the app (which clears
+quarantine) before updating. Without the check the failure surfaces as a bare
+read-only-filesystem IO error from mid-swap, on the most common
+first-run-after-download path on macOS.
 
 BNDL-5-2. Rollback guarantee: before step 2 of BNDL-2-5 nothing under
 `bundle_install_path` has changed. A failure at step 2 or 3 restores the old
@@ -204,7 +214,7 @@ no per-file partial window) and the exe-aside step for running-image safety.
   shipped. Docs must note: a bundle modified after signing fails Gatekeeper,
   and a quarantined app running under App Translocation executes from a
   read-only randomized mount, so default `.app` detection finds a path that
-  cannot be swapped (documented limitation; detection option in Q9).
+  cannot be swapped (detected and rejected, BNDL-5-3).
 - No privilege escalation (consistent with #112): an unwritable
   `/Applications` surfaces as an error; sudo/UAC re-exec is the application's
   choice.
@@ -234,28 +244,39 @@ no per-file partial window) and the exe-aside step for running-image safety.
   post-swap `codesign --verify` and relaunch via `restart()`; windows and
   linux directory-bundle swap with the exe inside and outside the bundle.
 
-## Open questions (maintainer sign-off needed)
+## Design decisions (signed off 2026-07-26)
 
-Q1. Naming: `bundle_root_in_archive` / `bundle_install_path` vs alternatives
-    (`bundle_path_in_archive`, `bundle_dir`). Spec assumes the former.
-Q2. Mutual exclusion (BNDL-1-4): hard `build()` error vs last-setter-wins.
-    Spec recommends the hard error.
-Q3. macOS default detection: on automatically whenever bundle mode is set
-    without an explicit path (spec's position), or opt-in only / always
-    explicit everywhere.
-Q4. Non-macOS in-bundle swaps: allow with documented caveats (spec's
-    position) vs hard error on windows when `current_exe()` is inside the
-    bundle.
-Q5. Cross-device / staging fallback: none (spec's position: staging in the
-    destination parent makes cross-device impossible; a copy fallback would
-    forfeit atomicity) vs fall back to copy.
-Q6. `verify_binary` hook target in bundle mode: staged bundle root (spec's
-    position), staged exe path, or skip the hook in bundle mode.
-Q7. Error variant names for BNDL-5-1.
-Q8. RESOLVED: the zip-symlink fix (BNDL-4-2) landed as a standalone bug-fix
-    PR (#199) ahead of bundle mode.
-Q9. App Translocation: detect (`/AppTranslocation/` path component) and fail
-    with a specific error, or document-only. Spec leans detect-and-error.
+D1. Naming: `bundle_path_in_archive` / `bundle_install_path`, symmetric with
+    the existing `bin_path_in_archive` / `bin_install_path` pair. The
+    directory-ness is carried by the docs and the swap semantics, not by the
+    setter name (rejected: `bundle_root_in_archive`, `bundle_dir`).
+D2. Mutual exclusion (BNDL-1-4): hard `build()` error. Silently dropping one
+    setter can install to the wrong path; a config conflict fails before any
+    network work (rejected: last-setter-wins, warn-and-continue).
+D3. macOS default detection: on automatically whenever bundle mode is set
+    without an explicit path, mirroring `bin_install_path`'s `current_exe()`
+    default. No `.app` ancestor is a hard error naming the exe, and D9 covers
+    the quarantined case, so every failure mode is explicit.
+D4. Non-macOS in-bundle swaps: allowed, with the BNDL-2-7 caveat documented.
+    One code path on all platforms; a windows file-locking failure rolls back
+    and surfaces an error naming the path, so the failure is diagnosable
+    rather than corrupting (rejected: hard error on windows, ack-setter gate).
+D5. Cross-device: no fallback. Staging in `bundle_install_path.parent()` makes
+    a cross-device rename impossible by construction; a copy fallback would
+    forfeit the all-or-nothing rename guarantee (rejected: copy on EXDEV).
+D6. `verify_binary` in bundle mode receives the staged bundle root. Always
+    resolvable (the exe path is not, when the running exe lives outside the
+    bundle) and it is the path `codesign --verify --deep` wants. Documented as
+    a directory in bundle mode; a hook that wants the exe joins the relative
+    path itself (rejected: staged exe path, skipping the hook).
+D7. Errors: three new variants, `Error::NoAppBundle`,
+    `Error::ConflictingConfig`, and `Error::AppTranslocated` (BNDL-5-1).
+    `Error` is `#[non_exhaustive]`, so these are matchable without a breaking
+    change (rejected: string-only distinction via the existing config family).
+D8. The zip-symlink fix (BNDL-4-2) landed as a standalone bug-fix PR (#199)
+    ahead of bundle mode.
+D9. App Translocation: detect and fail with `Error::AppTranslocated`
+    (BNDL-5-3), not document-only.
 
 ## Related
 
