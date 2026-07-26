@@ -3717,6 +3717,623 @@ mod tests {
             .expect("without bundle mode the bin install path is probed");
     }
 
+    // --- bundle mode: gaps closed by the coverage pass (BNDL-*) ---------------------------------
+
+    // BNDL-2-2: `install_parent` picks the directory the staging and stash temp dirs are created
+    // in. A bare relative bundle name has an *empty* parent component, which must resolve to the
+    // current directory -- `TempDir::new_in("")` fails, so an empty parent would break the swap for
+    // a relative `bundle_install_path`.
+    #[test]
+    fn install_parent_resolves_a_bare_name_to_the_current_dir() {
+        assert_eq!(
+            super::install_parent(std::path::Path::new("MyApp.app")),
+            std::path::Path::new("."),
+            "a bare bundle name must stage in the current directory"
+        );
+        assert_eq!(
+            super::install_parent(std::path::Path::new("/Applications/MyApp.app")),
+            std::path::Path::new("/Applications")
+        );
+        assert_eq!(
+            super::install_parent(std::path::Path::new("sub/MyApp.app")),
+            std::path::Path::new("sub"),
+            "a relative nested path keeps its real parent"
+        );
+    }
+
+    // BNDL-3-1: the bundle-parent probe is best-effort in exactly the way the single-file probe is:
+    // only a definite permission refusal fails. A directory that does not exist is indeterminate,
+    // so the update proceeds and the real install step surfaces the outcome.
+    #[test]
+    fn probe_dir_writable_treats_a_missing_dir_as_indeterminate() {
+        let dir = tempfile::tempdir().unwrap();
+        super::probe_dir_writable(&dir.path().join("nope").join("deeper"))
+            .expect("a missing directory is indeterminate and must probe Ok");
+        super::probe_dir_writable(dir.path()).expect("a writable directory must probe Ok");
+    }
+
+    // BNDL-5-2/BNDL-3-2: a failure at the stash step (step 2 of the swap) happens before anything
+    // under the install path has changed, so the installed bundle is left exactly as it was, the
+    // ORIGINAL io error surfaces, and it names the install path. Injected by pointing the swap at a
+    // stash directory that does not exist.
+    #[test]
+    fn swap_bundle_leaves_the_bundle_intact_when_the_stash_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_bundle(&staging, "MyApp.app", "myapp", b"new");
+        let missing_stash = dir.path().join("no-such-stash");
+        let dest = staged_bundle(dir.path(), "MyApp.app", "myapp", b"old");
+
+        let err = super::swap_bundle(
+            &staged,
+            &dest,
+            &missing_stash,
+            &dir.path().join("updater"),
+            None,
+        )
+        .expect_err("an unusable stash must fail the swap");
+        assert!(
+            matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "the original rename error (and its kind) must surface, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains(&dest.display().to_string()),
+            "the install error must name the bundle install path, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"old",
+            "nothing may change before the stash rename succeeds"
+        );
+        assert!(
+            staged.is_dir(),
+            "the staged tree must be left for the caller when the swap never started"
+        );
+    }
+
+    // BNDL-5-2: the very first rename -- the running executable moved aside (step 1) -- can fail
+    // too. Nothing has moved at that point, so both the installed bundle and the running
+    // executable's path are untouched, and the error names the install path.
+    #[test]
+    fn swap_bundle_reports_a_failed_exe_aside_with_nothing_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_bundle(&staging, "MyApp.app", "myapp", b"new");
+        let missing_stash = dir.path().join("no-such-stash");
+        let dest = staged_bundle(dir.path(), "MyApp.app", "myapp", b"old");
+        let running_exe = dest.join("Contents").join("MacOS").join("myapp");
+
+        let err = super::swap_bundle(&staged, &dest, &missing_stash, &running_exe, None)
+            .expect_err("an unusable stash must fail the exe-aside rename");
+        assert!(
+            err.to_string().contains(&dest.display().to_string()),
+            "the install error must name the bundle install path, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&running_exe).unwrap(),
+            b"old",
+            "the running executable must stay in place when the swap never started"
+        );
+        assert!(dest.is_dir(), "the installed bundle must be untouched");
+    }
+
+    // BNDL-2-4: a hook failing with an ordinary error (not an explicit rejection) still aborts the
+    // swap; its message becomes the `VerificationRejected` reason and nothing is renamed. The
+    // rejection arm is covered above -- this is the wrap-any-other-error arm, in bundle mode.
+    #[test]
+    fn swap_bundle_wraps_a_hook_error_as_a_rejection_and_replaces_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_bundle(&staging, "MyApp.app", "myapp", b"new");
+        let stash = dir.path().join("stash");
+        std::fs::create_dir(&stash).unwrap();
+        let dest = staged_bundle(dir.path(), "MyApp.app", "myapp", b"old");
+
+        let hook: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(Error::Io(std::io::Error::other("codesign hook blew up")))
+        });
+        let err = super::swap_bundle(
+            &staged,
+            &dest,
+            &stash,
+            &dir.path().join("updater"),
+            Some(&*hook),
+        )
+        .expect_err("a failing hook must abort the swap");
+        match err {
+            Error::VerificationRejected { reason } => assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("codesign hook blew up")),
+                "the hook's error message must become the rejection reason, got {reason:?}"
+            ),
+            other => panic!("expected VerificationRejected, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"old",
+            "a failed verification must leave the installed bundle in place"
+        );
+    }
+
+    // BNDL-2-5: containment is decided even when neither path exists yet -- a fresh install has no
+    // destination to canonicalize, so the comparison falls back to the lexical paths -- and it is
+    // component-wise: a sibling whose name merely starts with the bundle's name is outside it.
+    #[test]
+    fn exe_inside_bundle_falls_back_to_a_lexical_comparison() {
+        let base = std::path::Path::new("/no/such/root");
+        let bundle = base.join("MyApp.app");
+        let exe = bundle.join("Contents").join("MacOS").join("myapp");
+
+        let (found, rel) = super::exe_inside_bundle(&exe, &bundle)
+            .expect("paths that cannot be canonicalized must still compare lexically");
+        assert_eq!(rel, std::path::Path::new("Contents/MacOS/myapp"));
+        assert_eq!(found, exe, "the un-canonicalizable exe path is used as-is");
+        assert!(
+            super::exe_inside_bundle(&base.join("MyApp.app.bak").join("myapp"), &bundle).is_none(),
+            "a sibling sharing the bundle's name prefix is not inside the bundle"
+        );
+    }
+
+    // BNDL-2-5: a `bundle_install_path` that is a symlink to the real bundle still ends up
+    // resolving to the NEW tree after the swap -- the guarantee a caller who configured that path
+    // depends on. (Whether the link itself survives the swap is deliberately not asserted here:
+    // that detail is not fixed by the committed spec.)
+    #[cfg(unix)]
+    #[test]
+    fn swap_bundle_through_a_symlinked_install_path_installs_the_new_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_bundle(&staging, "MyApp.app", "myapp", b"new");
+        let stash = dir.path().join("stash");
+        std::fs::create_dir(&stash).unwrap();
+
+        // The real bundle lives elsewhere; the configured install path is a symlink to it.
+        let real_root = dir.path().join("real");
+        std::fs::create_dir(&real_root).unwrap();
+        let real = staged_bundle(&real_root, "MyApp.app", "myapp", b"old");
+        let link = dir.path().join("MyApp.app");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        super::swap_bundle(&staged, &link, &stash, &dir.path().join("updater"), None)
+            .expect("a symlinked install path must swap");
+
+        assert_eq!(
+            std::fs::read(link.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"new",
+            "the configured install path must resolve to the new bundle after the swap"
+        );
+    }
+
+    // BNDL-2-2: the staging/stash dirs are created inside the destination's parent, so an
+    // unwritable parent fails there -- before the archive is even opened -- as
+    // `InstallPathNotWritable` naming the bundle install path.
+    #[cfg(unix)]
+    #[test]
+    fn install_bundle_reports_an_unwritable_install_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("Applications");
+        std::fs::create_dir(&ro_dir).unwrap();
+        let dest = ro_dir.join("MyApp.app");
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // The archive is never read: creating the staging dir fails first.
+        let res = super::install_bundle(
+            &dir.path().join("never-read.zip"),
+            "MyApp.app",
+            &dest,
+            None,
+            false,
+        );
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match res {
+            Err(Error::InstallPathNotWritable { path }) => assert_eq!(
+                path, dest,
+                "the staging failure must name the bundle install path"
+            ),
+            other => panic!("expected InstallPathNotWritable, got {other:?}"),
+        }
+    }
+
+    // BNDL-2-3: an archive that does not carry the configured bundle directory is an error naming
+    // the missing staged root, with the installed bundle untouched and no staging/stash residue
+    // left beside it.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn install_bundle_errors_when_the_archive_has_no_bundle_directory() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.zip");
+        {
+            let f = std::fs::File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("some-other-dir/readme.txt", opts).unwrap();
+            zip.write_all(b"not a bundle").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let install_root = dir.path().join("Applications");
+        std::fs::create_dir(&install_root).unwrap();
+        let dest = staged_bundle(&install_root, "MyApp.app", "myapp", b"old");
+
+        let err = super::install_bundle(&archive_path, "MyApp.app", &dest, None, false)
+            .expect_err("an archive without the bundle directory must error");
+        assert!(
+            matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "expected a NotFound Io error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("MyApp.app"),
+            "the error must name the bundle directory it looked for, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"old",
+            "the installed bundle must be untouched"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&install_root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "MyApp.app")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the staging/stash dirs must be cleaned up on the error path too, found: {leftovers:?}"
+        );
+    }
+
+    // BNDL-4-1/BNDL-4-2: the same install over a **tar.gz** bundle archive (the zip case is
+    // covered above). `tar`'s unpack carries the executable bit and restores symlinks, both of
+    // which a macOS `.app` (framework `Versions/Current` links, signed executables) depends on.
+    #[cfg(all(feature = "compression-tar-gz", unix))]
+    #[test]
+    fn install_bundle_extracts_and_swaps_a_tar_gz_archive() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("MyApp.app.tar.gz");
+        {
+            let mut ar = tar::Builder::new(Vec::new());
+
+            let exe = b"#!/bin/sh\necho new\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o755);
+            header.set_size(exe.len() as u64);
+            ar.append_data(&mut header, "MyApp.app/Contents/MacOS/myapp", &exe[..])
+                .unwrap();
+
+            let data = b"payload";
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(data.len() as u64);
+            ar.append_data(
+                &mut header,
+                "MyApp.app/Contents/Resources/data.txt",
+                &data[..],
+            )
+            .unwrap();
+
+            // A relative symlink, as a bundled framework's `Versions/Current` would be.
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o777);
+            header.set_size(0);
+            ar.append_link(&mut header, "MyApp.app/Contents/Current", "Resources")
+                .unwrap();
+
+            let tarred = ar.into_inner().unwrap();
+            let out = std::fs::File::create(&archive_path).unwrap();
+            let mut gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+            std::io::copy(&mut tarred.as_slice(), &mut gz).unwrap();
+            gz.finish().unwrap();
+        }
+
+        let install_root = dir.path().join("Applications");
+        std::fs::create_dir(&install_root).unwrap();
+        let dest = staged_bundle(&install_root, "MyApp.app", "myapp", b"old");
+        std::fs::write(dest.join("Contents").join("gone.txt"), b"stale").unwrap();
+
+        super::install_bundle(&archive_path, "MyApp.app", &dest, None, false)
+            .expect("installing a bundle from a tar.gz must work");
+
+        let installed_exe = dest.join("Contents").join("MacOS").join("myapp");
+        assert_eq!(
+            std::fs::read(&installed_exe).unwrap(),
+            b"#!/bin/sh\necho new\n",
+            "the installed exe must come from the tar.gz"
+        );
+        assert!(
+            std::fs::metadata(&installed_exe)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0,
+            "the archived executable bit must survive a tar.gz install"
+        );
+        let link = dest.join("Contents").join("Current");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a tar symlink entry must be installed as a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("Resources"),
+            "the symlink must still point at its original relative target"
+        );
+        assert!(
+            !dest.join("Contents").join("gone.txt").exists(),
+            "the swap replaces the whole tree"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&install_root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "MyApp.app")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging/stash dirs must not be left behind, found: {leftovers:?}"
+        );
+    }
+
+    // A bundle-mode [`FinishCtx`], built on the same shape as `traversal_ctx` (which the
+    // substitution-guard tests use) with the bundle fields filled in, so the finish tail takes the
+    // `install_bundle` branch.
+    fn bundle_ctx(
+        bundle_path_in_archive: &str,
+        version: &str,
+        bundle_install_path: &std::path::Path,
+    ) -> super::FinishCtx {
+        let mut ctx = traversal_ctx("unused-bin-path", version);
+        ctx.bundle_path_in_archive = Some(bundle_path_in_archive.to_string());
+        ctx.bundle_install_path = Some(bundle_install_path.to_path_buf());
+        ctx
+    }
+
+    // BNDL-1-1/BNDL-2-3: the finish tail end to end in bundle mode, with all three `{{ .. }}`
+    // templates inside a *nested* bundle path. The substitution is shared with the single-file
+    // path, so this pins that bundle mode reads it (and reads `bundle_path_in_archive`, not
+    // `bin_path_in_archive`), installs the nested directory, and reports the release.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn finish_update_owned_installs_a_templated_nested_bundle_path() {
+        use std::io::Write as _;
+
+        let install_dir = tempfile::tempdir().unwrap();
+        let dest = install_dir.path().join("MyApp.app");
+
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_path = archive_dir.path().join("release.zip");
+        {
+            let f = std::fs::File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file(
+                "myapp-1.2.3-x86_64-unknown-linux-gnu/MyApp.app/Contents/MacOS/myapp",
+                opts,
+            )
+            .unwrap();
+            zip.write_all(b"new-exe").unwrap();
+            zip.start_file(
+                "myapp-1.2.3-x86_64-unknown-linux-gnu/MyApp.app/Contents/Info.plist",
+                opts,
+            )
+            .unwrap();
+            zip.write_all(b"plist").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let mut ctx = bundle_ctx(
+            "{{ bin }}-{{ version }}-{{ target }}/MyApp.app",
+            "1.2.3",
+            &dest,
+        );
+        ctx.bin_name = "myapp".to_string();
+        // A path that only the single-file branch would ever write to.
+        let never_written = install_dir.path().join("single-file-install");
+        ctx.bin_install_path = never_written.clone();
+
+        let status = super::finish_update_owned(ctx, archive_dir, &archive_path)
+            .expect("a bundle-mode finish must install the bundle");
+        assert!(status.is_updated(), "bundle mode must report an update");
+        assert_eq!(
+            status.version(),
+            Some("1.2.3"),
+            "the installed release must be reported"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"new-exe",
+            "the templated nested bundle directory must be installed at the bundle install path"
+        );
+        assert!(
+            dest.join("Contents").join("Info.plist").exists(),
+            "the whole bundle tree must be installed, not just the executable"
+        );
+        assert!(
+            !never_written.exists(),
+            "bundle mode must not run the single-file install"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(install_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "MyApp.app")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging/stash dirs must not be left beside the installed bundle, found: {leftovers:?}"
+        );
+    }
+
+    // BNDL-1-1 (traversal defense): the `is_safe_asset_name` guard covers a value substituted into
+    // the BUNDLE path too, so a malicious release version cannot redirect the swap's source outside
+    // the staging dir. The guard fires before the archive is read (it does not even exist here),
+    // and the installed bundle is untouched.
+    #[test]
+    fn finish_update_rejects_traversal_in_a_substituted_bundle_path() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let dest = staged_bundle(install_dir.path(), "MyApp.app", "myapp", b"old");
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = archive_dir.path().join("release.zip");
+
+        let ctx = bundle_ctx("{{ version }}/MyApp.app", "../evil", &dest);
+        match super::finish_update_owned(ctx, archive_dir, &archive) {
+            Err(Error::InvalidAssetName { name }) => {
+                assert_eq!(name, "../evil", "the offending component must be named");
+            }
+            other => panic!("expected InvalidAssetName for a traversal version, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"old",
+            "a rejected substitution must not touch the installed bundle"
+        );
+    }
+
+    // A clonable release source offering one newer release with an asset for the target the bundle
+    // tests configure, so the same source can drive the sync updater, the async updater (the async
+    // adapter requires `Clone`), and a full `update_extended` run up to the preflight.
+    #[derive(Clone)]
+    struct BundleSource;
+    impl BundleSource {
+        fn release(version: &str) -> Result<Release> {
+            Release::builder()
+                .version(version)
+                .asset(crate::update::ReleaseAsset::new(
+                    "myapp-x86_64-unknown-linux-gnu.zip",
+                    // Unroutable on purpose: reaching the download at all is a test failure.
+                    "http://127.0.0.1:1/myapp-x86_64-unknown-linux-gnu.zip",
+                ))
+                .build()
+        }
+    }
+    impl crate::update::ReleaseSource for BundleSource {
+        fn get_latest_release(&self) -> Result<Release> {
+            Self::release("1.2.3")
+        }
+        fn get_releases(&self) -> Result<Vec<Release>> {
+            Ok(vec![Self::release("1.2.3")?])
+        }
+        fn get_release_version(&self, v: &str) -> Result<Release> {
+            Self::release(v)
+        }
+    }
+
+    // BNDL-3-1: the opt-in preflight through a real updater in bundle mode. It probes the BUNDLE'S
+    // PARENT (not `bin_install_path`, which defaults to the running test binary and is writable)
+    // and bails before anything is downloaded -- the asset URL is unroutable, so a preflight that
+    // failed to fire would surface a transport error instead.
+    #[cfg(unix)]
+    #[test]
+    fn update_extended_preflight_rejects_an_unwritable_bundle_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("Applications");
+        std::fs::create_dir(&ro_dir).unwrap();
+        let bundle = ro_dir.join("MyApp.app");
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let upd = crate::backends::custom::Update::configure()
+            .source(BundleSource)
+            .bin_name("myapp")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .bundle_path_in_archive("MyApp.app")
+            .bundle_install_path(&bundle)
+            .check_install_path_writable(true)
+            .no_confirm(true)
+            .show_output(false)
+            .build()
+            .unwrap();
+        let res = upd.update_extended();
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match res {
+            Err(Error::InstallPathNotWritable { path }) => assert_eq!(
+                path, ro_dir,
+                "the preflight must name the unwritable bundle parent"
+            ),
+            other => panic!("expected InstallPathNotWritable from the preflight, got {other:?}"),
+        }
+    }
+
+    // BNDL-1-7: the bundle fields ride through `FinishCtx`, which is what the sync tail and the
+    // async tail (inside `spawn_blocking`) both capture -- so bundle mode behaves identically on
+    // both. Without the setters the captured context stays in single-file mode.
+    #[test]
+    fn finish_ctx_captures_the_bundle_fields() {
+        let asset = crate::update::ReleaseAsset::new("release.zip", "https://host/release.zip");
+
+        let bundled = crate::backends::custom::Update::configure()
+            .source(BundleSource)
+            .bin_name("myapp")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .bundle_path_in_archive("MyApp.app")
+            .bundle_install_path("/Applications/MyApp.app")
+            .build()
+            .unwrap();
+        let ctx = super::FinishCtx::capture(&bundled, rel("1.2.3"), &asset);
+        assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
+        assert_eq!(
+            ctx.bundle_install_path.as_deref(),
+            Some(std::path::Path::new("/Applications/MyApp.app"))
+        );
+
+        let plain = crate::backends::custom::Update::configure()
+            .source(BundleSource)
+            .bin_name("myapp")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build()
+            .unwrap();
+        let ctx = super::FinishCtx::capture(&plain, rel("1.2.3"), &asset);
+        assert!(
+            ctx.bundle_path_in_archive.is_none() && ctx.bundle_install_path.is_none(),
+            "without the setters the finish tail must stay in single-file mode"
+        );
+    }
+
+    // BNDL-1-7 (async lane): an updater built with `build_async` carries the same bundle fields
+    // into the shared `FinishCtx`, so `update_extended_async` installs bundles like the sync verb.
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_update_captures_the_bundle_fields_too() {
+        let upd = crate::backends::custom::AsyncUpdate::configure()
+            .source(crate::backends::custom::Blocking::new(BundleSource))
+            .bin_name("myapp")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .bundle_path_in_archive("MyApp.app")
+            .bundle_install_path("/Applications/MyApp.app")
+            .build_async()
+            .unwrap();
+        let asset = crate::update::ReleaseAsset::new("release.zip", "https://host/release.zip");
+        let ctx = super::FinishCtx::capture(&upd, rel("1.2.3"), &asset);
+        assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
+        assert_eq!(
+            ctx.bundle_install_path.as_deref(),
+            Some(std::path::Path::new("/Applications/MyApp.app"))
+        );
+    }
+
     // Build a custom-backend `Update` carrying `checksum`, to drive `finish_update` directly.
     #[cfg(feature = "checksums")]
     fn update_with_checksum(checksum: crate::Checksum) -> crate::backends::custom::Update {

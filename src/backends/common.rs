@@ -1004,6 +1004,82 @@ mod tests {
         }
     }
 
+    // BNDL-1-3: `bundle_path_in_archive` alone selects bundle mode -- `bundle_install_path` does
+    // not. Set on its own it is inert: the built config stays single-file (both bundle fields
+    // `None`, so the pipeline never takes the swap branch) and an explicit `bin_install_path`
+    // alongside it is therefore NOT a conflict.
+    #[test]
+    fn build_ignores_bundle_install_path_without_the_archive_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            bin_install_path: Some(PathBuf::from("/usr/local/bin/app")),
+            ..bundle_base()
+        };
+        let built = cfg
+            .build()
+            .expect("bundle_install_path alone must not select bundle mode");
+        assert!(built.bundle_path_in_archive.is_none());
+        assert!(
+            built.bundle_install_path.is_none(),
+            "an install path with no bundle mode must not reach the built config"
+        );
+        assert_eq!(built.bin_install_path, PathBuf::from("/usr/local/bin/app"));
+    }
+
+    // BNDL-1-5: bundle mode does not relax the shared required fields -- `current_version` and
+    // `bin_name` (which names the asset and feeds `{{ bin }}`) are still required.
+    #[test]
+    fn build_still_requires_current_version_and_bin_name_in_bundle_mode() {
+        let no_version = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            current_version: None,
+            ..bundle_base()
+        };
+        match no_version.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "current_version");
+            }
+            other => panic!("expected MissingField(current_version), got {other:?}"),
+        }
+
+        let no_bin_name = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            bin_name: None,
+            // No `bin_name` setter call means no auto-derived archive path either.
+            bin_path_in_archive: None,
+            bin_path_in_archive_auto: false,
+            ..bundle_base()
+        };
+        match no_bin_name.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "bin_name");
+            }
+            other => panic!("expected MissingField(bin_name), got {other:?}"),
+        }
+    }
+
+    // BNDL-1-4: the conflict is reported before the install path is resolved, so a caller who set
+    // both gets the actionable "these two setters conflict" error rather than a
+    // missing/undetectable-`bundle_install_path` error from the default resolution (which on macOS
+    // would even consult `current_exe()` first).
+    #[test]
+    fn build_reports_the_conflict_before_resolving_the_install_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bin_install_path: Some(PathBuf::from("/usr/local/bin/app")),
+            ..bundle_base()
+        };
+        match cfg.build() {
+            Err(crate::errors::Error::ConflictingConfig { field, conflict }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+                assert_eq!(conflict, "bin_install_path");
+            }
+            other => panic!("expected ConflictingConfig, got {other:?}"),
+        }
+    }
+
     // --- Item 5: self-fixing error messages --------------------------------------------------
 
     #[test]

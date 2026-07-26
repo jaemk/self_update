@@ -1937,6 +1937,80 @@ mod tests {
         assert!(upd.verify_checksum().is_some());
     }
 
+    // BNDL-1-1/BNDL-1-2: the bundle setters are part of the shared builder surface, so they exist
+    // on a real backend's builder and their values reach the built `Update`'s accessors. Bundle
+    // mode is off by default, in which case both accessors are `None` (the trait defaults).
+    #[test]
+    fn builder_stores_bundle_paths() {
+        let plain = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        assert!(
+            plain.bundle_path_in_archive().is_none() && plain.bundle_install_path().is_none(),
+            "bundle mode must be off unless bundle_path_in_archive is set"
+        );
+
+        let bundled = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .bundle_path_in_archive("{{ bin }}-{{ version }}/MyApp.app")
+            .bundle_install_path("/Applications/MyApp.app")
+            .build()
+            .unwrap();
+        assert_eq!(
+            bundled.bundle_path_in_archive(),
+            Some("{{ bin }}-{{ version }}/MyApp.app")
+        );
+        assert_eq!(
+            bundled.bundle_install_path(),
+            Some(std::path::Path::new("/Applications/MyApp.app"))
+        );
+    }
+
+    // BNDL-1-4: bundle mode combined with an explicit single-file setter is rejected by `build()`
+    // (naming both sides) rather than silently dropping one and installing to the wrong path. The
+    // value `bin_name` auto-derives is not an explicit call, so it never conflicts -- but an
+    // explicit `bin_path_in_archive` does, even when it repeats the auto-derived value.
+    #[test]
+    fn builder_rejects_bundle_mode_combined_with_the_single_file_setters() {
+        let conflict = |res: crate::errors::Result<super::Update>| match res {
+            Err(crate::errors::Error::ConflictingConfig { field, conflict }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+                conflict
+            }
+            other => panic!("expected ConflictingConfig, got {:?}", other.map(|_| ())),
+        };
+
+        let res = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .bundle_path_in_archive("MyApp.app")
+            .bundle_install_path("/Applications/MyApp.app")
+            .bin_install_path("/usr/local/bin/app")
+            .build();
+        assert_eq!(conflict(res), "bin_install_path");
+
+        let res = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .bundle_path_in_archive("MyApp.app")
+            .bundle_install_path("/Applications/MyApp.app")
+            // Even repeating what `bin_name` already derived is an explicit call, and conflicts.
+            .bin_path_in_archive("app")
+            .build();
+        assert_eq!(conflict(res), "bin_path_in_archive");
+    }
+
     #[test]
     fn builder_stores_asset_matcher() {
         let upd = super::Update::configure()
