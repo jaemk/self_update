@@ -294,6 +294,12 @@ macro_rules! impl_update_config_accessors {
         fn bin_path_in_archive(&self) -> &str {
             &self.common.bin_path_in_archive
         }
+        fn bundle_path_in_archive(&self) -> Option<&str> {
+            self.common.bundle_path_in_archive.as_deref()
+        }
+        fn bundle_install_path(&self) -> Option<&std::path::Path> {
+            self.common.bundle_install_path.as_deref()
+        }
         fn show_download_progress(&self) -> bool {
             self.common.show_download_progress
         }
@@ -601,6 +607,69 @@ macro_rules! impl_common_builder_setters {
             self.common.bin_path_in_archive = Some(bin_path.into());
             // An explicit set wins and is sticky: a subsequent `bin_name` call must not re-derive.
             self.common.bin_path_in_archive_auto = false;
+            self
+        }
+
+        /// Install a whole directory bundle (a macOS `.app`) instead of a single executable,
+        /// naming the bundle directory *inside the archive*, relative to its root (e.g.
+        /// `"MyApp.app"` or `"{{ bin }}-{{ version }}/MyApp.app"`).
+        ///
+        /// Calling this selects bundle mode: the archive is extracted in full and the named
+        /// directory replaces [`bundle_install_path`](Self::bundle_install_path) as one unit, so a
+        /// bundle's resources and code signature stay consistent with its executable (replacing
+        /// only the exe inside an `.app` leaves stale resources and breaks the signature).
+        ///
+        /// The same `{{ bin }}` / `{{ target }}` / `{{ version }}` substitutions as
+        /// [`bin_path_in_archive`](Self::bin_path_in_archive) apply.
+        ///
+        /// Bundle mode replaces a directory rather than a file, so combining it with an explicit
+        /// [`bin_install_path`](Self::bin_install_path) or
+        /// [`bin_path_in_archive`](Self::bin_path_in_archive) is rejected by `build()` with
+        /// [`Error::ConflictingConfig`](crate::errors::Error::ConflictingConfig) rather than
+        /// silently ignoring one of them. [`bin_name`](Self::bin_name) is still required (it names
+        /// the asset and feeds `{{ bin }}`); the path it auto-derives is simply unused.
+        ///
+        /// The replacement is a whole-tree swap: the new bundle is staged next to the destination,
+        /// the old tree is stashed, and the two are renamed, so a failure at any step restores the
+        /// original bundle. When the running executable lives inside the bundle it is renamed aside
+        /// first (the mechanism a self-replace relies on), so no running image remains in the old
+        /// tree; after a successful update the running exe's path holds the new executable and the
+        /// process can relaunch itself with [`restart`](crate::restart::restart).
+        ///
+        /// Phase A targets macOS `.app` bundles. A directory bundle on linux or windows is swapped
+        /// by the same code path, but on windows the swap fails (and rolls back) if the process
+        /// holds files inside the bundle open beyond its own executable, for example a DLL loaded
+        /// from it.
+        ///
+        /// See the crate-level "Bundle installs" section for a full example.
+        pub fn bundle_path_in_archive(&mut self, bundle_path: impl Into<String>) -> &mut Self {
+            self.common.bundle_path_in_archive = Some(bundle_path.into());
+            self
+        }
+
+        /// Set the installed bundle directory that bundle mode replaces, e.g.
+        /// `"/Applications/MyApp.app"`. Only consulted when
+        /// [`bundle_path_in_archive`](Self::bundle_path_in_archive) is set.
+        ///
+        /// On macOS this defaults to the nearest `.app` ancestor of the running executable, so an
+        /// app launched from `/Applications/MyApp.app/Contents/MacOS/myapp` updates itself in
+        /// place; a running executable with no `.app` ancestor is an
+        /// [`Error::NoAppBundle`](crate::errors::Error::NoAppBundle) from `build()`, and a
+        /// quarantined app running from a read-only translocated mount is an
+        /// [`Error::AppTranslocated`](crate::errors::Error::AppTranslocated). On every other
+        /// platform there is no default and bundle mode requires this setter.
+        ///
+        /// The swap stages the new tree inside this path's parent directory, so the parent must be
+        /// writable and hold enough free space for one more copy of the bundle. There is no
+        /// cross-filesystem fallback (staging in the parent makes one unnecessary), and no
+        /// privilege escalation: an unwritable `/Applications` surfaces as
+        /// [`Error::InstallPathNotWritable`](crate::errors::Error::InstallPathNotWritable).
+        pub fn bundle_install_path<A: AsRef<std::path::Path>>(
+            &mut self,
+            bundle_install_path: A,
+        ) -> &mut Self {
+            self.common.bundle_install_path =
+                Some(std::path::PathBuf::from(bundle_install_path.as_ref()));
             self
         }
 

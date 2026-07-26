@@ -35,7 +35,10 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidResponse { source: Box<dyn Error + Send + Sync> }` | A backend response could not be parsed: a malformed (non-array) JSON release-listing body (`github.rs`, `gitlab.rs`, `gitea.rs`), the S3 listing regex build failure, and the S3 XML parse failure (`s3.rs`). The underlying error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name` (`github.rs`, `gitlab.rs`, `gitea.rs`), `host` (`gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
-| `InstallPathNotWritable { path: PathBuf }` | The opt-in preflight probe (`check_install_path_writable(true)`, `probe_install_path_writable` at `update.rs:1606`) when the path is definitely not writable, or the install step (`map_install_io_error` at `update.rs:1582`) when the replace/move fails with `PermissionDenied`. `path` is the configured `bin_install_path`. `#[non_exhaustive]`. | none | no (struct fields) |
+| `InstallPathNotWritable { path: PathBuf }` | The opt-in preflight probe (`check_install_path_writable(true)`, `probe_writable` at `update.rs:1865`) when the path is definitely not writable, or the install step (`map_install_io_error` at `update.rs:1582`) when the replace/move fails with `PermissionDenied`. `path` is the configured `bin_install_path`, or in bundle mode the bundle's parent directory. `#[non_exhaustive]`. | none | no (struct fields) |
+| `NoAppBundle { exe: PathBuf }` | Bundle mode with no explicit `bundle_install_path` on macOS, when `current_exe()` has no `.app` ancestor to derive it from (`default_bundle_install_path` at `update.rs:1801`). `exe` is the running executable. macOS only: other targets get `MissingField { field: "bundle_install_path" }`. `#[non_exhaustive]`. | none | no (struct fields) |
+| `ConflictingConfig { field: &'static str, conflict: &'static str }` | Two builder settings that cannot both apply were set; raised from `build()` (`resolve_bundle_mode` at `backends/common.rs:638`) for `bundle_path_in_archive` combined with an explicit `bin_install_path` or `bin_path_in_archive`. `field` is the rejected setting, `conflict` the one it clashes with. `#[non_exhaustive]`. | none | no (struct fields) |
+| `AppTranslocated { exe: PathBuf }` | Bundle mode on macOS when the running executable is inside an `AppTranslocation` mount, i.e. a quarantined copy on a read-only randomized path whose bundle is not the installed one (`is_translocated` at `update.rs:1838`, via `default_bundle_install_path`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A request header (`request_header` on the builders or on `Download`) was not a valid HTTP header. The setters are infallible; the error is deferred and surfaced from `build()` (via `common.rs`) or from `Download::download_to` / `download_to_async` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. Exception: on a ureq-only build a malformed **DER** certificate is not caught at `build()` (ureq's `from_der` is infallible) and surfaces as `Transport` at connection time; PEM is validated at `build()` on both clients. `#[non_exhaustive]`. | none | yes (boxed source) |
@@ -128,6 +131,9 @@ Each variant renders with a specific Display string:
 - `InvalidResponse { source }` -> `"ReleaseError: invalid response: {source}"`
 - `MissingField { field }` -> `"ConfigError: \`{field}\` required"`
 - `InstallPathNotWritable { path }` -> `"InstallPathNotWritableError: cannot write to install path {path}: run with elevated privileges or choose a user-writable bin_install_path"`
+- `NoAppBundle { exe }` -> ``"ConfigError: no `.app` ancestor of {exe}; set bundle_install_path explicitly"``
+- `ConflictingConfig { field, conflict }` -> ``"ConfigError: `{field}` conflicts with `{conflict}`; set one or the other"``
+- `AppTranslocated { exe }` -> `"AppTranslocatedError: {exe} is running from a translocated (quarantined) copy on a read-only mount, so its bundle cannot be replaced: move the app (e.g. to /Applications) and relaunch it before updating"`
 - `InvalidHeader { source }` -> `"ConfigError: invalid HTTP header: {source}"`
 - `InvalidAuthToken { source }` -> `"ConfigError: failed to parse auth token: {source}"`
 - `InvalidCertificate { source }` -> `"ConfigError: invalid root certificate: {source}"`
@@ -159,9 +165,9 @@ boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
 `Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
 (`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
-`NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`,
-`ArchiveNotEnabled`, `CompressionNotEnabled`, `InvalidAssetName`, `NoSignatures`,
-`SignatureNonUTF8`) return `None`. The concrete inner error of
+`NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`, `NoAppBundle`,
+`ConflictingConfig`, `AppTranslocated`, `ArchiveNotEnabled`, `CompressionNotEnabled`,
+`InvalidAssetName`, `NoSignatures`, `SignatureNonUTF8`) return `None`. The concrete inner error of
 a boxed variant is reachable at runtime through `source()` and `downcast_ref::<ConcreteType>()`
 (e.g. `err.source().and_then(|s| s.downcast_ref::<reqwest::Error>())`).
 
@@ -272,7 +278,12 @@ type directly, since `std::io::Error` is stable std.)
   `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
   `InvalidResponse`, `MissingField`, `InstallPathNotWritable`, `InvalidHeader`, `InvalidAuthToken`,
   `InvalidCertificate`, `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`,
-  `ChecksumMismatch`).
+  `ChecksumMismatch`, `NoAppBundle`, `ConflictingConfig`, `AppTranslocated`).
+- The bundle-mode config variants are raised from `build()`, before any request: `NoAppBundle`
+  (macOS, no `.app` ancestor to derive `bundle_install_path` from), `ConflictingConfig` (bundle mode
+  plus an explicit `bin_install_path`/`bin_path_in_archive`), and `AppTranslocated` (a quarantined
+  app running from a read-only translocated mount). Off macOS, bundle mode without an explicit
+  `bundle_install_path` is `MissingField { field: "bundle_install_path" }` instead.
 - `Error::Internal` is reserved for genuine internal/invariant failures: extractor invariants,
   archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
   `source`).

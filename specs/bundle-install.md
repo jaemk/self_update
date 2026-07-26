@@ -1,7 +1,16 @@
 # Bundle Install (directory bundles, #145 phase A)
 
-Status: pending (design signed off 2026-07-26, see Design decisions; not
-implemented)
+Status: implemented (design signed off 2026-07-26, see Design decisions; shipped
+for directory bundles as specified below, with `.deb`/`.msi` remaining a
+docs-only recipe per Non-goals)
+
+Implementation: `bundle_path_in_archive` / `bundle_install_path` on the common
+builder setters (`src/macros.rs`), resolved by
+`CommonBuilderConfig::resolve_bundle_mode` (`src/backends/common.rs:638`) and
+`default_bundle_install_path` (`src/update.rs:1801`); the finish tail branches to
+`install_bundle` / `swap_bundle` (`src/update.rs:1630`, `:1683`). See
+`ref-update-pipeline.md` ("Bundle install") for the behavior reference and the
+test list.
 
 ## Problem
 

@@ -246,6 +246,61 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Bundle installs (macOS `.app`)
+
+A macOS application is a *directory* bundle, so replacing only the executable inside
+`MyApp.app/Contents/MacOS/` leaves stale resources behind and breaks the bundle's code signature.
+Set `bundle_path_in_archive` to name the bundle directory inside the release archive and the whole
+tree is installed as one unit:
+
+```rust
+# #[cfg(feature = "github")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("me")
+        .repo_name("myapp")
+        .bin_name("myapp")
+        .current_version(self_update::cargo_crate_version!())
+        // The bundle directory inside the archive; `{{ bin }}` / `{{ target }}` / `{{ version }}`
+        // substitutions work here exactly as in `bin_path_in_archive`.
+        .bundle_path_in_archive("MyApp.app")
+        // Optional on macOS: defaults to the nearest `.app` ancestor of the running executable.
+        .bundle_install_path("/Applications/MyApp.app")
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+How the swap works, and what it guarantees:
+
+- The archive is extracted in full into a temporary directory **inside the install path's parent**,
+  so every rename is on one filesystem (there is no cross-device fallback, and the parent needs
+  room for one more copy of the bundle).
+- The installed tree is stashed, then the staged tree is renamed into place. A failure at any step
+  restores the original bundle, and the error names the bundle path. Once the final rename lands the
+  update is committed.
+- When the running executable lives inside the bundle it is renamed aside first, so the old tree
+  holds no running image. After a successful update the running executable's path holds the new
+  bundle's executable, and the process can relaunch itself with `restart()` (see
+  [Restarting after an update](#restarting-after-an-update)).
+- Bundle mode replaces a directory, so combining it with an explicit `bin_install_path` or
+  `bin_path_in_archive` is rejected by `build()` (`Error::ConflictingConfig`). `bin_name` is still
+  required: it selects the asset and feeds `{{ bin }}`.
+- The `verify_binary` hook receives the **staged bundle root**, which is what
+  `codesign --verify --deep` wants; a rejection aborts before anything is replaced.
+- The crate never signs, notarizes, or staples: ship an already-signed (and, for Gatekeeper,
+  notarized) `.app` and the swap preserves exactly what you shipped. A quarantined app running from
+  a read-only App Translocation mount cannot update itself in place; that is detected up front as
+  `Error::AppTranslocated`, and the fix is to move the app (which clears the quarantine) and
+  relaunch it.
+
+Directory bundles on linux and windows go through the same code path. On windows the swap fails,
+and rolls back, if the process holds files inside the bundle open beyond its own executable (a DLL
+loaded from the bundle, for example). `.deb` / `.msi` packages are a different shape entirely --
+hand the downloaded file to `dpkg -i` / `msiexec /i` yourself; the crate's replace-and-verify
+semantics do not apply to a system installer.
+
 ### Checksum verification
 
 With the `checksums` feature, the crate verifies the downloaded artifact against a digest
