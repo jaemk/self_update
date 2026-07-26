@@ -276,7 +276,8 @@ How the swap works, and what it guarantees:
 
 - The archive is extracted in full into a temporary directory **inside the install path's parent**,
   so every rename is on one filesystem (there is no cross-device fallback, and the parent needs
-  room for one more copy of the bundle).
+  room for one more copy of the bundle). A symlinked `bundle_install_path` is resolved first, so the
+  tree behind the link is replaced, the link survives, and staging still lands beside the real tree.
 - The installed tree is stashed, then the staged tree is renamed into place. A failure at any step
   restores the original bundle, and the error names the bundle path. Once the final rename lands the
   update is committed.
@@ -285,8 +286,9 @@ How the swap works, and what it guarantees:
   bundle's executable, and the process can relaunch itself with `restart()` (see
   [Restarting after an update](#restarting-after-an-update)).
 - Bundle mode replaces a directory, so combining it with an explicit `bin_install_path` or
-  `bin_path_in_archive` is rejected by `build()` (`Error::ConflictingConfig`). `bin_name` is still
-  required: it selects the asset and feeds `{{ bin }}`.
+  `bin_path_in_archive` is rejected by `build()` (`Error::ConflictingConfig`), and setting
+  `bundle_install_path` without `bundle_path_in_archive` is an `Error::MissingField` rather than a
+  silently discarded path. `bin_name` is still required: it selects the asset and feeds `{{ bin }}`.
 - The `verify_binary` hook receives the **staged bundle root**, which is what
   `codesign --verify --deep` wants; a rejection aborts before anything is replaced.
 - The crate never signs, notarizes, or staples: ship an already-signed (and, for Gatekeeper,

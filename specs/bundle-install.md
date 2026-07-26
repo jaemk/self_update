@@ -63,7 +63,11 @@ substitution and `is_safe_asset_name` traversal defense as `bin_path_in_archive`
 BNDL-1-2. `bundle_install_path(path: impl AsRef<Path>) -> &mut Self` names the
 installed bundle directory to replace (e.g. `/Applications/MyApp.app`).
 
-BNDL-1-3. Setting `bundle_path_in_archive` selects bundle mode. Default
+BNDL-1-3. Setting `bundle_path_in_archive` selects bundle mode; `bundle_install_path`
+on its own does not, and is `Error::MissingField { field: "bundle_path_in_archive" }`
+rather than a silently discarded install path. The `.app` suffix is matched
+case-insensitively, since macOS's default filesystem preserves case without
+distinguishing it. Default
 `bundle_install_path` on macOS: the nearest ancestor of
 `std::env::current_exe()` whose file name ends in `.app`. Resolution happens in
 `build()`; no `.app` ancestor and no explicit path => a config error naming the
@@ -203,13 +207,27 @@ quarantine) before updating. Without the check the failure surfaces as a bare
 read-only-filesystem IO error from mid-swap, on the most common
 first-run-after-download path on macOS.
 
-BNDL-5-2. Rollback guarantee: before step 2 of BNDL-2-5 nothing under
-`bundle_install_path` has changed. A failure at step 2 or 3 restores the old
-tree (and the exe-aside) via reverse renames. After step 3 succeeds the update
-is committed. The guarantees match `MoveAll`: all-or-nothing at rename
-granularity, original error surfaced, best-effort logged rollback. The bundle
-swap adds on top of `MoveAll`: whole-tree granularity (one rename each way, so
-no per-file partial window) and the exe-aside step for running-image safety.
+BNDL-5-2. Rollback guarantee: every pre-swap check (staged root present and a
+directory, staged tree carries the running exe's relative path, `verify_binary`)
+runs before any rename, so a rejection there leaves `bundle_install_path`
+byte-for-byte untouched. Step 1 does move one file out of the bundle (the
+running exe, when it is inside), and a failure at step 2 or 3 restores the old
+tree and that exe via reverse renames. After step 3 succeeds the update is
+committed. The guarantees match `MoveAll`: all-or-nothing at rename granularity,
+original error surfaced, best-effort logged rollback. The bundle swap adds on top
+of `MoveAll`: whole-tree granularity (one rename each way, so no per-file partial
+window) and the exe-aside step for running-image safety.
+
+BNDL-5-4. A symlinked `bundle_install_path` is resolved to its real path before
+the swap, so the installed tree behind the link is what gets replaced and the
+link itself survives; staging follows the resolved path's parent, keeping every
+rename same-filesystem. A dangling symlink at the path counts as an existing
+entry and is stashed and replaced rather than being renamed onto.
+
+BNDL-5-5. Concurrency is not coordinated: the existence check and the renames
+are not atomic as a unit, so two updaters racing on one bundle can interleave and
+each report success while only one tree survives. Single-writer is assumed, as it
+is for the single-file `Move` / `self_replace` path.
 
 ## Non-goals
 

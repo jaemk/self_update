@@ -637,6 +637,14 @@ impl CommonBuilderConfig {
     /// nearest `.app` ancestor); every other platform requires it.
     fn resolve_bundle_mode(&self) -> Result<(Option<String>, Option<PathBuf>)> {
         let Some(path_in_archive) = self.bundle_path_in_archive.clone() else {
+            // `bundle_install_path` alone does not select bundle mode, and silently installing a
+            // single file to the default path instead is the same footgun the conflict check below
+            // exists to prevent, so say which setter is missing.
+            if self.bundle_install_path.is_some() {
+                return Err(Error::MissingField {
+                    field: "bundle_path_in_archive",
+                });
+            }
             return Ok((None, None));
         };
         if self.bin_install_path.is_some() {
@@ -1004,26 +1012,27 @@ mod tests {
         }
     }
 
-    // BNDL-1-3: `bundle_path_in_archive` alone selects bundle mode -- `bundle_install_path` does
-    // not. Set on its own it is inert: the built config stays single-file (both bundle fields
-    // `None`, so the pipeline never takes the swap branch) and an explicit `bin_install_path`
-    // alongside it is therefore NOT a conflict.
+    // BNDL-1-3: `bundle_path_in_archive` is what selects bundle mode, so `bundle_install_path` set
+    // on its own is a missing-field error naming the setter that is absent. Installing a single file
+    // to the default path instead would silently discard the caller's install path, the same footgun
+    // the bin/bundle conflict check prevents from the other direction.
     #[test]
-    fn build_ignores_bundle_install_path_without_the_archive_path() {
+    fn build_rejects_a_bundle_install_path_without_the_archive_path() {
         let cfg = CommonBuilderConfig {
             bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
-            bin_install_path: Some(PathBuf::from("/usr/local/bin/app")),
             ..bundle_base()
         };
-        let built = cfg
-            .build()
-            .expect("bundle_install_path alone must not select bundle mode");
+        match cfg.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+
+        // Neither bundle setter: plain single-file mode, both bundle fields unset.
+        let built = bundle_base().build().expect("single-file mode must build");
         assert!(built.bundle_path_in_archive.is_none());
-        assert!(
-            built.bundle_install_path.is_none(),
-            "an install path with no bundle mode must not reach the built config"
-        );
-        assert_eq!(built.bin_install_path, PathBuf::from("/usr/local/bin/app"));
+        assert!(built.bundle_install_path.is_none());
     }
 
     // BNDL-1-5: bundle mode does not relax the shared required fields -- `current_version` and

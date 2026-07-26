@@ -165,7 +165,9 @@ preflight probe (`check_install_path_writable`).
 `bundle_path_in_archive()` being `Some` selects bundle mode, resolved at `build()` time by
 `CommonBuilderConfig::resolve_bundle_mode` (`backends/common.rs:638`): an explicit
 `bin_install_path` or a non-auto `bin_path_in_archive` alongside it is
-`Error::ConflictingConfig { field, conflict }`, and an unset `bundle_install_path` resolves via
+`Error::ConflictingConfig { field, conflict }`; a `bundle_install_path` set *without*
+`bundle_path_in_archive` is `Error::MissingField { field: "bundle_path_in_archive" }` rather than a
+silently discarded path; and an unset `bundle_install_path` resolves via
 `default_bundle_install_path` (`update.rs:1801`) -- on macOS the nearest `.app` ancestor of
 `current_exe()` (`enclosing_app_bundle`, `update.rs:1825`), with a translocated exe
 (`is_translocated`, `update.rs:1838`) rejected as `Error::AppTranslocated` and no `.app` ancestor as
@@ -173,10 +175,13 @@ preflight probe (`check_install_path_writable`).
 
 In the finish tail the same `{{ bin }}` / `{{ target }}` / `{{ version }}` substitution runs over
 the bundle path, then `install_bundle` (`update.rs:1630`) replaces the single-file
-extract-and-install pair: two `tempfile::TempDir`s (staging and stash) are created inside
-`install_parent(bundle_install_path)`, so every rename is same-filesystem and there is no
-cross-device case; `Extract::extract_into` unpacks the whole archive into staging; the staged root
-is `staging/<substituted bundle path>`. Failure to create either temp dir goes through
+extract-and-install pair: the configured path is first run through `resolve_bundle_target`, which
+maps a live symlink to the tree it designates (`rename` does not follow a path's final component, so
+swapping onto the link itself would stash the link and orphan the installed tree; a dangling link and
+a plain path pass through unchanged); two `tempfile::TempDir`s (staging and stash) are created inside
+`install_parent(<resolved target>)`, so every rename is same-filesystem and there is no cross-device
+case; `Extract::extract_into` unpacks the whole archive into staging; the staged root is
+`staging/<substituted bundle path>`. Failure to create either temp dir goes through
 `map_install_io_error` naming the bundle path.
 
 `swap_bundle` (`update.rs:1683`) performs the swap, taking the running exe as a parameter (so it is
@@ -197,7 +202,14 @@ affects the installed tree. The swap is one code path on all targets: a windows 
 open files (a loaded DLL) fails at the directory rename and rolls back.
 
 Output messages in bundle mode are "Extracting archive... Done" then "Replacing bundle directory...
-Done"; `ReleaseStatus` / `VersionStatus` reporting is unchanged.
+Done"; the confirmation block names the bundle path ("Current bundle:") and says the existing bundle
+directory will be replaced, since `bin_install_path` is never written in bundle mode.
+`ReleaseStatus` / `VersionStatus` reporting is unchanged.
+
+Existence at the destination is tested with `fs::symlink_metadata`, not `exists()`: a dangling
+symlink is an entry that must be stashed out of the way (renaming a directory onto one fails with
+`ENOTDIR`), where `exists()` would report it absent. Concurrency is not coordinated: the existence
+test and the renames are not atomic as a unit, so racing updaters can interleave.
 
 ### Multi-file install
 

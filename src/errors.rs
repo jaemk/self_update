@@ -125,16 +125,18 @@ pub enum Error {
         /// The name of the missing required field.
         field: &'static str,
     },
-    /// The binary's install path (or its parent directory) is not writable by this process.
+    /// The install path (or the directory it lives in) is not writable by this process.
     ///
     /// Returned either by the opt-in preflight writability check
     /// (`check_install_path_writable(true)`), which probes before any download, or by the install
-    /// step itself when the replace/move fails with a permission error. `path` is the configured
-    /// `bin_install_path`. Re-run with elevated privileges, or choose a user-writable
-    /// `bin_install_path`; the crate never escalates privileges itself.
+    /// step itself when the replace/move fails with a permission error. `path` is the path that
+    /// could not be written: the configured `bin_install_path`, or in bundle mode the
+    /// `bundle_install_path` (the preflight names its parent directory, which is where the swap
+    /// needs permission). Re-run with elevated privileges, or configure a user-writable install
+    /// path; the crate never escalates privileges itself.
     #[non_exhaustive]
     InstallPathNotWritable {
-        /// The install path (`bin_install_path`) that could not be written.
+        /// The path that could not be written.
         path: std::path::PathBuf,
     },
     /// Bundle mode is on but the bundle install path could not be derived: the running executable
@@ -458,7 +460,7 @@ impl std::fmt::Display for Error {
             InstallPathNotWritable { path } => write!(
                 f,
                 "InstallPathNotWritableError: cannot write to install path {}: run with elevated \
-                 privileges or choose a user-writable bin_install_path",
+                 privileges or configure a user-writable install path",
                 path.display()
             ),
             NoAppBundle { exe } => write!(
@@ -1322,10 +1324,12 @@ mod tests {
             shown.contains("/usr/local/bin/app"),
             "InstallPathNotWritable Display must name the path, got: {shown}"
         );
+        // The remedy is named without naming a specific setter: the same variant covers
+        // `bin_install_path` and, in bundle mode, `bundle_install_path` (or its parent).
         assert!(
-            shown.contains("elevated privileges") && shown.contains("bin_install_path"),
+            shown.contains("elevated privileges") && shown.contains("user-writable install path"),
             "InstallPathNotWritable Display must suggest elevated privileges or a user-writable \
-             bin_install_path, got: {shown}"
+             install path, got: {shown}"
         );
         assert!(
             err.source().is_none(),

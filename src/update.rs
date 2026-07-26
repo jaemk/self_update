@@ -1225,7 +1225,12 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
     let prompt_confirmation = !u.no_confirm();
     if u.show_output() || prompt_confirmation {
         println!("\n{} release status:", u.bin_name());
-        println!("  * Current exe: {:?}", u.bin_install_path());
+        // In bundle mode the install target is the bundle directory, not `bin_install_path` (which
+        // the swap never writes), so confirm against the path that will actually be replaced.
+        match u.bundle_install_path() {
+            Some(bundle) => println!("  * Current bundle: {:?}", bundle),
+            None => println!("  * Current exe: {:?}", u.bin_install_path()),
+        }
         println!("  * New exe release: {:?}", target_asset.name());
         println!(
             "  * New exe download url: {:?}",
@@ -1238,8 +1243,13 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
                 println!("  * Release notes:\n{}", body);
             }
         }
+        let replaced = match u.bundle_install_path() {
+            Some(_) => "the existing bundle directory will be replaced",
+            None => "the existing binary will be replaced",
+        };
         println!(
-            "\nThe new release will be downloaded/extracted and the existing binary will be replaced."
+            "\nThe new release will be downloaded/extracted and {}.",
+            replaced
         );
     }
     if prompt_confirmation {
@@ -1634,7 +1644,11 @@ fn install_bundle(
     verify: Option<&crate::DynVerifyFn>,
     show_output: bool,
 ) -> Result<()> {
-    let parent = install_parent(bundle_install_path);
+    // Resolve a symlinked install path to the tree it points at, so the swap replaces the installed
+    // bundle rather than the link (`rename` does not follow its final component) and staging lands
+    // beside the real tree, keeping every rename same-filesystem.
+    let target = resolve_bundle_target(bundle_install_path);
+    let parent = install_parent(&target);
     let staging = tempfile::TempDir::new_in(parent)
         .map_err(|e| map_install_io_error(e, bundle_install_path))?;
     let stash = tempfile::TempDir::new_in(parent)
@@ -1647,7 +1661,7 @@ fn install_bundle(
     print_flush(show_output, "Replacing bundle directory... ")?;
     swap_bundle(
         &staged_root,
-        bundle_install_path,
+        &target,
         stash.path(),
         &std::env::current_exe()?,
         verify,
@@ -1724,7 +1738,9 @@ fn swap_bundle(
         fs::rename(exe, &stashed_exe).map_err(|e| map_install_io_error(e, bundle_install_path))?;
     }
 
-    let old_stashed = bundle_install_path.exists();
+    // `symlink_metadata` rather than `exists()`: a dangling symlink at the path is still an entry
+    // that must be stashed out of the way, and renaming a directory onto one fails with ENOTDIR.
+    let old_stashed = fs::symlink_metadata(bundle_install_path).is_ok();
     if old_stashed && let Err(e) = fs::rename(bundle_install_path, &stashed_old) {
         if let Some(exe) = exe_aside.as_deref() {
             restore_stashed(&stashed_exe, exe);
@@ -1779,6 +1795,29 @@ fn exe_inside_bundle(
     Some((exe, rel))
 }
 
+/// The bundle directory a configured install path actually designates: the symlink target when the
+/// path is a symlink, else the path itself.
+///
+/// `rename` does not follow a path's final component, so swapping straight onto a symlinked
+/// `bundle_install_path` would stash the *link*, plant a real directory in its place, and leave the
+/// installed tree orphaned on disk. Resolving first means the tree behind the link is what gets
+/// replaced, the link survives the update, and staging is created beside the real tree so the swap's
+/// renames stay on one filesystem.
+///
+/// Only an existing symlink is resolved: a plain path (including one that does not exist yet, the
+/// fresh-install case) and a dangling link are returned unchanged, the latter so the swap stashes and
+/// replaces the stale entry.
+fn resolve_bundle_target(bundle_install_path: &std::path::Path) -> std::path::PathBuf {
+    let is_symlink = fs::symlink_metadata(bundle_install_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return bundle_install_path.to_path_buf();
+    }
+    // A dangling link has no target to replace; keep the configured path.
+    fs::canonicalize(bundle_install_path).unwrap_or_else(|_| bundle_install_path.to_path_buf())
+}
+
 /// The directory an install path lives in: its parent, or the current directory for a bare name.
 fn install_parent(path: &std::path::Path) -> &std::path::Path {
     match path.parent() {
@@ -1818,12 +1857,18 @@ pub(crate) fn default_bundle_install_path() -> Result<std::path::PathBuf> {
 ///
 /// Pure and path-lexical (no filesystem access), so it is exercised on every platform even though
 /// only macOS uses it for the default install path. Innermost wins for a nested bundle (an
-/// `.app` shipped inside another `.app`).
+/// `.app` shipped inside another `.app`). The extension is matched case-insensitively: macOS's
+/// default filesystem preserves case but does not distinguish it, so a `MyApp.App` on disk is the
+/// same bundle as `MyApp.app`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn enclosing_app_bundle(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     exe.ancestors()
         .skip(1)
-        .find(|a| a.extension() == Some(std::ffi::OsStr::new("app")))
+        .find(|a| {
+            a.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        })
         .map(std::path::Path::to_path_buf)
 }
 
@@ -3578,6 +3623,16 @@ mod tests {
             None,
             "the .app itself is not its own ancestor"
         );
+        // macOS's default filesystem preserves case without distinguishing it, so an odd-cased
+        // bundle directory on disk is still the same bundle.
+        assert_eq!(
+            super::enclosing_app_bundle(std::path::Path::new(
+                "/Applications/MyApp.App/Contents/MacOS/myapp"
+            ))
+            .unwrap(),
+            std::path::Path::new("/Applications/MyApp.App"),
+            "the .app extension must match case-insensitively"
+        );
     }
 
     // BNDL-5-3: a translocated (quarantined) app is detected from its path component.
@@ -3892,20 +3947,103 @@ mod tests {
         let stash = dir.path().join("stash");
         std::fs::create_dir(&stash).unwrap();
 
-        // The real bundle lives elsewhere; the configured install path is a symlink to it.
+        // The real bundle lives elsewhere; the configured install path is a symlink to it. The
+        // resolved target is what the swap is given, so the tree behind the link is replaced.
         let real_root = dir.path().join("real");
         std::fs::create_dir(&real_root).unwrap();
         let real = staged_bundle(&real_root, "MyApp.app", "myapp", b"old");
         let link = dir.path().join("MyApp.app");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        super::swap_bundle(&staged, &link, &stash, &dir.path().join("updater"), None)
+        let target = super::resolve_bundle_target(&link);
+        super::swap_bundle(&staged, &target, &stash, &dir.path().join("updater"), None)
             .expect("a symlinked install path must swap");
 
         assert_eq!(
             std::fs::read(link.join("Contents").join("MacOS").join("myapp")).unwrap(),
             b"new",
             "the configured install path must resolve to the new bundle after the swap"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the caller's symlink must survive the update, not be replaced by a real directory"
+        );
+        assert_eq!(
+            std::fs::read(real.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"new",
+            "the tree behind the link is the one that gets replaced"
+        );
+    }
+
+    // BNDL-5-4: `resolve_bundle_target` maps a symlinked install path to the tree it designates, so
+    // the swap replaces that tree (and stages beside it) instead of renaming the link itself, which
+    // would orphan the installed bundle on disk. Everything else passes through unchanged.
+    #[test]
+    fn resolve_bundle_target_follows_only_a_live_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A plain directory, and a path that does not exist yet (fresh install): unchanged.
+        let plain = staged_bundle(dir.path(), "Plain.app", "myapp", b"x");
+        assert_eq!(super::resolve_bundle_target(&plain), plain);
+        let missing = dir.path().join("Missing.app");
+        assert_eq!(super::resolve_bundle_target(&missing), missing);
+
+        #[cfg(unix)]
+        {
+            let real = staged_bundle(dir.path(), "Real.app", "myapp", b"x");
+            let link = dir.path().join("Link.app");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(
+                super::resolve_bundle_target(&link),
+                std::fs::canonicalize(&real).unwrap(),
+                "a live symlink resolves to its target"
+            );
+
+            // A dangling link has no target to replace, so the configured path is kept and the swap
+            // stashes the stale entry.
+            let dangling = dir.path().join("Dangling.app");
+            std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+            assert_eq!(super::resolve_bundle_target(&dangling), dangling);
+        }
+    }
+
+    // BNDL-5-4: a dangling symlink at the install path counts as an existing entry -- it is stashed
+    // and replaced. Renaming the staged directory straight onto it would fail with ENOTDIR.
+    #[cfg(unix)]
+    #[test]
+    fn swap_bundle_replaces_a_dangling_symlink_at_the_install_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_bundle(&staging, "MyApp.app", "myapp", b"new");
+        let stash = dir.path().join("stash");
+        std::fs::create_dir(&stash).unwrap();
+
+        let dest = dir.path().join("MyApp.app");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &dest).unwrap();
+
+        let target = super::resolve_bundle_target(&dest);
+        super::swap_bundle(&staged, &target, &stash, &dir.path().join("updater"), None)
+            .expect("a dangling symlink must be replaced, not renamed onto");
+
+        assert!(
+            dest.is_dir()
+                && !std::fs::symlink_metadata(&dest)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+            "the stale link must be gone, replaced by the installed bundle"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"new"
+        );
+        assert!(
+            stash.join("old").exists() || std::fs::symlink_metadata(stash.join("old")).is_ok(),
+            "the stale link must have been stashed rather than clobbered"
         );
     }
 

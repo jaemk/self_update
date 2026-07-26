@@ -648,8 +648,14 @@ macro_rules! impl_common_builder_setters {
         }
 
         /// Set the installed bundle directory that bundle mode replaces, e.g.
-        /// `"/Applications/MyApp.app"`. Only consulted when
-        /// [`bundle_path_in_archive`](Self::bundle_path_in_archive) is set.
+        /// `"/Applications/MyApp.app"`. Requires
+        /// [`bundle_path_in_archive`](Self::bundle_path_in_archive), which is what selects bundle
+        /// mode; setting this alone is an
+        /// [`Error::MissingField`](crate::errors::Error::MissingField) from `build()` rather than a
+        /// silently discarded install path.
+        ///
+        /// A symlinked path is resolved to the tree it points at, so the installed bundle behind the
+        /// link is what gets replaced and the link itself survives the update.
         ///
         /// On macOS this defaults to the nearest `.app` ancestor of the running executable, so an
         /// app launched from `/Applications/MyApp.app/Contents/MacOS/myapp` updates itself in

@@ -14,7 +14,10 @@
   `check_install_path_writable` preflight probes the bundle's parent directory. Adds
   `Error::NoAppBundle` (no `.app` ancestor to derive the path from), `Error::ConflictingConfig`
   (bundle mode combined with an explicit `bin_install_path` / `bin_path_in_archive`), and
-  `Error::AppTranslocated` (a quarantined app running from a read-only translocated mount).
+  `Error::AppTranslocated` (a quarantined app running from a read-only translocated mount). A
+  symlinked `bundle_install_path` is resolved first, so the tree behind the link is replaced and the
+  link survives; `bundle_install_path` without `bundle_path_in_archive` is a `MissingField` error
+  rather than a silently discarded path.
   ([#145](https://github.com/jaemk/self_update/issues/145))
 - `compression-tar-xz` feature: decode `.tar.xz` / `.txz` archives and plain `.xz` single-file
   assets (pure-Rust `lzma-rs`, no C `liblzma` dependency, so it cross-compiles like the rest of the
