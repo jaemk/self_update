@@ -40,9 +40,14 @@ EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)
 TEST_TARGETS    = tests tests/default tests/reqwest tests/ureq tests/async
 BUILD_TARGETS   = build/all-features
 DOC_TARGETS     = docs docs/readme
-CHECK_TARGETS   = check check/fmt check/readme check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help
+CHECK_TARGETS   = check check/fmt check/readme check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help check/workflow-features
 CLEAN_TARGETS   = clean clean/cargo
 HELP_TARGETS    = help ci $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(BUILD_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
+
+# The CI workflow. The windows and macos jobs cannot run `make`, so they carry
+# the per-client feature sets above as workflow env vars;
+# `check/workflow-features` fails if the two copies drift apart.
+WORKFLOW       = .github/workflows/build.yml
 
 # Cargo command used to run `build`, `test`, `clippy`... Useful if you keep
 # multiple cargo versions installed on your machine.
@@ -89,6 +94,7 @@ help: ## List all supported Make targets
 			check/clippy/ureq) desc="Run clippy with the full ureq feature set" ;; \
 			check/clippy/async) desc="Run clippy with the async API feature set" ;; \
 			check/help) desc="Verify the help output covers every supported target" ;; \
+			check/workflow-features) desc="Verify the workflow feature lists match this Makefile" ;; \
 			clean) desc="Remove all generated artifacts" ;; \
 			clean/cargo) desc="Run cargo clean" ;; \
 			*) desc="" ;; \
@@ -168,7 +174,7 @@ fmt:
 
 ################################################################################
 # Runs all checks.
-check: check/fmt check/readme check/clippy check/help
+check: check/fmt check/readme check/clippy check/help check/workflow-features
 
 # Checks that the crate is well formatted.
 check/fmt: FMT_CCFLAGS += --check
@@ -211,6 +217,32 @@ check/help:
 		printf '%s\n' "$$documented" >&2; \
 		exit 1; \
 	fi
+
+# Verifies the workflow's per-client feature lists match this Makefile, which is
+# the source of truth for the lanes. A stale copy silently stops testing whole
+# backends on the runners that cannot use `make`.
+check/workflow-features:
+	@echo [$@]: Checking workflow feature lists...
+	@fail=0; \
+	for var in REQWEST_FEATURES UREQ_FEATURES; do \
+		case "$$var" in \
+			REQWEST_FEATURES) expected="$(REQWEST_FEATURES)" ;; \
+			UREQ_FEATURES) expected="$(UREQ_FEATURES)" ;; \
+		esac; \
+		expected="$$(printf '%s' "$$expected" | tr -s ' ')"; \
+		actual="$$(grep -E "^  $$var:" $(WORKFLOW) | head -1 | cut -d: -f2- \
+			| tr -s ' ' | sed -e 's/^ *//' -e 's/ *$$//')"; \
+		if [ -z "$$actual" ]; then \
+			echo "$$var is missing from $(WORKFLOW)" >&2; \
+			fail=1; \
+		elif [ "$$expected" != "$$actual" ]; then \
+			echo "$$var differs between the Makefile and $(WORKFLOW):" >&2; \
+			echo "  Makefile: $$expected" >&2; \
+			echo "  workflow: $$actual" >&2; \
+			fail=1; \
+		fi; \
+	done; \
+	exit $$fail
 
 ################################################################################
 # Cleans all generated artifacts.

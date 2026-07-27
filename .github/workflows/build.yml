@@ -8,6 +8,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The full per-client feature sets, for the jobs that cannot run `make` (the Makefile is the source
+  # of truth for the lanes; `make check/workflow-features` fails if these drift from it).
+  REQWEST_FEATURES: github gitlab gitea gitee manifest s3 archive-tar archive-zip compression-tar-gz compression-tar-xz compression-zip-deflate compression-zip-bzip2 signatures checksums s3-auth
+  UREQ_FEATURES: ureq native-tls github gitlab gitea gitee manifest s3 archive-tar archive-zip compression-tar-gz compression-tar-xz compression-zip-deflate compression-zip-bzip2 signatures checksums s3-auth
 
 jobs:
   ci:
@@ -48,7 +52,7 @@ jobs:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@1.88.0
     # Pin the declared MSRV: the full reqwest feature set must build on 1.88 (zip 8 requires 1.88).
-    - run: cargo build --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+    - run: cargo build --features "${{ env.REQWEST_FEATURES }}"
 
   macos:
     # macOS is the target platform for directory-bundle (`.app`) installs, so run the suite there.
@@ -61,15 +65,16 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     # `make` is available here, but the fmt/README lanes are already covered on linux, so run the
     # test lanes directly on both clients.
-    - run: cargo test --features "github gitlab gitea gitee manifest s3 archive-tar archive-zip compression-tar-gz compression-tar-xz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-    - run: cargo test --no-default-features --features "ureq native-tls github gitlab gitea gitee manifest s3 archive-tar archive-zip compression-tar-gz compression-tar-xz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+    - run: cargo test --features "${{ env.REQWEST_FEATURES }}"
+    - run: cargo test --no-default-features --features "${{ env.UREQ_FEATURES }}"
 
   windows:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
-    # Exercise the Windows-sensitive paths (asset-name guard, zip extraction, self-replace) on both
-    # clients. `make` is not available on the Windows runner, so run the lanes directly.
-    - run: cargo test --features "github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
-    - run: cargo test --no-default-features --features "ureq native-tls github gitlab gitea s3 archive-tar archive-zip compression-tar-gz compression-zip-deflate compression-zip-bzip2 signatures s3-auth checksums"
+    # Exercise the Windows-sensitive paths (asset-name guard, zip extraction, self-replace, the
+    # bundle swap's file-locking caveat) on both clients. `make` is not available on the Windows
+    # runner, so run the lanes directly.
+    - run: cargo test --features "${{ env.REQWEST_FEATURES }}"
+    - run: cargo test --no-default-features --features "${{ env.UREQ_FEATURES }}"
