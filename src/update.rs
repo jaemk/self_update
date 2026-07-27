@@ -1836,20 +1836,37 @@ fn install_parent(path: &std::path::Path) -> &std::path::Path {
 ///
 /// Every other platform has no meaningful default, so the setter is required there.
 pub(crate) fn default_bundle_install_path() -> Result<std::path::PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let exe = std::env::current_exe()?;
-        if is_translocated(&exe) {
-            return Err(Error::AppTranslocated { exe });
-        }
-        enclosing_app_bundle(&exe).ok_or(Error::NoAppBundle { exe })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(Error::MissingField {
+    resolve_default_bundle_path(&std::env::current_exe()?, HAS_APP_BUNDLE_DEFAULT)
+}
+
+/// Whether this target derives a default `bundle_install_path` from the running executable. Only
+/// macOS has the `.app` convention to derive one from.
+///
+/// A `cfg!` value rather than a `#[cfg]` branch so both policies below compile, and are tested, on
+/// every target: the macOS resolution is the part most worth pinning and the least reachable from CI.
+const HAS_APP_BUNDLE_DEFAULT: bool = cfg!(target_os = "macos");
+
+/// Resolve the default bundle install path from `exe`, for a target that `has_default`.
+///
+/// Split out from [`default_bundle_install_path`] over an explicit exe path and policy flag so every
+/// arm is exercisable on any host, rather than the macOS arm being invisible to a linux test run.
+fn resolve_default_bundle_path(
+    exe: &std::path::Path,
+    has_default: bool,
+) -> Result<std::path::PathBuf> {
+    if !has_default {
+        return Err(Error::MissingField {
             field: "bundle_install_path",
-        })
+        });
     }
+    if is_translocated(exe) {
+        return Err(Error::AppTranslocated {
+            exe: exe.to_path_buf(),
+        });
+    }
+    enclosing_app_bundle(exe).ok_or_else(|| Error::NoAppBundle {
+        exe: exe.to_path_buf(),
+    })
 }
 
 /// The nearest ancestor of `exe` whose name ends in `.app`, i.e. the macOS application bundle the
@@ -1860,7 +1877,6 @@ pub(crate) fn default_bundle_install_path() -> Result<std::path::PathBuf> {
 /// `.app` shipped inside another `.app`). The extension is matched case-insensitively: macOS's
 /// default filesystem preserves case but does not distinguish it, so a `MyApp.App` on disk is the
 /// same bundle as `MyApp.app`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn enclosing_app_bundle(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     exe.ancestors()
         .skip(1)
@@ -1877,7 +1893,6 @@ pub(crate) fn enclosing_app_bundle(exe: &std::path::Path) -> Option<std::path::P
 /// `/private/var/folders/../AppTranslocation/<uuid>/d/MyApp.app`.
 ///
 /// Pure and path-lexical, matching on the `AppTranslocation` path component.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn is_translocated(exe: &std::path::Path) -> bool {
     exe.components()
         .any(|c| c.as_os_str() == std::ffi::OsStr::new("AppTranslocation"))
@@ -3632,6 +3647,50 @@ mod tests {
             .unwrap(),
             std::path::Path::new("/Applications/MyApp.App"),
             "the .app extension must match case-insensitively"
+        );
+    }
+
+    // BNDL-1-3/BNDL-5-3: the default-path resolution as a whole, on every host. With a target that
+    // has the `.app` convention, a translocated exe is rejected before the `.app` lookup, an exe
+    // inside a bundle yields it, and one outside any bundle is `NoAppBundle`. A target without the
+    // convention has no default at all, so the setter is required.
+    #[test]
+    fn resolve_default_bundle_path_covers_every_arm() {
+        let inside = std::path::Path::new("/Applications/MyApp.app/Contents/MacOS/myapp");
+        assert_eq!(
+            super::resolve_default_bundle_path(inside, true).unwrap(),
+            std::path::Path::new("/Applications/MyApp.app")
+        );
+
+        let outside = std::path::Path::new("/usr/local/bin/myapp");
+        match super::resolve_default_bundle_path(outside, true) {
+            Err(Error::NoAppBundle { exe }) => assert_eq!(exe, outside),
+            other => panic!("expected NoAppBundle, got {other:?}"),
+        }
+
+        // Translocation wins over the `.app` lookup: the enclosing `.app` exists here, but it is the
+        // read-only translocated copy, so returning it would hand back an unswappable path.
+        let translocated = std::path::Path::new(
+            "/private/var/folders/x1/T/AppTranslocation/UUID/d/MyApp.app/Contents/MacOS/myapp",
+        );
+        match super::resolve_default_bundle_path(translocated, true) {
+            Err(Error::AppTranslocated { exe }) => assert_eq!(exe, translocated),
+            other => panic!("expected AppTranslocated, got {other:?}"),
+        }
+
+        match super::resolve_default_bundle_path(inside, false) {
+            Err(Error::MissingField { field }) => assert_eq!(field, "bundle_install_path"),
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
+
+    // The policy flag matches the target: only macOS derives a default install path.
+    #[test]
+    fn has_app_bundle_default_is_macos_only() {
+        assert_eq!(
+            super::HAS_APP_BUNDLE_DEFAULT,
+            cfg!(target_os = "macos"),
+            "only macOS has the `.app` convention to derive a default install path from"
         );
     }
 

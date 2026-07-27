@@ -264,12 +264,19 @@ is for the single-file `Move` / `self_replace` path.
 - macOS default detection: pure function over a supplied exe path (no real
   `.app` needed) covering `.app` ancestor found / not found / nested `.app`.
 - Preflight: parent-dir probe under a 0555 parent (unix), nothing downloaded.
-- CI cannot exercise a real `.app` relaunch. Manual test matrix to document in
-  the PR: macOS (x86_64 + aarch64) with zip and tar.gz `.app` archives,
-  launched from Finder and from a terminal, quarantined (translocated) vs
-  cleared, install under `/Applications` and under `~/Applications`;
-  post-swap `codesign --verify` and relaunch via `restart()`; windows and
-  linux directory-bundle swap with the exe inside and outside the bundle.
+- Default-path resolution is a pure function of `(exe, has_default)`
+  (`resolve_default_bundle_path`), with the macOS policy carried by a `cfg!`
+  value rather than a `#[cfg]` branch, so every arm compiles and is tested on
+  every host instead of the macOS arm being invisible to a linux run.
+- The suite runs on macOS in CI (`macos-latest`, arm64), which covers the swap on
+  APFS: case-insensitive filenames, macOS symlink and rename semantics, and
+  `self_replace`. None of that is architecture-dependent, so arm64 alone is
+  enough and no x86_64 runner is used. That leaves as genuinely
+  manual only what needs a signed build or a real download: `codesign --verify`
+  on a signed/notarized `.app`, Gatekeeper, a quarantined (translocated) copy,
+  launching from Finder, and relaunch via `restart()`. Document that run in the
+  PR, for `.app` archives in both zip and tar.gz form, installed under
+  `/Applications` and under `~/Applications`.
 
 ## Design decisions (signed off 2026-07-26)
 
