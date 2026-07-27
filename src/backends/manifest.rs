@@ -986,13 +986,16 @@ mod tests {
         );
     }
 
-    /// Build a tiny tar.gz in memory containing a single file named `app` (the default
-    /// `bin_path_in_archive` on a unix target, where EXE_SUFFIX is empty).
+    /// Build a tiny tar.gz in memory containing the single file the updater will look for: the
+    /// default `bin_path_in_archive` derived from `bin_name("app")`, which carries the platform exe
+    /// suffix (`app.exe` on windows, `app` where EXE_SUFFIX is empty).
     #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
     fn app_tar_gz(payload: &[u8]) -> Vec<u8> {
         let mut tar = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
-        header.set_path("app").unwrap();
+        header
+            .set_path(format!("app{}", std::env::consts::EXE_SUFFIX))
+            .unwrap();
         header.set_size(payload.len() as u64);
         header.set_mode(0o755);
         header.set_cksum();
