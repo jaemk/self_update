@@ -59,8 +59,10 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 ### Download
 
 `resolve_and_confirm` prints the release-status block and (unless `no_confirm`) prompts
-(see below). If `check_install_path_writable()` is `true`, `probe_install_path_writable`
-(`update.rs:1606`) runs immediately after the confirmation and before any download
+(see below). If `check_install_path_writable()` is `true`, `probe_writable` (`update.rs:1865`) runs
+immediately after the confirmation and before any download, probing the bundle's parent directory in
+bundle mode (`probe_dir_writable`) and otherwise `bin_install_path`
+(`probe_install_path_writable`)
 (`update.rs:1005-1009` sync, `update.rs:1509-1510` async): only a definite `PermissionDenied`
 errors as `Error::InstallPathNotWritable { path }`; any other result (missing parent directory,
 unusual filesystem, `Ok`) proceeds. Default is `false` (off). Then a `tempfile::TempDir` is
@@ -134,9 +136,9 @@ In `finish_update`, before any extraction or replacement:
    implemented for `.tar.gz` and `.zip` assets, not gz files".
 
 All three run on the *downloaded archive bytes* and before extraction. The last hook,
-`verify_binary`, runs later inside `install_binary` on the *extracted binary*,
-immediately before the swap. Ordering: verify_checksum -> release digest -> verify_keys ->
-extract -> verify_binary -> replace.
+`verify_binary`, runs later inside `install_binary` on the *extracted binary* (in bundle mode, on
+the *staged bundle root*), immediately before the swap. Ordering: verify_checksum -> release
+digest -> verify_keys -> extract -> verify_binary -> replace.
 
 ### Replace
 
@@ -157,6 +159,57 @@ Both the `self_replace` call and the `Move::to_dest` call have their IO errors w
 rewrapped as `Error::Io` with the message `"installing to {path}: {orig}"`, preserving the
 original `ErrorKind` for inspection. This annotation is always on, independent of the opt-in
 preflight probe (`check_install_path_writable`).
+
+### Bundle install (directory bundles)
+
+`bundle_path_in_archive()` being `Some` selects bundle mode, resolved at `build()` time by
+`CommonBuilderConfig::resolve_bundle_mode` (`backends/common.rs:638`): an explicit
+`bin_install_path` or a non-auto `bin_path_in_archive` alongside it is
+`Error::ConflictingConfig { field, conflict }`; a `bundle_install_path` set *without*
+`bundle_path_in_archive` is `Error::MissingField { field: "bundle_path_in_archive" }` rather than a
+silently discarded path; and an unset `bundle_install_path` resolves via
+`default_bundle_install_path` (`update.rs:1801`) -- on macOS the nearest `.app` ancestor of
+`current_exe()` (`enclosing_app_bundle`, `update.rs:1825`), with a translocated exe
+(`is_translocated`, `update.rs:1838`) rejected as `Error::AppTranslocated` and no `.app` ancestor as
+`Error::NoAppBundle`; on every other target `Error::MissingField { field: "bundle_install_path" }`.
+
+In the finish tail the same `{{ bin }}` / `{{ target }}` / `{{ version }}` substitution runs over
+the bundle path, then `install_bundle` (`update.rs:1630`) replaces the single-file
+extract-and-install pair: the configured path is first run through `resolve_bundle_target`, which
+maps a live symlink to the tree it designates (`rename` does not follow a path's final component, so
+swapping onto the link itself would stash the link and orphan the installed tree; a dangling link and
+a plain path pass through unchanged); two `tempfile::TempDir`s (staging and stash) are created inside
+`install_parent(<resolved target>)`, so every rename is same-filesystem and there is no cross-device
+case; `Extract::extract_into` unpacks the whole archive into staging; the staged root is
+`staging/<substituted bundle path>`. Failure to create either temp dir goes through
+`map_install_io_error` naming the bundle path.
+
+`swap_bundle` (`update.rs:1683`) performs the swap, taking the running exe as a parameter (so it is
+testable against a temp tree). Pre-swap checks, none of which touch the destination: the staged root
+must exist and be a directory (else `Error::Io` NotFound naming it); when `exe_inside_bundle`
+(`update.rs:1771`, canonicalizing both sides like `same_file`) reports the running exe inside the
+installed bundle, the staged tree must carry a file at the same relative path; then the
+`verify_binary` hook runs against the *staged bundle root* via the shared `run_verify_hook`
+(`update.rs:1611`). Then, in order: rename the running exe to `stash/exe-aside` (only when it is
+inside the bundle), rename `bundle_install_path` to `stash/old` (only when it exists), rename the
+staged root onto `bundle_install_path`. A failure at either later step reverses the applied renames
+(old tree first, then the exe, via `restore_stashed`, `update.rs:1753`) and returns the original
+error mapped by `map_install_io_error`; rollback is best-effort and logged, matching the `MoveAll`
+contract. After the final rename the update is committed and the file at the running exe's path is
+the new tree's executable, so no `self_replace` call is involved. On unix the stashed old image is
+unlinked with the stash `TempDir`; on windows it may stay locked until process exit, which never
+affects the installed tree. The swap is one code path on all targets: a windows bundle holding other
+open files (a loaded DLL) fails at the directory rename and rolls back.
+
+Output messages in bundle mode are "Extracting archive... Done" then "Replacing bundle directory...
+Done"; the confirmation block names the bundle path ("Current bundle:") and says the existing bundle
+directory will be replaced, since `bin_install_path` is never written in bundle mode.
+`ReleaseStatus` / `VersionStatus` reporting is unchanged.
+
+Existence at the destination is tested with `fs::symlink_metadata`, not `exists()`: a dangling
+symlink is an entry that must be stashed out of the way (renaming a directory onto one fails with
+`ENOTDIR`), where `exists()` would report it absent. Concurrency is not coordinated: the existence
+test and the renames are not atomic as a unit, so racing updaters can interleave.
 
 ### Multi-file install
 
@@ -248,9 +301,17 @@ under feature `async`; the free `update::update_extended_async` they route to is
   `!no_confirm`. Suppressing one does not suppress the other.
 - The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
-- When `check_install_path_writable` is `true`, the preflight probe (`probe_install_path_writable`,
-  `update.rs:1606`) runs after confirmation and before any download; only a definite
-  `PermissionDenied` errors, indeterminate results proceed. Default is `false`.
+- When `check_install_path_writable` is `true`, the preflight probe (`probe_writable`,
+  `update.rs:1865`) runs after confirmation and before any download, targeting the bundle's parent
+  directory in bundle mode and `bin_install_path` otherwise; only a definite `PermissionDenied`
+  errors, indeterminate results proceed. Default is `false`.
+- Bundle mode is all-or-nothing at whole-tree granularity: nothing under `bundle_install_path`
+  changes until the old tree is stashed, a failure at any step restores the old tree (and the
+  running exe inside it), and the original error is returned with rollback failures logged only. It
+  never falls back to a copy, so an install is never partially visible; and it never calls
+  `self_replace` (the exe rides along inside the swapped tree).
+- Bundle mode and the single-file `bin_*` paths are mutually exclusive: setting both explicitly is
+  `Error::ConflictingConfig` from `build()`, not a silently-dropped setter.
 - The install step always annotates IO failures with the install path: `PermissionDenied` becomes
   `Error::InstallPathNotWritable { path }` and other kinds become `Error::Io` with the path in the
   message, `ErrorKind` preserved (`map_install_io_error`, `update.rs:1582`). Independent of the
@@ -273,7 +334,25 @@ sorts-out-of-order / ignores-unparseable / falls-back-to-incompatible);
 `finish_update_rejects_a_mismatched_release_digest_by_default`,
 `finish_update_passes_a_matching_release_digest_then_proceeds`,
 `finish_update_release_digest_opt_out_skips_the_gate`,
-`finish_update_rejects_an_unsupported_release_digest` (feature-gated). `lib.rs` `mod tests`:
+`finish_update_rejects_an_unsupported_release_digest` (feature-gated); the bundle set
+`swap_bundle_installs_when_nothing_is_there`, `swap_bundle_replaces_the_whole_tree`,
+`swap_bundle_rejects_a_missing_or_non_directory_staged_root`,
+`swap_bundle_rolls_back_when_the_install_rename_fails`,
+`swap_bundle_moves_the_running_exe_aside_and_restores_its_path`,
+`swap_bundle_rollback_restores_the_running_exe_inside_the_old_tree`,
+`swap_bundle_requires_the_staged_tree_to_carry_the_running_exe_path`,
+`swap_bundle_verifies_the_staged_root_and_a_rejection_replaces_nothing`,
+`install_bundle_extracts_and_swaps_a_real_archive` (zip fixture with an exec bit and a symlink),
+`exe_inside_bundle_detects_containment_through_symlinks`,
+`enclosing_app_bundle_finds_the_nearest_app_ancestor`,
+`is_translocated_matches_the_translocation_mount`,
+`probe_writable_probes_the_bundle_parent_in_bundle_mode`, and
+`probe_writable_falls_back_to_the_bin_path_without_bundle_mode`; `backends/common.rs` `mod tests`
+covers the bundle-mode resolution (`build_resolves_bundle_mode_with_an_explicit_install_path`,
+`build_leaves_bundle_fields_none_without_the_setter`,
+`build_rejects_bundle_mode_with_an_explicit_bin_install_path`,
+`build_rejects_bundle_mode_only_with_an_explicit_bin_path_in_archive`,
+`build_requires_bundle_install_path_off_macos`). `lib.rs` `mod tests`:
 `detect_*` (archive detection), `unpack_*` / `test_extract_into` / `test_extract_file`
 (extraction), `move_all_commits_every_move`, `move_all_rolls_back_on_failure`,
 `move_all_installs_fresh_destinations`, `move_all_second_commit_is_a_noop`,

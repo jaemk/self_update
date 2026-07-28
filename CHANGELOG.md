@@ -3,6 +3,22 @@
 ## [unreleased]
 
 ### Added
+- Directory-bundle installs (macOS `.app`): `bundle_path_in_archive(..)` names the bundle directory
+  inside the release archive and selects bundle mode, where the whole tree replaces
+  `bundle_install_path(..)` instead of one file replacing `bin_install_path`. The new bundle is
+  staged in the destination's parent and swapped by rename with the displaced tree stashed, so a
+  failure restores the original bundle; a running executable inside the bundle is renamed aside
+  first, so its path holds the new executable afterwards and composes with `restart()`. On macOS
+  `bundle_install_path` defaults to the nearest `.app` ancestor of the running executable. The
+  `verify_binary` hook receives the staged bundle root, and the opt-in
+  `check_install_path_writable` preflight probes the bundle's parent directory. Adds
+  `Error::NoAppBundle` (no `.app` ancestor to derive the path from), `Error::ConflictingConfig`
+  (bundle mode combined with an explicit `bin_install_path` / `bin_path_in_archive`), and
+  `Error::AppTranslocated` (a quarantined app running from a read-only translocated mount). A
+  symlinked `bundle_install_path` is resolved first, so the tree behind the link is replaced and the
+  link survives; `bundle_install_path` without `bundle_path_in_archive` is a `MissingField` error
+  rather than a silently discarded path.
+  ([#145](https://github.com/jaemk/self_update/issues/145))
 - `compression-tar-xz` feature: decode `.tar.xz` / `.txz` archives and plain `.xz` single-file
   assets (pure-Rust `lzma-rs`, no C `liblzma` dependency, so it cross-compiles like the rest of the
   default stack). Opt-in, mirroring `compression-tar-gz`. Adds `Compression::Xz`.

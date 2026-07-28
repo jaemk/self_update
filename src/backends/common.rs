@@ -474,6 +474,14 @@ pub(crate) struct CommonBuilderConfig {
     /// the user). Used by `bin_name` to re-derive when called again, while leaving an explicitly
     /// set value untouched.
     pub(crate) bin_path_in_archive_auto: bool,
+    /// The bundle directory inside the archive, relative to the archive root (e.g. `MyApp.app`).
+    /// `Some` selects bundle mode: the whole directory replaces `bundle_install_path` instead of
+    /// one file replacing `bin_install_path`. Set via `bundle_path_in_archive`.
+    pub bundle_path_in_archive: Option<String>,
+    /// The installed bundle directory to replace in bundle mode. Defaults on macOS to the nearest
+    /// `.app` ancestor of the running executable; required on every other platform. Set via
+    /// `bundle_install_path`.
+    pub bundle_install_path: Option<PathBuf>,
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
@@ -517,6 +525,8 @@ impl Default for CommonBuilderConfig {
             check_install_path_writable: false,
             bin_path_in_archive: None,
             bin_path_in_archive_auto: false,
+            bundle_path_in_archive: None,
+            bundle_install_path: None,
             show_download_progress: false,
             show_output: true,
             no_confirm: false,
@@ -551,6 +561,9 @@ impl CommonBuilderConfig {
     /// current executable. `current_version`, `bin_name`, and `bin_path_in_archive` are
     /// required (the last is set automatically by the `bin_name` setter).
     pub(crate) fn build(&self) -> Result<CommonConfig> {
+        // Bundle mode: reject a conflicting single-file config and resolve the install path (which
+        // may consult `current_exe()`), before any other work.
+        let (bundle_path_in_archive, bundle_install_path) = self.resolve_bundle_mode()?;
         // Resolve the auth scheme/token into the request config so the shared header-derivation
         // (`apply_auth`) can apply it on both the listing and download paths.
         let mut request = self.request.clone();
@@ -587,6 +600,8 @@ impl CommonBuilderConfig {
                 .ok_or(Error::MissingField {
                     field: "bin_path_in_archive",
                 })?,
+            bundle_path_in_archive,
+            bundle_install_path,
             show_download_progress: self.show_download_progress,
             show_output: self.show_output,
             no_confirm: self.no_confirm,
@@ -607,6 +622,49 @@ impl CommonBuilderConfig {
             verifying_keys: self.verifying_keys.clone(),
         })
     }
+
+    /// Validate and resolve the bundle-mode options, returning the pair stored on the built
+    /// [`CommonConfig`]: `(bundle_path_in_archive, bundle_install_path)`, both `None` when bundle
+    /// mode is off.
+    ///
+    /// Bundle mode is selected by `bundle_path_in_archive`. It replaces a whole directory instead
+    /// of one file, so combining it with an explicit `bin_install_path` or `bin_path_in_archive` is
+    /// a config conflict rather than a silently-dropped setter. The value
+    /// `bin_path_in_archive` auto-derives from `bin_name` does not count as explicit (it is simply
+    /// unused in bundle mode).
+    ///
+    /// With no explicit `bundle_install_path`, macOS derives it from the running executable (the
+    /// nearest `.app` ancestor); every other platform requires it.
+    fn resolve_bundle_mode(&self) -> Result<(Option<String>, Option<PathBuf>)> {
+        let Some(path_in_archive) = self.bundle_path_in_archive.clone() else {
+            // `bundle_install_path` alone does not select bundle mode, and silently installing a
+            // single file to the default path instead is the same footgun the conflict check below
+            // exists to prevent, so say which setter is missing.
+            if self.bundle_install_path.is_some() {
+                return Err(Error::MissingField {
+                    field: "bundle_path_in_archive",
+                });
+            }
+            return Ok((None, None));
+        };
+        if self.bin_install_path.is_some() {
+            return Err(Error::ConflictingConfig {
+                field: "bundle_path_in_archive",
+                conflict: "bin_install_path",
+            });
+        }
+        if self.bin_path_in_archive.is_some() && !self.bin_path_in_archive_auto {
+            return Err(Error::ConflictingConfig {
+                field: "bundle_path_in_archive",
+                conflict: "bin_path_in_archive",
+            });
+        }
+        let install_path = match &self.bundle_install_path {
+            Some(p) => p.clone(),
+            None => crate::update::default_bundle_install_path()?,
+        };
+        Ok((Some(path_in_archive), Some(install_path)))
+    }
 }
 
 /// The resolved common options of a built `Update`, embedded by every backend's `Update`.
@@ -623,6 +681,12 @@ pub(crate) struct CommonConfig {
     /// Opt-in preflight writability probe of `bin_install_path` (default `false`).
     pub check_install_path_writable: bool,
     pub bin_path_in_archive: String,
+    /// The bundle directory inside the archive; `Some` means bundle mode, in which case
+    /// `bundle_install_path` is also `Some` and the single-file `bin_*` paths are unused.
+    pub bundle_path_in_archive: Option<String>,
+    /// The resolved installed bundle directory to replace, `Some` exactly when
+    /// `bundle_path_in_archive` is.
+    pub bundle_install_path: Option<PathBuf>,
     pub show_download_progress: bool,
     pub show_output: bool,
     pub no_confirm: bool,
@@ -836,6 +900,193 @@ mod tests {
             ..base
         };
         assert_eq!(with_target.build().unwrap().target, "custom-target");
+    }
+
+    // --- bundle mode (BNDL-1) ----------------------------------------------------------------
+
+    use std::path::PathBuf;
+
+    // A builder config with the required single-file fields set, as a base for the bundle tests.
+    fn bundle_base() -> CommonBuilderConfig {
+        CommonBuilderConfig {
+            current_version: Some("0.1.0".to_string()),
+            bin_name: Some("app".to_string()),
+            // As the `bin_name` setter derives it: auto, not explicit.
+            bin_path_in_archive: Some("app".to_string()),
+            bin_path_in_archive_auto: true,
+            ..Default::default()
+        }
+    }
+
+    // BNDL-1-2/BNDL-1-3: with an explicit `bundle_install_path`, bundle mode resolves to that path
+    // on every platform and carries the archive-side path through to the built config.
+    #[test]
+    fn build_resolves_bundle_mode_with_an_explicit_install_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            ..bundle_base()
+        };
+        let built = cfg
+            .build()
+            .expect("an explicit bundle install path must build");
+        assert_eq!(built.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
+        assert_eq!(
+            built.bundle_install_path.as_deref(),
+            Some(std::path::Path::new("/Applications/MyApp.app"))
+        );
+    }
+
+    // Bundle mode is off by default: both resolved fields stay `None`, so the pipeline takes the
+    // single-file path.
+    #[test]
+    fn build_leaves_bundle_fields_none_without_the_setter() {
+        let built = bundle_base().build().unwrap();
+        assert!(built.bundle_path_in_archive.is_none());
+        assert!(built.bundle_install_path.is_none());
+    }
+
+    // BNDL-1-4: bundle mode plus an explicit `bin_install_path` is a config conflict, named in the
+    // error rather than silently dropping one of the two.
+    #[test]
+    fn build_rejects_bundle_mode_with_an_explicit_bin_install_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            bin_install_path: Some(PathBuf::from("/usr/local/bin/app")),
+            ..bundle_base()
+        };
+        match cfg.build() {
+            Err(crate::errors::Error::ConflictingConfig { field, conflict }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+                assert_eq!(conflict, "bin_install_path");
+            }
+            other => panic!("expected ConflictingConfig, got {other:?}"),
+        }
+    }
+
+    // BNDL-1-4: likewise for an explicit `bin_path_in_archive` -- but NOT for the value the
+    // `bin_name` setter auto-derives, which is simply unused in bundle mode.
+    #[test]
+    fn build_rejects_bundle_mode_only_with_an_explicit_bin_path_in_archive() {
+        let explicit = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            bin_path_in_archive: Some("dist/app".to_string()),
+            bin_path_in_archive_auto: false,
+            ..bundle_base()
+        };
+        match explicit.build() {
+            Err(crate::errors::Error::ConflictingConfig { field, conflict }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+                assert_eq!(conflict, "bin_path_in_archive");
+            }
+            other => panic!("expected ConflictingConfig, got {other:?}"),
+        }
+
+        let auto = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            ..bundle_base()
+        };
+        assert!(
+            auto.build().is_ok(),
+            "the auto-derived bin_path_in_archive must not count as a conflict"
+        );
+    }
+
+    // BNDL-1-3: off macOS there is no default bundle install path, so bundle mode without the
+    // setter is a missing-field error naming it.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn build_requires_bundle_install_path_off_macos() {
+        let cfg = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            ..bundle_base()
+        };
+        match cfg.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "bundle_install_path");
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
+
+    // BNDL-1-3: `bundle_path_in_archive` is what selects bundle mode, so `bundle_install_path` set
+    // on its own is a missing-field error naming the setter that is absent. Installing a single file
+    // to the default path instead would silently discard the caller's install path, the same footgun
+    // the bin/bundle conflict check prevents from the other direction.
+    #[test]
+    fn build_rejects_a_bundle_install_path_without_the_archive_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            ..bundle_base()
+        };
+        match cfg.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+
+        // Neither bundle setter: plain single-file mode, both bundle fields unset.
+        let built = bundle_base().build().expect("single-file mode must build");
+        assert!(built.bundle_path_in_archive.is_none());
+        assert!(built.bundle_install_path.is_none());
+    }
+
+    // BNDL-1-5: bundle mode does not relax the shared required fields -- `current_version` and
+    // `bin_name` (which names the asset and feeds `{{ bin }}`) are still required.
+    #[test]
+    fn build_still_requires_current_version_and_bin_name_in_bundle_mode() {
+        let no_version = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            current_version: None,
+            ..bundle_base()
+        };
+        match no_version.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "current_version");
+            }
+            other => panic!("expected MissingField(current_version), got {other:?}"),
+        }
+
+        let no_bin_name = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bundle_install_path: Some(PathBuf::from("/Applications/MyApp.app")),
+            bin_name: None,
+            // No `bin_name` setter call means no auto-derived archive path either.
+            bin_path_in_archive: None,
+            bin_path_in_archive_auto: false,
+            ..bundle_base()
+        };
+        match no_bin_name.build() {
+            Err(crate::errors::Error::MissingField { field }) => {
+                assert_eq!(field, "bin_name");
+            }
+            other => panic!("expected MissingField(bin_name), got {other:?}"),
+        }
+    }
+
+    // BNDL-1-4: the conflict is reported before the install path is resolved, so a caller who set
+    // both gets the actionable "these two setters conflict" error rather than a
+    // missing/undetectable-`bundle_install_path` error from the default resolution (which on macOS
+    // would even consult `current_exe()` first).
+    #[test]
+    fn build_reports_the_conflict_before_resolving_the_install_path() {
+        let cfg = CommonBuilderConfig {
+            bundle_path_in_archive: Some("MyApp.app".to_string()),
+            bin_install_path: Some(PathBuf::from("/usr/local/bin/app")),
+            ..bundle_base()
+        };
+        match cfg.build() {
+            Err(crate::errors::Error::ConflictingConfig { field, conflict }) => {
+                assert_eq!(field, "bundle_path_in_archive");
+                assert_eq!(conflict, "bin_install_path");
+            }
+            other => panic!("expected ConflictingConfig, got {other:?}"),
+        }
     }
 
     // --- Item 5: self-fixing error messages --------------------------------------------------

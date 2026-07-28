@@ -125,17 +125,55 @@ pub enum Error {
         /// The name of the missing required field.
         field: &'static str,
     },
-    /// The binary's install path (or its parent directory) is not writable by this process.
+    /// The install path (or the directory it lives in) is not writable by this process.
     ///
     /// Returned either by the opt-in preflight writability check
     /// (`check_install_path_writable(true)`), which probes before any download, or by the install
-    /// step itself when the replace/move fails with a permission error. `path` is the configured
-    /// `bin_install_path`. Re-run with elevated privileges, or choose a user-writable
-    /// `bin_install_path`; the crate never escalates privileges itself.
+    /// step itself when the replace/move fails with a permission error. `path` is the path that
+    /// could not be written: the configured `bin_install_path`, or in bundle mode the
+    /// `bundle_install_path` (the preflight names its parent directory, which is where the swap
+    /// needs permission). Re-run with elevated privileges, or configure a user-writable install
+    /// path; the crate never escalates privileges itself.
     #[non_exhaustive]
     InstallPathNotWritable {
-        /// The install path (`bin_install_path`) that could not be written.
+        /// The path that could not be written.
         path: std::path::PathBuf,
+    },
+    /// Bundle mode is on but the bundle install path could not be derived: the running executable
+    /// (`current_exe()`) has no `.app` ancestor.
+    ///
+    /// Only produced on macOS, where `bundle_install_path` defaults to the nearest enclosing
+    /// `.app` directory. Set `bundle_install_path` explicitly (on every other platform it is
+    /// required in bundle mode, surfacing as
+    /// [`MissingField`](Error::MissingField) instead).
+    #[non_exhaustive]
+    NoAppBundle {
+        /// The running executable that has no enclosing `.app` bundle.
+        exe: std::path::PathBuf,
+    },
+    /// Two builder settings that cannot both apply were set.
+    ///
+    /// `field` is the setting that was rejected and `conflict` the one it clashes with, e.g.
+    /// `bundle_path_in_archive` (which replaces a whole directory bundle) together with an
+    /// explicit `bin_install_path` (which replaces a single file). Returned from `build()`, before
+    /// any request is made.
+    #[non_exhaustive]
+    ConflictingConfig {
+        /// The setting that was rejected.
+        field: &'static str,
+        /// The already-set setting it conflicts with.
+        conflict: &'static str,
+    },
+    /// The running app is a translocated copy, so its bundle cannot be replaced.
+    ///
+    /// macOS runs a quarantined (freshly downloaded, un-cleared) app from a read-only randomized
+    /// `AppTranslocation` mount, so the enclosing `.app` path is not the installed one and is not
+    /// writable. Move the app (for example to `/Applications`), which clears the quarantine flag,
+    /// and relaunch it before updating.
+    #[non_exhaustive]
+    AppTranslocated {
+        /// The running executable, inside the translocated bundle.
+        exe: std::path::PathBuf,
     },
     /// A bare release listing ([`ReleaseList::fetch`](crate::backends)) carries no current version,
     /// so [`Releases::is_update_available`](crate::update::Releases::is_update_available) has nothing
@@ -422,8 +460,25 @@ impl std::fmt::Display for Error {
             InstallPathNotWritable { path } => write!(
                 f,
                 "InstallPathNotWritableError: cannot write to install path {}: run with elevated \
-                 privileges or choose a user-writable bin_install_path",
+                 privileges or configure a user-writable install path",
                 path.display()
+            ),
+            NoAppBundle { exe } => write!(
+                f,
+                "ConfigError: no `.app` ancestor of {}; set bundle_install_path explicitly",
+                exe.display()
+            ),
+            ConflictingConfig { field, conflict } => write!(
+                f,
+                "ConfigError: `{}` conflicts with `{}`; set one or the other",
+                field, conflict
+            ),
+            AppTranslocated { exe } => write!(
+                f,
+                "AppTranslocatedError: {} is running from a translocated (quarantined) copy on a \
+                 read-only mount, so its bundle cannot be replaced: move the app (e.g. to \
+                 /Applications) and relaunch it before updating",
+                exe.display()
             ),
             NoCurrentVersion => write!(
                 f,
@@ -1269,10 +1324,12 @@ mod tests {
             shown.contains("/usr/local/bin/app"),
             "InstallPathNotWritable Display must name the path, got: {shown}"
         );
+        // The remedy is named without naming a specific setter: the same variant covers
+        // `bin_install_path` and, in bundle mode, `bundle_install_path` (or its parent).
         assert!(
-            shown.contains("elevated privileges") && shown.contains("bin_install_path"),
+            shown.contains("elevated privileges") && shown.contains("user-writable install path"),
             "InstallPathNotWritable Display must suggest elevated privileges or a user-writable \
-             bin_install_path, got: {shown}"
+             install path, got: {shown}"
         );
         assert!(
             err.source().is_none(),

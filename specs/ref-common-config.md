@@ -50,6 +50,14 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 - Defaulted: `target` falls back to `get_target()` (`common.rs:148-151`);
   `bin_install_path` falls back to `std::env::current_exe()` (`common.rs:162-165`),
   which can itself error and propagates via `?`.
+- Bundle mode is resolved first, by `resolve_bundle_mode` (`common.rs:638`), which returns the
+  `(bundle_path_in_archive, bundle_install_path)` pair stored on `CommonConfig` (both `None` when
+  `bundle_path_in_archive` is unset). With it set: an explicit `bin_install_path`, or a
+  `bin_path_in_archive` whose `bin_path_in_archive_auto` is `false`, is
+  `Error::ConflictingConfig { field, conflict }`; an unset `bundle_install_path` resolves through
+  `update::default_bundle_install_path()` (macOS: the nearest `.app` ancestor of `current_exe()`,
+  else `Error::NoAppBundle` / `Error::AppTranslocated`; other targets:
+  `Error::MissingField { field: "bundle_install_path" }`).
 - All other fields are cloned through unchanged. Note `target` and
   `current_version` become owned `String`, and `bin_install_path` an owned
   `PathBuf`, in `CommonConfig`.
@@ -89,6 +97,12 @@ The `@shared` vocabulary (`macros.rs:231-462`):
 - `bin_path_in_archive(impl Into<String>)` (`macros.rs:328`) - supports `{{ bin }}`,
   `{{ target }}`, `{{ version }}` substitutions; sets `bin_path_in_archive_auto = false`
   so a later `bin_name` call will not overwrite it.
+- `bundle_path_in_archive(impl Into<String>)` - names the bundle directory inside the archive and
+  selects bundle mode; supports the same `{{ bin }}` / `{{ target }}` / `{{ version }}`
+  substitutions as `bin_path_in_archive`.
+- `bundle_install_path<A: AsRef<Path>>(A)` - the installed bundle directory bundle mode replaces;
+  optional on macOS (defaults to the nearest `.app` ancestor of the running exe), required
+  elsewhere in bundle mode.
 - `show_download_progress(bool)` (`macros.rs:336`).
 - `progress_style(ProgressStyle)` (`macros.rs:342`) - sets template and chars via
   the typed `ProgressStyle { template, chars }` newtype (`ProgressStyle::new(template, chars)`).
