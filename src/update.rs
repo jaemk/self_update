@@ -1198,6 +1198,23 @@ fn is_safe_asset_name(name: &str) -> bool {
     )
 }
 
+/// Format the install-target line of the release-status block.
+///
+/// Paths print through [`Path::display`](std::path::Path::display), not `{:?}`: `Path`'s `Debug`
+/// impl quotes the path and escapes it, so a windows install path came out as
+/// `"C:\\Users\\me\\bin\\app.exe"` — doubled separators the user never typed.
+fn install_target_line(
+    bundle_install_path: Option<&std::path::Path>,
+    bin_install_path: &std::path::Path,
+) -> String {
+    // In bundle mode the install target is the bundle directory, not `bin_install_path` (which the
+    // swap never writes), so confirm against the path that will actually be replaced.
+    match bundle_install_path {
+        Some(bundle) => format!("  * Current bundle: {}", bundle.display()),
+        None => format!("  * Current exe: {}", bin_install_path.display()),
+    }
+}
+
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
 /// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
 fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
@@ -1225,12 +1242,10 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
     let prompt_confirmation = !u.no_confirm();
     if u.show_output() || prompt_confirmation {
         println!("\n{} release status:", u.bin_name());
-        // In bundle mode the install target is the bundle directory, not `bin_install_path` (which
-        // the swap never writes), so confirm against the path that will actually be replaced.
-        match u.bundle_install_path() {
-            Some(bundle) => println!("  * Current bundle: {:?}", bundle),
-            None => println!("  * Current exe: {:?}", u.bin_install_path()),
-        }
+        println!(
+            "{}",
+            install_target_line(u.bundle_install_path(), u.bin_install_path())
+        );
         println!("  * New exe release: {:?}", target_asset.name());
         println!(
             "  * New exe download url: {:?}",
@@ -2093,7 +2108,9 @@ pub fn verify_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{Releases, UpdateStrategy, choose_latest_release, install_binary};
+    use super::{
+        Releases, UpdateStrategy, choose_latest_release, install_binary, install_target_line,
+    };
     // `ReleaseAsset` is only referenced unqualified by the checksum tests below; gate the import so
     // a build without `checksums` (e.g. `--features s3` alone) does not trip the unused-import lint.
     #[cfg(feature = "checksums")]
@@ -3071,6 +3088,24 @@ mod tests {
             .unwrap();
         let p: &std::path::Path = upd.bin_install_path();
         assert_eq!(p, std::path::Path::new("/tmp/app-install-path"));
+    }
+
+    // A windows install path must print with the separators the user typed. The old `{:?}` went
+    // through `Path`'s `Debug` impl, which quotes and escapes, turning `C:\Users\..` into
+    // `"C:\\Users\\.."` in the confirmation block. `Display` writes the path as-is, so this
+    // asserts the same string on every platform — a backslash is an ordinary character in a unix
+    // path, so the test is meaningful on the linux lanes too, not only the windows job.
+    #[test]
+    fn install_target_line_prints_paths_without_debug_escaping() {
+        let exe = std::path::Path::new(r"C:\Users\Public\Documents\mise\bin\mise.exe");
+        assert_eq!(
+            install_target_line(None, exe),
+            r"  * Current exe: C:\Users\Public\Documents\mise\bin\mise.exe"
+        );
+        assert_eq!(
+            install_target_line(Some(std::path::Path::new("/Applications/App.app")), exe),
+            "  * Current bundle: /Applications/App.app"
+        );
     }
 
     #[test]
