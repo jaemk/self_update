@@ -120,6 +120,13 @@
   unaffected. On windows, where creating symlinks needs elevated privileges, symlink entries
   keep the previous regular-file behavior. `Extract::extract_file` now errors on a symlink entry
   rather than writing its target string out as the requested file.
+- The update confirmation block printed the install path with `{:?}`, and `Path`'s `Debug` impl
+  quotes the path and escapes each separator, so on windows the "Current exe" line read
+  `"C:\\Users\\me\\bin\\app.exe"` — doubled backslashes the user never typed. The `Current exe` and
+  `Current bundle` lines now print through `Path::display()`, so the path appears exactly as the
+  platform writes it. The `New exe release` / `New exe download url` lines are strings rather than
+  paths and keep their existing quoted form.
+  ([#201](https://github.com/jaemk/self_update/pull/201))
 
 ### Removed
 

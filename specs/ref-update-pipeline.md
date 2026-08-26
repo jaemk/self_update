@@ -227,10 +227,13 @@ Rollback is best-effort: a failing rollback step is logged via `log::error!`, no
 ### Confirm and output
 
 `no_confirm()` controls the prompt; `show_output()` controls informational printing. In
-`resolve_and_confirm` (`update.rs:724-735`), the release-status block (current exe, new exe
+`resolve_and_confirm` (`update.rs:1242-1269`), the release-status block (current exe, new exe
 name, download URL, "will be downloaded/extracted and replaced") prints when either
 `show_output` is true or a confirmation will be prompted, so it prints even with
-`show_output(false)` unless `no_confirm(true)` is also set. The confirmation prompt
+`show_output(false)` unless `no_confirm(true)` is also set. The install-target line is built by
+`install_target_line` (`update.rs:1206`), which formats the path with `Path::display()`, so it
+prints unquoted and with one separator per component on windows; the asset name and the redacted
+download URL are strings formatted with `{:?}` and stay quoted. The confirmation prompt
 (`confirm("Do you want to continue? [Y/n] ")`, `lib.rs:521`) reads stdin; blank or `y`
 continues, anything else => `Error::Aborted` (Display "AbortedError: the update was not
 confirmed", `lib.rs:528`). `print_check_header`,
@@ -299,6 +302,9 @@ under feature `async`; the free `update::update_extended_async` they route to is
   rollback failures are logged only. A second `commit` is a no-op.
 - The status block prints when `show_output || !no_confirm`; the prompt prints only when
   `!no_confirm`. Suppressing one does not suppress the other.
+- The status block's install-target line goes through `Path::display()`, never `{:?}`: a path is
+  shown exactly as the platform writes it, so a windows path keeps single backslashes
+  (`install_target_line`, `update.rs:1206`).
 - The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
 - When `check_install_path_writable` is `true`, the preflight probe (`probe_writable`,
@@ -328,7 +334,8 @@ under feature `async`; the free `update::update_extended_async` they route to is
 
 `update.rs` `mod tests`: `choose_latest_release_*` (up-to-date / prefers-newest-compatible /
 sorts-out-of-order / ignores-unparseable / falls-back-to-incompatible);
-`install_binary_aborts_when_verify_rejects`, `install_binary_installs_when_verify_accepts`;
+`install_binary_aborts_when_verify_rejects`, `install_binary_installs_when_verify_accepts`,
+`install_target_line_prints_paths_without_debug_escaping`;
 `finish_update_rejects_a_mismatched_checksum_before_extracting`,
 `finish_update_passes_a_matching_checksum_then_proceeds`,
 `finish_update_rejects_a_mismatched_release_digest_by_default`,
