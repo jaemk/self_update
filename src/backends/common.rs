@@ -1125,6 +1125,11 @@ mod tests {
     fn build_client_with_injected_client_skips_cert_build() {
         // An injected client wins: even with a (garbage) cert present, `build_client` must NOT try to
         // build a client over it, so no `cert_error` is recorded and the injected client is kept.
+        //
+        // Cert materialization is per slot, so with `async` enabled the async slot must be injected
+        // too. Filling only the sync slot leaves the async one to build from the garbage certs and
+        // record the error, which is what
+        // `build_client_injected_sync_still_builds_async_from_certs` pins.
         struct DummyClient;
         impl crate::http_client::HttpClient for DummyClient {
             fn get(
@@ -1136,8 +1141,26 @@ mod tests {
                 unreachable!("not called in this test")
             }
         }
+        #[cfg(feature = "async")]
+        struct DummyAsyncClient;
+        #[cfg(feature = "async")]
+        impl crate::http_client::AsyncHttpClient for DummyAsyncClient {
+            fn get<'a>(
+                &'a self,
+                _url: &'a str,
+                _headers: &'a crate::http_client::HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                crate::Result<Box<dyn crate::http_client::AsyncHttpResponse>>,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
         let mut req = RequestConfig {
             client: Some(std::sync::Arc::new(DummyClient)),
+            #[cfg(feature = "async")]
+            async_client: Some(std::sync::Arc::new(DummyAsyncClient)),
             ..Default::default()
         };
         req.root_certificates
@@ -1150,10 +1173,9 @@ mod tests {
         assert!(req.client.is_some(), "the injected client must be kept");
     }
 
-    // Regression for H3: when a sync client is injected but the async slot is empty, and the cert
-    // bytes are garbage, the async cert-build must NOT run and must NOT set cert_error. Previously
-    // the async block ran independently of the sync guard, so a cert parse failure surfaced as a
-    // cert_error even though the injected sync client was valid.
+    // Cert materialization is per slot: when a sync client is injected but the async slot is empty,
+    // the async cert-build still runs, so garbage cert bytes surface as a cert_error even though the
+    // injected sync client is valid. Injecting one slot does not suppress the other.
     #[cfg(feature = "async")]
     #[test]
     fn build_client_injected_sync_still_builds_async_from_certs() {

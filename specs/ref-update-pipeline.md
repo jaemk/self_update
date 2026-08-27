@@ -53,8 +53,11 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
    (`update.rs:86`), which matches by `target` substring (optionally `identifier`), then by
    `OS`+`ARCH` substring, then by `identifier` alone. No match =>
    `Error::NoReleaseFound { target: Some(...) }`. A server-supplied asset name that is empty,
-   `.`/`..`, contains a path separator, or is absolute =>
-   `Error::InvalidAssetName { name }` before any file is created.
+   `.`/`..`, contains a path separator, contains a control character, or is absolute =>
+   `Error::InvalidAssetName { name }` before any file is created. The control-character rejection
+   is a display defense, not a path defense: the name is echoed into the confirmation block, where
+   a `\r` or an ESC sequence could repaint the lines the user reads before authorizing the
+   replacement.
 
 ### Download
 

@@ -1765,9 +1765,9 @@ impl MoveAll {
                     && let Err(restore_err) = fs::rename(stash, dest)
                 {
                     log::error!(
-                        "failed to restore {:?} from stash {:?} during rollback: {}",
-                        dest,
-                        stash,
+                        "failed to restore {} from stash {} during rollback: {}",
+                        dest.display(),
+                        stash.display(),
                         restore_err
                     );
                 }
@@ -1805,9 +1805,9 @@ fn rollback(applied: &[Applied]) {
             Some(stash) => {
                 if let Err(e) = fs::rename(stash, &entry.dest) {
                     log::error!(
-                        "failed to restore {:?} from stash {:?} during rollback: {}",
-                        entry.dest,
-                        stash,
+                        "failed to restore {} from stash {} during rollback: {}",
+                        entry.dest.display(),
+                        stash.display(),
                         e
                     );
                 }
@@ -1815,7 +1815,11 @@ fn rollback(applied: &[Applied]) {
             // Fresh install (nothing to restore): remove the file we added.
             None => {
                 if let Err(e) = fs::remove_file(&entry.dest) {
-                    log::error!("failed to remove {:?} during rollback: {}", entry.dest, e);
+                    log::error!(
+                        "failed to remove {} during rollback: {}",
+                        entry.dest.display(),
+                        e
+                    );
                 }
             }
         }

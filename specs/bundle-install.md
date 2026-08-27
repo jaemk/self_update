@@ -224,6 +224,14 @@ link itself survives; staging follows the resolved path's parent, keeping every
 rename same-filesystem. A dangling symlink at the path counts as an existing
 entry and is stashed and replaced rather than being renamed onto.
 
+The resolution happens exactly once, in the orchestrator, before the
+confirmation prompt, and the resolved path is what the status block names, what
+the `check_install_path_writable` preflight probes, and what the swap writes.
+`install_bundle` resolves nothing itself. Resolving again after the prompt would
+mean the tree named in the block and the tree replaced by the swap are read at
+two different times, so a link repointed in between would redirect the
+replacement to a path the user never approved.
+
 BNDL-5-5. Concurrency is not coordinated: the existence check and the renames
 are not atomic as a unit, so two updaters racing on one bundle can interleave and
 each report success while only one tree survives. Single-writer is assumed, as it

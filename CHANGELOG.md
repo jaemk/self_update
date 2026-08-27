@@ -122,11 +122,24 @@
   rather than writing its target string out as the requested file.
 - The update confirmation block printed the install path with `{:?}`, and `Path`'s `Debug` impl
   quotes the path and escapes each separator, so on windows the "Current exe" line read
-  `"C:\\Users\\me\\bin\\app.exe"` — doubled backslashes the user never typed. The `Current exe` and
+  `"C:\\Users\\me\\bin\\app.exe"`, doubled backslashes the user never typed. The `Current exe` and
   `Current bundle` lines now print through `Path::display()`, so the path appears exactly as the
   platform writes it. The `New exe release` / `New exe download url` lines are strings rather than
   paths and keep their existing quoted form.
   ([#201](https://github.com/jaemk/self_update/pull/201))
+- A server-supplied asset name containing a control character is now rejected as
+  `Error::InvalidAssetName` alongside the existing empty / `.` / `..` / separator / absolute-path
+  cases. The name is remote-controlled and is echoed into the confirmation block, so a `\r` or an
+  ESC sequence in it could repaint or hide the lines (including the download url) that the user
+  reads before authorizing the replacement.
+- In bundle mode, a symlinked `bundle_install_path` is resolved once, before the confirmation
+  prompt, and that single resolved path is what the status block names, what the
+  `check_install_path_writable` preflight probes, and what the swap replaces. It was resolved again
+  after the prompt, so repointing the link in between would have redirected the replacement to a
+  tree the user never approved.
+- Rollback failures log paths through `Path::display()` rather than `{:?}`, so a windows path in
+  those messages keeps single separators. Diagnostic `debug!` logs keep `{:?}`, which renders a
+  non-UTF-8 path unambiguously.
 
 ### Removed
 

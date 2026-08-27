@@ -1014,11 +1014,17 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
             }
         };
 
-        let target_asset = resolve_and_confirm(self, &release)?;
+        // Resolve a symlinked bundle destination once, before the user is asked to approve it, and
+        // reuse that path for the preflight and the swap. Resolving again later would let the link
+        // be repointed in between, so the tree that gets replaced would not be the one confirmed.
+        let bundle_target = self.bundle_install_path().map(resolve_bundle_target);
+        let bundle_target = bundle_target.as_deref();
+
+        let target_asset = resolve_and_confirm(self, &release, bundle_target)?;
 
         // Opt-in preflight: bail before downloading if the install path is definitely not writable.
         if self.check_install_path_writable() {
-            probe_writable(self.bin_install_path(), self.bundle_install_path())?;
+            probe_writable(self.bin_install_path(), bundle_target)?;
         }
 
         let tmp_archive_dir = tempfile::TempDir::new()?;
@@ -1034,6 +1040,7 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
             &target_asset,
             tmp_archive_dir,
             &tmp_archive_path,
+            bundle_target,
         )
     }
 }
@@ -1188,6 +1195,13 @@ fn target_arch_os(target: &str) -> (Option<&str>, Option<&str>) {
 /// `\` and `:` are only special on Windows, so they are rejected explicitly rather than relying on
 /// component parsing (which does not treat them as special when the crate is built for unix).
 fn is_safe_asset_name(name: &str) -> bool {
+    // The name comes from the release listing, so it is remote-controlled, and it is echoed into
+    // the confirmation block the user reads before authorizing the replacement. A control
+    // character (`\r`, `\n`, ESC) in that block can repaint or hide the lines below it, including
+    // the download url, so reject it here rather than relying on the block's formatting.
+    if name.chars().any(char::is_control) {
+        return false;
+    }
     if name.contains('\\') || name.contains(':') {
         return false;
     }
@@ -1217,9 +1231,14 @@ fn install_target_line(
 
 /// Select the asset to download (custom matcher or the built-in target/identifier match), print the
 /// release status, and prompt for confirmation unless suppressed. Shared by both orchestrators.
+///
+/// `bundle_target` is the already-resolved bundle destination (see [`resolve_bundle_target`]), not
+/// the configured `bundle_install_path`, so the status block names the tree the swap will actually
+/// replace.
 fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
     u: &U,
     release: &Release,
+    bundle_target: Option<&std::path::Path>,
 ) -> Result<ReleaseAsset> {
     let target = u.target();
     let target_asset = match u.asset_matcher() {
@@ -1244,7 +1263,7 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
         println!("\n{} release status:", u.bin_name());
         println!(
             "{}",
-            install_target_line(u.bundle_install_path(), u.bin_install_path())
+            install_target_line(bundle_target, u.bin_install_path())
         );
         println!("  * New exe release: {:?}", target_asset.name());
         println!(
@@ -1258,7 +1277,7 @@ fn resolve_and_confirm<U: UpdateConfig + UpdateInternals + ?Sized>(
                 println!("  * Release notes:\n{}", body);
             }
         }
-        let replaced = match u.bundle_install_path() {
+        let replaced = match bundle_target {
             Some(_) => "the existing bundle directory will be replaced",
             None => "the existing binary will be replaced",
         };
@@ -1361,9 +1380,11 @@ struct FinishCtx {
     bin_name: String,
     bin_path_in_archive: String,
     /// The bundle directory inside the archive; `Some` puts the finish tail in bundle mode, where
-    /// `bundle_install_path` is also `Some` and the `bin_*` paths are unused.
+    /// `bundle_target` is also `Some` and the `bin_*` paths are unused.
     bundle_path_in_archive: Option<String>,
-    bundle_install_path: Option<std::path::PathBuf>,
+    /// The resolved bundle destination, not the configured `bundle_install_path`: the orchestrator
+    /// resolves it once before the confirmation prompt so the approved path is the written path.
+    bundle_target: Option<std::path::PathBuf>,
     show_output: bool,
     verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
     #[cfg(feature = "checksums")]
@@ -1386,6 +1407,7 @@ impl FinishCtx {
         u: &U,
         release: Release,
         target_asset: &ReleaseAsset,
+        bundle_target: Option<&std::path::Path>,
     ) -> Self {
         Self {
             #[cfg(feature = "checksums")]
@@ -1396,7 +1418,7 @@ impl FinishCtx {
             bin_name: u.bin_name().to_string(),
             bin_path_in_archive: u.bin_path_in_archive().to_string(),
             bundle_path_in_archive: u.bundle_path_in_archive().map(str::to_string),
-            bundle_install_path: u.bundle_install_path().map(std::path::Path::to_path_buf),
+            bundle_target: bundle_target.map(std::path::Path::to_path_buf),
             show_output: u.show_output(),
             verify_callback: u.verify_callback(),
             #[cfg(feature = "checksums")]
@@ -1419,8 +1441,9 @@ fn finish_update<U: UpdateConfig + UpdateInternals + ?Sized>(
     target_asset: &ReleaseAsset,
     tmp_archive_dir: tempfile::TempDir,
     tmp_archive_path: &std::path::Path,
+    bundle_target: Option<&std::path::Path>,
 ) -> Result<ReleaseStatus> {
-    let ctx = FinishCtx::capture(u, release, target_asset);
+    let ctx = FinishCtx::capture(u, release, target_asset, bundle_target);
     finish_update_owned(ctx, tmp_archive_dir, tmp_archive_path)
 }
 
@@ -1503,11 +1526,11 @@ fn finish_update_owned(
 
     // Bundle mode: extract the whole tree beside the destination and swap the directory in one
     // rename, instead of extracting and moving a single file.
-    if let Some(bundle_install_path) = ctx.bundle_install_path.as_deref() {
+    if let Some(bundle_target) = ctx.bundle_target.as_deref() {
         install_bundle(
             tmp_archive_path,
             path_in_archive,
-            bundle_install_path,
+            bundle_target,
             ctx.verify_callback.as_deref(),
             show_output,
         )?;
@@ -1566,12 +1589,17 @@ where
         }
     };
 
-    let target_asset = resolve_and_confirm(u, &release)?;
+    // Resolved once before the prompt, as on the sync path, so the confirmed path is the one the
+    // swap replaces.
+    let bundle_target = u.bundle_install_path().map(resolve_bundle_target);
+    let bundle_target = bundle_target.as_deref();
+
+    let target_asset = resolve_and_confirm(u, &release, bundle_target)?;
 
     // Opt-in preflight: bail before downloading if the install path is definitely not writable.
     // Shares the sync probe for exact parity with `update_extended`.
     if u.check_install_path_writable() {
-        probe_writable(u.bin_install_path(), u.bundle_install_path())?;
+        probe_writable(u.bin_install_path(), bundle_target)?;
     }
 
     let tmp_archive_dir = tempfile::TempDir::new()?;
@@ -1586,7 +1614,7 @@ where
     // Run the blocking finish tail (verify/extract/install) off the async executor. Copy out the
     // owned fields, MOVE the TempDir into the closure (it is dropped there), and `.await` the
     // join handle, mapping a JoinError to an update error.
-    let ctx = FinishCtx::capture(u, release, &target_asset);
+    let ctx = FinishCtx::capture(u, release, &target_asset, bundle_target);
     tokio::task::spawn_blocking(move || {
         finish_update_owned(ctx, tmp_archive_dir, &tmp_archive_path)
     })
@@ -1645,8 +1673,12 @@ fn run_verify_hook(new_path: &std::path::Path, verify: Option<&crate::DynVerifyF
     Ok(())
 }
 
-/// Extract the archive and replace `bundle_install_path` with the bundle directory it carries at
+/// Extract the archive and replace `bundle_target` with the bundle directory it carries at
 /// `bundle_path_in_archive`.
+///
+/// `bundle_target` is already resolved by [`resolve_bundle_target`]: the caller does that once,
+/// before the confirmation prompt, so the path the user approves is the path this writes. Resolving
+/// it here instead would reopen the window between the prompt and the swap.
 ///
 /// Both the extraction target and the rollback stash are temporary directories created inside the
 /// destination's *parent*, so every rename in [`swap_bundle`] is same-filesystem and there is no
@@ -1655,19 +1687,15 @@ fn run_verify_hook(new_path: &std::path::Path, verify: Option<&crate::DynVerifyF
 fn install_bundle(
     archive: &std::path::Path,
     bundle_path_in_archive: &str,
-    bundle_install_path: &std::path::Path,
+    bundle_target: &std::path::Path,
     verify: Option<&crate::DynVerifyFn>,
     show_output: bool,
 ) -> Result<()> {
-    // Resolve a symlinked install path to the tree it points at, so the swap replaces the installed
-    // bundle rather than the link (`rename` does not follow its final component) and staging lands
-    // beside the real tree, keeping every rename same-filesystem.
-    let target = resolve_bundle_target(bundle_install_path);
-    let parent = install_parent(&target);
-    let staging = tempfile::TempDir::new_in(parent)
-        .map_err(|e| map_install_io_error(e, bundle_install_path))?;
-    let stash = tempfile::TempDir::new_in(parent)
-        .map_err(|e| map_install_io_error(e, bundle_install_path))?;
+    let parent = install_parent(bundle_target);
+    let staging =
+        tempfile::TempDir::new_in(parent).map_err(|e| map_install_io_error(e, bundle_target))?;
+    let stash =
+        tempfile::TempDir::new_in(parent).map_err(|e| map_install_io_error(e, bundle_target))?;
 
     Extract::from_source(archive).extract_into(staging.path())?;
     let staged_root = staging.path().join(bundle_path_in_archive);
@@ -1676,7 +1704,7 @@ fn install_bundle(
     print_flush(show_output, "Replacing bundle directory... ")?;
     swap_bundle(
         &staged_root,
-        &target,
+        bundle_target,
         stash.path(),
         &std::env::current_exe()?,
         verify,
@@ -1782,9 +1810,9 @@ fn swap_bundle(
 fn restore_stashed(from: &std::path::Path, to: &std::path::Path) {
     if let Err(e) = fs::rename(from, to) {
         log::error!(
-            "failed to restore {:?} from stash {:?} during rollback: {}",
-            to,
-            from,
+            "failed to restore {} from stash {} during rollback: {}",
+            to.display(),
+            from.display(),
             e
         );
     }
@@ -3108,6 +3136,36 @@ mod tests {
         );
     }
 
+    // The asset name comes from the release listing, so it is remote-controlled, and it is echoed
+    // into the confirmation block. A control character in it (a `\r` that returns to the start of
+    // the line, or an ESC that opens an ANSI sequence) could repaint or hide the lines the user
+    // reads before authorizing the replacement, including the download url. Reject it at the guard
+    // rather than relying on the block's formatting to neutralize it.
+    #[test]
+    fn is_safe_asset_name_rejects_control_characters() {
+        assert!(super::is_safe_asset_name("app-v1.2.3-x86_64.tar.gz"));
+
+        for name in [
+            "app\r\u{1b}[2Kevil.tar.gz",
+            "app\nevil.tar.gz",
+            "app\u{1b}[31m.tar.gz",
+            "app\u{7f}.tar.gz",
+            "app\u{0}.tar.gz",
+        ] {
+            assert!(
+                !super::is_safe_asset_name(name),
+                "a control character must be rejected: {:?}",
+                name
+            );
+        }
+
+        // The traversal and separator rejections are unchanged.
+        assert!(!super::is_safe_asset_name(""));
+        assert!(!super::is_safe_asset_name(".."));
+        assert!(!super::is_safe_asset_name("dir/app.tar.gz"));
+        assert!(!super::is_safe_asset_name(r"dir\app.tar.gz"));
+    }
+
     #[test]
     fn install_binary_aborts_when_verify_rejects() {
         let dir = tempfile::tempdir().unwrap();
@@ -4104,6 +4162,57 @@ mod tests {
         }
     }
 
+    // `install_bundle` replaces exactly the path it is handed and resolves nothing itself. The
+    // orchestrator calls `resolve_bundle_target` once, before the confirmation prompt, so that the
+    // path the user approves is the path that gets written; resolving a second time down here would
+    // reopen the window for the link to be repointed in between. Handing it a symlink therefore
+    // replaces the link, which is what proves the resolution is not happening twice.
+    #[cfg(all(unix, feature = "archive-zip"))]
+    #[test]
+    fn install_bundle_replaces_exactly_the_path_it_is_given() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("MyApp.app.zip");
+        {
+            let f = std::fs::File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            zip.start_file("MyApp.app/Contents/MacOS/myapp", opts)
+                .unwrap();
+            zip.write_all(b"new").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let install_root = dir.path().join("Applications");
+        std::fs::create_dir(&install_root).unwrap();
+        let real = staged_bundle(&install_root, "Real.app", "myapp", b"old");
+        let link = install_root.join("Link.app");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        super::install_bundle(&archive_path, "MyApp.app", &link, None, false).unwrap();
+
+        assert!(
+            !std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the given path must be replaced, not followed"
+        );
+        assert_eq!(
+            std::fs::read(link.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"new",
+            "the new bundle lands at the path that was passed in"
+        );
+        assert_eq!(
+            std::fs::read(real.join("Contents").join("MacOS").join("myapp")).unwrap(),
+            b"old",
+            "the tree the link pointed at is left alone"
+        );
+    }
+
     // BNDL-5-4: a dangling symlink at the install path counts as an existing entry -- it is stashed
     // and replaced. Renaming the staged directory straight onto it would fail with ENOTDIR.
     #[cfg(unix)]
@@ -4329,11 +4438,11 @@ mod tests {
     fn bundle_ctx(
         bundle_path_in_archive: &str,
         version: &str,
-        bundle_install_path: &std::path::Path,
+        bundle_target: &std::path::Path,
     ) -> super::FinishCtx {
         let mut ctx = traversal_ctx("unused-bin-path", version);
         ctx.bundle_path_in_archive = Some(bundle_path_in_archive.to_string());
-        ctx.bundle_install_path = Some(bundle_install_path.to_path_buf());
+        ctx.bundle_target = Some(bundle_target.to_path_buf());
         ctx
     }
 
@@ -4522,10 +4631,15 @@ mod tests {
             .bundle_install_path("/Applications/MyApp.app")
             .build()
             .unwrap();
-        let ctx = super::FinishCtx::capture(&bundled, rel("1.2.3"), &asset);
+        let ctx = super::FinishCtx::capture(
+            &bundled,
+            rel("1.2.3"),
+            &asset,
+            Some(std::path::Path::new("/Applications/MyApp.app")),
+        );
         assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
         assert_eq!(
-            ctx.bundle_install_path.as_deref(),
+            ctx.bundle_target.as_deref(),
             Some(std::path::Path::new("/Applications/MyApp.app"))
         );
 
@@ -4536,9 +4650,9 @@ mod tests {
             .current_version("1.0.0")
             .build()
             .unwrap();
-        let ctx = super::FinishCtx::capture(&plain, rel("1.2.3"), &asset);
+        let ctx = super::FinishCtx::capture(&plain, rel("1.2.3"), &asset, None);
         assert!(
-            ctx.bundle_path_in_archive.is_none() && ctx.bundle_install_path.is_none(),
+            ctx.bundle_path_in_archive.is_none() && ctx.bundle_target.is_none(),
             "without the setters the finish tail must stay in single-file mode"
         );
     }
@@ -4558,10 +4672,15 @@ mod tests {
             .build_async()
             .unwrap();
         let asset = crate::update::ReleaseAsset::new("release.zip", "https://host/release.zip");
-        let ctx = super::FinishCtx::capture(&upd, rel("1.2.3"), &asset);
+        let ctx = super::FinishCtx::capture(
+            &upd,
+            rel("1.2.3"),
+            &asset,
+            Some(std::path::Path::new("/Applications/MyApp.app")),
+        );
         assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
         assert_eq!(
-            ctx.bundle_install_path.as_deref(),
+            ctx.bundle_target.as_deref(),
             Some(std::path::Path::new("/Applications/MyApp.app"))
         );
     }
@@ -4609,7 +4728,7 @@ mod tests {
         let release = Release::builder().version("1.2.3").build().unwrap();
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("a mismatched checksum must abort the update");
         let msg = err.to_string();
         assert!(
@@ -4640,7 +4759,7 @@ mod tests {
         let release = Release::builder().version("1.2.3").build().unwrap();
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
@@ -4667,7 +4786,7 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest(format!("sha256:{}", "00".repeat(32)));
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("a mismatched release digest must abort the update");
         let msg = err.to_string();
         assert!(
@@ -4696,7 +4815,7 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
@@ -4725,7 +4844,7 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest(format!("sha256:{}", "00".repeat(32)));
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
@@ -4750,7 +4869,7 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest("md5:abc123");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path)
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
             .expect_err("an unsupported digest must abort the update");
         assert!(
             matches!(err, crate::errors::Error::InvalidResponse { .. }),
@@ -5606,7 +5725,7 @@ mod tests {
             bin_name: "app".to_string(),
             bin_path_in_archive: bin_path_in_archive.to_string(),
             bundle_path_in_archive: None,
-            bundle_install_path: None,
+            bundle_target: None,
             show_output: false,
             verify_callback: None,
             #[cfg(feature = "checksums")]
