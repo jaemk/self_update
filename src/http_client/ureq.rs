@@ -146,14 +146,22 @@ impl HttpClient for UreqClient {
             Ok(r) => r,
             Err(ureq::Error::StatusCode(code)) if is_injected => {
                 // An injected agent has http_status_as_error=true (the ureq default) and cannot be
-                // reconfigured. When it fires StatusCode, extract the code and map to structured error.
+                // reconfigured. When it fires StatusCode, extract the code and map to structured
+                // error. `StatusCode` carries no headers, so this path cannot distinguish a
+                // rate-limited 403 from an authorization failure: it maps to `Unauthorized`. An
+                // agent built with `http_status_as_error(false)` reaches the header-aware check
+                // below instead.
                 return Err(status_to_error(code, url));
             }
             Err(e) => return Err(Error::Transport(Box::new(e))),
         };
 
         if !res.status().is_success() {
-            return Err(status_to_error(res.status().as_u16(), url));
+            return Err(crate::errors::status_to_error_with_headers(
+                res.status().as_u16(),
+                url,
+                res.headers(),
+            ));
         }
 
         Ok(Box::new(res))
@@ -242,6 +250,98 @@ mod tests {
             .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err")
+    }
+
+    /// Like [`stub`], but injects `extra_headers` (a pre-formatted `Name: value\r\n` block), so a
+    /// response can carry the rate-limit headers a spent quota comes with.
+    fn stub_with_headers(status: &'static str, extra_headers: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "err";
+                let out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: text/plain\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    extra_headers,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn default_agent_maps_a_spent_quota_403_to_rate_limited() {
+        // The default per-call agent reaches the bottom-of-`get` check with the response in hand, so
+        // it must classify a 403 carrying `x-ratelimit-remaining: 0` as RateLimited rather than
+        // Unauthorized -- matching the reqwest lane.
+        let client = UreqClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1780000000\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "default-agent 403 with a spent quota must map to RateLimited, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn injected_agent_status_code_arm_cannot_see_rate_limit_headers() {
+        // Documented limitation: an injected agent with ureq's default `http_status_as_error(true)`
+        // surfaces `ureq::Error::StatusCode(code)`, which carries no headers, so the rate-limit
+        // classification is impossible on that path and the 403 stays Unauthorized. Pinning it here
+        // keeps the caveat in the `get` comment honest; injecting an agent built with
+        // `http_status_as_error(false)` gets the header-aware classification (below).
+        let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
+        let client = UreqClient::from(agent);
+        let base = stub_with_headers("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "the headerless StatusCode arm must fall back to Unauthorized, got {:?}",
+            err
+        );
+
+        // The same injected agent with ureq's status-error disabled falls through to the
+        // header-aware check and does classify the spent quota.
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build(),
+        );
+        let client = UreqClient::from(agent);
+        let base = stub_with_headers("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::RateLimited { status: 403, .. }),
+            "an injected agent that defers status handling must reach the header-aware check, got {:?}",
+            err
+        );
     }
 
     #[test]

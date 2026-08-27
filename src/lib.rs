@@ -429,17 +429,50 @@ Requests to the GitHub REST API are rate limited by GitHub itself, not by this c
 - **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
   requests (set any personal access token via `auth_token`) get **5000 per hour**. A token needs no
   scopes to raise the limit for a public repository.
+- That budget is counted **per source IP, not per application**. Behind a shared egress IP -- a
+  NAT'd corporate network, a CI runner pool, a VPN exit -- it is pooled across everyone on that IP
+  and can be spent entirely by other people, so a lightly-used application still sees 403s there.
 - An update check costs **one** API request (the latest-release lookup, or one request per page of a
   paginated listing). The asset **download** itself is a CDN redirect and does not count against the
   core API limit.
-- When you are rate limited, GitHub responds with **HTTP 403** (and an `x-ratelimit-remaining: 0`
-  header), which this crate surfaces as `Error::Unauthorized { status: 403, .. }` -- the same
-  variant as a genuine auth failure, so recognize it by the symptom (a 403 that appears only under
-  frequent checking).
-- To avoid it: set an `auth_token` (5000/hour), and check less often -- the
+- When you are rate limited, GitHub responds with **HTTP 403** and an `x-ratelimit-remaining: 0`
+  header. This crate reads that header and surfaces
+  [`Error::RateLimited`](crate::errors::Error::RateLimited) -- distinct from the
+  `Error::Unauthorized` a genuine credential failure produces -- carrying the reset instant and any
+  `Retry-After` delay, so you can match on it to back off. (A 403 with no quota headers stays
+  `Unauthorized`.)
+- To avoid it: set a token, and check less often -- the
   [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
   The retry/backoff setters do **not** help here; retrying a rate-limited request only consumes more
   quota.
+
+The one-line remedy is `auth_token_from_env()`, on every git backend's `Update` and `ReleaseList`
+builder. It reads the host's conventional variables -- `GITHUB_TOKEN` then `GH_TOKEN` (matching the
+`gh` CLI), `GITLAB_TOKEN` then `CI_JOB_TOKEN`, `GITEA_TOKEN`, `GITEE_TOKEN` -- and uses the first
+that is set and non-empty:
+
+```rust
+# #[cfg(feature = "github")]
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let status = self_update::backends::github::Update::configure()
+    .repo_owner("jaemk")
+    .repo_name("self_update")
+    .bin_name("self_update_example")
+    .current_version(self_update::cargo_crate_version!())
+    // Uses a token when the environment supplies one; unauthenticated when it does not.
+    .auth_token_from_env()
+    .build()?
+    .update()?;
+# let _ = status;
+# Ok(())
+# }
+```
+
+Reading the environment is opt-in -- the crate never does it on its own, since the configured API
+base can be a self-hosted host and sending a user's token there should be your decision. With no
+variable set the call is a no-op and the request goes out unauthenticated, so it is safe to place
+unconditionally in an application that also runs outside CI or a corporate network. It never clears
+a token you set with `auth_token(..)`.
 
 ### Listing releases (`ReleaseList`)
 

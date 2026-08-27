@@ -76,8 +76,10 @@ headers via `api_headers(auth_token)` (`github.rs:488-507`): it always sets
 `User-Agent: rust/self-update`, and when a token is present sets
 `Authorization: token {token}` (the GitHub legacy "token" scheme, not "Bearer").
 A token that fails to parse as a header value is surfaced as `Error::InvalidAuthToken`.
-There is no `GITHUB_TOKEN` environment-variable interplay
-in this backend; the token must be supplied explicitly via `auth_token(...)`. The
+The token is supplied explicitly via `auth_token(...)`, or read from the environment on request via
+`auth_token_from_env()` (`GITHUB_TOKEN`, then `GH_TOKEN`, matching the `gh` CLI), on both the
+`Update` and `ReleaseList` builders. The environment is never read implicitly: without that call the
+backend does not look at `GITHUB_TOKEN` at all. The
 `impl_update_config_accessors!` override arm wires github's `api_headers` into the
 download path so the same User-Agent and token scheme are used there too.
 
@@ -95,9 +97,13 @@ scopes needed for a public repo). This crate does not track the limit; it is doc
 crate-level "GitHub rate limits" section (`src/lib.rs`) and pointed at from the `auth_token` setter
 rustdoc (`github.rs:138-149`). An update check costs one API request (a `/latest` or `/tags/{tag}`
 lookup, or one per page of a listing); the asset download is a CDN redirect and does not count
-against the core limit. A rate-limited response is HTTP 403 (with `x-ratelimit-remaining: 0`), which
-maps through `status_to_error` to `Error::Unauthorized { status: 403, .. }` (the same variant as a
-genuine auth failure). Mitigation is an `auth_token` and checking less often (the
+against the core limit. The 60/hour budget is counted per source IP, so behind a shared egress
+IP (a NAT'd corporate network, a CI runner pool, a VPN exit) it is pooled across everyone on that IP
+and can be spent by other people entirely. A rate-limited response is HTTP 403 with
+`x-ratelimit-remaining: 0`, which `status_to_error_with_headers` classifies as
+`Error::RateLimited { status: 403, reset_at, retry_after }` -- distinct from the `Error::Unauthorized`
+a genuine credential failure produces (a 403 without those headers). Mitigation is a token
+(`auth_token` / `auth_token_from_env`) and checking less often (the
 `check_interval::UpdateCheckGuard` throttle); the retry/backoff setters do not help, since retrying
 a rate-limited request only consumes more quota.
 

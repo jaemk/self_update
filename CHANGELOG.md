@@ -3,6 +3,24 @@
 ## [unreleased]
 
 ### Added
+- `auth_token_from_env()` on the github/gitlab/gitea/gitee `Update` and `ReleaseList` builders:
+  read the token from the host's conventional environment variables instead of plumbing
+  `std::env::var` through the application. Reads `GITHUB_TOKEN` then `GH_TOKEN` (matching the `gh`
+  CLI), `GITLAB_TOKEN` then `CI_JOB_TOKEN`, `GITEA_TOKEN`, `GITEE_TOKEN`, using the first that is
+  set and non-empty after trimming. Opt-in: the crate never reads the environment on its own, since
+  the configured API base can be a self-hosted host. With nothing set the call is a no-op and the
+  request goes out unauthenticated, and it never clears a token set by `auth_token(..)`.
+- `Error::RateLimited { status, url, reset_at, retry_after }`: a spent request quota is now
+  distinguished from a credential failure. Both built-in HTTP clients classify a 403/429 carrying a
+  zero remaining-quota header (`x-ratelimit-remaining` / gitlab's `RateLimit-Remaining`) as
+  `RateLimited`, picking up the reset instant and any delta-seconds `Retry-After`; a 403 without
+  those headers stays `Error::Unauthorized`. `http_status()` and `url()` cover the new variant, and
+  `Error::http_status_error_with_headers(status, url, &HeaderMap)` gives a custom `HttpClient` the
+  same classification. The one gap is an injected `ureq::Agent` left with ureq's default
+  `http_status_as_error(true)`: its `StatusCode` error carries no headers, so that path still
+  reports `Unauthorized`.
+  ([#78](https://github.com/jaemk/self_update/issues/78))
+
 - Directory-bundle installs (macOS `.app`): `bundle_path_in_archive(..)` names the bundle directory
   inside the release archive and selects bundle mode, where the whole tree replaces
   `bundle_install_path(..)` instead of one file replacing `bin_install_path`. The new bundle is

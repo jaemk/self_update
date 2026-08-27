@@ -157,6 +157,73 @@ pub(crate) fn tag_prefix_mismatch_error(tag: &str, prefix: &str) -> Error {
     ))))
 }
 
+/// Pick the auth token out of a list of candidate `(env var name, value)` pairs: the first pair
+/// whose value is present and non-empty after trimming surrounding whitespace wins.
+///
+/// Split out from [`token_from_env`] so the precedence rules are testable without mutating process
+/// env, which is racy under the parallel test harness (and `unsafe` since the 2024 edition).
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn first_env_token(candidates: &[(&str, Option<String>)]) -> Option<String> {
+    for (name, value) in candidates {
+        let Some(value) = value else { continue };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        log::debug!("self_update: using the auth token from ${name}");
+        return Some(value.to_owned());
+    }
+    None
+}
+
+/// Read `names` from the environment in order and return the first present, non-empty value.
+/// `None` when none is set, which leaves the builder's `auth_token` untouched.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn token_from_env(names: &[&str]) -> Option<String> {
+    let candidates = names
+        .iter()
+        .map(|name| (*name, std::env::var(name).ok()))
+        .collect::<Vec<_>>();
+    first_env_token(&candidates)
+}
+
+/// Write an env-resolved token into a builder's token slot.
+///
+/// A resolved token replaces whatever was there; *not* finding one leaves the slot alone, so
+/// `auth_token_from_env()` can never silently drop a token an application set explicitly (which
+/// would turn a missing env var into a surprise 403). Split out from the `auth_token_from_env`
+/// macro so this rule is tested once rather than per backend.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn apply_env_token(slot: &mut Option<String>, resolved: Option<String>) {
+    if let Some(token) = resolved {
+        *slot = Some(token);
+    }
+}
+
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
 /// available, no `url` crate needed). Returns `None` when the URL has no host.
 #[cfg_attr(
@@ -718,6 +785,102 @@ mod tests {
     #[cfg(feature = "async")]
     const BAD_PEM_CERT: &[u8] =
         b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
+
+    /// Build the `(name, value)` candidate list `token_from_env` hands to `first_env_token`, from
+    /// literal values, so the precedence rules are exercised without mutating process env (racy
+    /// under the parallel harness, and `unsafe` since the 2024 edition).
+    fn candidates<'a>(pairs: &[(&'a str, Option<&str>)]) -> Vec<(&'a str, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (*name, value.map(str::to_owned)))
+            .collect()
+    }
+
+    // AUTH-1-1: the first candidate that is set and non-empty wins, even when a later one is also
+    // set. This pins the documented precedence (e.g. GITHUB_TOKEN over GH_TOKEN).
+    #[test]
+    fn first_env_token_takes_the_first_present_value() {
+        let got = super::first_env_token(&candidates(&[
+            ("GITHUB_TOKEN", Some("first")),
+            ("GH_TOKEN", Some("second")),
+        ]));
+        assert_eq!(
+            got.as_deref(),
+            Some("first"),
+            "the earlier variable must win over a later one"
+        );
+    }
+
+    // A variable that is set but empty (or all-whitespace) is treated as unset, so an exported-but-
+    // blank `GITHUB_TOKEN` (common in CI scaffolding) falls through to the next candidate instead of
+    // producing an empty `Authorization` header.
+    #[test]
+    fn first_env_token_skips_empty_and_whitespace_values() {
+        let got = super::first_env_token(&candidates(&[
+            ("GITHUB_TOKEN", Some("")),
+            ("GH_TOKEN", Some("   ")),
+            ("OTHER_TOKEN", Some("real")),
+        ]));
+        assert_eq!(
+            got.as_deref(),
+            Some("real"),
+            "empty and whitespace-only values must be skipped"
+        );
+    }
+
+    // Surrounding whitespace is trimmed: a value pasted into a CI secret with a trailing newline
+    // still yields a usable token (an untrimmed one would fail header encoding).
+    #[test]
+    fn first_env_token_trims_surrounding_whitespace() {
+        let got = super::first_env_token(&candidates(&[("GITHUB_TOKEN", Some("  ghp_abc\n"))]));
+        assert_eq!(got.as_deref(), Some("ghp_abc"));
+    }
+
+    // AUTH-1-2: nothing set (or everything empty) resolves to `None`, which leaves the builder's
+    // token untouched and sends the request unauthenticated.
+    #[test]
+    fn first_env_token_returns_none_when_nothing_is_set() {
+        assert_eq!(
+            super::first_env_token(&candidates(&[
+                ("GITHUB_TOKEN", None),
+                ("GH_TOKEN", Some("  ")),
+            ])),
+            None,
+            "no present, non-empty candidate must resolve to None"
+        );
+    }
+
+    // A resolved token overwrites whatever the slot held, so `auth_token("x").auth_token_from_env()`
+    // ends up with the environment's token.
+    #[test]
+    fn apply_env_token_overwrites_with_a_resolved_token() {
+        let mut slot = Some("explicit".to_string());
+        super::apply_env_token(&mut slot, Some("from-env".to_string()));
+        assert_eq!(slot.as_deref(), Some("from-env"));
+    }
+
+    // The other half of that rule: an unresolved lookup must NOT clear an explicitly-set token.
+    // Clearing it would turn an unset env var into a silent loss of authorization (a surprise 403
+    // against a private repo), so `auth_token_from_env()` is additive when the environment is empty.
+    #[test]
+    fn apply_env_token_keeps_an_existing_token_when_env_resolves_to_none() {
+        let mut slot = Some("explicit".to_string());
+        super::apply_env_token(&mut slot, None);
+        assert_eq!(
+            slot.as_deref(),
+            Some("explicit"),
+            "an empty environment must leave an explicitly-set token in place"
+        );
+    }
+
+    // With no token set and nothing in the environment, the slot stays empty: the request goes out
+    // unauthenticated exactly as it would without the call.
+    #[test]
+    fn apply_env_token_leaves_an_empty_slot_empty() {
+        let mut slot = None;
+        super::apply_env_token(&mut slot, None);
+        assert_eq!(slot, None);
+    }
 
     // `name_tag_in_semver_error` names the tag in the message and keeps the original
     // `semver::Error` reachable through the `source()` chain (SemVer -> NonSemverTagError ->

@@ -78,9 +78,20 @@ backend's `impl UpdateBuilder` block (`github.rs:223`) and emits every shared
 setter, each writing through `self.common.*` and returning `&mut Self`. Adding a
 shared setter happens here once and reaches all backends.
 
-Two invocation forms: `()` (`macros.rs:212-224`) emits the `@shared` set plus
-`auth_token` (`macros.rs:220`); `(no_auth_token)` (`macros.rs:228-230`) emits
-only `@shared`, for backends like s3 that authenticate differently.
+Three invocation forms: `()` emits the `@shared` set plus `auth_token`;
+`(auth_env: ["VAR", ..])` emits that plus an `auth_token_from_env()` setter for the named
+environment variables (the form the github/gitlab/gitea/gitee `UpdateBuilder`s use); and
+`(no_auth_token)` emits only `@shared`, for backends like s3 that authenticate differently.
+
+`auth_token_from_env()` itself is emitted by the standalone `impl_auth_token_from_env!($field,
+[$vars])` macro, which the `ReleaseListBuilder`s (whose token is their own field, not
+`common.auth_token`) invoke directly. It resolves the variables through
+`backends::common::token_from_env` -> `first_env_token` (first present and non-empty after
+trimming wins) and writes the result with `apply_env_token`: a resolved token replaces whatever the
+slot held, and an unresolved lookup leaves it untouched, so the call can never clear a token set by
+`auth_token(..)`. The lookup happens in the setter, not at request time. Variables per backend:
+github `GITHUB_TOKEN`, `GH_TOKEN`; gitlab `GITLAB_TOKEN`, `CI_JOB_TOKEN`; gitea `GITEA_TOKEN`;
+gitee `GITEE_TOKEN`. Reading the environment is opt-in: nothing reads it without this call.
 
 The `@shared` vocabulary (`macros.rs:231-462`):
 
@@ -146,7 +157,9 @@ parses versions from object keys and the custom backend supplies its own `Releas
   (last call wins, unlike
   `request_header` which appends); an empty set (or never calling it) leaves
   signature verification disabled, which is not an error.
-- `auth_token(impl Into<String>)` (`macros.rs:220`, only the `()` form).
+- `auth_token(impl Into<String>)` (`macros.rs:220`, the `()` and `auth_env:` forms).
+- `auth_token_from_env()` (the `auth_env:` form only) - resolve the token from the backend's
+  conventional environment variables; a no-op when none is set.
 
 ### Accessor macro: impl_update_config_accessors!
 
@@ -212,7 +225,10 @@ largely `#[doc(hidden)]` plumbing.
   before resolving defaults.
 - `target` defaults to `get_target()`, `bin_install_path` to
   `current_exe()`; `show_output` defaults `true`, the other toggles `false`.
-- The `()` form emits `auth_token`; `(no_auth_token)` omits it.
+- The `()` form emits `auth_token`; `(auth_env: [..])` emits `auth_token` plus
+  `auth_token_from_env`; `(no_auth_token)` omits both.
+- `auth_token_from_env()` never clears an existing token: with nothing set in the environment
+  the builder's token is left exactly as it was.
 
 ## Tests
 

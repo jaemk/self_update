@@ -149,6 +149,8 @@ impl ReleaseListBuilder {
         self
     }
 
+    impl_auth_token_from_env!(auth_token, ["GITHUB_TOKEN", "GH_TOKEN"]);
+
     request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
@@ -311,7 +313,7 @@ impl UpdateBuilder {
         self
     }
 
-    impl_common_builder_setters!();
+    impl_common_builder_setters!(auth_env: ["GITHUB_TOKEN", "GH_TOKEN"]);
 
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
@@ -652,6 +654,53 @@ fn api_headers() -> Result<header::HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+
+    // AUTH-1: `auth_token_from_env()` exists on both github builders, is chainable, and leaves a
+    // buildable configuration whatever the environment holds (nothing set is the no-op case). The
+    // env-var precedence itself is unit-tested in `backends::common` without touching process env.
+    #[test]
+    fn auth_token_from_env_is_available_on_both_builders() {
+        super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token_from_env()
+            .build()
+            .expect("an env-sourced token must leave the update builder buildable");
+        super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token_from_env()
+            .build()
+            .expect("an env-sourced token must leave the release-list builder buildable");
+    }
+
+    // Ordering: an explicit `auth_token(..)` after `auth_token_from_env()` wins, so an application
+    // can use the environment as a default and still override it. (Env-independent: it asserts the
+    // explicit value, which beats whatever the environment may or may not hold.)
+    #[test]
+    fn explicit_auth_token_overrides_the_env_lookup() {
+        use crate::http_client::header::{AUTHORIZATION, HeaderMap};
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token_from_env()
+            .auth_token("explicit")
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        upd.request_config()
+            .apply_auth("https://api.github.com/repos/o/r/releases", &mut headers)
+            .unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "token explicit",
+            "a later auth_token(..) must win over the env lookup"
+        );
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
 

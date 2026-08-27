@@ -164,6 +164,8 @@ impl ReleaseListBuilder {
         self
     }
 
+    impl_auth_token_from_env!(auth_token, ["GITLAB_TOKEN", "CI_JOB_TOKEN"]);
+
     request_config_setters!(request);
 
     /// Verify builder args, returning a `ReleaseList`
@@ -325,7 +327,7 @@ impl UpdateBuilder {
         self
     }
 
-    impl_common_builder_setters!();
+    impl_common_builder_setters!(auth_env: ["GITLAB_TOKEN", "CI_JOB_TOKEN"]);
 
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
@@ -665,6 +667,26 @@ fn api_headers() -> Result<header::HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+
+    // AUTH-1: `auth_token_from_env()` (GITLAB_TOKEN, then CI_JOB_TOKEN) is present on both gitlab
+    // builders and leaves them buildable whatever the environment holds.
+    #[test]
+    fn auth_token_from_env_is_available_on_both_builders() {
+        Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token_from_env()
+            .build()
+            .expect("an env-sourced token must leave the update builder buildable");
+        super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token_from_env()
+            .build()
+            .expect("an env-sourced token must leave the release-list builder buildable");
+    }
     use super::Update;
     use crate::update::UpdateConfig;
 

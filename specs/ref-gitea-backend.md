@@ -69,6 +69,8 @@ under `async`, `fetch_async` (`gitea.rs:225`), both returning `Result<Releases>`
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`
   (`gitea.rs:113-116`); on `UpdateBuilder` it comes through the common setters and is
   stored in `CommonConfig`.
+- `auth_token_from_env()` on either builder resolves the token from `GITEA_TOKEN`; it is opt-in
+  (nothing reads the environment without it) and a no-op when the variable is unset or empty.
 - Headers are built by the free function `api_headers(auth_token)`.
   It always sets `User-Agent: rust-reqwest/self-update`. Auth is
   applied centrally by `apply_auth` (`common.rs`), which renders the token as

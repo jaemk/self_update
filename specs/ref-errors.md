@@ -30,6 +30,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. `#[non_exhaustive]`. | none | no (struct fields) |
 | `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
+| `RateLimited { status: u16, url: String, reset_at: Option<SystemTime>, retry_after: Option<Duration> }` | A 403 or 429 whose response carried a spent request quota (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`). Raised by both HTTP clients via `status_to_error_with_headers`; the ureq injected-agent `StatusCode` arm cannot reach it (no headers). `reset_at` comes from `x-ratelimit-reset` / `RateLimit-Reset` (a unix timestamp), `retry_after` from a delta-seconds `Retry-After`; both `None` when absent or unparseable. `#[non_exhaustive]`. | none | no (struct fields) |
 | `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
 | `NoReleaseFound { target: Option<String> }` | The clean negative of a release lookup: no release / no matching release for a tag/version (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), or the resolved release had no asset for the requested target (`update.rs`, with `target: Some(...)`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
@@ -125,6 +126,7 @@ Each variant renders with a specific Display string:
 - `Aborted` -> `"AbortedError: the update was not confirmed"`
 - `NotFound { url }` -> `"NotFoundError: no resource found at {url} (HTTP 404)"`
 - `Unauthorized { status, url }` -> `"UnauthorizedError: request to {url} was not authorized (HTTP {status})"`
+- `RateLimited { status, url, reset_at, retry_after }` -> `"RateLimitedError: request to {url} was rate limited (HTTP {status})"`, plus `", quota resets in {n}s"` when a wait is known (`retry_after` first, else `reset_at` minus now; omitted when the window has already elapsed), then `": set an auth token to raise the limit, or check less often"`
 - `HttpStatus { status, url }` -> `"HttpStatusError: request to {url} failed with status {status}"`
 - `NoReleaseFound { target: None }` -> `"ReleaseError: no release was found"`; with `Some(t)` -> `"ReleaseError: no release found with an asset for target \`{t}\`"`
 - `MissingAssetField { field }` -> `"ReleaseError: release/asset payload missing \`{field}\`"`
@@ -165,7 +167,7 @@ boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
 `Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
 (`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
-`NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`, `NoAppBundle`,
+`RateLimited`, `NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`, `NoAppBundle`,
 `ConflictingConfig`, `AppTranslocated`, `ArchiveNotEnabled`, `CompressionNotEnabled`,
 `InvalidAssetName`, `NoSignatures`, `SignatureNonUTF8`) return `None`. The concrete inner error of
 a boxed variant is reachable at runtime through `source()` and `downcast_ref::<ConcreteType>()`
@@ -185,6 +187,7 @@ pub fn http_status(&self) -> Option<u16>
 Returns the HTTP status code when the error came from a completed non-2xx response:
 - `NotFound { .. }` -> `Some(404)`
 - `Unauthorized { status, .. }` -> `Some(status)`
+- `RateLimited { status, .. }` -> `Some(status)`
 - `HttpStatus { status, .. }` -> `Some(status)`
 - all other variants -> `None`
 
@@ -197,15 +200,24 @@ pub fn url(&self) -> Option<&str>
 Returns the request URL for the HTTP error variants; `None` for everything else:
 - `NotFound { url }` -> `Some(url)`
 - `Unauthorized { url, .. }` -> `Some(url)`
+- `RateLimited { url, .. }` -> `Some(url)`
 - `HttpStatus { url, .. }` -> `Some(url)`
 - all other variants -> `None`
 
 ### HTTP status construction mapping (both clients)
 
-Both `reqwest` and `ureq` clients call `errors::status_to_error(status_code, url)` which maps:
+Both `reqwest` and `ureq` clients call `errors::status_to_error_with_headers(status_code, url, headers)`,
+which classifies the rate-limit case first and otherwise delegates to `status_to_error(status_code, url)`:
+- 403 or 429 whose remaining-quota header parses as `0` -> `Error::RateLimited { status, url, reset_at, retry_after }`
 - 404 -> `Error::NotFound { url }`
 - 401 or 403 -> `Error::Unauthorized { status, url }`
 - any other non-2xx -> `Error::HttpStatus { status, url }`
+
+The remaining-quota signal is read from `x-ratelimit-remaining` (github/gitea/gitee) falling back to
+`ratelimit-remaining` (gitlab's `RateLimit-Remaining`; `HeaderMap` lookups are case-insensitive), the
+reset instant from `x-ratelimit-reset` / `ratelimit-reset`, and the delay from `Retry-After`. A 403
+without those headers keeps its `Unauthorized` classification, and a 429 without them stays
+`HttpStatus`, so only an explicit spent quota reclassifies a status.
 
 For ureq specifically (`http_client/ureq.rs`):
 - The **default (built-in) agent** is configured with `.http_status_as_error(false)` so ureq does
@@ -238,7 +250,10 @@ type directly, since `std::io::Error` is stable std.)
   `Error::missing_asset_field(field: impl Into<String>)`,
   `Error::invalid_response(source: impl Into<Box<dyn Error + Send + Sync>>)`,
   `Error::http_status_error(status: u16, url: impl Into<String>)` (routes through
-  `status_to_error`, so 404 -> `NotFound` and 401/403 -> `Unauthorized`), and
+  `status_to_error`, so 404 -> `NotFound` and 401/403 -> `Unauthorized`; it never produces
+  `RateLimited`, having no headers to read),
+  `Error::http_status_error_with_headers(status: u16, url: impl Into<String>, headers: &HeaderMap)`
+  (the header-aware form, for a custom `HttpClient` that has the response in hand), and
   `Error::checksum_mismatch(expected: impl Into<String>, computed: impl Into<String>)`.
 - Trait impls: `Debug` (derived), `Display`, `std::error::Error` (with `source()`).
 - `From` impls: `std::io::Error`, `serde_json::Error`, `semver::Error` (always); `reqwest::Error`
@@ -247,6 +262,9 @@ type directly, since `std::io::Error` is stable std.)
   `time::error::ComponentRange`.
 - `pub(crate) fn status_to_error(status: u16, url: &str) -> Error` (`errors.rs`) maps a status
   code to `NotFound` / `Unauthorized` / `HttpStatus`.
+- `pub(crate) fn status_to_error_with_headers(status: u16, url: &str, headers: &http::HeaderMap) -> Error`
+  (`errors.rs`) reads the rate-limit headers off a response and delegates to the pure
+  `classify_status(status, url, RateLimitSignals)`, which is what the built-in clients call.
 - `pub(crate) struct MessageError(String)` (`errors.rs`): a minimal owned message error used as the
   boxed `source` of `InvalidHeader` where the underlying `TryInto` conversion error is not
   nameable. Crate-internal, not part of the public surface.
@@ -262,20 +280,24 @@ type directly, since `std::io::Error` is stable std.)
   concrete `reqwest` / `ureq` / `zip` / `serde_json` / `semver` / `zipsign` type. `Io` deliberately
   carries the std `io::Error`.
 - `Transport` = the request could not be completed (connection/TLS/timeout); `NotFound` /
-  `Unauthorized` / `HttpStatus` = the request completed but returned a non-2xx status.
+  `Unauthorized` / `RateLimited` / `HttpStatus` = the request completed but returned a non-2xx
+  status.
 - Both reqwest and ureq produce identical structured status variants for any given HTTP status code.
   The old reqwest=`Network` / ureq=`Http` inconsistency (documented in the now-superseded
   `error-network-vs-http-semantics.md`) is resolved.
-- 404 -> `NotFound`; 401 or 403 -> `Unauthorized`; any other non-2xx -> `HttpStatus`.
-- `http_status()` returns `Some(u16)` for `NotFound`/`Unauthorized`/`HttpStatus`; `None` for
-  all other variants.
-- `url()` returns `Some(&str)` for `NotFound`/`Unauthorized`/`HttpStatus`; `None` for all other
-  variants.
+- 404 -> `NotFound`; 401 or 403 -> `Unauthorized`; any other non-2xx -> `HttpStatus`; except that a
+  403 or 429 carrying a zero remaining-quota header -> `RateLimited`, which is checked first.
+- A 403 with no rate-limit headers must stay `Unauthorized` (a genuine credential failure), and a 429
+  with none must stay `HttpStatus`: only an explicit spent quota promotes a status to `RateLimited`.
+- `http_status()` returns `Some(u16)` for `NotFound`/`Unauthorized`/`RateLimited`/`HttpStatus`;
+  `None` for all other variants.
+- `url()` returns `Some(&str)` for `NotFound`/`Unauthorized`/`RateLimited`/`HttpStatus`; `None` for
+  all other variants. The `RateLimited` url is redacted like the others.
 - A checksum digest mismatch produces `Error::ChecksumMismatch { expected, computed }`. Both
   fields are lowercase hex-encoded digests.
 - A user-declined confirmation prompt produces `Error::Aborted`.
 - Every struct-form variant carries `#[non_exhaustive]` on the variant (`Unauthorized`,
-  `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
+  `RateLimited`, `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
   `InvalidResponse`, `MissingField`, `InstallPathNotWritable`, `InvalidHeader`, `InvalidAuthToken`,
   `InvalidCertificate`, `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`,
   `ChecksumMismatch`, `NoAppBundle`, `ConflictingConfig`, `AppTranslocated`).

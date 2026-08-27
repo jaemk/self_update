@@ -100,7 +100,11 @@ impl HttpClient for ReqwestClient {
         };
 
         if !resp.status().is_success() {
-            return Err(crate::errors::status_to_error(resp.status().as_u16(), url));
+            return Err(crate::errors::status_to_error_with_headers(
+                resp.status().as_u16(),
+                url,
+                resp.headers(),
+            ));
         }
         Ok(Box::new(resp))
     }
@@ -204,7 +208,11 @@ impl super::AsyncHttpClient for ReqwestAsyncClient {
                 }
             };
             if !resp.status().is_success() {
-                return Err(crate::errors::status_to_error(resp.status().as_u16(), url));
+                return Err(crate::errors::status_to_error_with_headers(
+                    resp.status().as_u16(),
+                    url,
+                    resp.headers(),
+                ));
             }
             Ok(Box::new(resp) as Box<dyn super::AsyncHttpResponse>)
         })
@@ -249,6 +257,30 @@ mod tests {
                 let out = format!(
                     "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     status,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    /// Like [`stub`], but injects `extra_headers` (a pre-formatted `Name: value\r\n` block) into the
+    /// response. Used to serve the rate-limit headers a spent GitHub quota carries.
+    fn stub_with_headers(status: &'static str, extra_headers: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "err";
+                let out = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: text/plain\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    extra_headers,
                     body.len(),
                     body
                 );
@@ -361,6 +393,36 @@ mod tests {
     }
 
     #[test]
+    fn sync_get_maps_a_spent_quota_403_to_rate_limited() {
+        // The classification needs the *response headers*, so this pins that the client actually
+        // hands them to `status_to_error_with_headers`: the same 403 that maps to `Unauthorized`
+        // above must map to `RateLimited` once it carries `x-ratelimit-remaining: 0`, with the
+        // reset instant recovered from `x-ratelimit-reset`.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1780000000\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "a 403 with a spent quota must map to RateLimited, got {:?}",
+            err
+        );
+        assert_eq!(err.http_status(), Some(403));
+    }
+
+    #[test]
     fn sync_get_transport_failure_maps_to_transport() {
         // A connection refused (no listener) cannot complete, so `From<reqwest::Error>` routes the
         // failure to `Error::Transport` (via the `?` on `send()`), never a status variant.
@@ -420,6 +482,26 @@ mod tests {
             get_async_status("500 Internal Server Error").await,
             Error::HttpStatus { status: 500, .. }
         ));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_maps_a_spent_quota_403_to_rate_limited() {
+        // Async sibling of the sync rate-limit test: the async client must thread the response
+        // headers into the classification too, so the two lanes agree on what a spent quota is.
+        use super::super::AsyncHttpClient;
+        let client = ReqwestAsyncClient::default();
+        let base = stub_with_headers("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .await
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::RateLimited { status: 403, .. }),
+            "a 403 with a spent quota must map to RateLimited (async), got {:?}",
+            err
+        );
     }
 
     #[cfg(feature = "async")]

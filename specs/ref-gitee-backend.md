@@ -62,6 +62,8 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`; on
   `UpdateBuilder` it comes through the common setters and is stored in `CommonConfig`.
+- `auth_token_from_env()` on either builder resolves the token from `GITEE_TOKEN`; it is opt-in
+  (nothing reads the environment without it) and a no-op when the variable is unset or empty.
 - Auth is applied centrally by `apply_auth` (`common.rs`), which renders the token as
   `Authorization: Bearer <token>`. This matches the scheme used by Gitee's official
   client (oschina/mcp-gitee `utils/gitee_client.go:172`, verified 2026-07-17).

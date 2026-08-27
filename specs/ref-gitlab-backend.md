@@ -90,10 +90,11 @@ paths. The token is host-gated: it is only attached to requests whose host match
 configured instance host (or an `allow_auth_host` entry), over https
 (`dangerously_allow_non_https_auth_forwarding()` relaxes the https requirement), and a
 user-set `Authorization` via `request_header` overrides it. A token that cannot be parsed
-into a header value yields `Error::InvalidAuthToken`. There is no
-`PRIVATE-TOKEN` header and no environment-variable lookup in this file; the token comes
-solely from the builder setter (`ReleaseListBuilder::auth_token`) or the
-common `auth_token` setter for `Update` (`self.common.auth_token`).
+into a header value yields `Error::InvalidAuthToken`. There is no `PRIVATE-TOKEN` header and no
+implicit environment lookup: the token comes from the builder setter
+(`ReleaseListBuilder::auth_token`) or the common `auth_token` setter for `Update`
+(`self.common.auth_token`), or on request from `auth_token_from_env()` on either builder, which
+reads `GITLAB_TOKEN` then `CI_JOB_TOKEN` and is a no-op when neither is set.
 
 ### Pagination and ordering
 

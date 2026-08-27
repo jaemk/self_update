@@ -457,6 +457,49 @@ macro_rules! impl_async_update_verbs {
     };
 }
 
+/// Emit an `auth_token_from_env()` setter that resolves the backend's conventional env vars.
+///
+/// `$field` is the path (relative to `self`) of the builder's token field — `common.auth_token` on
+/// an `UpdateBuilder`, plain `auth_token` on a `ReleaseListBuilder` — and `$var`s are the env var
+/// names in precedence order.
+macro_rules! impl_auth_token_from_env {
+    ($($field:ident).+, [$($var:literal),+ $(,)?]) => {
+        #[doc = concat!(
+            "Set the authorization token from the environment, reading ",
+            $("`", $var, "`, ",)+
+            "in that order and using the first that is set and non-empty (surrounding whitespace \
+             is trimmed)."
+        )]
+        ///
+        /// Reading the environment is **opt-in**: nothing here happens unless you call this. A
+        /// library that harvests credentials on its own would be surprising, and the configured API
+        /// base can be a self-hosted host, so the decision to send a token stays with your
+        /// application.
+        ///
+        /// When none of the variables is set, the token is left as it was and the request goes out
+        /// unauthenticated exactly as before -- so this call is safe to make unconditionally in an
+        /// application that also runs outside CI or a corporate network. It never *clears* a token
+        /// set by [`auth_token`](Self::auth_token); an explicit `auth_token(..)` call after this one
+        /// overrides what the environment supplied.
+        ///
+        /// The lookup happens here, not at request time, so the resolved token does not depend on
+        /// env changes made later in the process.
+        ///
+        /// The main reason to reach for this is GitHub's unauthenticated budget of 60 requests per
+        /// hour, which is counted **per source IP**: behind a NAT'd corporate network it is shared
+        /// with everyone else on that IP and can be exhausted by other people entirely, surfacing as
+        /// [`Error::RateLimited`](crate::errors::Error::RateLimited). A token moves the count to its
+        /// own 5000/hour budget.
+        pub fn auth_token_from_env(&mut self) -> &mut Self {
+            crate::backends::common::apply_env_token(
+                &mut self.$($field).+,
+                crate::backends::common::token_from_env(&[$($var),+]),
+            );
+            self
+        }
+    };
+}
+
 /// Every backend's `UpdateBuilder` embeds a `common:
 /// crate::backends::common::CommonBuilderConfig` field; these setters write through it, so
 /// the shared configuration surface (target, identifier, bin name/path, version, progress
@@ -477,6 +520,12 @@ macro_rules! impl_common_builder_setters {
             self.common.auth_token = Some(auth_token.into());
             self
         }
+    };
+    // Default plus the backend's conventional env-var lookup (`auth_token_from_env`). `$var`s are
+    // the env var names, in precedence order.
+    (auth_env: [$($var:literal),+ $(,)?]) => {
+        impl_common_builder_setters!();
+        impl_auth_token_from_env!(common.auth_token, [$($var),+]);
     };
     // Variant for backends that don't authenticate via a bearer token (e.g. s3, which uses
     // `access_key`/SigV4). Omits the shared `auth_token` setter so the backend can either drop
