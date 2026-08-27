@@ -52,7 +52,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `CompressionNotEnabled(String)` | The asset is compressed with a codec whose feature is not enabled (`lib.rs`). String is the codec token (`"gz"`); enable `compression-tar-gz` to decode it. Distinct from `ArchiveNotEnabled`, which concerns the container format; without this a gzip asset would install its still-compressed bytes as the binary. | none | no (String) |
 | `NoSignatures(crate::ArchiveKind)` | Archive contains no signatures to verify. | `signatures` | no (carries `ArchiveKind`) |
 | `Signature(Box<dyn Error + Send + Sync>)` | Signature-verification failure, only via `From<ZipsignError>`. | `signatures` | yes (boxed) |
-| `InvalidAssetName { name: String }` | The server-supplied asset name is empty, `.`, `..`, contains a `/` or `\` path separator, or is an absolute path; the file is never created (`update.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `InvalidAssetName { name: String }` | The server-supplied asset name is empty, `.`, `..`, contains a `/` or `\` path separator, contains a control character, or is an absolute path; the file is never created (`update.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `SignatureNonUTF8` | Generated archive path contains non-UTF-8 characters so its signature cannot be verified. Unit variant. | `signatures` | no (unit) |
 | `S3Auth(Box<dyn Error + Send + Sync>)` | S3 SigV4 request-signing failure, including the host-extraction case (a signed URL with no extractable host). Via `From<SystemTimeError>`, `From<hmac::digest::InvalidLength>`, `From<url::ParseError>`, `From<time::error::ComponentRange>`, and direct construction at the host-extraction sites (`s3.rs`). | `s3-auth` | yes (boxed) |
 | `InvalidAssetKeyPattern { source: Box<dyn Error + Send + Sync> }` | A user-supplied `asset_key_pattern` on the s3 builders did not compile or lacks a required named capture group (`name` / `version`). Raised from `build()` via `compile_asset_key_pattern` (`s3.rs`); the source is the regex-compile error or a `MessageError` naming the missing group. `#[non_exhaustive]`. | `s3` | yes (boxed source) |
@@ -304,8 +304,8 @@ type directly, since `std::io::Error` is stable std.)
 - A malformed (non-array) release-listing body maps to `InvalidResponse`, not `NoReleaseFound`.
 - A gzip asset with `compression-tar-gz` off produces `Error::CompressionNotEnabled("gz")`
   instead of installing the still-compressed bytes.
-- An unsafe server-supplied asset name (empty, `.`/`..`, path separators, absolute path) produces
-  `Error::InvalidAssetName { name }` before any file is created.
+- An unsafe server-supplied asset name (empty, `.`/`..`, path separators, control characters,
+  absolute path) produces `Error::InvalidAssetName { name }` before any file is created.
 - `ChecksumMismatch` is compiled unconditionally (no feature gate).
 - Custom sources build the release-flow variants through the public constructors
   (`no_release_found` / `no_release_found_for_target`, `missing_asset_field`,
