@@ -37,7 +37,7 @@ SELF_UPDATE_EXAMPLES = github gitlab gitea gitee manifest s3 custom embedded_key
 SELF_UPDATE_EXAMPLE_TARGETS = $(addprefix examples/, $(SELF_UPDATE_EXAMPLES))
 
 EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)
-TEST_TARGETS    = tests tests/default tests/reqwest tests/ureq tests/async
+TEST_TARGETS    = tests tests/default tests/reqwest tests/ureq tests/async tests/all-features
 BUILD_TARGETS   = build/all-features
 DOC_TARGETS     = docs docs/readme
 CHECK_TARGETS   = check check/fmt check/readme check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help check/workflow-features
@@ -78,11 +78,12 @@ help: ## List all supported Make targets
 			build/all-features) desc="Build the crate with --all-features (both clients + both TLS + async)" ;; \
 			examples) desc="Build every backend example" ;; \
 			examples/*) desc="Build the '$${target#examples/}' backend example (full features)" ;; \
-			tests) desc="Run the full test matrix (default, reqwest, ureq)" ;; \
+			tests) desc="Run the full test matrix (default, reqwest, ureq, async, all-features)" ;; \
 			tests/default) desc="Run tests with default features (reqwest + default-tls)" ;; \
 			tests/reqwest) desc="Run tests with the full reqwest feature set" ;; \
 			tests/ureq) desc="Run tests with the full ureq feature set" ;; \
 			tests/async) desc="Run tests with the async API (reqwest + async)" ;; \
+			tests/all-features) desc="Run tests with --all-features (both clients + both TLS + async)" ;; \
 			docs) desc="Sync generated documentation artifacts" ;; \
 			docs/readme) desc="Regenerate README.md from src/lib.rs" ;; \
 			fmt) desc="Format the source code" ;; \
@@ -125,7 +126,7 @@ $(SELF_UPDATE_EXAMPLE_TARGETS): examples/%:
 ################################################################################
 # Runs the test suite with several feature combinations. The crate needs no
 # external services; everything is in-process.
-tests: tests/default tests/reqwest tests/ureq tests/async
+tests: tests/default tests/reqwest tests/ureq tests/async tests/all-features
 
 # Default features only (reqwest + default-tls).
 tests/default:
@@ -146,6 +147,14 @@ tests/ureq:
 tests/async:
 	@echo "[$@]: Running tests (async + full features)..."
 	$(CARGO_COMMAND) test --features "$(ASYNC_FEATURES)"
+
+# Every feature at once. `build/all-features` only compiles this combination; the
+# per-slot client behavior (a sync client injected while the async slot builds
+# from the configured roots) is only reachable with both clients and `async` on,
+# so the assertions covering it need a lane that actually runs the tests here.
+tests/all-features:
+	@echo "[$@]: Running tests (--all-features)..."
+	$(CARGO_COMMAND) test --all-features
 
 ################################################################################
 # Builds the crate with every feature enabled. This is the all-features check:
