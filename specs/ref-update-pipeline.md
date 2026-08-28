@@ -130,7 +130,7 @@ In `finish_update`, before any extraction or replacement:
    that is present but malformed or an unsupported algorithm aborts with
    `Error::InvalidResponse` naming the digest (no silent skip); an absent digest skips the gate.
    Independent of gate 1: when both apply, both must pass.
-3. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
+3. **Signature** (feature `signatures`): `verify_signature(archive_path, verifying_keys())`
    (`src/update.rs:verify_signature`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
    archive file name as context; any other kind => `Error::NoSignatures(kind)`,

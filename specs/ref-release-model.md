@@ -194,7 +194,7 @@ strictly-newer-filtered distinction. The trait also carries default `update_asyn
 `update_extended_async`; callers bring it into scope to call any verb.
 
 The custom-source trait methods (`ReleaseSource`) take the same shape but return plain `Release` /
-`Vec<Release>`: `get_latest_release()` is the single newest release; `get_latest_releases()` returns
+`Vec<Release>`: `get_latest_release()` is the single newest release; `get_releases()` returns
 the candidate list newest-first (the updater re-filters downstream, discarding non-newer entries,
 preferring the newest semver-compatible one, and otherwise offering the newest available flagged
 not-compatible, so the implementer need not filter and there is no `current_version` parameter);
@@ -273,8 +273,8 @@ with `into_vec()`.
 - `get_latest_release` is raw newest (always `latest().is_some()`);
   `get_newer_releases` is strictly-newer-filtered (empty when up to date). Async
   siblings (`get_newer_releases_async`) preserve this. The custom-source
-  `ReleaseSource::get_latest_releases` keeps its name (an unfiltered candidate
-  list; the updater filters downstream).
+  `ReleaseSource::get_releases` (renamed from `get_latest_releases`) is the
+  unfiltered candidate list; the updater filters downstream.
 - Accessors live on `UpdateConfig` and borrow; the trait chain stays sealed via
   `sealed::Sealed` so `ReleaseUpdate` / `UpdateConfig` cannot be implemented
   downstream, while `ReleaseSource` / `AsyncReleaseSource` remain implementable.

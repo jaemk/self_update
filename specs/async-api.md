@@ -16,7 +16,7 @@ coexist, reqwest handles async, ureq handles sync). Each built-in backend's `Upd
 builder gains `build_async()`
 returning a concrete `Update` implementing the public sealed `AsyncReleaseUpdate`
 trait, with the async verbs `update_async()`, `update_extended_async()`,
-`get_latest_release_async()`, `get_latest_releases_async()`, and
+`get_latest_release_async()`, `get_newer_releases_async()`, and
 `get_release_version_async()`. The blocking API is unchanged. Only the release
 listing and the download are async; the response parsers are shared verbatim with
 the sync path (no logic fork), and the verify/extract/install tail runs on

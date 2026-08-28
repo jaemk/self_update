@@ -107,7 +107,7 @@ Feature-gated public items:
 - `signatures`: re-export `pub use zipsign_api` and the
   `pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH]` alias
   (`src/lib.rs:VerifyingKey`), plus the `verifying_keys` builder setter (`src/macros.rs:verifying_keys`)
-  and the doc-hidden `verify_keys()` accessor (`src/macros.rs:verifying_keys`).
+  and the matching `verifying_keys()` accessor (`src/macros.rs:verifying_keys`).
 - `checksums`: `pub use checksum::Checksum` (`src/checksum.rs:Checksum`) with its
   `parse_digest` associated fn, the `verify_checksum` and `verify_release_digest`
   builder setters and accessors (`macros.rs`), and `ReleaseAsset::digest()` /
