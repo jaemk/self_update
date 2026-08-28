@@ -876,6 +876,9 @@ pub(crate) struct CommonBuilderConfig {
     pub auth_scheme: AuthScheme,
     pub progress_callback: Option<crate::ProgressCallback>,
     pub verify: Option<crate::VerifyCallback>,
+    /// Pre-extraction hook over the downloaded archive, set by `verify_archive(..)`. Distinct from
+    /// [`verify`](Self::verify), which runs later and over the extracted binary.
+    pub verify_archive: Option<crate::VerifyCallback>,
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
@@ -923,6 +926,7 @@ impl std::fmt::Debug for CommonBuilderConfig {
             auth_scheme,
             progress_callback,
             verify,
+            verify_archive,
             asset_matcher,
             #[cfg(feature = "checksums")]
             checksum,
@@ -958,6 +962,7 @@ impl std::fmt::Debug for CommonBuilderConfig {
             .field("auth_scheme", auth_scheme)
             .field("progress_callback", progress_callback)
             .field("verify", verify)
+            .field("verify_archive", verify_archive)
             .field("asset_matcher", asset_matcher);
         #[cfg(feature = "checksums")]
         s.field("checksum", checksum)
@@ -999,6 +1004,7 @@ impl Default for CommonBuilderConfig {
             auth_scheme: AuthScheme::default(),
             progress_callback: None,
             verify: None,
+            verify_archive: None,
             asset_matcher: None,
             #[cfg(feature = "checksums")]
             checksum: None,
@@ -1069,6 +1075,7 @@ impl CommonBuilderConfig {
             progress_chars: self.progress_chars.clone(),
             progress_callback: self.progress_callback.clone(),
             verify: self.verify.clone(),
+            verify_archive: self.verify_archive.clone(),
             asset_matcher: self.asset_matcher.clone(),
             #[cfg(feature = "checksums")]
             checksum: self.checksum.clone(),
@@ -1166,6 +1173,9 @@ pub(crate) struct CommonConfig {
     pub progress_chars: String,
     pub progress_callback: Option<crate::ProgressCallback>,
     pub verify: Option<crate::VerifyCallback>,
+    /// Pre-extraction hook over the downloaded archive; see
+    /// [`CommonBuilderConfig::verify_archive`].
+    pub verify_archive: Option<crate::VerifyCallback>,
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
@@ -1751,6 +1761,7 @@ mod tests {
             "auth_scheme",
             "progress_callback",
             "verify",
+            "verify_archive",
             "asset_matcher",
         ];
         #[cfg(feature = "progress-bar")]

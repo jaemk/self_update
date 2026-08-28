@@ -339,6 +339,53 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Verification hooks
+
+Two hooks let you gate an update with your own check. They differ in *what file they see*, which is
+the whole reason both exist:
+
+- `verify_archive(|archive: &Path| ..)` runs on the **downloaded archive**, after the crate's own
+  content gates (checksum, release digest, signature) and before anything is extracted. This is
+  where an external attestation or signature check belongs, since those are issued over the released
+  file itself: `gh attestation verify <archive> --repo owner/repo`, `cosign verify-blob`, and so on.
+  A rejection is `Error::ArchiveVerificationRejected`.
+- `verify_binary(|new_exe: &Path| ..)` runs on the **extracted binary**, immediately before it
+  replaces the installed one. This is where a smoke test belongs, typically running
+  `new_exe --version` and checking the output. A rejection is `Error::VerificationRejected`.
+
+Either returning `Err(..)` aborts the update with nothing installed. Full order:
+`verify_checksum` -> release digest -> signature -> `verify_archive` -> extract -> `verify_binary`
+-> replace.
+
+```rust
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .verify_archive(|archive: &std::path::Path| {
+            let ok = std::process::Command::new("gh")
+                .args(["attestation", "verify"])
+                .arg(archive)
+                .args(["--repo", "jaemk/self_update"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                Ok(())
+            } else {
+                Err(self_update::Error::archive_verification_rejected(
+                    "no build-provenance attestation for this artifact",
+                ))
+            }
+        })
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
 ### Checking for an update without installing
 
 To check whether a newer release exists without downloading or installing anything, call

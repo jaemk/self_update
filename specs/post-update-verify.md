@@ -20,3 +20,8 @@ typical use runs `new_exe --version`, checks the output, and returns `Ok(())` / 
 
 See the `verify_binary` setter in `src/macros.rs`, the `DynVerifyFn` type and `install_binary` in
 `src/lib.rs` / `src/update.rs`, and the `VerificationRejected` variant in `src/errors.rs`.
+
+`verify_archive` (`archive-verify.md`) is the sibling hook one step earlier, over the downloaded
+archive, with its own `ArchiveVerificationRejected` variant. The two exist separately because they
+see different files: an external attestation is issued over the released artifact, not over the
+binary extracted from it.

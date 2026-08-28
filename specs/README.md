@@ -37,6 +37,7 @@ design before it can be built). Keep each row's status current with `spec.py set
 | Progress Callback | done | [progress-callback.md](progress-callback.md) |
 | S3 Auth Token Removal | done | [s3-auth-token-removal.md](s3-auth-token-removal.md) |
 | Post-update Verify | done | [post-update-verify.md](post-update-verify.md) |
+| Archive Verify | done | [archive-verify.md](archive-verify.md) |
 | Release Tag URL Encoding | done | [release-tag-url-encoding.md](release-tag-url-encoding.md) |
 | Error Network vs HTTP Semantics | done | [error-network-vs-http-semantics.md](error-network-vs-http-semantics.md) |
 | Error Variant Granularity | done | [error-variant-granularity.md](error-variant-granularity.md) |

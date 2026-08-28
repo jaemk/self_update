@@ -44,6 +44,20 @@ pub enum Error {
         /// The reason the verification was rejected — the hook error's message, if any.
         reason: Option<String>,
     },
+    /// A pre-extraction verification callback (`verify_archive`) rejected the downloaded archive.
+    ///
+    /// This is a user-controlled rejection: the caller's `verify_archive` closure returned `Err(..)`
+    /// (an explicit rejection or a hook IO error), so nothing was extracted and nothing was
+    /// installed. `reason` carries the hook error's message when one was returned (else `None`).
+    ///
+    /// Distinct from [`VerificationRejected`](Error::VerificationRejected), which is the
+    /// `verify_binary` hook's rejection of the *extracted binary*: the two hooks see different
+    /// files, so they report through different variants.
+    #[non_exhaustive]
+    ArchiveVerificationRejected {
+        /// The reason the verification was rejected — the hook error's message, if any.
+        reason: Option<String>,
+    },
     /// The downloaded artifact's checksum did not match the expected digest.
     ///
     /// `expected` is the configured digest; `computed` is the one actually produced from the
@@ -545,6 +559,32 @@ impl Error {
             reason: Some(reason.into()),
         }
     }
+
+    /// Construct an [`ArchiveVerificationRejected`](Error::ArchiveVerificationRejected) error with
+    /// the given reason, for rejecting the downloaded archive from a `verify_archive` hook:
+    ///
+    /// ```rust
+    /// # fn attested(path: &std::path::Path) -> bool { true }
+    /// # let hook =
+    /// |archive: &std::path::Path| {
+    ///     if attested(archive) {
+    ///         Ok(())
+    ///     } else {
+    ///         Err(self_update::Error::archive_verification_rejected(
+    ///             "no build-provenance attestation for this artifact",
+    ///         ))
+    ///     }
+    /// }
+    /// # ;
+    /// ```
+    ///
+    /// The update pipeline surfaces this error as-is; any *other* error returned from the hook is
+    /// wrapped in an `ArchiveVerificationRejected` whose `reason` is that error's message.
+    pub fn archive_verification_rejected(reason: impl Into<String>) -> Error {
+        Error::ArchiveVerificationRejected {
+            reason: Some(reason.into()),
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -561,6 +601,17 @@ impl std::fmt::Display for Error {
                 None => write!(
                     f,
                     "VerificationRejectedError: post-update verification rejected the new binary"
+                ),
+            },
+            ArchiveVerificationRejected { reason } => match reason {
+                Some(reason) => write!(
+                    f,
+                    "ArchiveVerificationRejectedError: verification rejected the downloaded archive: {}",
+                    reason
+                ),
+                None => write!(
+                    f,
+                    "ArchiveVerificationRejectedError: verification rejected the downloaded archive"
                 ),
             },
             ChecksumMismatch { expected, computed } => write!(
@@ -2590,6 +2641,44 @@ mod tests {
         );
     }
 
+    // `ArchiveVerificationRejected` Display, with and without a reason. It names the *archive*, not
+    // the new binary: a caller reading only the message must be able to tell which of the two hooks
+    // rejected the update.
+    #[test]
+    fn archive_verification_rejected_display_variants() {
+        assert_eq!(
+            Error::ArchiveVerificationRejected { reason: None }.to_string(),
+            "ArchiveVerificationRejectedError: verification rejected the downloaded archive"
+        );
+        assert_eq!(
+            Error::ArchiveVerificationRejected {
+                reason: Some("no attestation found".into())
+            }
+            .to_string(),
+            "ArchiveVerificationRejectedError: verification rejected the downloaded archive: no attestation found"
+        );
+        assert_eq!(
+            Error::ArchiveVerificationRejected { reason: None }.http_status(),
+            None
+        );
+        assert!(
+            Error::ArchiveVerificationRejected { reason: None }
+                .source()
+                .is_none()
+        );
+    }
+
+    // The constructor fills `reason`, mirroring `verification_rejected`.
+    #[test]
+    fn archive_verification_rejected_constructor_sets_reason() {
+        match Error::archive_verification_rejected("nope") {
+            Error::ArchiveVerificationRejected { reason } => {
+                assert_eq!(reason.as_deref(), Some("nope"));
+            }
+            other => panic!("expected ArchiveVerificationRejected, got {other:?}"),
+        }
+    }
+
     // `InvalidResponse` carries a boxed source and chains it through `source()`.
     #[test]
     fn invalid_response_chains_source() {
@@ -2717,7 +2806,8 @@ mod tests {
     // non_exhaustive contract that the enum-level wildcard test above does not exercise.
     //
     // Variants with `#[non_exhaustive]` on the variant itself (in addition to the enum-level
-    // `#[non_exhaustive]`): `Internal`, `VerificationRejected`, `NoReleaseFound`,
+    // `#[non_exhaustive]`): `Internal`, `VerificationRejected`, `ArchiveVerificationRejected`,
+    // `NoReleaseFound`,
     // `MissingAssetField`, `InvalidResponse`, `MissingField`, `InvalidHeader`,
     // `InvalidAuthToken`, `Unauthorized`, `HttpStatus`, `InvalidAssetName`.
     #[test]
@@ -2896,6 +2986,10 @@ mod tests {
             (
                 Error::VerificationRejected { reason: None },
                 "VerificationRejectedError:",
+            ),
+            (
+                Error::ArchiveVerificationRejected { reason: None },
+                "ArchiveVerificationRejectedError:",
             ),
             (Error::NoReleaseFound { target: None }, "ReleaseError:"),
             (Error::missing_asset_field("f"), "ReleaseError:"),

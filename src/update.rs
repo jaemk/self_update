@@ -906,6 +906,10 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
     /// Optional post-update verification hook, run on the extracted binary before install.
     fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
 
+    /// Optional pre-extraction verification hook, run on the downloaded archive after the built-in
+    /// content gates (checksum, release digest, signature) and before anything is extracted.
+    fn verify_archive_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
+
     /// Optional custom asset matcher, overriding the built-in target/identifier selection.
     fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
         None
@@ -1393,6 +1397,9 @@ struct FinishCtx {
     bundle_target: Option<std::path::PathBuf>,
     show_output: bool,
     verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
+    /// The pre-extraction hook over the downloaded archive, run after the built-in content gates
+    /// below and before extraction.
+    verify_archive_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
     #[cfg(feature = "checksums")]
     verify_checksum: Option<crate::Checksum>,
     /// The selected asset's backend-published digest (`algorithm:hex`), if any, verified when
@@ -1427,6 +1434,7 @@ impl FinishCtx {
             bundle_target: bundle_target.map(std::path::Path::to_path_buf),
             show_output: u.show_output(),
             verify_callback: u.verify_callback(),
+            verify_archive_callback: u.verify_archive_callback(),
             #[cfg(feature = "checksums")]
             verify_checksum: u.verify_checksum().cloned(),
             #[cfg(feature = "checksums")]
@@ -1486,6 +1494,13 @@ fn finish_update_owned(
         }
         verify_signature(tmp_archive_path, &ctx.verify_keys)?;
     }
+
+    // The caller's own gate over the artifact as published, after every built-in content check and
+    // before a single byte is extracted. Its subject is the downloaded file itself, which is what an
+    // external attestation (`gh attestation verify`, `cosign verify-blob`) is issued over -- the
+    // extracted binary that `verify_binary` sees is a different file with a different digest. A
+    // rejection here aborts with nothing extracted, in bundle mode as well as single-binary mode.
+    run_archive_verify_hook(tmp_archive_path, ctx.verify_archive_callback.as_deref())?;
 
     print_flush(show_output, "Extracting archive... ")?;
 
@@ -1672,6 +1687,29 @@ fn run_verify_hook(new_path: &std::path::Path, verify: Option<&crate::DynVerifyF
         verify(new_path).map_err(|e| match e {
             Error::VerificationRejected { .. } => e,
             other => Error::VerificationRejected {
+                reason: Some(other.to_string()),
+            },
+        })?;
+    }
+    Ok(())
+}
+
+/// Run the pre-extraction verification hook (if any) on the downloaded archive, before anything is
+/// extracted.
+///
+/// The mirror of [`run_verify_hook`] one step earlier in the pipeline, and it maps to its own error
+/// variant: a rejection here is `ArchiveVerificationRejected`, so a caller that registers both hooks
+/// can tell whether the artifact or the binary it carried was refused. An error that already is an
+/// `ArchiveVerificationRejected` (e.g. built via `Error::archive_verification_rejected`) passes
+/// through unwrapped so the reason is not nested inside another rejection message.
+fn run_archive_verify_hook(
+    archive_path: &std::path::Path,
+    verify: Option<&crate::DynVerifyFn>,
+) -> Result<()> {
+    if let Some(verify) = verify {
+        verify(archive_path).map_err(|e| match e {
+            Error::ArchiveVerificationRejected { .. } => e,
+            other => Error::ArchiveVerificationRejected {
                 reason: Some(other.to_string()),
             },
         })?;
@@ -4691,6 +4729,198 @@ mod tests {
         );
     }
 
+    // Build a custom-backend `Update` carrying a `verify_archive` hook, to drive `finish_update`
+    // directly and observe where in the pipeline the hook runs.
+    fn update_with_archive_hook(
+        hook: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
+    ) -> crate::backends::custom::Update {
+        crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .verify_archive(hook)
+            .build()
+            .unwrap()
+    }
+
+    // A rejecting `verify_archive` hook aborts the update, and it does so *before* extraction: the
+    // archive here is not a real archive, so had the hook been skipped (or run after extraction) the
+    // failure would be an extraction error instead of the rejection.
+    #[test]
+    fn finish_update_rejects_the_archive_before_extracting() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_archive_hook(|_: &std::path::Path| {
+            Err(crate::errors::Error::archive_verification_rejected(
+                "no attestation found",
+            ))
+        });
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
+            .expect_err("a rejecting verify_archive hook must abort the update");
+        match err {
+            crate::errors::Error::ArchiveVerificationRejected { reason } => {
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("no attestation found"),
+                    "the constructor's reason must pass through unwrapped"
+                );
+            }
+            other => panic!("expected Error::ArchiveVerificationRejected, got {other:?}"),
+        }
+    }
+
+    // The hook receives the path of the file that was actually downloaded -- the subject an external
+    // attestation check (`gh attestation verify <archive>`) has to be pointed at.
+    #[test]
+    fn verify_archive_hook_receives_the_downloaded_archive_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let seen: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorder = std::sync::Arc::clone(&seen);
+        let upd = update_with_archive_hook(move |p: &std::path::Path| {
+            // Read inside the hook: the archive lives in a temp dir that is dropped when the update
+            // returns, and the point is that the file is readable *while the hook runs*, exactly as
+            // it was downloaded. An external verifier is spawned on this path, so it has to exist.
+            assert_eq!(
+                std::fs::read(p).expect("the archive must be readable while the hook runs"),
+                b"hello",
+                "the hook must see the archive as downloaded, unmodified"
+            );
+            *recorder.lock().unwrap() = Some(p.to_path_buf());
+            Err(crate::errors::Error::archive_verification_rejected("stop"))
+        });
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let _ = super::finish_update(&upd, release, &asset, dir, &archive_path, None);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some(archive_path.as_path()),
+            "the hook must be handed the downloaded archive, not the extracted binary"
+        );
+    }
+
+    // An accepting hook is not a gate: the flow proceeds past it (and here fails at extraction,
+    // since the bytes are not a real archive), so a passing hook cannot stall an update.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn finish_update_proceeds_when_the_archive_hook_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_archive_hook(|_: &std::path::Path| Ok(()));
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
+            .expect_err("the bytes are not a real archive, so extraction must fail");
+        assert!(
+            !matches!(
+                err,
+                crate::errors::Error::ArchiveVerificationRejected { .. }
+            ),
+            "an accepting hook must let the flow through to extraction, got: {err}"
+        );
+    }
+
+    // Ordering: the built-in content gates run first, so a corrupt download is rejected by the cheap
+    // digest check without spawning the caller's external verifier at all.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn checksum_gate_runs_before_the_archive_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&ran);
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            // A valid-length but wrong SHA-256 digest (the file's real digest is 2cf24dba…).
+            .verify_checksum(crate::Checksum::Sha256("00".repeat(32)))
+            .verify_archive(move |_: &std::path::Path| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .build()
+            .unwrap();
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
+            .expect_err("a mismatched checksum must abort the update");
+        assert!(
+            err.to_string().contains("checksum mismatch"),
+            "expected a checksum-mismatch abort, got: {err}"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the archive hook must not run once a built-in content gate has already failed"
+        );
+    }
+
+    // A hook error that is not already an `ArchiveVerificationRejected` (e.g. the IO error from a
+    // verifier binary that could not be spawned) is wrapped, carrying its message as the reason.
+    #[test]
+    fn run_archive_verify_hook_wraps_a_foreign_error() {
+        let hook: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(crate::errors::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not run gh attestation verify",
+            )))
+        });
+        let err =
+            super::run_archive_verify_hook(std::path::Path::new("/tmp/a.tar.gz"), Some(&*hook))
+                .expect_err("a hook IO error must abort the update");
+        match err {
+            crate::errors::Error::ArchiveVerificationRejected { reason } => {
+                let reason = reason.expect("a hook IO error must carry its message as the reason");
+                assert!(
+                    reason.contains("could not run gh attestation verify"),
+                    "the hook IO error message must propagate as the reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Error::ArchiveVerificationRejected, got {other:?}"),
+        }
+    }
+
+    // No hook configured is not a failure: the step is a no-op.
+    #[test]
+    fn run_archive_verify_hook_is_a_no_op_without_a_hook() {
+        super::run_archive_verify_hook(std::path::Path::new("/tmp/a.tar.gz"), None)
+            .expect("no configured hook must not fail the update");
+    }
+
     // Build a custom-backend `Update` carrying `checksum`, to drive `finish_update` directly.
     #[cfg(feature = "checksums")]
     fn update_with_checksum(checksum: crate::Checksum) -> crate::backends::custom::Update {
@@ -5734,6 +5964,7 @@ mod tests {
             bundle_target: None,
             show_output: false,
             verify_callback: None,
+            verify_archive_callback: None,
             #[cfg(feature = "checksums")]
             verify_checksum: None,
             #[cfg(feature = "checksums")]

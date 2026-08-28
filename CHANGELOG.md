@@ -3,6 +3,14 @@
 ## [unreleased]
 
 ### Added
+- `verify_archive(|archive: &Path| -> Result<()>)` on every backend's `Update` builder: a
+  pre-extraction hook over the downloaded archive, for verification whose subject is the released
+  file itself (`gh attestation verify`, `cosign verify-blob`). It runs after the checksum,
+  release-digest, and signature gates and before extraction, in bundle mode as well. `verify_binary`
+  sees the extracted binary, which has a different digest than the artifact a forge attested, so it
+  could not host such a check. A rejection is the new
+  `Error::ArchiveVerificationRejected { reason }`, distinct from `verify_binary`'s
+  `Error::VerificationRejected`, and built by `Error::archive_verification_rejected(..)`.
 
 ### Changed
 
