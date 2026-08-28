@@ -74,7 +74,7 @@ Constructors:
 
 - `Releases::new(releases, current_version: String)` is `pub(crate)`: the updater
   path's constructor, storing `Some(current_version)`.
-- `Releases::from_listing(releases)` is **public** (`update.rs:306`): the
+- `Releases::from_listing(releases)` is **public** (`src/update.rs:Releases::from_listing`): the
   `ReleaseList::fetch` constructor, storing `None` for the current version. It
   also lets downstream tests build the bare-listing state.
 - `Releases::from_releases(releases, current_version: impl Into<String>)` is the
@@ -127,9 +127,9 @@ version (mirroring `VersionStatus::version`, but `Some` only on `Updated`; the
 
 ### Sealed traits
 
-The seal is `sealed::Sealed` (`src/update.rs:445-447`), a `pub(crate)` empty
+The seal is `sealed::Sealed` (`src/update.rs:Sealed`), a `pub(crate)` empty
 trait implemented only inside the crate. `UpdateConfig: sealed::Sealed`
-(`:462`) is the shared configuration/accessor surface (current version, target,
+(`src/update.rs:UpdateConfig`) is the shared configuration/accessor surface (current version, target,
 release tag, asset identifier, bin name/install path/path-in-archive, progress
 and output flags, progress template/chars, auth token), plus the provided
 `api_headers` helper. The crate-private plumbing accessors (request

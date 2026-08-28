@@ -63,7 +63,7 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`; on
   `UpdateBuilder` it comes through the common setters and is stored in `CommonConfig`.
 - `auth_token_from_env()` on either builder resolves the token from `GITEE_TOKEN`
-  (`AUTH_TOKEN_ENV_VARS`, `gitee.rs:225`/`418`); it is opt-in (nothing reads the environment
+  (`AUTH_TOKEN_ENV_VARS`, `src/macros.rs:AUTH_TOKEN_ENV_VARS`); it is opt-in (nothing reads the environment
   without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` with a
   non-blank value always wins over it, whatever the call order (a blank explicit token is the
   documented exception: `auth_token("").auth_token_from_env()` still picks up the env token, but
@@ -81,9 +81,9 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 - Headers always include `User-Agent: rust-reqwest/self-update`.
 - An env-sourced token is bound to whatever host `host(..)` is configured with (or the default
   `gitee.com`), which `build()` flags via `env_token_host_decision`
-  (`gitee.rs:258-263` `ReleaseListBuilder`, `:461-466` `Update`). It returns
+  (`src/backends/common.rs:env_token_host_decision` `ReleaseListBuilder`, `src/backends/common.rs:env_token_host_decision` `Update`). It returns
   `EnvTokenDecision::WarnedAndSent` (warns, but still attaches the token) when the resolved host is
-  neither gitee's canonical `gitee.com` (`CANONICAL_AUTH_HOST`, `gitee.rs:23`) nor an acknowledged
+  neither gitee's canonical `gitee.com` (`CANONICAL_AUTH_HOST`, `src/backends/gitee.rs:CANONICAL_AUTH_HOST`) nor an acknowledged
   `allow_auth_host` entry -- unchanged from before; a host passed to `allow_auth_host(..)` is now
   acknowledged (`host_is_acknowledged`, `backends/common.rs`) and yields `EnvTokenDecision::Sent`
   with no warning. An explicitly-set token is never warned about either. Both builders' `Debug`
@@ -247,7 +247,7 @@ external network):
 - **Malformed response**: a non-array payload from the listing endpoint surfaces as
   `Error::InvalidResponse`.
 - **Env token**: `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEE_TOKEN"]` on both builders
-  (`gitee.rs:875-881`), and a first-wins check over the candidate pairs mirrors the shared
+  (`src/backends/gitee.rs:auth_token_env_vars_are_gitee_token_only`), and a first-wins check over the candidate pairs mirrors the shared
   `first_env_token` behavior for this single-variable list.
 
 ## Related

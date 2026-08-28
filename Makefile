@@ -40,7 +40,7 @@ EXAMPLE_TARGETS = examples $(SELF_UPDATE_EXAMPLE_TARGETS)
 TEST_TARGETS    = tests tests/default tests/reqwest tests/ureq tests/async tests/all-features
 BUILD_TARGETS   = build/all-features
 DOC_TARGETS     = docs docs/readme
-CHECK_TARGETS   = check check/fmt check/readme check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help check/workflow-features
+CHECK_TARGETS   = check check/fmt check/readme check/specs check/clippy check/clippy/reqwest check/clippy/ureq check/clippy/async check/help check/workflow-features
 CLEAN_TARGETS   = clean clean/cargo
 HELP_TARGETS    = help ci $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(BUILD_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
 
@@ -52,6 +52,9 @@ WORKFLOW       = .github/workflows/build.yml
 # Cargo command used to run `build`, `test`, `clippy`... Useful if you keep
 # multiple cargo versions installed on your machine.
 CARGO_COMMAND  = cargo
+
+# Interpreter used for the repo's helper scripts under scripts/.
+PYTHON         = python3
 
 # Compiler program and flags used to (re)generate README.md from src/lib.rs.
 README_CC      = $(CARGO_COMMAND) readme
@@ -95,6 +98,7 @@ help: ## List all supported Make targets
 			check/clippy/ureq) desc="Run clippy with the full ureq feature set" ;; \
 			check/clippy/async) desc="Run clippy with the async API feature set" ;; \
 			check/help) desc="Verify the help output covers every supported target" ;; \
+			check/specs) desc="Verify specs/ cite symbols that still exist" ;; \
 			check/workflow-features) desc="Verify the workflow feature lists match this Makefile" ;; \
 			clean) desc="Remove all generated artifacts" ;; \
 			clean/cargo) desc="Run cargo clean" ;; \
@@ -183,7 +187,7 @@ fmt:
 
 ################################################################################
 # Runs all checks.
-check: check/fmt check/readme check/clippy check/help check/workflow-features
+check: check/fmt check/readme check/specs check/clippy check/help check/workflow-features
 
 # Checks that the crate is well formatted.
 check/fmt: FMT_CCFLAGS += --check
@@ -197,6 +201,13 @@ check/readme:
 	$(README_CC) $(README_CCFLAGS) > _tmp_readme.md
 	cmp README.md _tmp_readme.md
 	rm -f _tmp_readme.md
+
+# Checks that every `file.rs:symbol` citation in specs/ names a symbol that still
+# exists, and that no citation has regressed to a line number.
+check/specs:
+	@echo [$@]: Checking spec citations...
+	@$(PYTHON) scripts/check_spec_citations.py --self-test
+	@$(PYTHON) scripts/check_spec_citations.py
 
 # Runs clippy on both http clients (cannot be combined — they are mutually
 # exclusive).

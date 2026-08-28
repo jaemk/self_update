@@ -18,35 +18,36 @@ canonical reference; it does not propose changes.
 
 Two builders, each reached through a `configure()` entry point:
 
-- `ReleaseList` / `ReleaseListBuilder` (`s3.rs:91`, `s3.rs:151`): queries a bucket
-  and returns a `Releases` via `ReleaseList::fetch` (`s3.rs:257`) or, under the
-  `async` feature, `ReleaseList::fetch_async` (`s3.rs:282`). The result is a bare listing
+- `ReleaseList` / `ReleaseListBuilder` (`src/backends/s3.rs:ReleaseList`,
+  `src/backends/s3.rs:ReleaseListBuilder`): queries a bucket
+  and returns a `Releases` via `ReleaseList::fetch` (`src/backends/s3.rs:ReleaseList::fetch`) or, under the
+  `async` feature, `ReleaseList::fetch_async` (`src/backends/s3.rs:ReleaseList::fetch_async`). The result is a bare listing
   (`current_version()` is `None`); recover the `Vec<Release>` with `into_vec()`.
-  `ReleaseList::configure` (`s3.rs:205`) seeds the builder. Setters: `bucket_name`,
+  `ReleaseList::configure` (`src/backends/s3.rs:ReleaseList::configure`) seeds the builder. Setters: `bucket_name`,
   `asset_prefix`, `asset_key_pattern`, `region`, `endpoint`, `filter_target`, `max_keys`, and
   (under `s3-auth`) `access_key` and `signature_ttl`; plus the shared
   `request_config_setters!(request)`.
   There is **no** `auth_token` setter on this builder (the deprecated no-op was removed);
   the credential setter is `access_key`.
-- `Update` / `UpdateBuilder` (`s3.rs:359`, `s3.rs:247`): the `ReleaseUpdate`
+- `Update` / `UpdateBuilder` (`src/backends/s3.rs:Update`, `src/backends/s3.rs:UpdateBuilder`): the `ReleaseUpdate`
   implementation. `Update::configure` returns an `UpdateBuilder`.
-  `build` (`s3.rs:433`) and `build_async` (under `async`, `s3.rs:442`) both return
+  `build` (`src/backends/s3.rs:UpdateBuilder::build`) and `build_async` (under `async`, `src/backends/s3.rs:UpdateBuilder::build_async`) both return
   the concrete `Update` (which is `Send` and exposes the update verbs as inherent
   methods, so no trait import is needed). Backend setters mirror the list builder
   (`endpoint`, `bucket_name`, `asset_prefix`, `asset_key_pattern`, `region`, `access_key`); the common
-  setters come from `impl_common_builder_setters!(no_auth_token)` (`s3.rs:314`).
+  setters come from `impl_common_builder_setters!(no_auth_token)` (`src/macros.rs:impl_common_builder_setters`).
   As on the list builder, there is **no** `auth_token` setter (the deprecated shim was
   removed); use `access_key`.
 
 `filter_target` on the list builder drops whole releases that carry no matching
-asset (`s3.rs:144`, via `has_target_asset` in `fetch`, `s3.rs:234`); the `Update`
+asset (`src/backends/s3.rs:filter_target`, via `has_target_asset` in `fetch`, `src/backends/s3.rs:ReleaseList::fetch`); the `Update`
 `target` (a common setter) selects which asset of the chosen release to download.
 
 Both `build` paths require `bucket_name`, bailing `Error::MissingField { field }` with
-"`bucket_name` required" otherwise (`s3.rs:177`, `s3.rs:323`). They also validate
-the endpoint/region pairing up front via `check_endpoint_region` (`s3.rs:78`),
-called from `ReleaseListBuilder::build` (`s3.rs:171`) and
-`UpdateBuilder::build_update` (`s3.rs:317`), so a missing required region is an
+"`bucket_name` required" otherwise (`src/backends/s3.rs:ReleaseListBuilder::build`, `src/backends/s3.rs:UpdateBuilder::build_update`). They also validate
+the endpoint/region pairing up front via `check_endpoint_region` (`src/backends/s3.rs:check_endpoint_region`),
+called from `ReleaseListBuilder::build` (`src/backends/s3.rs:ReleaseListBuilder::build`) and
+`UpdateBuilder::build_update` (`src/backends/s3.rs:UpdateBuilder::build_update`), so a missing required region is an
 `Error::MissingField { field }` from `build()` rather than from the first request. All the string
 setters (`bucket_name`, `asset_prefix`, `region`, `filter_target`, and the common
 setters) take `impl Into<String>`.
@@ -59,17 +60,17 @@ produce `Generic(String)` (the variant is now a tuple variant, renamed from
 `Generic { end_point }`). The builder setter is `endpoint(impl Into<Endpoint>)` (renamed
 from `end_point`). `build_s3_api_url` returns `(download_base_url, api_url)`:
 
-- `S3`: `https://<bucket>.s3.<region>.amazonaws.com/` (`s3.rs:706`)
-- `S3DualStack`: `https://<bucket>.s3.dualstack.<region>.amazonaws.com/` (`s3.rs:710`)
-- `DigitalOceanSpaces`: `https://<bucket>.<region>.digitaloceanspaces.com/` (`s3.rs:714`)
-- `GCS`: `https://storage.googleapis.com/<bucket>/` (region not consumed) (`s3.rs:718`)
+- `S3`: `https://<bucket>.s3.<region>.amazonaws.com/` (`src/backends/s3.rs:build_s3_api_url`)
+- `S3DualStack`: `https://<bucket>.s3.dualstack.<region>.amazonaws.com/` (`src/backends/s3.rs:build_s3_api_url`)
+- `DigitalOceanSpaces`: `https://<bucket>.<region>.digitaloceanspaces.com/` (`src/backends/s3.rs:build_s3_api_url`)
+- `GCS`: `https://storage.googleapis.com/<bucket>/` (region not consumed) (`src/backends/s3.rs:build_s3_api_url`)
 - `Generic(endpoint)`: the supplied URL used verbatim as the base
 
 `region` is `Option<String>`. The three host-interpolating endpoints (`S3`,
 `S3DualStack`, `DigitalOceanSpaces`) require it (`endpoint_requires_region`,
-`s3.rs:69`): a missing region surfaces as `Error::MissingField { field }` (field `region`,
+`src/backends/s3.rs:endpoint_requires_region`): a missing region surfaces as `Error::MissingField { field }` (field `region`,
 for the S3, S3DualStack, and DigitalOceanSpaces endpoints). This is
-now validated at `build()` time via `check_endpoint_region` (`s3.rs:78`), not
+now validated at `build()` time via `check_endpoint_region` (`src/backends/s3.rs:check_endpoint_region`), not
 deferred to URL construction. `GCS` and `Generic` never read the region and build
 without it (under `s3-auth`, SigV4 still defaults the signing region to `us-east-1`
 when none is set).
@@ -93,30 +94,30 @@ reads `<IsTruncated>true</IsTruncated>` and `<NextContinuationToken>`, and when 
 same driver follows. So a >1000-key bucket is walked across multiple requests, not truncated. Under
 `s3-auth` each continuation URL is freshly SigV4-signed. The `signature_ttl(Duration)` setter
 (default 300s, clamped to AWS's `X-Amz-Expires` range of 1s..=7d via
-`clamp_signature_ttl`, `s3.rs:39`) sets the `X-Amz-Expires` of signed listing and
+`clamp_signature_ttl`, `src/backends/s3.rs:clamp_signature_ttl`) sets the `X-Amz-Expires` of signed listing and
 download URLs.
 
 ### XML to model
 
-`fetch_releases_from_s3` (`s3.rs:743`) builds the URL, sends one GET via `send`
-(`s3.rs:763`), reads the body as text, and hands it to `parse_s3_response`
-(`s3.rs:814`). Parsing uses `quick_xml::Reader` with `trim_text(true)` (`s3.rs:821`)
+`fetch_releases_from_s3` (`src/backends/s3.rs:fetch_releases`) builds the URL, sends one GET via `send`
+(`src/backends/mod.rs:send`), reads the body as text, and hands it to `parse_s3_response`
+(`src/backends/s3.rs:parse_s3_response`). Parsing uses `quick_xml::Reader` with `trim_text(true)` (`src/backends/s3.rs:parse_s3_response`)
 and walks the `ListBucketResult`:
 
 - A `<Contents>` start flushes any in-progress release via `add_to_releases_list`
-  and resets state (`s3.rs:848`).
+  and resets state (`src/backends/s3.rs:parse_s3_response`).
 - `<Key>` text is matched against the filename regex (below); on match it sets the
   current release's `name`/`version`, forms the download URL as
-  `download_base_url + key` (`s3.rs:875`), and sets a single-element `assets` vec
+  `download_base_url + key` (`src/backends/s3.rs:parse_s3_response`), and sets a single-element `assets` vec
   whose `name` is the key's filename component (path stripped via
-  `PathBuf::file_name`, `s3.rs:865`). A non-matching key is logged and skipped
-  (`s3.rs:887`).
-- `<LastModified>` text sets the release `date` (`s3.rs:890`).
-- `Eof` flushes the final in-progress release (`s3.rs:898`).
+  `PathBuf::file_name`, `src/backends/s3.rs:parse_s3_response`). A non-matching key is logged and skipped
+  (`src/backends/s3.rs:parse_s3_response`).
+- `<LastModified>` text sets the release `date` (`src/backends/s3.rs:parse_s3_response`).
+- `Eof` flushes the final in-progress release (`src/backends/s3.rs:parse_s3_response`).
 
-`add_to_releases_list` (`s3.rs:921`) drops any release with an empty `name` or
+`add_to_releases_list` (`src/backends/s3.rs:add_to_releases_list`) drops any release with an empty `name` or
 `version`, and merges entries sharing the same `name`+`version` into one release
-with their assets concatenated (`s3.rs:923`); otherwise it pushes a new release.
+with their assets concatenated (`src/backends/s3.rs:add_to_releases_list`); otherwise it pushes a new release.
 
 ### Version derivation
 
@@ -142,36 +143,37 @@ key; the default pattern is exempt from that check since its version group only
 matches a numeric triple. When unset, behavior is unchanged.
 
 `ReleaseUpdate` selection helpers operate on the parsed list: `pick_latest`
-(`s3.rs:498`) picks the highest version (ignoring unparseable ones, erroring
-`Error::NoReleaseFound` when empty); `sort_newer` (`s3.rs:513`) filters to strictly
-newer-than-current, newest-first; `find_version` (`s3.rs:524`) matches an exact
+(`src/backends/s3.rs:pick_latest`) picks the highest version (ignoring unparseable ones, erroring
+`Error::NoReleaseFound` when empty); `sort_newer` (`src/backends/s3.rs:sort_newer`) filters to strictly
+newer-than-current, newest-first; `find_version` (`src/backends/s3.rs:find_version`) matches an exact
 version, erroring `Error::NoReleaseFound` when absent. These back
 `get_latest_release`, `get_newer_releases`, and `get_release_version`
-(`s3.rs:534`) and their `async` siblings, all also exposed as inherent methods on
+(`src/backends/s3.rs:get_latest_release`, `src/backends/s3.rs:get_newer_releases`,
+`src/backends/s3.rs:get_release_version`) and their `async` siblings, all also exposed as inherent methods on
 `Update` alongside `is_update_available`.
 
 ### Signing under s3-auth
 
-The `auth` module (`s3.rs:503`) is gated on `feature = "s3-auth"`. `AccessKey`
-(`s3.rs:524`) is `#[non_exhaustive]` with fields `access_key_id` and
+The `auth` module (`src/backends/s3.rs:auth`) is gated on `feature = "s3-auth"`. `AccessKey`
+(`src/backends/s3.rs:AccessKey`) is `#[non_exhaustive]` with fields `access_key_id` and
 `secret_access_key`, built through `AccessKey::new(access_key_id,
-secret_access_key)` (`s3.rs:533`, both args `impl Into<String>`) or the
+secret_access_key)` (`src/backends/s3.rs:AccessKey::new`, both args `impl Into<String>`) or the
 `From<(&str, &str)>` / `From<(String, String)>` impls; it is re-exported as
-`self_update::backends::s3::AccessKey` (`s3.rs:26`). The `#[non_exhaustive]`
+`self_update::backends::s3::AccessKey` (`src/backends/s3.rs:AccessKey`). The `#[non_exhaustive]`
 attribute reserves room for a future STS session token; no `session_token` field
 exists today.
 
-`s3_signature_v4` (`s3.rs:612`) implements AWS SigV4 presigned-query signing. With
-no `AccessKey` it returns the URL unchanged (`s3.rs:620`) -- so public buckets are
+`s3_signature_v4` (`src/backends/s3.rs:s3_signature_v4`) implements AWS SigV4 presigned-query signing. With
+no `AccessKey` it returns the URL unchanged (`src/backends/s3.rs:s3_signature_v4_at`) -- so public buckets are
 unsigned. With one it appends `X-Amz-Algorithm=AWS4-HMAC-SHA256`,
 `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders=host`, and
 the `X-Amz-Signature` (lowercase hex HMAC-SHA256). Region defaults to `us-east-1`
-when absent (`s3.rs:635`); the service is fixed to `s3` (`s3.rs:596`) and the
-payload to `UNSIGNED-PAYLOAD` (`s3.rs:667`). Signing uses `hmac`/`sha2` for
+when absent (`src/backends/s3.rs:s3_signature_v4_at`); the service is fixed to `s3` (`src/backends/s3.rs:derive_signing_key`) and the
+payload to `UNSIGNED-PAYLOAD` (`src/backends/s3.rs:s3_signature_v4_at`). Signing uses `hmac`/`sha2` for
 HMAC-SHA256 and SHA-256, `percent-encoding` for URI encoding (reserving
 `- . _ ~`, slash kept in the canonical URI but encoded in query params,
-`s3.rs:561`), `url` for parsing, and `time` for the timestamp. Both the listing URL
-(TTL 300s, `s3.rs:734`) and each asset download URL (TTL 300s, `s3.rs:879`) are
+`src/backends/s3.rs:uri_encode`), `url` for parsing, and `time` for the timestamp. Both the listing URL
+(TTL 300s, `src/backends/s3.rs:build_s3_api_url`) and each asset download URL (TTL 300s, `src/backends/s3.rs:parse_s3_response`) are
 signed when an access key is present.
 
 The s3 backend does not authenticate via bearer token. The shared `auth_token`
@@ -185,11 +187,11 @@ no-op, because s3 authenticates by SigV4-signing the URL, not via an auth header
 
 A non-2xx listing response is always an `Err`, never an `Ok` parsed from the error
 body: `send` / `http_client::get` bail on any non-2xx status before returning
-(`s3.rs:763`). Both clients now map a completed non-2xx to the same structured
+(`src/backends/mod.rs:send`, `src/http_client/mod.rs:HttpClient::get`). Both clients now map a completed non-2xx to the same structured
 variant by status: 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`,
-any other non-2xx -> `Error::HttpStatus` (`status_to_error`, `errors.rs:254`); a
+any other non-2xx -> `Error::HttpStatus` (`status_to_error`, `src/errors.rs:status_to_error`); a
 request that cannot complete (connection/TLS/timeout) is `Error::Transport`. XML
-parse errors surface as `Error::InvalidResponse` with the buffer position (`s3.rs:904`).
+parse errors surface as `Error::InvalidResponse` with the buffer position (`src/backends/s3.rs:parse_s3_response`).
 Missing region (for the region-requiring endpoints) and missing bucket are both
 `Error::MissingField { field }`, now raised from `build()` rather than the first request.
 
@@ -240,7 +242,7 @@ Missing region (for the region-requiring endpoints) and missing bucket are both
 
 ## Tests
 
-In-module tests (`s3.rs:938`): `parse_s3_response` cases (single/multi asset,
+In-module tests (`src/backends/s3.rs:tests`): `parse_s3_response` cases (single/multi asset,
 v-prefix strip, multiple releases, non-matching-key skip, path-stripped filename,
 malformed-XML error, empty body); custom `asset_key_pattern` cases (pre-release
 kept and merged, non-semver capture skipped, default lossy pre-release pinned,

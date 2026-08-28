@@ -17,42 +17,42 @@ feature.
 
 Two builders exist, each reached through a `configure()` constructor:
 
-- `ReleaseList::configure()` returns `ReleaseListBuilder` (`gitea.rs:274`). The
+- `ReleaseList::configure()` returns `ReleaseListBuilder` (`src/backends/gitea.rs:ReleaseList::configure`). The
   builder holds `host`, `repo_owner`, `repo_name`, `target`, `auth_token`, `auth_token_from_env`,
-  and a `RequestConfig` (`gitea.rs:94-103`). It is `#[derive(Clone)]` with a hand-written `Debug`
-  (`gitea.rs:105-124`, so `auth_token` redacts) and `#[must_use]`.
-  `build()` validates and returns a `ReleaseList` (`gitea.rs:211-259`).
-- `Update::configure()` returns `UpdateBuilder` (`gitea.rs:491-493`). The builder
+  and a `RequestConfig` (`src/backends/gitea.rs:ReleaseListBuilder`). It is `#[derive(Clone)]` with a hand-written `Debug`
+  (`src/backends/gitea.rs:ReleaseListBuilder`, so `auth_token` redacts) and `#[must_use]`.
+  `build()` validates and returns a `ReleaseList` (`src/backends/gitea.rs:ReleaseListBuilder::build`).
+- `Update::configure()` returns `UpdateBuilder` (`src/backends/gitea.rs:Update::configure`). The builder
   holds `host`, `repo_owner`, `repo_name`, and a `CommonBuilderConfig`
-  (`gitea.rs:348-353`); it is `#[derive(Clone, Debug, Default)]` and `#[must_use]`.
-  `UpdateBuilder::new()` is `Default::default()` (`gitea.rs:357-359`). The common
+  (`src/backends/gitea.rs:UpdateBuilder`); it is `#[derive(Clone, Debug, Default)]` and `#[must_use]`.
+  `UpdateBuilder::new()` is `Default::default()` (`src/backends/gitea.rs:UpdateBuilder::new`). The common
   setters (target, bin_name, current_version, auth_token, request headers, etc.) come
-  from `impl_common_builder_setters!()` (`gitea.rs:399`).
+  from `impl_common_builder_setters!()` (`src/macros.rs:impl_common_builder_setters`).
 
 `UpdateBuilder` exposes two terminal methods:
 
-- `build()` returns the concrete `Update` (`gitea.rs:465-467`).
+- `build()` returns the concrete `Update` (`src/backends/gitea.rs:UpdateBuilder::build`).
 - `build_async()` (feature `async`) also returns the concrete `Update`, with the
-  inherent `*_async` methods reachable (`gitea.rs:475-477`). There is no separate async
+  inherent `*_async` methods reachable (`src/backends/gitea.rs:UpdateBuilder::build_async`). There is no separate async
   builder type.
 
 `Update` is `Send` and exposes the update verbs as inherent methods (`update`,
 `update_extended`, `get_latest_release`, `get_newer_releases`, `get_release_version`,
 `is_update_available`), so no trait import is needed. Both terminal methods delegate
-to the private `build_update()` helper (see below). `ReleaseList` has `fetch` (`gitea.rs:295-313`)
-and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Releases>`.
+to the private `build_update()` helper (see below). `ReleaseList` has `fetch` (`src/backends/gitea.rs:ReleaseList::fetch`)
+and, under `async`, `fetch_async` (`src/backends/gitea.rs:ReleaseList::fetch_async`), both returning `Result<Releases>`.
 
 ### Route shapes and host
 
-- The base releases route is built by `Update::releases_url()` (`gitea.rs:496-503`)
-  and, identically, inline in `ReleaseList::fetch` (`gitea.rs:296-301`):
+- The base releases route is built by `Update::releases_url()` (`src/backends/gitea.rs:Update::releases_url`)
+  and, identically, inline in `ReleaseList::fetch` (`src/backends/gitea.rs:ReleaseList::fetch`):
   `<host>/api/v1/repos/<owner>/<repo>/releases`.
 - Fetch-by-tag appends `/tags/{tag}` to that base via the shared `tag_url` helper
-  (`gitea.rs:510-512`), which percent-encodes the tag with `urlencoding::encode(ver)`:
-  `<base>/tags/{encoded_tag}`, called from `get_release_version` (`gitea.rs:542`, sync) and
-  `get_release_version_async` (`gitea.rs:734`, async).
+  (`src/backends/gitea.rs:Update::tag_url`), which percent-encodes the tag with `urlencoding::encode(ver)`:
+  `<base>/tags/{encoded_tag}`, called from `get_release_version` (`src/backends/gitea.rs:Update::get_release_version`, sync) and
+  `get_release_version_async` (`src/backends/gitea.rs:Update::get_release_version_async`, async).
 - The custom host is set with `host(impl Into<String>)` on both builders
-  (`gitea.rs:143` `ReleaseListBuilder`, `gitea.rs:373` `UpdateBuilder`). The setter
+  (`src/backends/gitea.rs:ReleaseListBuilder::host`, `src/backends/gitea.rs:UpdateBuilder::host`). The setter
   carries no `#[doc(alias)]` (all builder-setter doc-aliases were dropped); it was
   renamed `url` -> `host` (and earlier `instance_url` / `with_host` -> `url`), but no
   alias remains. Its doc states the instance host
@@ -60,20 +60,20 @@ and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Relea
   `/api/v1/...` path itself. Gitea has no
   canonical public host, so `host` is required: `build()` / `build_update()` return
   `Error::MissingField { field: "host" }` when it is unset
-  (`gitea.rs:242` `ReleaseListBuilder`, inside `build_update` `gitea.rs:415-459` for `Update`).
+  (`src/backends/gitea.rs:ReleaseListBuilder::build`, inside `build_update` `src/backends/gitea.rs:UpdateBuilder::build_update` for `Update`).
   The string setters (`host`, `repo_owner`,
   `repo_name`, `filter_target`, `auth_token`, and the `Update` builder's common
   setters) take `impl Into<String>`.
 - Unlike GitHub, Gitea has no dedicated `/releases/latest` endpoint, so "latest" is
-  derived from the list endpoint via `newest_plan` (`gitea.rs:661-686`, see ordering below).
+  derived from the list endpoint via `newest_plan` (`src/backends/gitea.rs:newest_plan`, see ordering below).
 
 ### Auth
 
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`
-  (`gitea.rs:182-189`, calling the shared `set_explicit_auth_token`); on `UpdateBuilder` it comes
+  (`src/backends/gitea.rs:ReleaseListBuilder::auth_token`, calling the shared `set_explicit_auth_token`); on `UpdateBuilder` it comes
   through the common setters and is stored in `CommonConfig`.
 - `auth_token_from_env()` on either builder resolves the token from `GITEA_TOKEN`
-  (`AUTH_TOKEN_ENV_VARS`, `gitea.rs:194`/`400`); it is opt-in (nothing reads the environment
+  (`AUTH_TOKEN_ENV_VARS`, `src/macros.rs:AUTH_TOKEN_ENV_VARS`); it is opt-in (nothing reads the environment
   without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` with a
   non-blank value always wins over it, whatever the call order; `has_auth_token()` reports whether
   either source set a token (a blank explicit token counts as unset here too). A blank explicit
@@ -81,7 +81,7 @@ and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Relea
   up the env token, but `auth_token_from_env().auth_token("")` discards it (see
   `auth-token-from-env.md` AUTH-1-3).
 - `build()` calls `env_token_host_decision` (`common.rs`), passing `None` for the canonical host
-  (`gitea.rs:229-237` `ReleaseListBuilder`, `:447-455` `Update`): gitea has no well-known public
+  (`src/backends/gitea.rs:ReleaseListBuilder::build`, `src/backends/gitea.rs:UpdateBuilder::build_update`): gitea has no well-known public
   instance (it is always self-hosted), so there is no host to compare an env-sourced token
   against. Unless the configured host was explicitly re-affirmed -- either an `auth_token(..)`
   call instead of `auth_token_from_env()`, or the same host also passed to
@@ -101,7 +101,7 @@ and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Relea
   user-set `Authorization` via `request_header` overrides it. A token
   that cannot parse into a header value surfaces as `Error::InvalidAuthToken`.
 - The `Update`'s `UpdateConfig` accessor override wires this same `api_headers`
-  via `impl_update_config_accessors!` (`gitea.rs:569`), so the trait default
+  via `impl_update_config_accessors!` (`src/macros.rs:impl_update_config_accessors`), so the trait default
   (which sets no User-Agent) is not used.
 
 ### Pagination and ordering
@@ -136,7 +136,7 @@ and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Relea
   - `browser_download_url` and `name` on each asset are required; either missing is
     `Error::MissingAssetField { field }`.
 - `get_release_version[_async]` parses the bare object returned by `/tags/{tag}`
-  directly (not wrapped in an array) (`gitea.rs:542`, `gitea.rs:734`), while the list
+  directly (not wrapped in an array) (`src/backends/gitea.rs:Update::get_release_version`, `src/backends/gitea.rs:Update::get_release_version_async`), while the list
   endpoints parse a JSON array.
 
 ### Errors
@@ -154,7 +154,7 @@ and, under `async`, `fetch_async` (`gitea.rs:317`), both returning `Result<Relea
 
 ### `build_update` helper
 
-`UpdateBuilder::build_update` (`gitea.rs:415-459`) is the private validator shared by
+`UpdateBuilder::build_update` (`src/backends/gitea.rs:UpdateBuilder::build_update`) is the private validator shared by
 `build` and `build_async`. It resolves `host` / `repo_owner` / `repo_name` (erroring
 as above) and calls `self.common.build()?` to produce the `CommonConfig`, returning a
 concrete `Update`. Keeping it private ensures the sync and async terminal methods
@@ -180,15 +180,15 @@ validate identically and cannot drift.
 - Free `api_headers` and the `releases_plan` / `newest_plan` / `single_plan` plan builders are
   private to the module.
 
-`Update` is `#[non_exhaustive]` (`gitea.rs:482`) so its fields stay private and future
+`Update` is `#[non_exhaustive]` (`src/backends/gitea.rs:Update`) so its fields stay private and future
 fields do not break downstream code; it is constructed only through the builder.
 
 ## Invariants and regression checklist
 
 - Tag is percent-encoded in the fetch-by-tag route via `urlencoding::encode`
-  (`gitea.rs:338`, `gitea.rs:484`).
+  (`src/backends/gitea.rs:Update::tag_url`).
 - Base route shape is exactly `<host>/api/v1/repos/<owner>/<repo>/releases`, shared by
-  sync, async, and `ReleaseList` paths via `releases_url()` (`gitea.rs:314-319`).
+  sync, async, and `ReleaseList` paths via `releases_url()` (`src/backends/gitea.rs:Update::releases_url`).
 - "Latest" is `releases[0]` of the first page, depending on the endpoint's newest-first
   ordering; the latest path does not paginate.
 - Newer-release filtering is strict (`bump_is_greater`), folded into the page parser via
@@ -214,11 +214,11 @@ fields do not break downstream code; it is constructed only through the builder.
 
 ## Tests
 
-In `src/backends/gitea.rs` `mod tests` (starting `gitea.rs:764`), backed by a loopback
+In `src/backends/gitea.rs` `mod tests` (starting `src/backends/gitea.rs:tests`), backed by a loopback
 `TcpListener` stub (no external network):
 
 - Sync `ReleaseUpdate` fetch: one-element latest wrap, strictly-newer filtering
-  (e.g. `get_newer_releases_sync_reports_no_update_when_up_to_date`, `gitea.rs:1457`),
+  (e.g. `get_newer_releases_sync_reports_no_update_when_up_to_date`, `src/backends/gitea.rs:get_newer_releases_sync_reports_no_update_when_up_to_date`),
   no-update-when-up-to-date, and single-vs-list agreement.
 - Builder shape: `host`/`filter_target` exist on `ReleaseListBuilder`; `ReleaseList`
   and `Update` builds require `host`, `repo_owner`, `repo_name`; invalid header surfaces
@@ -229,7 +229,7 @@ In `src/backends/gitea.rs` `mod tests` (starting `gitea.rs:764`), backed by a lo
   `/tags/{ver}` single-object parse, missing-`tag_name` error, newer-only filtering,
   empty-when-up-to-date, accumulate-then-filter across pages, empty-array error
   (`NoReleaseFound`), non-array-payload error (`InvalidResponse`).
-- `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEA_TOKEN"]` on both builders (`gitea.rs:802-808`), with
+- `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEA_TOKEN"]` on both builders (`src/backends/gitea.rs:auth_token_env_vars_are_gitea_token_only`), with
   a comment guarding against a copy-pasted `GITHUB_TOKEN`-style list arriving here by mistake.
 
 ## Related

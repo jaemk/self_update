@@ -56,25 +56,25 @@ Implication notes:
   `archive-tar` via the optional `zipsign-api?/verify-*` syntax, so signature
   verification of a given archive kind is enabled only when both `signatures`
   and the matching archive feature are on (`Cargo.toml:70,73,75`;
-  `update.rs:904-938`).
+  `src/update.rs:verify_signature`).
 - `async` requires the `reqwest` client plus `tokio` and `futures-util` (`Cargo.toml:95`);
   `async` + `ureq` together is allowed (async drives the reqwest path, ureq serves sync).
 
 Client and TLS coexistence: `reqwest` and `ureq` may both be enabled, and so may
 `native-tls` and `rustls`; `cargo build --all-features` builds. When more than one
-client is on, `default_client()` picks `reqwest` (`http_client/mod.rs:98-106`); when
+client is on, `default_client()` picks `reqwest` (`src/http_client/mod.rs:default_client`); when
 both TLS backends are on, the per-call client builders prefer `rustls`. An injected
 `http_client(Arc<dyn HttpClient>)` overrides the default pick entirely.
 
 The only `compile_error!` guards that remain:
 
-- neither `reqwest` nor `ureq` -> error (`http_client/mod.rs:111`):
+- neither `reqwest` nor `ureq` -> error (`src/http_client/mod.rs:HttpClient`):
   "no HTTP client selected - enable at least one of the `reqwest` (default) or
   `ureq` features". A build with no client cannot service any request. This is the exact failure a
   `default-features = false` manifest that enables only a TLS feature (e.g. `features = ["rustls"]`)
   hits; the crate-level Features section (`src/lib.rs`) names the error and shows the fix (add a
   client, e.g. `features = ["ureq", "rustls", "github"]`).
-- `async` without `reqwest` -> error (`lib.rs:434`):
+- `async` without `reqwest` -> error (`src/update.rs:AsyncReleaseSource`):
   "feature `async` requires the `reqwest` client - `ureq` has no async API".
   (`async` implies `reqwest` in `Cargo.toml`, so this only fires on a manual
   inconsistent feature set.)
@@ -88,7 +88,7 @@ docs.rs feature set (`Cargo.toml:17-33`): `reqwest`, `ureq`, `native-tls`,
 client/TLS pair to `reqwest` + `native-tls` for a stable rendered surface. The same
 `[package.metadata.docs.rs]` block also sets `rustdoc-args = ["--cfg", "docsrs"]`
 (`Cargo.toml:30`), which sets the `docsrs` cfg so the crate enables the nightly
-`doc_cfg` feature (`lib.rs:410`) and the gated public re-exports carry
+`doc_cfg` feature (`src/lib.rs:VerifyingKey`) and the gated public re-exports carry
 `#[cfg_attr(docsrs, doc(cfg(...)))]`; docs.rs then renders a feature-gate badge
 on each gated item.
 
@@ -96,48 +96,49 @@ on each gated item.
 
 Feature-gated public items:
 
-- `reqwest`: re-export `pub use reqwest` (`lib.rs:442-444`) and the
-  `reqwest_client()` builder setter (`macros.rs:64-68`).
-- `ureq`: re-export `pub use ureq` (`lib.rs:452-454`) and the `ureq_agent()`
-  builder setter (`macros.rs:82-86`).
-- `async`: re-export `pub use update::AsyncReleaseSource` (`lib.rs:445-447`),
-  the `reqwest_async_client()` setter (`macros.rs:72-76`), and the `*_async`
+- `reqwest`: re-export `pub use reqwest` (`src/http_client/mod.rs:reqwest`) and the
+  `reqwest_client()` builder setter (`src/macros.rs:reqwest_client`).
+- `ureq`: re-export `pub use ureq` (`src/http_client/mod.rs:ureq`) and the `ureq_agent()`
+  builder setter (`src/macros.rs:ureq_agent`).
+- `async`: re-export `pub use update::AsyncReleaseSource` (`src/update.rs:AsyncReleaseSource`),
+  the `reqwest_async_client()` setter (`src/macros.rs:reqwest_async_client`), and the `*_async`
   verbs across the backends (e.g. `github.rs`, `gitlab.rs`, `gitea.rs`,
   `s3.rs`, `custom.rs`, `update.rs`).
 - `signatures`: re-export `pub use zipsign_api` and the
   `pub type VerifyingKey = [u8; zipsign_api::PUBLIC_KEY_LENGTH]` alias
-  (`lib.rs:460-470`), plus the `verifying_keys` builder setter (`macros.rs:617`)
-  and the doc-hidden `verify_keys()` accessor (`macros.rs:260`).
-- `checksums`: `pub use checksum::Checksum` (`lib.rs:498-500`) with its
+  (`src/lib.rs:VerifyingKey`), plus the `verifying_keys` builder setter (`src/macros.rs:verifying_keys`)
+  and the doc-hidden `verify_keys()` accessor (`src/macros.rs:verifying_keys`).
+- `checksums`: `pub use checksum::Checksum` (`src/checksum.rs:Checksum`) with its
   `parse_digest` associated fn, the `verify_checksum` and `verify_release_digest`
   builder setters and accessors (`macros.rs`), and `ReleaseAsset::digest()` /
   `with_digest()` for the backend-published asset digest.
 - All the gated crate-root re-exports above carry
   `#[cfg_attr(docsrs, doc(cfg(feature = "...")))]`, so docs.rs renders a
-  feature-gate badge on each (`lib.rs:443,446,453,461,469,499`).
-- `archive-tar`: `ArchiveKind::Tar` enum variant (`lib.rs:589-591`).
-- `archive-zip`: `ArchiveKind::Zip` enum variant (`lib.rs:595-597`).
+  feature-gate badge on each (`src/http_client/mod.rs:reqwest`, `src/http_client/mod.rs:ureq`,
+  `src/update.rs:AsyncReleaseSource`, `src/lib.rs:VerifyingKey`, `src/checksum.rs:Checksum`).
+- `archive-tar`: `ArchiveKind::Tar` enum variant (`src/lib.rs:ArchiveKind::Tar`).
+- `archive-zip`: `ArchiveKind::Zip` enum variant (`src/lib.rs:ArchiveKind::Zip`).
 - `s3`: gates the S3 backend module (`backends/s3.rs`); also pulled in by `s3-auth`.
 - `s3-auth`: the SigV4 signing path and credential/region builder surface in
-  `backends/s3.rs` (e.g. `s3.rs:25,76,120,...`); implies `s3`.
+  `backends/s3.rs` (e.g. `src/backends/s3.rs:s3_signature_v4`, `src/backends/s3.rs:AccessKey`); implies `s3`.
 
 `ArchiveKind` and `Extract` are public unconditionally, but `ArchiveKind` is
 `#[non_exhaustive]` and its `Tar`/`Zip` variants only exist under their archive
-features (`lib.rs:572-580`). `ArchiveKind` implements `Display` (`lib.rs:589`),
+features (`src/lib.rs:ArchiveKind`). `ArchiveKind` implements `Display` (`src/lib.rs:ArchiveKind`),
 rendering `tar.gz` / `tar.xz` / `zip` / `tar` / `gz` / `xz` / `plain`; the `Error::NoSignatures`
 message uses it instead of the `Debug` form. `detect_archive` returns
 `Error::ArchiveNotEnabled` for an extension whose archive feature is off
-(`lib.rs:600-603,611-614`).
+(`src/lib.rs:detect_archive`).
 
 ## Invariants and regression checklist
 
 - At least one HTTP client must be enabled: a build with neither `reqwest` nor
-  `ureq` is a `compile_error!` (`http_client/mod.rs:111`). Both may be on at once;
-  `default_client()` picks `reqwest` (`http_client/mod.rs:98-106`).
+  `ureq` is a `compile_error!` (`src/http_client/mod.rs:HttpClient`). Both may be on at once;
+  `default_client()` picks `reqwest` (`src/http_client/mod.rs:default_client`).
 - `native-tls` and `rustls` may both be on; the per-call client builders prefer
   `rustls` when both are set. Neither combination is a `compile_error!`.
 - `async` requires `reqwest`: a build with `async` but not `reqwest` is a
-  `compile_error!` (`lib.rs:434`). `async` force-enables `reqwest` (`Cargo.toml:95`),
+  `compile_error!` (`src/update.rs:AsyncReleaseSource`). `async` force-enables `reqwest` (`Cargo.toml:95`),
   so this only fires on a hand-edited inconsistent feature set.
 - `cargo build --all-features` MUST build: with both clients and both TLS backends
   coexisting, the only remaining guards are the no-client and async-without-reqwest

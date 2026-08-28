@@ -16,17 +16,18 @@ tie-breaking/ordering used when multiple releases or assets qualify.
 ### Version parsing and comparison
 
 All comparison helpers parse both operands with `semver::Version::parse` and operate
-on the parsed `Version` (`src/version.rs:6`). They take bare `&str` version strings:
+on the parsed `Version` (`src/version.rs:bump_is_greater`). They take bare `&str` version strings:
 
 - `bump_is_greater(current, other)` returns `Ok(true)` iff `other > current` under
   full semver ordering, including prerelease and build-metadata rules
-  (`src/version.rs:9-11`). This is the predicate that drives "is there an update".
-- `bump_is_compatible(current, other)` (`src/version.rs:14-31`) encodes the crate's
+  (`src/version.rs:bump_is_greater`). This is the predicate that drives "is there an update".
+- `bump_is_compatible(current, other)` (`src/version.rs:bump_is_compatible`) encodes the crate's
   own compatibility policy (caret-like, with special-casing when `current` is a
   prerelease and when both majors are 0); a compatible bump must not itself be a
   prerelease except in the prerelease-current branch.
 - `bump_is_major` / `bump_is_minor` / `bump_is_patch` compare the corresponding
-  numeric fields (`src/version.rs:34-52`).
+  numeric fields (`src/version.rs:bump_is_major`, `src/version.rs:bump_is_minor`,
+  `src/version.rs:bump_is_patch`).
 - `cmp_versions(a, b) -> Result<Ordering>` parses each version once and
   returns a true total order, including real `Equal` for equal versions (unlike the
   boolean `bump_is_greater`, which collapses equal/less into `false`). The shared
@@ -41,13 +42,13 @@ the same core version; build metadata is ignored for ordering (standard semver).
 
 No helper in `version.rs` strips a leading `v`. Prefix handling happens at the backend
 boundary: the GitHub backend trims a single leading `v` from the release tag before it
-becomes `Release.version` (`src/backends/github.rs:52`), so the value reaching these
+becomes `Release.version` (`src/backends/github.rs:into_release`), so the value reaching these
 helpers is already a bare semver string. A `Release` built via `Release::builder()` is
-expected to carry a bare semver `version` (`src/update.rs:141-146`).
+expected to carry a bare semver `version` (`src/update.rs:Release::builder`).
 
 Error cases: any unparseable operand surfaces the underlying `semver::Error` converted
 to `Error::SemVer` (boxed, opaque, source-preserving) via `From<semver::Error>`
-(`src/errors.rs:53`, `src/errors.rs:154-157`). The helpers return `Result<bool>`, so a
+(`src/errors.rs:SemVer`, `src/errors.rs:SemVer`). The helpers return `Result<bool>`, so a
 parse failure propagates as `Err(Error::SemVer(_))` rather than a boolean.
 
 Where parse errors are swallowed vs propagated:
@@ -55,33 +56,33 @@ Where parse errors are swallowed vs propagated:
 - `Releases::is_update_available` calls `bump_is_greater` with `?` and short-circuits
   on the first strictly-newer release; a found update wins over a later parse error, but
   the first release *reached* with an unparseable version propagates `Error::SemVer`
-  (`src/update.rs:267-274`).
+  (`src/update.rs:Releases::is_update_available`).
 - `choose_latest_release` is lenient: its filter and sort comparator use
   `bump_is_greater(...).unwrap_or(false)` / treat a comparator error as "not greater",
   so a release with an unparseable version is dropped rather than failing the update
-  (`src/update.rs:642`, `src/update.rs:650-660`).
+  (`src/update.rs:choose_latest_release`, `src/update.rs:choose_latest_release`).
 
 ### Target string
 
 `get_target()` returns the compile-time target triple as `&'static str` via
-`env!("TARGET")` (`src/lib.rs:503-505`), e.g. `x86_64-unknown-linux-gnu` or
+`env!("TARGET")` (`src/lib.rs:get_target`), e.g. `x86_64-unknown-linux-gnu` or
 `i686-pc-windows-msvc`. It is the build target of the crate, captured at compile time
 in `build.rs`; it is not recomputed at runtime.
 
 The effective target used during an update is resolved at builder `build()` time:
-`CommonBuilderConfig.target` is an `Option<String>` (`src/backends/common.rs:87`) that,
+`CommonBuilderConfig.target` is an `Option<String>` (`src/backends/common.rs:CommonBuilderConfig`) that,
 when unset, defaults to `get_target().to_owned()`, and when set is used verbatim
-(`src/backends/common.rs:148-151`). The resolved `CommonConfig.target` is a plain
-`String` (`src/backends/common.rs:191`) exposed through the `target()` accessor
-(`src/macros.rs:129-131`).
+(`src/backends/common.rs:CommonBuilderConfig::build`). The resolved `CommonConfig.target` is a plain
+`String` (`src/backends/common.rs:CommonConfig`) exposed through the `target()` accessor
+(`src/macros.rs:target`).
 
 ### Asset matching and overrides
 
-Asset selection happens in `resolve_and_confirm` (`src/update.rs:716-722`):
+Asset selection happens in `resolve_and_confirm` (`src/update.rs:resolve_and_confirm`):
 
 - If a custom `asset_matcher` is set, it is called with `&release.assets` and its
   `Option<ReleaseAsset>` result is used directly; the built-in `target`/`identifier`
-  matching is bypassed entirely (`src/update.rs:718-719`).
+  matching is bypassed entirely (`src/update.rs:resolve_and_confirm`).
 - Otherwise `release.asset_for(target, asset_identifier())` runs the default matcher.
 - Either way, `None` becomes `Error::NoReleaseFound { target: Some(..) }`
   (`resolve_and_confirm`, `src/update.rs`).
@@ -97,18 +98,18 @@ tries three passes in order, returning the **first** matching asset (cloned):
 3. Else, only if `identifier` is set, the first asset whose `name` contains
    `identifier`.
 
-`identifier` (set via `asset_identifier(...)`, `src/macros.rs:266`) disambiguates when
+`identifier` (set via `asset_identifier(...)`, `src/macros.rs:asset_identifier`) disambiguates when
 multiple assets match the same target; if unset, the first target match wins.
 `has_target_asset` is the related `any(name.contains(target))` predicate the GitHub
-backend uses to pre-filter releases (`src/update.rs:80-82`, `src/backends/github.rs:176`).
+backend uses to pre-filter releases (`src/update.rs:has_target_asset`, `src/backends/github.rs:ReleaseList::fetch`).
 
 Overrides:
 
-- `target(&str)` (`src/macros.rs:257-260`) overrides the platform string used by the
+- `target(&str)` (`src/macros.rs:target`) overrides the platform string used by the
   default matcher and the `{target}` URL substitution.
-- `asset_matcher(closure)` (`src/macros.rs:388-397`) installs an
+- `asset_matcher(closure)` (`src/macros.rs:asset_matcher`) installs an
   `Fn(&[ReleaseAsset]) -> Option<ReleaseAsset>` (boxed as `DynAssetMatcher`,
-  `src/lib.rs:1136`) that fully replaces the default substring heuristic.
+  `src/lib.rs:DynAssetMatcher`) that fully replaces the default substring heuristic.
 
 ### Tie-breaking and ordering
 
@@ -118,28 +119,28 @@ Overrides:
 - Multiple releases: `choose_latest_release` filters to strictly-newer releases,
   sorts them semver-descending (newest first) independent of source order, prefers the
   first *compatible* release, and falls back to the first (newest) release overall if
-  none is compatible (`src/update.rs:640-692`).
+  none is compatible (`src/update.rs:choose_latest_release`).
 
 ## Public surface
 
-- `self_update::get_target() -> &'static str` (`src/lib.rs:503`).
+- `self_update::get_target() -> &'static str` (`src/lib.rs:get_target`).
 - `self_update::version::{bump_is_greater, bump_is_compatible, bump_is_major,
   bump_is_minor, bump_is_patch}(current, other) -> Result<bool>` (`src/version.rs`).
 - `Release::has_target_asset(target)`, `Release::asset_for(target, identifier)`
-  (`src/update.rs:80`, `src/update.rs:86`).
+  (`src/update.rs:has_target_asset`, `src/update.rs:asset_for`).
 - Builder setters (each backend, via macro): `.target(&str)`,
   `.asset_identifier(&str)`, `.asset_matcher(closure)`
-  (`src/macros.rs:257`, `:266`, `:388`).
+  (`src/macros.rs:target`, `src/macros.rs:asset_identifier`, `src/macros.rs:asset_matcher`).
 
 ## Invariants and regression checklist
 
 - Comparison helpers never strip `v`; the `v`-trim lives in the GitHub backend
-  (`src/backends/github.rs:52`). Backend `Release.version` must be bare semver.
+  (`src/backends/github.rs:into_release`). Backend `Release.version` must be bare semver.
 - An unparseable version propagates as `Error::SemVer`, never a silent `false`, in
   `bump_is_greater`/`is_update_available`; but `choose_latest_release` deliberately
   drops unparseable releases via `unwrap_or(false)`.
 - Unset `target` resolves to `get_target()`; a set `target` is used verbatim
-  (`src/backends/common.rs:148-151`).
+  (`src/backends/common.rs:CommonBuilderConfig::build`).
 - A custom `asset_matcher` fully bypasses `asset_for`; no asset selected ->
   `Error::Release`.
 - Default matcher pass order (target+id, OS+ARCH+id, id-only) and first-match
@@ -149,15 +150,18 @@ Overrides:
 
 ## Tests
 
-- `src/version.rs:54-114`: `test_bump_greater`, `test_bump_is_compatible`,
-  `test_bump_is_major/minor/patch` cover the comparison matrix.
-- `src/errors.rs:255-283`: `Error::SemVer` is opaque, source-preserving, and keeps the
+- `src/version.rs:test_bump_greater`, `src/version.rs:test_bump_is_compatible`,
+  `src/version.rs:test_bump_is_major`, `src/version.rs:test_bump_is_minor`,
+  `src/version.rs:test_bump_is_patch` cover the comparison matrix.
+- `src/errors.rs:semver_error_is_opaque_with_source`,
+  `src/errors.rs:semver_error_display_includes_prefix_and_inner_message`:
+  `Error::SemVer` is opaque, source-preserving, and keeps the
   `SemVerError:` Display prefix.
-- `src/backends/common.rs:318-336`:
-  `build_resolves_target_and_install_path_defaults` pins unset-target-defaults-to-build
-  -target and set-target-used-verbatim.
-- `src/backends/github.rs:1059`: `asset_matcher_overrides_default_selection`.
-- `src/update.rs:1181`: documents that an unparseable version is dropped by the leading
+- `src/backends/common.rs:build_resolves_target_and_install_path_defaults`
+  pins unset-target-defaults-to-build-target and set-target-used-verbatim.
+- `src/backends/github.rs:asset_matcher_overrides_default_selection`.
+- `src/update.rs:choose_latest_release_ignores_unparseable_versions`: documents that an
+  unparseable version is dropped by the leading
   `bump_is_greater(...).unwrap_or(false)` in `choose_latest_release`.
 
 ## Related

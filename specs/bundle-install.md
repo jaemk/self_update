@@ -6,16 +6,16 @@ docs-only recipe per Non-goals)
 
 Implementation: `bundle_path_in_archive` / `bundle_install_path` on the common
 builder setters (`src/macros.rs`), resolved by
-`CommonBuilderConfig::resolve_bundle_mode` (`src/backends/common.rs:638`) and
-`default_bundle_install_path` (`src/update.rs:1801`); the finish tail branches to
-`install_bundle` / `swap_bundle` (`src/update.rs:1630`, `:1683`). See
+`CommonBuilderConfig::resolve_bundle_mode` (`src/backends/common.rs:CommonBuilderConfig::resolve_bundle_mode`) and
+`default_bundle_install_path` (`src/update.rs:default_bundle_install_path`); the finish tail branches to
+`install_bundle` / `swap_bundle` (`src/update.rs:install_bundle`, `src/update.rs:swap_bundle`). See
 `ref-update-pipeline.md` ("Bundle install") for the behavior reference and the
 test list.
 
 ## Problem
 
 The update pipeline extracts exactly one file (`bin_path_in_archive`) and replaces
-one binary (`install_binary`, `src/update.rs:1523`). A macOS application is a
+one binary (`install_binary`, `src/update.rs:install_binary`). A macOS application is a
 directory bundle (`MyApp.app/...`): updating only the exe inside it leaves stale
 resources and breaks the bundle's code signature. Issue #145 carries a complete
 userland implementation (full unzip + dir-copy + self_replace) and the maintainer
@@ -28,25 +28,25 @@ Non-goals). Phase C (relaunch) shipped as `restart()` / `restart_with()`
 
 ## Building blocks (current behavior, cited)
 
-- `Extract::extract_into` (`src/lib.rs:1034`): full-tree extraction. Zip entries
-  get their archived unix mode applied, masked to `0o777` (`lib.rs:1118-1130`;
-  tests `lib.rs:3469`, `lib.rs:2737`). Tar unpacks via `tar::Archive::unpack`
-  (`lib.rs:1068`), which preserves modes and symlinks. Zip-slip is rejected via
-  `enclosed_name` (`lib.rs:1097`).
+- `Extract::extract_into` (`src/lib.rs:Extract::extract_into`): full-tree extraction. Zip entries
+  get their archived unix mode applied, masked to `0o777` (`src/lib.rs:extract_into`;
+  tests `src/lib.rs:extract_zip_masks_setuid_setgid_sticky_bits`, `src/lib.rs:extract_into_preserves_zip_unix_mode`). Tar unpacks via `tar::Archive::unpack`
+  (`src/lib.rs:extract_into`), which preserves modes and symlinks. Zip-slip is rejected via
+  `enclosed_name` (`src/lib.rs:extract_into`).
 - Zip symlink entries are restored as symlinks on unix, with escape-target
   rejection and a physical-parent canonicalization backstop (fixed in PR #199).
   See BNDL-4.
-- `MoveAll` (`lib.rs:1400`): all-or-nothing multi-file swap. Stashes each
+- `MoveAll` (`src/lib.rs:MoveAll`): all-or-nothing multi-file swap. Stashes each
   displaced destination under `temp`, rolls back applied moves in reverse on the
   first failure, returns the original error; rollback is best-effort (failures
   logged via `log::error!`). Rename-only: sources, destinations, and `temp`
   must share one filesystem.
-- `install_binary` (`update.rs:1523`): `verify_binary` hook, then `self_replace`
+- `install_binary` (`src/update.rs:install_binary`): `verify_binary` hook, then `self_replace`
   when `bin_install_path` is the running exe (`same_file`, canonicalizing,
-  `update.rs:1554`), else `Move`.
+  `src/update.rs:install_binary`), else `Move`.
 - Config threading: builder setter -> `CommonConfig.bin_install_path` (default
-  `current_exe()`, `src/backends/common.rs:574`) -> `FinishCtx` (owned,
-  `update.rs:1306`) -> `finish_update_owned` (shared sync/async tail).
+  `current_exe()`, `src/backends/common.rs:bin_install_path`) -> `FinishCtx` (owned,
+  `src/update.rs:FinishCtx`) -> `finish_update_owned` (shared sync/async tail).
 - Staging today: download and single-file extraction happen in a system-temp
   `TempDir`.
 
@@ -58,7 +58,7 @@ to the common builder setters (`src/macros.rs`), available on every backend's
 to the archive root (e.g. `MyApp.app` or `{{ bin }}-{{ version }}/MyApp.app`).
 The `{{ bin }}` / `{{ target }}` / `{{ version }}` templates apply with the same
 substitution and `is_safe_asset_name` traversal defense as `bin_path_in_archive`
-(`update.rs:1426`).
+(`src/update.rs:is_safe_asset_name`).
 
 BNDL-1-2. `bundle_install_path(path: impl AsRef<Path>) -> &mut Self` names the
 installed bundle directory to replace (e.g. `/Applications/MyApp.app`).
@@ -79,7 +79,7 @@ BNDL-1-4. Mutual exclusion: an explicit `bin_path_in_archive(..)` or
 `bin_install_path(..)` call combined with bundle mode is a `build()` error. The
 `bin_path_in_archive` value auto-derived from `bin_name` does not count
 (distinguished by the existing `bin_path_in_archive_auto` flag,
-`macros.rs:545`); in bundle mode the auto-derived value is simply unused.
+`src/backends/common.rs:bin_path_in_archive_auto`); in bundle mode the auto-derived value is simply unused.
 
 BNDL-1-5. `bin_name` and `current_version` remain required; asset selection,
 verification config, confirm/output flags, and progress are unchanged. Bundle
@@ -123,7 +123,7 @@ BNDL-2-5. Swap (stash-and-rollback, `MoveAll` semantics, one code path on all
 platforms):
 
 1. If `current_exe()` is inside `bundle_install_path` (ancestor check using the
-   `same_file` canonicalization approach, `update.rs:1554`): rename the running
+   `same_file` canonicalization approach, `src/update.rs:exe_inside_bundle`): rename the running
    exe file out to `stash/exe-aside`. Renaming a running executable is
    permitted on unix and windows; this is the primitive `self_replace` itself
    relies on, applied here so the old tree contains no running image before the
@@ -133,7 +133,7 @@ platforms):
 4. On failure at any step, reverse the applied renames in order (restore
    `stash/old`, restore `exe-aside`) and return the original error. Rollback
    is best-effort and logged on failure, exactly the `MoveAll` contract
-   (`lib.rs:1496`).
+   (`src/lib.rs:MoveAll`).
 5. On success the stash `TempDir` is dropped. On unix, unlinking the old
    running image is safe (the inode persists until the process exits). On
    windows the aside old exe stays locked until process exit; its deletion is
@@ -172,7 +172,7 @@ so a mid-swap EACCES names the path rather than a bare os error 13.
 ## BNDL-4: extraction fidelity (standalone fixes)
 
 BNDL-4-1. Permission bits: already correct, no change needed. Zip modes are
-applied masked to `0o777` (`lib.rs:1118-1130`); tar preserves modes via
+applied masked to `0o777` (`src/lib.rs:extract_into`); tar preserves modes via
 `unpack`. Recorded here because #145's userland code applies `unix_mode()`
 manually; upstream already does.
 
@@ -191,7 +191,7 @@ written as regular files (documented; `.app` is not a windows concern). See
 ## BNDL-5: errors and guarantees
 
 BNDL-5-1. New error variants. `Error` is `#[non_exhaustive]`
-(`src/errors.rs:21`), so each addition is a minor-version change:
+(`src/errors.rs:Error`), so each addition is a minor-version change:
 - `Error::NoAppBundle { exe: PathBuf }` ("ConfigError: no `.app` ancestor of
   <exe>; set bundle_install_path explicitly") for failed macOS default
   detection. Matchable so a caller can prompt for a path instead of failing.
