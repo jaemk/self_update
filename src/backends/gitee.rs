@@ -17,8 +17,9 @@ use serde::Deserialize;
 const DEFAULT_HOST: &str = "https://gitee.com";
 
 /// Gitee's canonical host. A token resolved from the environment is bound to whatever host the
-/// application configured, so `build()` warns when that host is not this one (see
-/// [`warn_if_env_token_off_canonical_host`](crate::backends::common::warn_if_env_token_off_canonical_host)).
+/// application configured, so `build()` warns when that host is neither this one nor an
+/// acknowledged `allow_auth_host` entry (see
+/// [`env_token_host_decision`](crate::backends::common::env_token_host_decision)).
 const CANONICAL_AUTH_HOST: &str = "gitee.com";
 
 /// Gitee release-asset JSON shape (download URL is `browser_download_url`). Private DTO converted
@@ -139,14 +140,24 @@ pub struct ReleaseListBuilder {
 impl std::fmt::Debug for ReleaseListBuilder {
     /// Every field, with the token redacted exactly as `RequestConfig`'s `Debug` does.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, no `..`: a field added to the struct and not listed here is a compile error.
+        let Self {
+            host,
+            repo_owner,
+            repo_name,
+            target,
+            auth_token,
+            auth_token_from_env,
+            request,
+        } = self;
         f.debug_struct("ReleaseListBuilder")
-            .field("host", &self.host)
-            .field("repo_owner", &self.repo_owner)
-            .field("repo_name", &self.repo_name)
-            .field("target", &self.target)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
-            .field("auth_token_from_env", &self.auth_token_from_env)
-            .field("request", &self.request)
+            .field("host", host)
+            .field("repo_owner", repo_owner)
+            .field("repo_name", repo_name)
+            .field("target", target)
+            .field("auth_token", &auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", auth_token_from_env)
+            .field("request", request)
             .finish()
     }
 }
@@ -200,10 +211,11 @@ impl ReleaseListBuilder {
     /// [`auth_token_from_env`](Self::auth_token_from_env). This setter always wins over that one,
     /// in either call order.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
-        self.auth_token = Some(auth_token.into());
-        // An explicit token is the application's own credential and always wins over the
-        // environment, whatever the call order, so this is no longer an env-sourced token.
-        self.auth_token_from_env = false;
+        crate::backends::common::set_explicit_auth_token(
+            &mut self.auth_token,
+            &mut self.auth_token_from_env,
+            auth_token,
+        );
         self
     }
 
@@ -236,16 +248,19 @@ impl ReleaseListBuilder {
         request.auth_scheme = crate::backends::common::AuthScheme::Bearer;
         request.auth_token = self.auth_token.clone();
         request.auth_base_host = crate::backends::common::host_of(&host);
-        // An env-sourced token is bound to whatever host was configured, which the request-time host
-        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
-        // gitee.com.
-        crate::backends::common::warn_if_env_token_off_canonical_host(
-            self.auth_token_from_env,
-            request.auth_base_host.as_deref(),
-            Some(CANONICAL_AUTH_HOST),
-        );
         request.build_client();
         request.check()?;
+        // An env-sourced token is bound to whatever host was configured, which the request-time host
+        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
+        // gitee.com (or an acknowledged `allow_auth_host` entry). gitee always has a canonical host,
+        // so the token is still sent either way (DECIDED, A1) -- checked after `request.check()?` so
+        // a builder that is about to fail validation does not also log.
+        crate::backends::common::env_token_host_decision(
+            self.auth_token_from_env,
+            request.auth_base_host.as_deref(),
+            &request.auth_hosts,
+            Some(CANONICAL_AUTH_HOST),
+        );
         Ok(ReleaseList {
             host,
             repo_owner: if let Some(ref owner) = self.repo_owner {
@@ -440,10 +455,13 @@ impl UpdateBuilder {
                 resolved.request.auth_base_host = crate::backends::common::host_of(&host);
                 // An env-sourced token is bound to whatever host was configured, which the
                 // request-time host gate cannot flag (the configured host *is* `auth_base_host`);
-                // warn when that is not gitee.com.
-                crate::backends::common::warn_if_env_token_off_canonical_host(
+                // warn when that is not gitee.com (or an acknowledged `allow_auth_host` entry).
+                // gitee always has a canonical host, so the token is still sent either way
+                // (DECIDED, A1).
+                crate::backends::common::env_token_host_decision(
                     self.common.auth_token_from_env,
                     resolved.request.auth_base_host.as_deref(),
+                    &resolved.request.auth_hosts,
                     Some(CANONICAL_AUTH_HOST),
                 );
                 resolved
@@ -824,9 +842,14 @@ mod tests {
 
     // --- AUTH-1: the environment-sourced auth token -------------------------------------------
 
-    // AUTH-1: `auth_token_from_env()` is present on both gitee builders and leaves them buildable
-    // whatever the environment holds. The env-var precedence itself is unit-tested in
-    // `backends::common` without touching process env.
+    // AUTH-1: `auth_token_from_env()` is present on both gitee builders and is chainable. This is
+    // effectively a "the method exists and does not panic" check, not a behavioral one: it reads the
+    // REAL process environment, so it means something different on a clean machine (nothing set)
+    // than on a dev box exporting `GITEE_TOKEN` -- either way it only asserts `build()` stays `Ok`,
+    // which passes in both cases. The env-var precedence itself is unit-tested in `backends::common`
+    // without touching process env; the actual pickup-from-environment behavior is pinned on the
+    // wire by the per-backend integration binary `tests/auth_token_env_gitee.rs`, which controls the
+    // environment directly.
     #[test]
     fn auth_token_from_env_is_available_on_both_builders() {
         super::Update::configure()
@@ -931,9 +954,9 @@ mod tests {
         }
     }
 
-    // K: `has_auth_token()` answers "am I about to run authenticated?" on both builders without the
+    // K: `has_auth_token()` answers "is a token configured?" on both builders without the
     // application reimplementing the variable list. (The env-pickup half is covered by the
-    // single-test integration binary `tests/auth_token_env.rs`, which may set process env.)
+    // single-test integration binary `tests/auth_token_env_gitee.rs`, which may set process env.)
     #[test]
     fn has_auth_token_reports_an_explicitly_set_token() {
         let mut upd = super::Update::configure();
@@ -948,6 +971,50 @@ mod tests {
         assert!(!list.has_auth_token());
         list.auth_token("explicit");
         assert!(list.has_auth_token());
+    }
+
+    // A5: a blank explicit token (empty or all-whitespace) is not "configured" -- otherwise
+    // `apply_auth` would go on to send a literal `Authorization: Bearer ` header.
+    #[test]
+    fn has_auth_token_treats_a_blank_explicit_token_as_unset() {
+        let mut upd = super::Update::configure();
+        upd.auth_token("");
+        assert!(
+            !upd.has_auth_token(),
+            "an empty token must not count as configured"
+        );
+        upd.auth_token("   ");
+        assert!(
+            !upd.has_auth_token(),
+            "an all-whitespace token must not count as configured"
+        );
+
+        let mut list = super::ReleaseList::configure();
+        list.auth_token("");
+        assert!(!list.has_auth_token());
+        list.auth_token("   ");
+        assert!(!list.has_auth_token());
+    }
+
+    // A1 (DECIDED): gitee has a canonical host, so an env-sourced token bound to an unacknowledged
+    // custom host is still SENT (only the warning differs from the canonical-host case; gitea is the
+    // backend that withholds instead -- see `backends::gitea`'s equivalent test).
+    #[test]
+    fn release_list_still_sends_an_env_sourced_token_off_the_canonical_host() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitee.mycorp.com")
+            .repo_owner("o")
+            .repo_name("r");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list
+            .build()
+            .expect("an unacknowledged host must not fail build()");
+        assert_eq!(
+            built.request.auth_token.as_deref(),
+            Some("ambient"),
+            "gitee must still send an env-sourced token off its canonical host"
+        );
     }
 
     // A: `Debug` on either builder must never print the token. Both hold a plaintext

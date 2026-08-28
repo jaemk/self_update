@@ -168,24 +168,36 @@
   is already at zero (and, on GitHub's unauthenticated per-IP budget, shared with everyone behind the
   same egress IP). Every other error still consumes the budget as before. The download path retries
   through the same loop, so it short-circuits too.
-- The backend builders' `Debug` redacts the authorization token, rendering it as `"<token>"` instead
-  of the value. `CommonBuilderConfig`'s `Debug` is hand-written (it was derived), and every
-  `UpdateBuilder` / `ReleaseListBuilder` derives over it, so logging a builder no longer prints an
-  ambient CI credential. All other fields are still shown.
+- Each backend `Update` / `ReleaseList` builder's `Debug` output redacts the authorization token,
+  rendering it as `"<token>"` instead of the value, so logging a builder no longer prints an ambient
+  CI credential. All other fields are still shown.
+- A credential passed via `request_header("Authorization", ..)` (or `PRIVATE-TOKEN`, `Cookie`, or
+  any header name ending in `-token`, case-insensitive) is now marked sensitive, so it is redacted
+  in a builder's `Debug` output and kept out of the underlying HTTP client's own header logging, the
+  same as a token set with `auth_token(..)`. Previously only the `auth_token` slot was redacted, so
+  a credential passed as a header printed verbatim.
 - `build()` logs a `log::warn!` when a token resolved from the environment would be sent to a host
   other than the backend's canonical one (`api.github.com`, `gitlab.com`, `gitee.com`). The
   environment variables are conventions of the backend's own service, so an application that exposes
   its update url as configuration would otherwise hand `GITHUB_TOKEN` to an arbitrary host with no
-  signal. An explicitly-set token is the application's own decision and is never warned about; gitea
-  is always self-hosted, has no canonical host, and never warns.
+  signal. An explicitly-set token is the application's own decision and is never warned about. gitea
+  has no canonical host, so its rule is stricter: an env-sourced token is withheld at `build()`
+  rather than sent, and the request goes out anonymous, unless the configured host was acknowledged
+  by passing it to `allow_auth_host(..)` or by setting the token explicitly with `auth_token(..)`;
+  the warning still fires, naming the host and the remedy. github/gitlab/gitee are unchanged: an
+  env-sourced token to a non-canonical host still warns and is still sent. On every backend, a host
+  passed to `allow_auth_host` no longer produces that warning.
+- A blank (empty or all-whitespace) `auth_token(..)` is now treated as unset: it no longer blocks the
+  `auth_token_from_env()` fallback, no longer sends an empty `Authorization` header, and
+  `has_auth_token()` reports `false` for it.
 - `Error::http_status_error(429, url)` returns `Error::RateLimited` (with both wait fields `None`)
   instead of `Error::HttpStatus`, so a custom `HttpClient` that has no headers to hand over still
   reports a 429 as rate limiting. 429 does not need a header to mean "too many requests" (RFC 6585);
   401/403 are unchanged on that path, since only a header distinguishes a spent quota from a
   credential failure. Use `Error::http_status_error_with_headers` to get the full classification.
-- `RequestConfig`'s `Debug` renders `auth_base_host`, `auth_hosts`, and `allow_insecure_auth`, which
-  it previously omitted. They carry no secrets, and `auth_base_host` is the field the new
-  env-token host warning is about. The `auth_token` redaction is unchanged.
+- A `Retry-After: 0` is no longer treated as a rate-limit signal. A bare 403 carrying a zero
+  `Retry-After` and no quota header stays `Error::Unauthorized` instead of becoming a zero-wait
+  `Error::RateLimited`.
 - An injected `ureq::Agent` classifies a non-2xx response exactly like the crate-built agents. The
   agent keeps ureq's default `http_status_as_error(true)`, whose `StatusCode` error carries no
   headers, so that path could not see the quota headers; the client now applies a per-request

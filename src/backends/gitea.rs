@@ -105,14 +105,24 @@ pub struct ReleaseListBuilder {
 impl std::fmt::Debug for ReleaseListBuilder {
     /// Every field, with the token redacted exactly as `RequestConfig`'s `Debug` does.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, no `..`: a field added to the struct and not listed here is a compile error.
+        let Self {
+            host,
+            repo_owner,
+            repo_name,
+            target,
+            auth_token,
+            auth_token_from_env,
+            request,
+        } = self;
         f.debug_struct("ReleaseListBuilder")
-            .field("host", &self.host)
-            .field("repo_owner", &self.repo_owner)
-            .field("repo_name", &self.repo_name)
-            .field("target", &self.target)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
-            .field("auth_token_from_env", &self.auth_token_from_env)
-            .field("request", &self.request)
+            .field("host", host)
+            .field("repo_owner", repo_owner)
+            .field("repo_name", repo_name)
+            .field("target", target)
+            .field("auth_token", &auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", auth_token_from_env)
+            .field("request", request)
             .finish()
     }
 }
@@ -170,10 +180,11 @@ impl ReleaseListBuilder {
     /// [`auth_token_from_env`](Self::auth_token_from_env). This setter always wins over that one,
     /// in either call order.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
-        self.auth_token = Some(auth_token.into());
-        // An explicit token is the application's own credential and always wins over the
-        // environment, whatever the call order, so this is no longer an env-sourced token.
-        self.auth_token_from_env = false;
+        crate::backends::common::set_explicit_auth_token(
+            &mut self.auth_token,
+            &mut self.auth_token_from_env,
+            auth_token,
+        );
         self
     }
 
@@ -186,9 +197,12 @@ impl ReleaseListBuilder {
                     by unrelated traffic behind the same NAT, surfacing as \
                     [`RateLimited`](crate::errors::Error::RateLimited). See the crate-level \
                     rate-limit notes.\n\nGitea is always self-hosted, so there is no canonical host \
-                    to compare against and no host warning is emitted: `GITEA_TOKEN` is read \
-                    whatever `host(..)` you configure, and it is on you to make sure the variable \
-                    holds a token for that instance.",
+                    to compare an env-sourced token against. Rather than silently bind \
+                    `GITEA_TOKEN` to whatever `host(..)` you configure, `build()` WITHHOLDS it \
+                    (the request proceeds anonymously, and `build()` still succeeds) unless you \
+                    re-affirm the host -- either with an explicit `auth_token(..)` instead of this \
+                    call, or by also calling `allow_auth_host(the_same_host)`. A warning names the \
+                    host and both remedies when this happens.",
     );
 
     request_config_setters!(request);
@@ -204,15 +218,23 @@ impl ReleaseListBuilder {
             .host
             .as_deref()
             .and_then(crate::backends::common::host_of);
-        // Gitea is always self-hosted, so it has no canonical host to compare an env-sourced token
-        // against: the call is made for symmetry with the other backends and never warns.
-        crate::backends::common::warn_if_env_token_off_canonical_host(
-            self.auth_token_from_env,
-            request.auth_base_host.as_deref(),
-            None,
-        );
         request.build_client();
         request.check()?;
+        // Gitea is always self-hosted, so it has no canonical host to compare an env-sourced token
+        // against: unless the configured host was explicitly re-affirmed (an `allow_auth_host`
+        // entry -- an explicit `auth_token(..)` already bypasses this by clearing
+        // `auth_token_from_env`), the token is WITHHELD rather than silently bound to whatever host
+        // was configured (DECIDED, A1). Checked after `request.check()?` so a builder that is about
+        // to fail validation does not also log.
+        if crate::backends::common::env_token_host_decision(
+            self.auth_token_from_env,
+            request.auth_base_host.as_deref(),
+            &request.auth_hosts,
+            None,
+        ) == crate::backends::common::EnvTokenDecision::Withheld
+        {
+            request.auth_token = None;
+        }
         Ok(ReleaseList {
             host: if let Some(ref host) = self.host {
                 host.to_owned()
@@ -381,9 +403,12 @@ impl UpdateBuilder {
                     by unrelated traffic behind the same NAT, surfacing as \
                     [`RateLimited`](crate::errors::Error::RateLimited). See the crate-level \
                     rate-limit notes.\n\nGitea is always self-hosted, so there is no canonical host \
-                    to compare against and no host warning is emitted: `GITEA_TOKEN` is read \
-                    whatever `host(..)` you configure, and it is on you to make sure the variable \
-                    holds a token for that instance.",
+                    to compare an env-sourced token against. Rather than silently bind \
+                    `GITEA_TOKEN` to whatever `host(..)` you configure, `build()` WITHHOLDS it \
+                    (the request proceeds anonymously, and `build()` still succeeds) unless you \
+                    re-affirm the host -- either with an explicit `auth_token(..)` instead of this \
+                    call, or by also calling `allow_auth_host(the_same_host)`. A warning names the \
+                    host and both remedies when this happens.",
     );
 
     /// Internal: validate config into a concrete `Update`. Shared by `build` / `build_async`.
@@ -416,12 +441,18 @@ impl UpdateBuilder {
                     .as_deref()
                     .and_then(crate::backends::common::host_of);
                 // Gitea is always self-hosted, so it has no canonical host to compare an
-                // env-sourced token against: the call is made for symmetry and never warns.
-                crate::backends::common::warn_if_env_token_off_canonical_host(
+                // env-sourced token against: unless the configured host was explicitly re-affirmed
+                // (an `allow_auth_host` entry), the token is WITHHELD rather than silently bound to
+                // whatever host was configured (DECIDED, A1).
+                if crate::backends::common::env_token_host_decision(
                     self.common.auth_token_from_env,
                     resolved.request.auth_base_host.as_deref(),
+                    &resolved.request.auth_hosts,
                     None,
-                );
+                ) == crate::backends::common::EnvTokenDecision::Withheld
+                {
+                    resolved.request.auth_token = None;
+                }
                 resolved
             },
         })
@@ -736,9 +767,14 @@ mod tests {
 
     // --- AUTH-1: the environment-sourced auth token -------------------------------------------
 
-    // AUTH-1: `auth_token_from_env()` is present on both gitea builders and leaves them buildable
-    // whatever the environment holds. The env-var precedence itself is unit-tested in
-    // `backends::common` without touching process env.
+    // AUTH-1: `auth_token_from_env()` is present on both gitea builders and is chainable. This is
+    // effectively a "the method exists and does not panic" check, not a behavioral one: it reads the
+    // REAL process environment, so it means something different on a clean machine (nothing set)
+    // than on a dev box exporting `GITEA_TOKEN` -- either way it only asserts `build()` stays `Ok`,
+    // which passes in both cases (a WITHHELD token, per A1, still leaves `build()` succeeding). The
+    // env-var precedence itself is unit-tested in `backends::common` without touching process env;
+    // the actual pickup-from-environment behavior is pinned on the wire by the per-backend
+    // integration binary `tests/auth_token_env_gitea.rs`, which controls the environment directly.
     #[test]
     fn auth_token_from_env_is_available_on_both_builders() {
         super::Update::configure()
@@ -849,9 +885,9 @@ mod tests {
         }
     }
 
-    // K: `has_auth_token()` answers "am I about to run authenticated?" on both builders without the
+    // K: `has_auth_token()` answers "is a token configured?" on both builders without the
     // application reimplementing the variable list. (The env-pickup half is covered by the
-    // single-test integration binary `tests/auth_token_env.rs`, which may set process env.)
+    // single-test integration binary `tests/auth_token_env_gitea.rs`, which may set process env.)
     #[test]
     fn has_auth_token_reports_an_explicitly_set_token() {
         let mut upd = super::Update::configure();
@@ -866,6 +902,160 @@ mod tests {
         assert!(!list.has_auth_token());
         list.auth_token("explicit");
         assert!(list.has_auth_token());
+    }
+
+    // A5: a blank explicit token (empty or all-whitespace) is not "configured" -- otherwise
+    // `apply_auth` would go on to send a literal `Authorization: token ` header.
+    #[test]
+    fn has_auth_token_treats_a_blank_explicit_token_as_unset() {
+        let mut upd = super::Update::configure();
+        upd.auth_token("");
+        assert!(
+            !upd.has_auth_token(),
+            "an empty token must not count as configured"
+        );
+        upd.auth_token("   ");
+        assert!(
+            !upd.has_auth_token(),
+            "an all-whitespace token must not count as configured"
+        );
+
+        let mut list = super::ReleaseList::configure();
+        list.auth_token("");
+        assert!(!list.has_auth_token());
+        list.auth_token("   ");
+        assert!(!list.has_auth_token());
+    }
+
+    // --- A1 (DECIDED): gitea withholds an unacknowledged env-sourced token ----------------------
+
+    // The core of A1: with no canonical host to compare against, an env-sourced token bound to a
+    // custom `host(..)` the application never explicitly re-affirmed is WITHHELD -- the request
+    // proceeds anonymously -- rather than silently sent, unlike github/gitlab/gitee (see those
+    // backends' `release_list_still_sends_an_env_sourced_token_off_the_canonical_host` tests).
+    #[test]
+    fn release_list_withholds_an_unacknowledged_env_sourced_token() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list
+            .build()
+            .expect("a withheld token must not fail build() -- the request goes out anonymous");
+        assert_eq!(
+            built.request.auth_token, None,
+            "an unacknowledged env-sourced token must be withheld, not sent"
+        );
+    }
+
+    #[test]
+    fn build_update_withholds_an_unacknowledged_env_sourced_token() {
+        let mut upd = super::Update::configure();
+        upd.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0");
+        upd.common.auth_token = Some("ambient".to_string());
+        upd.common.auth_token_from_env = true;
+        let built = upd.build().expect("a withheld token must not fail build()");
+        assert_eq!(built.auth_token(), None);
+    }
+
+    // A1's remedy #1: `allow_auth_host(the_same_host)` re-affirms the host, so the token IS sent
+    // even though gitea still has no canonical host of its own.
+    #[test]
+    fn release_list_sends_an_env_sourced_token_once_the_host_is_acknowledged() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .allow_auth_host("gitea.example.com");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list.build().unwrap();
+        assert_eq!(built.request.auth_token.as_deref(), Some("ambient"));
+    }
+
+    // The `Update` half of A1's remedy #1. `build_update` carries its own copy of the decision call
+    // (it resolves through `CommonBuilderConfig::build`, not through `ReleaseListBuilder::build`), so
+    // "acknowledged means sent" has to be pinned on both builders or a one-sided regression -- e.g.
+    // passing `&[]` instead of the resolved `auth_hosts` on this path only -- stays green.
+    // `auth_token()` is the `UpdateConfig` accessor both the listing and the DOWNLOAD path read, so
+    // asserting it covers the token that would be attached to an asset download too.
+    #[test]
+    fn build_update_sends_an_env_sourced_token_once_the_host_is_acknowledged() {
+        let mut upd = super::Update::configure();
+        upd.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .allow_auth_host("gitea.example.com");
+        upd.common.auth_token = Some("ambient".to_string());
+        upd.common.auth_token_from_env = true;
+        let built = upd.build().unwrap();
+        assert_eq!(
+            built.auth_token(),
+            Some("ambient"),
+            "an acknowledged host must receive the env-sourced token on the update path too"
+        );
+    }
+
+    // Acknowledgement is a HOST comparison, case-insensitive like every other host comparison in the
+    // crate (`auth_allowed_for`, the canonical-host check). A user who writes their instance host in
+    // the case their config file happens to use must not silently get an anonymous request.
+    #[test]
+    fn acknowledgement_of_the_host_is_case_insensitive() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .allow_auth_host("GITEA.Example.COM");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list.build().unwrap();
+        assert_eq!(
+            built.request.auth_token.as_deref(),
+            Some("ambient"),
+            "allow_auth_host must match the configured host case-insensitively"
+        );
+    }
+
+    // The anti-vacuity control for the two tests above: what unlocks the token is acknowledging THIS
+    // host, not the mere presence of an `allow_auth_host` call. An implementation that treated a
+    // non-empty `auth_hosts` list as blanket acknowledgement (`!auth_hosts.is_empty()`) would pass
+    // every other test in this file and hand `GITEA_TOKEN` to a host the application never named.
+    #[test]
+    fn acknowledging_a_different_host_still_withholds_the_env_sourced_token() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .allow_auth_host("cdn.example.com");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list.build().unwrap();
+        assert_eq!(
+            built.request.auth_token, None,
+            "acknowledging some other host must not acknowledge the configured one"
+        );
+    }
+
+    // A1's remedy #2 (the one that "falls out for free"): an explicit `auth_token(..)` call clears
+    // `auth_token_from_env`, so it is never subject to the withhold rule at all -- it is the
+    // application's own decision, exactly like the canonical-host backends.
+    #[test]
+    fn release_list_sends_an_explicit_token_regardless_of_host_acknowledgement() {
+        let mut list = super::ReleaseList::configure();
+        list.host("https://gitea.example.com")
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token("explicit");
+        let built = list.build().unwrap();
+        assert_eq!(built.request.auth_token.as_deref(), Some("explicit"));
     }
 
     // A: `Debug` on either builder must never print the token. Both hold a plaintext

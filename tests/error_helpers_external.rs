@@ -237,6 +237,153 @@ fn injected_transport_error_propagates_through_backend() {
     }
 }
 
+/// A transport that always fails with a fixed `Error` and counts how many times it was called.
+/// `error` is cloned per-call via the supplied closure so both a header-aware `RateLimited` and a
+/// plain `HttpStatus` can be pinned without hand-rolling `Clone` for `Error`.
+struct CountingErrorClient<F> {
+    calls: std::sync::atomic::AtomicUsize,
+    make_error: F,
+}
+
+impl<F> CountingErrorClient<F>
+where
+    F: Fn() -> Error + Send + Sync,
+{
+    fn new(make_error: F) -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            make_error,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<F> HttpClient for CountingErrorClient<F>
+where
+    F: Fn() -> Error + Send + Sync,
+{
+    fn get(
+        &self,
+        _url: &str,
+        _headers: &HeaderMap,
+        _timeout: Option<Duration>,
+    ) -> self_update::Result<Box<dyn HttpResponse>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err((self.make_error)())
+    }
+}
+
+// The downstream half of the retry-short-circuit contract (`src/backends/mod.rs:1768`, `:1790`
+// pin the in-crate half over a real loopback stub): a custom `HttpClient` that returns
+// `Error::RateLimited` must see exactly ONE call, no matter the configured `.retries(..)` budget —
+// the crate does not call the injected transport again. This is pinned from outside the crate
+// because a custom-transport author can only observe this contract through the public
+// `HttpClient` seam, not through the in-crate unit tests.
+#[test]
+fn injected_rate_limited_error_is_not_retried() {
+    let url = "https://example.com/releases";
+    let client = Arc::new(CountingErrorClient::new(move || {
+        Error::http_status_error_with_headers(429, url, &HeaderMap::new())
+    }));
+
+    let result = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("o")
+        .repo_name("r")
+        .http_client(client.clone())
+        .retries(3)
+        .build()
+        .unwrap()
+        .fetch();
+
+    assert!(
+        matches!(result, Err(Error::RateLimited { status: 429, .. })),
+        "expected Error::RateLimited, got {:?}",
+        result
+    );
+    assert_eq!(
+        client.calls(),
+        1,
+        "a RateLimited error must end the retry loop immediately: exactly one call to the \
+         injected transport, even with retries = 3"
+    );
+}
+
+// The control for the test above: every other error still consumes the whole retry budget
+// (1 initial attempt + `retries` retries). Without this pair, a transport-injection regression
+// that short-circuited on EVERY error (not just `RateLimited`) would pass the test above.
+#[test]
+fn injected_non_rate_limited_error_still_consumes_the_retry_budget() {
+    let url = "https://example.com/releases";
+    let client = Arc::new(CountingErrorClient::new(move || {
+        Error::http_status_error(500, url)
+    }));
+
+    let result = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("o")
+        .repo_name("r")
+        .http_client(client.clone())
+        .retries(3)
+        .build()
+        .unwrap()
+        .fetch();
+
+    assert!(
+        matches!(result, Err(Error::HttpStatus { status: 500, .. })),
+        "expected Error::HttpStatus, got {:?}",
+        result
+    );
+    assert_eq!(
+        client.calls(),
+        4,
+        "a non-RateLimited error must consume the whole retry budget: 1 initial attempt + 3 \
+         retries = 4 calls to the injected transport"
+    );
+}
+
+// A4 x D7: the interaction that motivated pairing the two fixes. Before A4, a downstream
+// `HttpClient` answering `403 + Retry-After: 0` with no other rate-limit signal classified as
+// `Error::RateLimited` (a zero-second wait) and the retry loop's short-circuit ended the loop
+// after exactly one call -- silently discarding the retry budget for what is, underneath, a bare
+// authorization failure. After A4, `parse_retry_after` treats a zero delay as no signal, so this
+// response classifies as `Error::Unauthorized` instead, and `Unauthorized` is not short-circuited:
+// it must consume the whole configured retry budget exactly like the plain-500 control above. A
+// regression that keyed the short-circuit on "this looked like a rate-limit response" (status +
+// header presence) rather than on the `RateLimited` variant itself would pass A4's own unit tests
+// (which only check the returned variant, not what the retry loop then does with it) while still
+// silently eating the retry budget here.
+#[test]
+fn injected_403_with_zero_retry_after_is_unauthorized_and_still_consumes_the_retry_budget() {
+    let url = "https://example.com/releases";
+    let client = Arc::new(CountingErrorClient::new(move || {
+        Error::http_status_error_with_headers(403, url, &headers(&[("retry-after", "0")]))
+    }));
+
+    let result = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("o")
+        .repo_name("r")
+        .http_client(client.clone())
+        .retries(3)
+        .build()
+        .unwrap()
+        .fetch();
+
+    assert!(
+        matches!(result, Err(Error::Unauthorized { status: 403, .. })),
+        "a 403 with Retry-After: 0 and no other rate-limit signal must classify as Unauthorized, \
+         got {:?}",
+        result
+    );
+    assert_eq!(
+        client.calls(),
+        4,
+        "Unauthorized is not short-circuited: 1 initial attempt + 3 retries = 4 calls to the \
+         injected transport, exactly as a non-rate-limited 500 would consume"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `Error::RateLimited`: the header-aware constructor, the accessors, and the back-off
 // ---------------------------------------------------------------------------

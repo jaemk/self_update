@@ -357,10 +357,10 @@ pub(crate) fn retry_backoff_ms(
     doubled.min(max_ms)
 }
 
-/// Whether an error must not be retried because the request quota is already exhausted. Retrying
-/// [`Error::RateLimited`] cannot succeed within the sub-second backoff window and only spends more
-/// of a budget that is already at zero (and, on the unauthenticated per-IP GitHub budget, shared
-/// with everyone behind the same egress IP), so both retry loops return it immediately.
+/// Whether an error must not be retried. [`Error::RateLimited`] is never retried: the wait is the
+/// server's to dictate (`Retry-After`, or the reset header), and it can be far longer than any
+/// backoff this crate would apply, so the error is returned immediately and the decision to sleep,
+/// reschedule, or give up stays with the caller instead of being spent inside the loop.
 fn is_rate_limited(err: &Error) -> bool {
     matches!(err, Error::RateLimited { .. })
 }
@@ -370,9 +370,10 @@ fn is_rate_limited(err: &Error) -> bool {
 /// once. The transport and the sleep are injected so the retry/backoff control flow can be
 /// unit-tested without real requests or real delays.
 ///
-/// [`Error::RateLimited`] is never retried: the quota is already spent, so the sub-second backoff
-/// would only fire more requests against an exhausted (and, behind a shared egress IP, shared)
-/// budget. That error returns immediately regardless of the remaining budget.
+/// [`Error::RateLimited`] is never retried: the wait is the server's to dictate (`Retry-After`, or
+/// the reset header), and it can be far longer than any backoff this crate would apply, so the
+/// error is returned immediately and the decision to sleep, reschedule, or give up stays with the
+/// caller instead of being spent inside the loop.
 pub(crate) fn retry<R>(
     retries: u32,
     base: std::time::Duration,

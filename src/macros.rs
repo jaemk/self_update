@@ -42,7 +42,12 @@ macro_rules! request_config_setters {
         /// request-establishment phase, with exponential backoff (see
         /// [`retry_backoff`](Self::retry_backoff)). Defaults to `0` (no retries). Intended for
         /// transient failures, though any failed attempt (including a permanent one such as a 404)
-        /// consumes the retry budget.
+        /// consumes the retry budget -- **with one exception**:
+        /// [`Error::RateLimited`](crate::errors::Error::RateLimited) is never retried. The wait is
+        /// the server's to dictate (`Retry-After`, or the reset header), and it can be far longer
+        /// than any backoff this crate would apply, so the error is returned immediately and the
+        /// decision to sleep, reschedule, or give up stays with the caller instead of being spent
+        /// inside the loop.
         ///
         /// The download is retried only *before* any bytes are streamed to disk (a failure
         /// mid-stream is not retried, since it would corrupt the partially-written file).
@@ -60,7 +65,10 @@ macro_rules! request_config_setters {
         /// the delay doubles each subsequent attempt, clamped to never exceed `max`. Defaults to a
         /// `100ms` base and a `~3.2s` cap. Applies to listing/lookup requests and to the binary
         /// download's request-establishment phase (see [`retries`](Self::retries)); a mid-stream
-        /// transfer failure is not retried.
+        /// transfer failure is not retried. As with `retries`,
+        /// [`Error::RateLimited`](crate::errors::Error::RateLimited) never consults this backoff: it
+        /// is returned immediately, since the wait it carries (`Retry-After` or the reset header)
+        /// is the server's to dictate and can be far longer than any backoff this crate would apply.
         pub fn retry_backoff(
             &mut self,
             base: std::time::Duration,
@@ -463,8 +471,11 @@ macro_rules! impl_async_update_verbs {
 /// * `token:` — the path (relative to `self`) of the builder's token field: `common.auth_token` on
 ///   an `UpdateBuilder`, plain `auth_token` on a `ReleaseListBuilder`.
 /// * `env_sourced:` — the path of the `bool` recording that the current token came from the
-///   environment. Set here, cleared by every explicit `auth_token(..)` setter, and read by `build()`
-///   to warn when an env-sourced token would be bound to a non-canonical host.
+///   environment. Set here, cleared by every explicit `auth_token(..)` setter (via
+///   [`set_explicit_auth_token`](crate::backends::common::set_explicit_auth_token)), and read by
+///   `build()` — via [`env_token_host_decision`](crate::backends::common::env_token_host_decision)
+///   — to warn (or, for a backend with no canonical host, withhold the token) when it would be bound
+///   to an unacknowledged host.
 /// * `vars:` — the env var names, in precedence order.
 /// * `rationale:` — the backend-specific closing paragraph of the rustdoc, so github's
 ///   60/5000-requests-per-hour numbers are not rendered verbatim on backends where they are false.
@@ -527,13 +538,17 @@ macro_rules! impl_auth_token_from_env {
         /// The variable set does **not** change with a custom `api_base_url` / `host`: the same
         /// names are read whatever host you point the builder at. For a backend that has a
         /// canonical host, `build()` logs a warning when an env-sourced token would be bound to a
-        /// different one.
+        /// different, unacknowledged one; a backend with no canonical host instead withholds the
+        /// token in that case (see [`has_auth_token`](Self::has_auth_token)).
         ///
         #[doc = $rationale]
         pub fn auth_token_from_env(&mut self) -> &mut Self {
-            let filled = crate::backends::common::fill_env_token_if_unset(
+            // The closure form means the environment is only actually read (and its "using the auth
+            // token from $X" / non-UTF-8 diagnostics only actually logged) when the slot is blank --
+            // never for a call whose result would just be thrown away (A6).
+            let filled = crate::backends::common::fill_env_token_if_unset_with(
                 &mut self.$($field).+,
-                crate::backends::common::token_from_env(Self::AUTH_TOKEN_ENV_VARS),
+                || crate::backends::common::token_from_env(Self::AUTH_TOKEN_ENV_VARS),
             );
             if filled {
                 self.$($env_sourced).+ = true;
@@ -541,15 +556,16 @@ macro_rules! impl_auth_token_from_env {
             self
         }
 
-        /// Whether an authorization token is set on this builder, from either
+        /// Whether an authorization token is *configured* on this builder, from either
         /// [`auth_token`](Self::auth_token) or [`auth_token_from_env`](Self::auth_token_from_env).
         ///
-        /// This is how an application answers "am I about to run authenticated?" — e.g. to pick a
-        /// polling interval, or to warn that a private repository will not be reachable — without
-        /// reimplementing the variable list above. It reports only that a token is *present*, not
-        /// that it is valid, and never exposes the value.
+        /// This is configuration, not a prediction: at request time the token is withheld unless the
+        /// URL's host matches the configured API host or an `allow_auth_host` entry over https, and a
+        /// user-supplied `Authorization` header via `request_header` takes precedence over it. On
+        /// gitea an env-sourced token is additionally withheld unless the configured host was
+        /// acknowledged.
         pub fn has_auth_token(&self) -> bool {
-            self.$($field).+.is_some()
+            !crate::backends::common::is_blank_token(self.$($field).+.as_deref())
         }
     };
 }
@@ -561,43 +577,63 @@ macro_rules! impl_auth_token_from_env {
 /// inside each `impl UpdateBuilder` block; backend-specific setters (repo/host/url, bucket,
 /// region, credentials) are written per backend.
 macro_rules! impl_common_builder_setters {
-    // Default: every shared setter, including `auth_token`.
-    () => {
-        impl_common_builder_setters!(@shared);
-        impl_common_builder_setters!(@auth_token "");
-    };
-    // Default plus the backend's conventional env-var lookup (`auth_token_from_env`), its
-    // `has_auth_token` query and its `AUTH_TOKEN_ENV_VARS` list. `$var`s are the env var names in
-    // precedence order; `$rationale` is the backend-specific closing rustdoc paragraph.
+    // Every shared setter, plus `auth_token`, the backend's conventional env-var lookup
+    // (`auth_token_from_env`), its `has_auth_token` query and its `AUTH_TOKEN_ENV_VARS` list.
+    // `$var`s are the env var names in precedence order; `$rationale` is the backend-specific
+    // closing rustdoc paragraph.
+    //
+    // This is the ONLY arm that emits `auth_token`. A bare, env-lookup-less
+    // `impl_common_builder_setters!()` arm used to exist for that purpose, but every forge backend
+    // (github/gitlab/gitea/gitee) has an env-var convention and uses THIS arm, and every non-forge
+    // backend (custom x2, s3, manifest) uses `no_auth_token` instead -- so the bare arm was dead
+    // code (it emitted an `auth_token` setter with an empty `#[doc = ""]` and no cross-link) and has
+    // been removed, along with the `@auth_token $extra` indirection it needed. One consequence worth
+    // being deliberate about: `has_auth_token()` is therefore emitted ONLY by
+    // `impl_auth_token_from_env!` below -- a builder cannot offer "is a token set?" without also
+    // opting into the environment lookup.
     (auth_env: [$($var:literal),+ $(,)?], rationale: $rationale:literal $(,)?) => {
         impl_common_builder_setters!(@shared);
-        impl_common_builder_setters!(@auth_token
-            "\nThe token can also be taken from the environment with \
-             [`auth_token_from_env`](Self::auth_token_from_env), which reads the backend's \
-             conventional variables. This setter always wins over that one, in either call order.");
+
+        /// Set the authorization token, used in requests to the backend's api url.
+        ///
+        /// This is to support private repos where you need an auth token.
+        /// **Make sure not to bake the token into your app**; it is recommended you obtain
+        /// it via another mechanism, such as environment variables or prompting the user.
+        ///
+        /// The value is stored verbatim -- it is **not** trimmed, unlike
+        /// [`auth_token_from_env`](Self::auth_token_from_env)'s environment lookup (which trims
+        /// surrounding whitespace). So `auth_token(" ghp_x\n")` keeps the leading space and
+        /// trailing newline and fails at **request** time as
+        /// [`Error::InvalidAuthToken`](crate::errors::Error::InvalidAuthToken), where the same raw
+        /// value in an environment variable would have worked. A **blank** value (empty, or all
+        /// whitespace) is different: it is treated as unset by
+        /// [`has_auth_token`](Self::has_auth_token), is never sent as a request header, and does not
+        /// block [`auth_token_from_env`](Self::auth_token_from_env)'s fallback -- so
+        /// `auth_token("").auth_token_from_env()` still picks up the environment.
+        ///
+        /// A blank value is the one case where the two setters are **order sensitive**: this setter
+        /// always overwrites the slot, so `auth_token_from_env().auth_token("")` discards the
+        /// resolved token and the request goes out unauthenticated (`has_auth_token()` then reports
+        /// `false`). A real, non-blank token wins in either order, as below.
+        ///
+        /// The token can also be taken from the environment with
+        /// [`auth_token_from_env`](Self::auth_token_from_env), which reads the backend's
+        /// conventional variables. This setter always wins over that one, in either call order.
+        pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
+            crate::backends::common::set_explicit_auth_token(
+                &mut self.common.auth_token,
+                &mut self.common.auth_token_from_env,
+                auth_token,
+            );
+            self
+        }
+
         impl_auth_token_from_env!(
             token: common.auth_token,
             env_sourced: common.auth_token_from_env,
             vars: [$($var),+],
             rationale: $rationale,
         );
-    };
-    // The shared `auth_token` setter. `$extra` is an additional rustdoc paragraph, used by the
-    // `auth_env:` form to cross-link `auth_token_from_env` (which the plain form does not emit).
-    (@auth_token $extra:literal) => {
-        /// Set the authorization token, used in requests to the backend's api url.
-        ///
-        /// This is to support private repos where you need an auth token.
-        /// **Make sure not to bake the token into your app**; it is recommended you obtain
-        /// it via another mechanism, such as environment variables or prompting the user.
-        #[doc = $extra]
-        pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
-            self.common.auth_token = Some(auth_token.into());
-            // An explicit token is the application's own credential and always wins over the
-            // environment, whatever the call order, so this is no longer an env-sourced token.
-            self.common.auth_token_from_env = false;
-            self
-        }
     };
     // Variant for backends that don't authenticate via a bearer token (e.g. s3, which uses
     // `access_key`/SigV4). Omits the shared `auth_token` setter so the backend can either drop

@@ -10,12 +10,15 @@
 //!
 //! # Why this file holds exactly ONE `#[test]`
 //!
-//! `std::env::set_var` is `unsafe` since the 2024 edition: the environment is process-global, and
-//! mutating it while another thread reads it (directly, or through libc calls such as
-//! `getaddrinfo`) is undefined behavior, and the harness runs the tests of one binary concurrently
-//! on many threads. Each integration-test file is its own binary and its own process, so with
-//! exactly one test here the `set_var` call happens on the only thread that exists. **Do not add a
-//! second `#[test]` to this file**; put it in a new single-test file of its own.
+//! SAFETY: `std::env::set_var` is sound only while no other thread may read the
+//! environment concurrently. What holds here is NOT "this process is single-threaded":
+//! libtest keeps its harness thread alive in `recv_timeout` while the body runs on a
+//! worker at default concurrency. What holds is that no environment-reading thread
+//! exists yet -- this binary contains exactly ONE `#[test]`, and every env write below
+//! happens BEFORE the first HTTP client is built. That ordering is load-bearing: a
+//! reqwest blocking client spawns a background thread that reads `HTTP_PROXY` /
+//! `http_proxy`. So do not add a second `#[test]` here, and do not place a `set_var` /
+//! `remove_var` after the first `build()` -- either is a genuine data race, not style.
 #![cfg(feature = "github")]
 
 use std::sync::Arc;

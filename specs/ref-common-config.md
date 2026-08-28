@@ -16,48 +16,50 @@ Source: `src/backends/common.rs`, `src/macros.rs`. One backend
 
 ### CommonBuilderConfig / CommonConfig + validation
 
-`CommonBuilderConfig` (`common.rs:85`) is the pre-validation state held while a
+`CommonBuilderConfig` (`common.rs:829`) is the pre-validation state held while a
 backend's `UpdateBuilder` is configured. Each backend's builder embeds it as a
-`common: CommonBuilderConfig` field (`github.rs:193`). Its fields
-(`common.rs:86-111`): `request: RequestConfig`, `target`, `asset_identifier`,
+`common: CommonBuilderConfig` field (e.g. `github.rs:342`). Its fields
+(`common.rs:829-888`): `request: RequestConfig`, `target`, `asset_identifier`,
 `bin_name`, `bin_install_path`, `bin_path_in_archive`, `bin_path_in_archive_auto`
-(`common.rs:95`, internal `bool` tracking whether `bin_path_in_archive` was
+(`common.rs:843`, internal `bool` tracking whether `bin_path_in_archive` was
 auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 `no_confirm`, `current_version`, `release_tag`, `progress_template`,
 `progress_chars`, `auth_token`, `progress_callback`, `verify`, `asset_matcher`,
 `checksum` and `verify_release_digest` (under `checksums`), and `verifying_keys`
-(under `signatures`).
+(under `signatures`). (The full struct also carries `check_install_path_writable`,
+`bundle_path_in_archive`, `bundle_install_path`, `show_release_notes`, `update_strategy`,
+`tag_prefix`, `auth_token_from_env`, and `auth_scheme`, added by later features; see
+`common.rs:829-888` for the complete, current field list.)
 
-`Default` (`common.rs:113-140`) sets the non-`None` defaults:
+`Default` (`common.rs:972-1011`) sets the non-`None` defaults:
 `bin_path_in_archive_auto = false`, `show_download_progress = false`,
 `show_output = true`, `no_confirm = false`,
 `progress_template = DEFAULT_PROGRESS_TEMPLATE`,
 `progress_chars = DEFAULT_PROGRESS_CHARS`, `verify_release_digest = true` (under
 `checksums`), and `verifying_keys = vec![]`.
 
-`build()` (`common.rs:142-190`) validates and resolves into `CommonConfig`
-(`common.rs:194-216`):
+`build()` (`common.rs:1019-1080`) validates and resolves into `CommonConfig`
+(`common.rs:1128-1176`):
 
-- First calls `self.request.check()` (`common.rs:150`), surfacing any deferred
-  `request_header` conversion failure as `Error::InvalidHeader { source }`.
-- Required (each missing field yields `Error::MissingField { field }` naming the
-  setter to call): `current_version` (`common.rs:161`, ``"`current_version`
-  required (call `.current_version(...)`)"``), `bin_name` (`common.rs:166`,
-  ``"`bin_name` required (call `.bin_name(...)`)"``), `bin_path_in_archive`
-  (`common.rs:174`, ``"`bin_path_in_archive` required (call `.bin_name(...)` or
-  `.bin_path_in_archive(...)`)"``). The last is normally set automatically by the
-  `bin_name` setter, so callers only need set `bin_name`.
-- Defaulted: `target` falls back to `get_target()` (`common.rs:148-151`);
-  `bin_install_path` falls back to `std::env::current_exe()` (`common.rs:162-165`),
-  which can itself error and propagates via `?`.
-- Bundle mode is resolved first, by `resolve_bundle_mode` (`common.rs:638`), which returns the
-  `(bundle_path_in_archive, bundle_install_path)` pair stored on `CommonConfig` (both `None` when
-  `bundle_path_in_archive` is unset). With it set: an explicit `bin_install_path`, or a
-  `bin_path_in_archive` whose `bin_path_in_archive_auto` is `false`, is
-  `Error::ConflictingConfig { field, conflict }`; an unset `bundle_install_path` resolves through
-  `update::default_bundle_install_path()` (macOS: the nearest `.app` ancestor of `current_exe()`,
-  else `Error::NoAppBundle` / `Error::AppTranslocated`; other targets:
+- Bundle mode is resolved first (before any other field), by `resolve_bundle_mode`
+  (`common.rs:1094-1123`), which returns the `(bundle_path_in_archive, bundle_install_path)` pair
+  stored on `CommonConfig` (both `None` when `bundle_path_in_archive` is unset). With it set: an
+  explicit `bin_install_path`, or a `bin_path_in_archive` whose `bin_path_in_archive_auto` is
+  `false`, is `Error::ConflictingConfig { field, conflict }`; an unset `bundle_install_path`
+  resolves through `update::default_bundle_install_path()` (macOS: the nearest `.app` ancestor of
+  `current_exe()`, else `Error::NoAppBundle` / `Error::AppTranslocated`; other targets:
   `Error::MissingField { field: "bundle_install_path" }`).
+- Then calls `self.request.check()` (`common.rs:1031`), surfacing any deferred
+  `request_header` conversion failure as `Error::InvalidHeader { source }`, and any
+  root-certificate/client-build failure as `Error::InvalidCertificate { source }`.
+- Required (each missing field yields `Error::MissingField { field }`, whose `Display` names the
+  field generically as `` "`{field}` required" ``, per `ref-errors.md`): `current_version`
+  (`common.rs:1039-1041`), `bin_name` (`common.rs:1044-1047`), `bin_path_in_archive`
+  (`common.rs:1053-1058`). The last is normally set automatically by the `bin_name` setter, so
+  callers only need set `bin_name`.
+- Defaulted: `target` falls back to `get_target()` (`common.rs:1034-1037`);
+  `bin_install_path` falls back to `std::env::current_exe()` (`common.rs:1048-1051`),
+  which can itself error and propagates via `?`.
 - All other fields are cloned through unchanged. Note `target` and
   `current_version` become owned `String`, and `bin_install_path` an owned
   `PathBuf`, in `CommonConfig`.
@@ -66,82 +68,113 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 delays, `client` / `async_client` (injected transports), root certificates
 (`add_root_certificate`), the auth fields (`auth_scheme`, `auth_token`,
 `auth_base_host`, the `allow_auth_host` allowlist, the non-https-forwarding
-flag), and `header_error`. `insert_header`
+flag), and `header_error`. `insert_header` (`common.rs:647-676`)
 stays infallible, recording the first bad name/value in `header_error`;
 `check` replays it as `Error::InvalidHeader { source }` and surfaces a
 root-certificate/client-build failure as `Error::InvalidCertificate { source }`.
+`insert_header` also marks the value [`set_sensitive`](https://docs.rs/http/latest/http/header/struct.HeaderValue.html#method.set_sensitive)
+when the header name is credential-bearing -- `authorization`, gitlab's `private-token`, `cookie`
+(exact match), or any name ending in `-token` (`header_name_is_credential_bearing`,
+`common.rs:631-633`) -- the same treatment `apply_auth` gives the derived `Authorization` header.
+Without this, a user-supplied `request_header("Authorization", ..)` (which `apply_auth` gives
+*precedence* over the backend's own token) would render verbatim in any `Debug` output, including
+the one this struct and every backend builder inherit.
 
 ### Shared setter macro: impl_common_builder_setters!
 
-`impl_common_builder_setters!` (`macros.rs:210-463`) is invoked once inside each
-backend's `impl UpdateBuilder` block (`github.rs:223`) and emits every shared
+`impl_common_builder_setters!` (`macros.rs:579-1012`) is invoked once inside each
+backend's `impl UpdateBuilder` block (e.g. `github.rs:380`) and emits every shared
 setter, each writing through `self.common.*` and returning `&mut Self`. Adding a
 shared setter happens here once and reaches all backends.
 
-Three invocation forms: `()` emits the `@shared` set plus `auth_token`;
-`(auth_env: ["VAR", ..])` emits that plus an `auth_token_from_env()` setter for the named
+Two invocation forms (a third, bare `()`, was removed as dead code once every backend settled on
+one of these two -- see the Invariants note below): `(auth_env: ["VAR", ..], rationale: ..)`
+emits the `@shared` set plus `auth_token` and an `auth_token_from_env()` setter for the named
 environment variables (the form the github/gitlab/gitea/gitee `UpdateBuilder`s use); and
 `(no_auth_token)` emits only `@shared`, for backends like s3 that authenticate differently.
 
 `auth_token_from_env()` itself is emitted by the standalone `impl_auth_token_from_env!(token:
-.., env_sourced: .., vars: [..], rationale: ..)` macro (`macros.rs:484-555`), which the
+.., env_sourced: .., vars: [..], rationale: ..)` macro (`macros.rs:468-571`), which the
 `ReleaseListBuilder`s (whose token is their own field, not `common.auth_token`) invoke directly.
 It resolves the variables through `backends::common::token_from_env` -> `first_env_token` (first
 present and non-empty after trimming wins) and writes the result with
-`fill_env_token_if_unset(slot, resolved)` (`common.rs:255-266`; renamed from the earlier
-`apply_env_token`): a resolved token fills the slot **only when it is currently empty**, and an
-unresolved lookup leaves it untouched either way. Concretely: an explicit `auth_token(..)` always
-wins over `auth_token_from_env()`, in either call order -- `auth_token(t).auth_token_from_env()`
-and `auth_token_from_env().auth_token(t)` both end up with `t`. This supersedes an earlier
-"last-setter-wins when the environment supplies a token" reading, which let a later
-`auth_token_from_env()` call silently displace a token the application had explicitly set; see
-`auth-token-from-env.md` AUTH-1-3 for the rationale. The explicit `auth_token(..)` setter always
-overwrites the slot and clears an `auth_token_from_env` bookkeeping flag (`macros.rs:594-600`),
-so a subsequent `auth_token_from_env()` call sees a filled slot and is a no-op; the flag exists
-so `build()` can tell whether the *current* token came from the environment (for the
-canonical-host warning below) even after an intervening call. The lookup happens in the setter,
-not at request time. Variables per backend, in precedence order: github `GH_TOKEN`,
+`fill_env_token_if_unset_with(slot, resolve)` (`common.rs:287-301`): a resolved token fills the
+slot **only when it is currently blank** (unset, or holding only whitespace -- the blank-token
+rule below), and `resolve` is not even called, let alone its diagnostics logged, when the slot is
+already non-blank. `fill_env_token_if_unset(slot, resolved)` (`common.rs:308-310`; renamed from
+the earlier `apply_env_token`) is a thin wrapper over an already-resolved value, kept only so its
+original unit tests stand -- the generated setter calls the `_with` form directly. Concretely: an
+explicit `auth_token(..)` with a non-blank value always wins over `auth_token_from_env()`, in
+either call order -- `auth_token(t).auth_token_from_env()` and `auth_token_from_env().auth_token(t)`
+both end up with `t`, for non-blank `t` (a blank `t` is the documented exception to
+order-independence; see the blank-token rule below). This supersedes an earlier "last-setter-wins
+when the environment supplies a token" reading,
+which let a later `auth_token_from_env()` call silently displace a token the application had
+explicitly set; see `auth-token-from-env.md` AUTH-1-3 for the rationale. The explicit
+`auth_token(..)` setter always overwrites the slot and clears an `auth_token_from_env` bookkeeping
+flag, via the shared `set_explicit_auth_token(slot, env_sourced, value)` (`common.rs:473-480`,
+called from `macros.rs:622-629` and each hand-written `ReleaseListBuilder::auth_token`, e.g.
+`github.rs:189-196`), so a subsequent `auth_token_from_env()` call sees a filled slot and is a
+no-op; the flag exists so `build()` can tell whether the *current* token came from the environment
+(for the canonical-host decision below) even after an intervening call. The lookup happens in the
+setter, not at request time. Variables per backend, in precedence order: github `GH_TOKEN`,
 `GITHUB_TOKEN` (flipped from `GITHUB_TOKEN`-then-`GH_TOKEN` to match `gh help environment`'s
 documented precedence); gitlab `GITLAB_TOKEN` only (`CI_JOB_TOKEN` was removed -- it is
 project-scoped and not compatible with the `Authorization: Bearer` scheme this crate sends, so
 keeping it meant `auth_token_from_env()` was not the advertised no-op inside GitLab CI); gitea
 `GITEA_TOKEN`; gitee `GITEE_TOKEN`. Each list is also exposed as a crate-internal
-`AUTH_TOKEN_ENV_VARS: &'static [&'static str]` constant (`macros.rs:494`). Reading the environment
-is opt-in: nothing reads it without this call. `has_auth_token() -> bool` (`macros.rs:544-553`) is
-emitted alongside it, reporting whether a token is set from either source without exposing the
-value.
+`AUTH_TOKEN_ENV_VARS: &'static [&'static str]` constant (`macros.rs:505`). Reading the environment
+is opt-in: nothing reads it without this call. `has_auth_token() -> bool` (`macros.rs:567-569`) is
+emitted alongside it, reporting whether a non-blank token is set from either source without
+exposing the value.
 
-The `@shared` vocabulary (`macros.rs:231-462`):
+**Blank-token rule.** A blank token (empty, or all-whitespace) is treated as unset everywhere a
+token is consulted, backed by one predicate, `is_blank_token(token: Option<&str>) -> bool`
+(`common.rs:256-258`): it backs `fill_env_token_if_unset_with` above (so a blank explicit token
+does not block the environment fallback), `RequestConfig::apply_auth` (`common.rs:697-729`, so a
+blank token is never rendered into a literal `Authorization: token ` header), and
+`has_auth_token()`. This is distinct from `first_env_token`'s trimming: an explicit
+`auth_token(..)` value is never trimmed, so a token merely *surrounded* by whitespace still
+surfaces as `Error::InvalidAuthToken` at request time.
 
-- `current_version(impl Into<String>)` (`macros.rs:235`) - required.
-- `release_tag(impl Into<String>)` (`macros.rs:247`) - used verbatim.
-- `target(impl Into<String>)` (`macros.rs:255`).
-- `asset_identifier(impl Into<String>)` (`macros.rs:263`).
-- `bin_name(impl Into<String>)` (`macros.rs:279`) - required; appends `EXE_SUFFIX` if absent
+A blank token is not order-independent, unlike a non-blank one: `set_explicit_auth_token`
+overwrites the slot unconditionally, so `auth_token("").auth_token_from_env()` picks up the env
+token (the blank slot lets the fallback through), while `auth_token_from_env().auth_token("")`
+discards it (the explicit call clobbers whatever the fallback just filled). This is a deliberate,
+kept tradeoff, not a bug: see `auth-token-from-env.md` AUTH-1-3 for the full asymmetry.
+
+The `@shared` vocabulary (`macros.rs:640-1011`):
+
+- `current_version(impl Into<String>)` (`macros.rs:644`) - required.
+- `release_tag(impl Into<String>)` (`macros.rs:662`) - used verbatim.
+- `target(impl Into<String>)` (`macros.rs:670`).
+- `asset_identifier(impl Into<String>)` (`macros.rs:678`).
+- `bin_name(impl Into<String>)` (`macros.rs:694`) - required; appends `EXE_SUFFIX` if absent
   and (re-)derives `bin_path_in_archive` when that path is unset or was previously
   auto-derived, setting `bin_path_in_archive_auto = true`. Re-calling `bin_name` thus
   re-derives the archive path rather than leaving a stale one; an explicitly set
   `bin_path_in_archive` is sticky and is never overwritten.
-- `bin_install_path<A: AsRef<Path>>(A)` (`macros.rs:300`).
-- `bin_path_in_archive(impl Into<String>)` (`macros.rs:328`) - supports `{{ bin }}`,
+- `bin_install_path<A: AsRef<Path>>(A)` (`macros.rs:715`).
+- `bin_path_in_archive(impl Into<String>)` (`macros.rs:759`) - supports `{{ bin }}`,
   `{{ target }}`, `{{ version }}` substitutions; sets `bin_path_in_archive_auto = false`
   so a later `bin_name` call will not overwrite it.
-- `bundle_path_in_archive(impl Into<String>)` - names the bundle directory inside the archive and
-  selects bundle mode; supports the same `{{ bin }}` / `{{ target }}` / `{{ version }}`
-  substitutions as `bin_path_in_archive`.
-- `bundle_install_path<A: AsRef<Path>>(A)` - the installed bundle directory bundle mode replaces;
-  optional on macOS (defaults to the nearest `.app` ancestor of the running exe), required
-  elsewhere in bundle mode.
-- `show_download_progress(bool)` (`macros.rs:336`).
-- `progress_style(ProgressStyle)` (`macros.rs:342`) - sets template and chars via
+- `bundle_path_in_archive(impl Into<String>)` (`macros.rs:798`) - names the bundle directory
+  inside the archive and selects bundle mode; supports the same `{{ bin }}` / `{{ target }}` /
+  `{{ version }}` substitutions as `bin_path_in_archive`.
+- `bundle_install_path<A: AsRef<Path>>(A)` (`macros.rs:826`) - the installed bundle directory
+  bundle mode replaces; optional on macOS (defaults to the nearest `.app` ancestor of the
+  running exe), required elsewhere in bundle mode.
+- `show_download_progress(bool)` (`macros.rs:836`).
+- `progress_style(ProgressStyle)` (`macros.rs:844`) - sets template and chars via
   the typed `ProgressStyle { template, chars }` newtype (`ProgressStyle::new(template, chars)`).
-- `show_output(bool)` (`macros.rs:358`).
-- `no_confirm(bool)` (`macros.rs:370`).
-- `show_release_notes(bool)` - show the release notes URL (or the body when no URL is available)
-  in the confirmation prompt; default off.
-- `update_strategy(UpdateStrategy)` - `Compatible` (default, prefer the newest semver-compatible
-  release, else newest overall) or `Latest` (always newest, across a major bump).
-- `unattended()` (`macros.rs:378`) - one-call CI/daemon configuration: sets
+- `show_output(bool)` (`macros.rs:856`).
+- `no_confirm(bool)` (`macros.rs:868`).
+- `update_strategy(UpdateStrategy)` (`macros.rs:879`) - `Compatible` (default, prefer the newest
+  semver-compatible release, else newest overall) or `Latest` (always newest, across a major
+  bump).
+- `show_release_notes(bool)` (`macros.rs:890`) - show the release notes URL (or the body when no
+  URL is available) in the confirmation prompt; default off.
+- `unattended()` (`macros.rs:898`) - one-call CI/daemon configuration: sets
   `no_confirm(true)` + `show_output(false)`. Without it the default
   (`no_confirm == false`) blocks on stdin waiting for confirmation.
 
@@ -149,7 +182,7 @@ The `@shared` vocabulary (`macros.rs:231-462`):
 github/gitlab/gitea `UpdateBuilder`s only (the tag-to-version derivation is forge-specific; s3
 parses versions from object keys and the custom backend supplies its own `Release`s). It writes
 `self.common.tag_prefix`, read by each forge's tag parser via `backends::common::strip_tag_prefix`.
-- `request_config_setters!(common.request)` - splices in
+- `request_config_setters!(common.request)` (invoked at `macros.rs:904`) - splices in
   `timeout`, `request_header`, `retries`, `retry_backoff(base, max)`,
   `http_client(Arc<dyn HttpClient>)` (and `http_client_async` under `async`),
   the thin wrappers `reqwest_client`, `reqwest_async_client`, `ureq_agent`
@@ -158,48 +191,55 @@ parses versions from object keys and the custom backend supplies its own `Releas
   cert surfaces as `Error::InvalidCertificate` from `build()`),
   `allow_auth_host(host)` (authorize an extra host, e.g. an asset CDN, to receive
   the auth token), and `dangerously_allow_non_https_auth_forwarding()` (allow the
-  token over http to a host-matched request) (`macros.rs:14-186`).
-- `progress_callback(impl Fn(u64, Option<u64>) ...)` (`macros.rs:391`).
+  token over http to a host-matched request); the macro itself is defined at `macros.rs:14-195`.
+- `progress_callback(impl Fn(u64, Option<u64>) ...)` (`macros.rs:911`).
 - `asset_matcher(impl Fn(&[ReleaseAsset]) -> Option<ReleaseAsset> ...)`
-  (`macros.rs:405`).
-- `verify_binary(impl Fn(&Path) -> Result<()> ...)` (`macros.rs:589`) - the post-update
+  (`macros.rs:925`).
+- `verify_binary(impl Fn(&Path) -> Result<()> ...)` (`macros.rs:952`) - the post-update
   hook on the extracted binary; its doc records the full verification order
   (`verify_checksum` -> release digest -> signature/`verifying_keys` -> extract ->
   `verify_binary` -> replace), so it runs last. `Err(..) => bail` with
   `Error::VerificationRejected { reason }`.
-- `verify_checksum(Checksum)` (under `checksums`).
-- `verify_release_digest(bool)` (under `checksums`, default on) - toggles verifying the
-  download against the selected asset's backend-published digest.
-- `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:617`, under
+- `verify_checksum(Checksum)` (`macros.rs:967`, under `checksums`).
+- `verify_release_digest(bool)` (`macros.rs:988`, under `checksums`, default on) - toggles
+  verifying the download against the selected asset's backend-published digest.
+- `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`macros.rs:1004`, under
   `signatures`; renamed from `verify_keys`) - **replaces** the key set on each call
   (last call wins, unlike
   `request_header` which appends); an empty set (or never calling it) leaves
   signature verification disabled, which is not an error.
-- `auth_token(impl Into<String>)` (`macros.rs:220`, the `()` and `auth_env:` forms).
+- `auth_token(impl Into<String>)` (`macros.rs:622-629`, the `auth_env:` form; a blank value is
+  stored verbatim but treated as unset by `has_auth_token()`, `apply_auth`, and the env fallback).
 - `auth_token_from_env()` (the `auth_env:` form only) - resolve the token from the backend's
   conventional environment variables; a no-op when none is set.
 
 ### Accessor macro: impl_update_config_accessors!
 
-`impl_update_config_accessors!` (`macros.rs:108-200`) emits a full
-`impl crate::update::UpdateConfig for $t` block (`github.rs:361`) reading through
-`self.common.*`. Bodies borrow, never own: `&str` for `current_version`,
-`target`, `bin_name`, `bin_path_in_archive`, `progress_template`,
-`progress_chars` (`macros.rs:126-161`); `Option<&str>` via `.as_deref()` for
-`release_tag`, `asset_identifier`, `auth_token` (`macros.rs:132,135,162`);
-`&Path` for `bin_install_path`; plain `bool`/`Copy` returns
-for the toggles. The crate-private accessors (`macros.rs:226-263`) live on the
+`impl_update_config_accessors!` (`macros.rs:215-341`) emits a full
+`impl crate::update::UpdateConfig for $t` block (e.g. `github.rs:587`) reading through
+`self.common.*`. Bodies borrow, never own: `&str` for `current_version` (`macros.rs:281`),
+`target` (`macros.rs:284`), `bin_name` (`macros.rs:293`), `bin_path_in_archive` (`macros.rs:302`),
+`progress_template` (`macros.rs:327`), `progress_chars` (`macros.rs:331`, under `progress-bar`);
+`Option<&str>` via `.as_deref()` for `release_tag` (`macros.rs:287`), `asset_identifier`
+(`macros.rs:290`), `auth_token` (`macros.rs:334`, reading `self.common.request.auth_token` -- the
+*resolved* `RequestConfig`'s copy, the single source of truth `apply_auth` itself reads);
+`&Path` for `bin_install_path` (`macros.rs:296`); plain `bool`/`Copy` returns
+for the toggles, including newer ones (`check_install_path_writable`, `bundle_path_in_archive`,
+`bundle_install_path`, `update_strategy`, `show_release_notes`) added by later features, all in
+the same `(@emit ...)` arm (`macros.rs:277-340`). The crate-private accessors
+(`(@internals ...)` arm, `macros.rs:234-276`) live on the
 `pub(crate) trait UpdateInternals` (not the public `UpdateConfig`):
 `request_timeout`, `request_headers`, `request_config`, `request_client`,
 `request_async_client` (`async`), `progress_callback`,
 `verify_callback`, `asset_matcher`, `verify_checksum` and `verify_release_digest`
-(`checksums`), and `verify_keys` (`signatures`, reading the `verifying_keys` field). See
+(`checksums`), and `verifying_keys` (`macros.rs:271-274`, `signatures`) -- the accessor and the
+field it reads share the same name; there is no separate `verify_keys` accessor. See
 `update-config-internal-accessors.md`.
 
-Three invocation forms: bare `($t)` (`macros.rs:109`) for the default
-`api_headers`; `($t, { ... })` (`macros.rs:112`) splices a custom `api_headers`
+Three invocation forms: bare `($t)` (`macros.rs:216-219`) for the default
+`api_headers`; `($t, { ... })` (`macros.rs:220-223`) splices a custom `api_headers`
 override into the same `impl` (github/gitlab/gitea); and `($t, where ( ... ))`
-(`macros.rs:116`) for the generic custom `AsyncUpdate<S>`.
+(`macros.rs:225-233`) for the generic custom `AsyncUpdate<S>`.
 
 ### Async verbs
 
@@ -246,30 +286,37 @@ setter reads.
   before resolving defaults.
 - `target` defaults to `get_target()`, `bin_install_path` to
   `current_exe()`; `show_output` defaults `true`, the other toggles `false`.
-- The `()` form emits `auth_token`; `(auth_env: [..])` emits `auth_token` plus
-  `auth_token_from_env` and `has_auth_token`; `(no_auth_token)` omits all three.
+- `(auth_env: [..])` emits `auth_token` plus `auth_token_from_env` and `has_auth_token`;
+  `(no_auth_token)` omits all three. A bare `()` form used to exist for a shared-setter caller
+  with no env-var convention, but every backend now uses one of the two forms above, so it was
+  removed as dead code.
 - `auth_token_from_env()` never clears an existing token: with nothing set in the environment
   the builder's token is left exactly as it was.
-- An explicit `auth_token(..)` always wins over `auth_token_from_env()`, whatever the call
-  order: the environment is a fallback that only fills an empty slot, never an override for a
-  populated one.
+- An explicit `auth_token(..)` with a non-blank value always wins over `auth_token_from_env()`,
+  whatever the call order: the environment is a fallback that only fills a blank slot, never an
+  override for a populated one. A blank explicit token is the documented exception: it does not
+  block a *later* `auth_token_from_env()` call, but it does clobber a token `auth_token_from_env()`
+  already filled if it comes *after* it.
 - `CommonBuilderConfig` and `RequestConfig` each carry a hand-written `Debug` that redacts
   `auth_token` to `"<token>"`; neither derives `Debug` for that field.
 - `token_from_env` reads via `std::env::var_os`, not `var`: a present-but-non-UTF-8 value is
   logged and treated as unset, not silently dropped like `var(..).ok()` would.
-- The canonical-host warning (`warn_if_env_token_off_canonical_host`) fires only for an
-  env-sourced token bound to a non-canonical host; an explicitly-set token is never warned
-  about, and gitea (no canonical host) never warns.
+- `env_token_host_decision` acts only on an env-sourced token bound to an unacknowledged host (not
+  the backend's canonical host, and not an `allow_auth_host` entry); an explicitly-set token is
+  never flagged. github/gitlab/gitee (each has a canonical host) warn and still send it; gitea
+  (no canonical host) withholds it instead, clearing the request's token so it goes out anonymous.
+- A blank token (empty or all-whitespace) is treated as unset by `fill_env_token_if_unset_with`,
+  `apply_auth`, and `has_auth_token()`, backed by one shared `is_blank_token` predicate.
 
 ## Tests
 
-`src/backends/common.rs` unit tests (`common.rs:218-380`):
-`build_requires_current_version_bin_name_and_archive_path` (`common.rs:299`),
-`build_resolves_target_and_install_path_defaults` (`common.rs:323`),
-`build_error_message_names_the_setter_for_current_version` (`common.rs:347`) and
-`build_error_message_names_the_setter_for_bin_name` (`common.rs:362`) asserting
+`src/backends/common.rs` unit tests (`mod tests`, starting `common.rs:1179`):
+`build_requires_current_version_bin_name_and_archive_path` (`common.rs:2226`),
+`build_resolves_target_and_install_path_defaults` (`common.rs:2276`),
+`build_error_message_names_the_setter_for_current_version` (`common.rs:2485`) and
+`build_error_message_names_the_setter_for_bin_name` (`common.rs:2674`) asserting
 the required-field errors name the setter to call, and the `insert_header` /
-`check` cases (`common.rs:222-296`) covering deferred invalid-name /
+`check` cases (`common.rs:2148-2223`) covering deferred invalid-name /
 invalid-value errors, first-error-wins, and the ok path.
 
 Env-token resolution (`common.rs` `mod tests`): `first_env_token_takes_the_first_present_value`,
@@ -281,6 +328,18 @@ Env-token resolution (`common.rs` `mod tests`): `first_env_token_takes_the_first
 fills an empty slot" rule (AUTH-1-3); `debug_redacts_the_auth_token_but_keeps_other_fields` pins the
 `CommonBuilderConfig::fmt` redaction. Each backend module (`github.rs`, `gitlab.rs`, `gitea.rs`,
 `gitee.rs`) separately asserts its own `AUTH_TOKEN_ENV_VARS` list and `has_auth_token()` behavior.
+
+Blank-token rule: `fill_env_token_if_unset_fills_over_a_blank_explicit_token`,
+`fill_env_token_if_unset_leaves_a_blank_token_blank_when_the_env_resolves_to_none`,
+`apply_auth_treats_a_blank_token_as_unset` (`common.rs`). The lazy `fill_env_token_if_unset_with`
+closure form: `fill_env_token_if_unset_with_does_not_call_the_resolver_when_the_slot_is_filled`,
+`fill_env_token_if_unset_with_calls_the_resolver_when_the_slot_is_empty`,
+`fill_env_token_if_unset_with_calls_the_resolver_when_the_slot_is_blank`. The canonical-host
+decision (`env_token_host_decision`): `warns_and_sends_when_an_env_token_targets_an_unacknowledged_custom_host`,
+`sends_silently_when_the_host_is_acknowledged_via_allow_auth_host`,
+`no_action_for_an_explicitly_set_token_on_a_custom_host`,
+`withholds_for_a_backend_without_a_canonical_host_and_no_acknowledgement`,
+`sends_for_a_backend_without_a_canonical_host_once_the_host_is_acknowledged`.
 
 ## Auth scheme, retry backoff, and progress style
 
@@ -305,21 +364,32 @@ fills an empty slot" rule (AUTH-1-3); `debug_redacts_the_auth_token_but_keeps_ot
   treated as unset (rather than silently ignored the way `var(..).ok()` would, which would make a
   mangled variable indistinguishable from an absent one). The first present, non-empty,
   whitespace-trimmed value wins (`first_env_token`, `common.rs:174-185`).
-- **Canonical-host warning.** `warn_if_env_token_off_canonical_host(env_sourced: bool,
-  auth_base_host: Option<&str>, canonical_host: Option<&str>) -> bool` (`common.rs:308-329`) is
-  called from every forge backend's `build()` after `auth_base_host` is resolved. It warns only
-  when the current token is env-sourced (the `auth_token_from_env` bookkeeping flag) and the
-  resolved host is not (case-insensitively) the backend's canonical one -- because the request-time
-  host gate above cannot catch this case: the configured host *is* `auth_base_host`, so an
-  application that exposes its update URL as configuration and runs the env-token call in CI could
-  otherwise hand a `GITHUB_TOKEN` to an attacker-chosen host with no signal. github/gitlab/gitee
-  each have a `CANONICAL_AUTH_HOST` const (`api.github.com` / `gitlab.com` / `gitee.com`); gitea has
-  none (always self-hosted) and passes `None`, so its call is made for symmetry but never warns. An
-  explicitly-set token (`auth_token(..)`) is never warned about.
+- **Blank-token rule.** `is_blank_token(token: Option<&str>) -> bool` (`common.rs:256-258`) treats
+  `None` and a whitespace-only `Some` the same way: unset. It backs three call sites --
+  `fill_env_token_if_unset_with` (so a blank explicit token does not block the env fallback),
+  `apply_auth` (so a blank token never renders as a literal `Authorization: token ` header), and
+  `has_auth_token()` -- so "is a token configured?" answers consistently everywhere.
+- **Canonical-host decision.** `env_token_host_decision(env_sourced: bool, auth_base_host:
+  Option<&str>, auth_hosts: &[String], canonical_host: Option<&str>) -> EnvTokenDecision`
+  (`common.rs:413-453`; replaces the earlier `warn_if_env_token_off_canonical_host`, which had no
+  `auth_hosts` parameter and returned a plain `bool`) is called from every forge backend's
+  `build()` after `auth_base_host` is resolved. It first checks `host_is_acknowledged(host,
+  auth_hosts, canonical_host)` (`common.rs:382-385`): the host is the backend's canonical one, or
+  one already passed to `allow_auth_host(..)` -- either way `EnvTokenDecision::Sent`, no warning.
+  It also returns `Sent` when the token is not env-sourced at all. Otherwise it branches on
+  whether the backend has a canonical host (`EnvTokenDecision`, `common.rs:349-361`):
+  github/gitlab/gitee (each a `CANONICAL_AUTH_HOST` const: `api.github.com` / `gitlab.com` /
+  `gitee.com`) get `WarnedAndSent` -- a `log::warn!` naming both hosts, but the token is still
+  attached, unchanged from before this round except that `allow_auth_host(..)` now silences the
+  warning too. Gitea (always self-hosted, passes `None`) gets `Withheld` instead: a `log::warn!`
+  naming the host and both remedies, and the caller clears `request.auth_token` so the request
+  goes out anonymous while `build()` still returns `Ok`. See `ref-gitea-backend.md` and
+  `auth-token-from-env.md` AUTH-1-8 for the full rationale. An explicitly-set token
+  (`auth_token(..)`) is never flagged either way, since it is not env-sourced.
 - **Redacting `Debug`.** Both config structs that can hold a raw token carry a hand-written `Debug`
-  that redacts it to `"<token>"` (`None` renders `None`): `RequestConfig::fmt` (`common.rs:416-440`)
-  and `CommonBuilderConfig::fmt` (`common.rs:679-723`). `CommonBuilderConfig` holds its own separate
-  `auth_token: Option<String>` field (`common.rs:657`, distinct from `RequestConfig::auth_token`,
+  that redacts it to `"<token>"` (`None` renders `None`): `RequestConfig::fmt` (`common.rs:568-619`)
+  and `CommonBuilderConfig::fmt` (`common.rs:890-970`). `CommonBuilderConfig` holds its own separate
+  `auth_token: Option<String>` field (`common.rs:867`, distinct from `RequestConfig::auth_token`,
   which is only populated at `build()` time), so a derived `Debug` on it would print a live
   credential -- including one the application author never typed, since `auth_token_from_env()` can
   put an ambient CI credential there. `CommonBuilderConfig::fmt` also renders `auth_token_from_env`

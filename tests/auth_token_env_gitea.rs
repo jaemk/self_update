@@ -3,18 +3,15 @@
 //!
 //! # Why this file holds exactly ONE `#[test]`
 //!
-//! `std::env::set_var` is `unsafe` since the 2024 edition: the environment is process-global, and
-//! mutating it while another thread reads it (directly, or through libc calls such as
-//! `getaddrinfo`) is undefined behavior. Rust's test harness runs the tests of one binary
-//! *concurrently on many threads*, so a second `#[test]` in this file could be reading the
-//! environment at the moment this one writes it.
-//!
-//! Each integration-test file is compiled into its **own binary**, and cargo runs the binaries as
-//! separate processes. With exactly one test here, the `set_var` call happens on the only thread
-//! that exists in this process, before anything else reads the environment -- which is what makes
-//! it sound. **Do not add a second `#[test]` (or any `#[bench]`) to this file**: put it in the
-//! in-crate `#[cfg(test)]` modules, which cover the resolution rules through the pure helpers
-//! without touching process env, or in a new single-test file of its own.
+//! SAFETY: `std::env::set_var` is sound only while no other thread may read the
+//! environment concurrently. What holds here is NOT "this process is single-threaded":
+//! libtest keeps its harness thread alive in `recv_timeout` while the body runs on a
+//! worker at default concurrency. What holds is that no environment-reading thread
+//! exists yet -- this binary contains exactly ONE `#[test]`, and every env write below
+//! happens BEFORE the first HTTP client is built. That ordering is load-bearing: a
+//! reqwest blocking client spawns a background thread that reads `HTTP_PROXY` /
+//! `http_proxy`. So do not add a second `#[test]` here, and do not place a `set_var` /
+//! `remove_var` after the first `build()` -- either is a genuine data race, not style.
 #![cfg(feature = "gitea")]
 
 use std::sync::{Arc, Mutex};
@@ -86,6 +83,16 @@ fn auth_header_of(f: impl FnOnce(Arc<dyn HttpClient>)) -> Option<String> {
 /// semantics: the pair used to be order-sensitive, so an ambient CI credential could displace the
 /// application's own). It also pins gitea's `token` scheme (not `Bearer`) for an env-sourced
 /// token: gitea and gitlab sit next to each other in this crate and their schemes differ.
+///
+/// Gitea has no canonical host of its own, so (DECIDED, A1) an env-sourced token bound to a host
+/// the application never re-affirmed is WITHHELD, not sent -- the opposite of every other backend
+/// in this crate. `HOST` is therefore acknowledged with `allow_auth_host(HOST)` on the pickup
+/// steps below, which is the deliberate choice for THIS file: its job is to pin that a genuinely
+/// usable env-sourced token reaches the wire with the right scheme, exactly like the sibling
+/// per-backend files do for github/gitlab/gitee. The withhold-unless-acknowledged behavior itself,
+/// including the unacknowledged (no-header) branch, is pinned on the wire in
+/// `tests/auth_token_env_host_warning.rs` (D4), which is also where the in-crate pure-logic
+/// coverage of `env_token_host_decision` lives.
 #[test]
 fn env_token_reaches_the_wire_and_an_explicit_token_still_wins() {
     // Set before any other thread exists in this process (see the module comment for why).
@@ -94,9 +101,13 @@ fn env_token_reaches_the_wire_and_an_explicit_token_still_wins() {
     }
 
     // 1. Pickup on the ReleaseList builder: the env token is resolved, threaded through build(),
-    //    and rendered with gitea's `token` scheme.
+    //    and rendered with gitea's `token` scheme. `allow_auth_host(HOST)` re-affirms the host
+    //    (A1's remedy #2), which is what lets this env-sourced token actually reach the wire.
     let mut list = gitea::ReleaseList::configure();
-    list.host(HOST).repo_owner("o").repo_name("r");
+    list.host(HOST)
+        .repo_owner("o")
+        .repo_name("r")
+        .allow_auth_host("gitea.example.test");
     assert!(
         !list.has_auth_token(),
         "nothing is set before the call: the listing would run anonymously"
@@ -112,16 +123,18 @@ fn env_token_reaches_the_wire_and_an_explicit_token_still_wins() {
     assert_eq!(
         header.as_deref(),
         Some("token env-token"),
-        "the env-resolved token must reach the wire with gitea's `token` scheme"
+        "the env-resolved token must reach the wire with gitea's `token` scheme, once the host is \
+         acknowledged"
     );
 
-    // 2. Pickup on the Update builder.
+    // 2. Pickup on the Update builder, same acknowledgement.
     let mut upd = gitea::Update::configure();
     upd.host(HOST)
         .repo_owner("o")
         .repo_name("r")
         .bin_name("app")
-        .current_version("0.1.0");
+        .current_version("0.1.0")
+        .allow_auth_host("gitea.example.test");
     assert!(!upd.has_auth_token());
     upd.auth_token_from_env();
     assert!(upd.has_auth_token());

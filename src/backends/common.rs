@@ -231,18 +231,19 @@ pub(crate) fn token_from_env(names: &[&str]) -> Option<String> {
     first_env_token(&candidates)
 }
 
-/// Fill a builder's token slot from an env-resolved token, **only when the slot is empty**.
+/// Whether an optional auth-token slot should be treated as unset: `None`, or `Some` holding only
+/// whitespace.
 ///
-/// The environment is a *fallback*, never an override: an explicit `auth_token(..)` always wins,
-/// whatever the call order, so the setter pair is order-independent like every other pair on these
-/// builders, and an ambient developer/CI credential can never displace the credential the
-/// application deliberately provisioned. Not finding one likewise leaves the slot alone, so
-/// `auth_token_from_env()` can never silently drop a token (which would turn a missing env var into
-/// a surprise 403).
+/// A blank *explicit* token (`auth_token("")`, or the common
+/// `auth_token(cfg.token.unwrap_or_default())` pattern applied to a missing config value) must not
+/// block the environment fallback ([`fill_env_token_if_unset`]) and must not produce a literal
+/// `Authorization: token ` header ([`RequestConfig::apply_auth`]); `has_auth_token()` answers
+/// `false` for it too, matching "is a token configured?" rather than "is the slot `Some`?".
 ///
-/// Returns `true` when the slot was filled from the environment, which is what the generated setter
-/// records in its `auth_token_from_env` flag. Split out from the `auth_token_from_env` macro so this
-/// rule is tested once rather than per backend.
+/// This is a distinct rule from [`first_env_token`]'s trimming: an *explicit* `auth_token(..)`
+/// value is never trimmed or otherwise modified here, so a token merely surrounded by whitespace
+/// still surfaces as [`Error::InvalidAuthToken`](crate::errors::Error::InvalidAuthToken) at request
+/// time instead of being silently repaired (see the crate docs' trim-asymmetry note).
 #[cfg_attr(
     not(any(
         feature = "github",
@@ -252,17 +253,60 @@ pub(crate) fn token_from_env(names: &[&str]) -> Option<String> {
     )),
     allow(dead_code)
 )]
-pub(crate) fn fill_env_token_if_unset(slot: &mut Option<String>, resolved: Option<String>) -> bool {
-    if slot.is_some() {
+pub(crate) fn is_blank_token(token: Option<&str>) -> bool {
+    token.is_none_or(|t| t.trim().is_empty())
+}
+
+/// Fill a builder's token slot from a lazily-resolved token, **only when the slot is blank**
+/// (unset, or holding only whitespace -- see [`is_blank_token`]).
+///
+/// The environment is a *fallback*, never an override: an explicit `auth_token(..)` always wins,
+/// whatever the call order, so the setter pair is order-independent like every other pair on these
+/// builders, and an ambient developer/CI credential can never displace the credential the
+/// application deliberately provisioned. Not finding one likewise leaves the slot alone, so
+/// `auth_token_from_env()` can never silently drop a token (which would turn a missing env var into
+/// a surprise 403).
+///
+/// `resolve` is only called when the slot is actually blank: with an explicit, non-blank token
+/// already in place there is nothing to fall back to, so the environment is never even read. That
+/// matters beyond an unnecessary syscall -- `token_from_env` logs which variable it used
+/// (`log::debug!`) and warns about an unusable non-UTF-8 one, and neither diagnostic should fire for
+/// a lookup whose result is discarded.
+///
+/// Returns `true` when the slot was filled from the environment, which is what the generated setter
+/// records in its `auth_token_from_env` flag.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn fill_env_token_if_unset_with(
+    slot: &mut Option<String>,
+    resolve: impl FnOnce() -> Option<String>,
+) -> bool {
+    if !is_blank_token(slot.as_deref()) {
         return false;
     }
-    match resolved {
+    match resolve() {
         Some(token) => {
             *slot = Some(token);
             true
         }
         None => false,
     }
+}
+
+/// Thin wrapper over [`fill_env_token_if_unset_with`] that takes an already-resolved value instead
+/// of a closure, kept so the existing pure-value unit tests stand unchanged. The generated
+/// `auth_token_from_env()` setter calls [`fill_env_token_if_unset_with`] directly (with a closure,
+/// per A6), so outside of tests this wrapper is genuinely unused.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fill_env_token_if_unset(slot: &mut Option<String>, resolved: Option<String>) -> bool {
+    fill_env_token_if_unset_with(slot, || resolved)
 }
 
 /// The lowercased host of a URL, for auth-origin comparison. Parses with `http::Uri` (always
@@ -284,18 +328,15 @@ pub(crate) fn host_of(url: &str) -> Option<String> {
     })
 }
 
-/// Warn when a token taken from the environment would be bound to a host that is not the backend's
-/// canonical one. Returns whether it warned (so the rule is testable without capturing logs).
+/// What [`env_token_host_decision`] decided to do with an env-sourced auth token bound to a host
+/// the application did not necessarily type in as `auth_token(..)`.
 ///
-/// The env var list is tied to the backend *type* (`GITHUB_TOKEN` for github, ...), but the token is
-/// sent to whatever host the application configured via `api_base_url` / `host`. The request-time
-/// host gate cannot help here, because the configured host *is* `auth_base_host`. So an application
-/// that exposes its update URL as configuration and runs in CI would hand `GITHUB_TOKEN` to an
-/// attacker-chosen host with no signal at all. An explicitly-set token is the application's own
-/// decision and is never warned about; only the env-sourced case is.
-///
-/// `canonical_host` is `None` for a backend that has no canonical host (gitea is always
-/// self-hosted), which never warns.
+/// Three states rather than a `bool` because the outcome for an unacknowledged host now differs by
+/// backend (DECIDED, see `local/review/plan.md` "Cross-shard decisions 1"): github/gitlab/gitee
+/// keep sending the token (with a warning); gitea, which has no canonical host to compare against,
+/// withholds it instead. Returning an enum keeps the rule unit-testable without capturing logs, the
+/// same way the old `-> bool` was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(any(
         feature = "github",
@@ -305,28 +346,139 @@ pub(crate) fn host_of(url: &str) -> Option<String> {
     )),
     allow(dead_code)
 )]
-pub(crate) fn warn_if_env_token_off_canonical_host(
+pub(crate) enum EnvTokenDecision {
+    /// The token is attached with no warning: not env-sourced, no host to compare against, or the
+    /// host is acknowledged (the backend's canonical host, or an `allow_auth_host` entry).
+    Sent,
+    /// Env-sourced, the host is neither canonical nor acknowledged, and the backend HAS a canonical
+    /// host to compare against (github/gitlab/gitee): the token is still attached, but a warning is
+    /// logged. This is today's behavior, unchanged (DECIDED, A1).
+    WarnedAndSent,
+    /// Env-sourced, the host is not acknowledged, and the backend has NO canonical host (gitea): the
+    /// token is withheld. The caller is responsible for actually clearing the request's auth token
+    /// on this outcome; this function only decides and logs.
+    Withheld,
+}
+
+/// Whether an env-sourced auth token bound to `host` is acknowledged, i.e. the application has, in
+/// some form, said "yes, send it here": either `host` is the backend's `canonical_host`, or it is
+/// one of the `auth_hosts` the application explicitly added via `allow_auth_host` (A2).
+///
+/// An `allow_auth_host` entry is itself the user's explicit "send the token to this host" -- the
+/// same declaration an explicit `auth_token(..)` call makes about the token itself -- so once a host
+/// is in that set it never triggers the environment-origin warning, exactly like the canonical host.
+/// This is deliberately the *same* acknowledgement for both branches below: a canonical-host backend
+/// stops warning about a host it was told to trust, and a canonical-host-less backend (gitea) starts
+/// sending to one instead of withholding.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+fn host_is_acknowledged(host: &str, auth_hosts: &[String], canonical_host: Option<&str>) -> bool {
+    canonical_host.is_some_and(|canonical| canonical.eq_ignore_ascii_case(host))
+        || auth_hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+}
+
+/// Decide what happens to a token taken from the environment when it is bound to a host that is not
+/// the backend's canonical one, per [`EnvTokenDecision`]. This is the single acknowledgement rule
+/// backing both A1 (gitea withholds) and A2 (an `allow_auth_host` entry silences the warning).
+///
+/// The env var list is tied to the backend *type* (`GITHUB_TOKEN` for github, ...), but the token is
+/// sent to whatever host the application configured via `api_base_url` / `host`. The request-time
+/// host gate cannot help here, because the configured host *is* `auth_base_host`. So an application
+/// that exposes its update URL as configuration and runs in CI would hand `GITHUB_TOKEN` to an
+/// attacker-chosen host with no signal at all. An explicitly-set token is the application's own
+/// decision and is never flagged; only the env-sourced case is ([`EnvTokenDecision::Sent`] when
+/// `env_sourced` is `false`).
+///
+/// `canonical_host` is `None` for a backend that has no canonical host of its own (gitea is always
+/// self-hosted): with no host to compare against, an unacknowledged env-sourced token is withheld
+/// rather than silently bound to whatever host happens to be configured (DECIDED, A1) -- a hard
+/// `build()` failure would make the failure mode worse than the anonymous request it replaces, so
+/// the token is dropped and `build()` still succeeds.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn env_token_host_decision(
     env_sourced: bool,
     auth_base_host: Option<&str>,
+    auth_hosts: &[String],
     canonical_host: Option<&str>,
-) -> bool {
+) -> EnvTokenDecision {
     if !env_sourced {
-        return false;
+        return EnvTokenDecision::Sent;
     }
-    let (Some(canonical), Some(host)) = (canonical_host, auth_base_host) else {
-        return false;
+    // No parseable host means the request-time gate (`auth_allowed_for`) will not attach the token
+    // to anything anyway -- fail-closed, so there is nothing to warn about or withhold.
+    let Some(host) = auth_base_host else {
+        return EnvTokenDecision::Sent;
     };
-    if host.eq_ignore_ascii_case(canonical) {
-        return false;
+    if host_is_acknowledged(host, auth_hosts, canonical_host) {
+        return EnvTokenDecision::Sent;
     }
-    log::warn!(
-        "self_update: the auth token resolved from the environment will be sent to `{host}`, which \
-         is not `{canonical}`. The environment variables are conventions of the backend's own \
-         service, so a token meant for `{canonical}` may be exposed to a different host. Set the \
-         token explicitly with auth_token(..) if this host is intended."
-    );
-    true
+    match canonical_host {
+        Some(canonical) => {
+            log::warn!(
+                "self_update: the auth token resolved from the environment will be sent to `{host}`, \
+                 which is not `{canonical}`. The environment variables are conventions of the \
+                 backend's own service, so a token meant for `{canonical}` may be exposed to a \
+                 different host. Set the token explicitly with auth_token(..), or acknowledge this \
+                 host with allow_auth_host(..), if it is intended."
+            );
+            EnvTokenDecision::WarnedAndSent
+        }
+        None => {
+            log::warn!(
+                "self_update: withholding the auth token resolved from the environment: `{host}` was \
+                 not explicitly acknowledged. This backend has no canonical host to compare an \
+                 env-sourced token against, so -- rather than silently binding an ambient credential \
+                 to whatever host the application happens to be pointed at -- the token is not \
+                 attached and the request proceeds anonymously. Set the token explicitly with \
+                 auth_token(..), or acknowledge this host with allow_auth_host(..), to send it."
+            );
+            EnvTokenDecision::Withheld
+        }
+    }
 }
+
+/// Set an explicit auth token, clearing the paired `auth_token_from_env` flag.
+///
+/// An explicit `auth_token(..)` is the application's own credential and always wins over the
+/// environment, whatever the call order, so it is never treated as env-sourced. Shared by the
+/// macro-generated `UpdateBuilder::auth_token` and all four hand-written `ReleaseListBuilder::auth_token`
+/// setters, so a backend that forgets this reset cannot happen by omission: skipping it would not
+/// break "explicit wins" (that is [`fill_env_token_if_unset`]'s job), but would produce a spurious
+/// environment-origin warning -- or, after A1, a wrongly *withheld* token on a canonical-host-less
+/// backend -- on every `build()`.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn set_explicit_auth_token(
+    slot: &mut Option<String>,
+    env_sourced: &mut bool,
+    value: impl Into<String>,
+) {
+    *slot = Some(value.into());
+    *env_sourced = false;
+}
+
 #[cfg(feature = "progress-bar")]
 use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
 
@@ -415,40 +567,83 @@ impl Default for RequestConfig {
 
 impl std::fmt::Debug for RequestConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, no `..`: a field added to the struct and not listed here is a compile error,
+        // rather than one that silently stops rendering (see `debug_renders_every_field`'s comment
+        // for what the *runtime* test can and cannot catch).
+        let Self {
+            timeout,
+            headers,
+            retries,
+            retry_base_delay,
+            retry_max_delay,
+            auth_scheme,
+            auth_token,
+            client,
+            #[cfg(feature = "async")]
+            async_client,
+            header_error,
+            root_certificates,
+            cert_error,
+            auth_base_host,
+            auth_hosts,
+            allow_insecure_auth,
+        } = self;
         let mut s = f.debug_struct("RequestConfig");
-        s.field("timeout", &self.timeout)
-            .field("headers", &self.headers)
-            .field("retries", &self.retries)
-            .field("retry_base_delay", &self.retry_base_delay)
-            .field("retry_max_delay", &self.retry_max_delay)
-            .field("auth_scheme", &self.auth_scheme)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
-            .field("client", &self.client.as_ref().map(|_| "<http_client>"));
+        s.field("timeout", timeout)
+            .field("headers", headers)
+            .field("retries", retries)
+            .field("retry_base_delay", retry_base_delay)
+            .field("retry_max_delay", retry_max_delay)
+            .field("auth_scheme", auth_scheme)
+            .field("auth_token", &auth_token.as_ref().map(|_| "<token>"))
+            .field("client", &client.as_ref().map(|_| "<http_client>"));
         #[cfg(feature = "async")]
         s.field(
             "async_client",
-            &self.async_client.as_ref().map(|_| "<async_http_client>"),
+            &async_client.as_ref().map(|_| "<async_http_client>"),
         );
-        s.field("header_error", &self.header_error)
+        s.field("header_error", header_error)
             .field(
                 "root_certificates",
-                &format_args!("<{} root_certificates>", self.root_certificates.len()),
+                &format_args!("<{} root_certificates>", root_certificates.len()),
             )
-            .field("cert_error", &self.cert_error)
+            .field("cert_error", cert_error)
             // The auth-host gate carries no secret (a hostname), and it decides whether the token is
             // attached at all -- including which host the env-token warning compares against -- so a
             // debug dump that hides it cannot answer "why was my token not sent?".
-            .field("auth_base_host", &self.auth_base_host)
-            .field("auth_hosts", &self.auth_hosts)
-            .field("allow_insecure_auth", &self.allow_insecure_auth)
+            .field("auth_base_host", auth_base_host)
+            .field("auth_hosts", auth_hosts)
+            .field("allow_insecure_auth", allow_insecure_auth)
             .finish()
     }
+}
+
+/// Whether an HTTP header name carries a credential and so must be redacted (`set_sensitive`)
+/// wherever its value is inserted: the derived `Authorization` header
+/// ([`RequestConfig::apply_auth`]) and any user-supplied header of the same shape
+/// ([`RequestConfig::insert_header`]).
+///
+/// `name` is expected to already be lowercase, as [`header::HeaderName::as_str`] always returns it.
+/// Covers `authorization` and gitlab's `private-token` (the header its docs use for a token outside
+/// the `Authorization` scheme) by exact match, `cookie` by exact match, and any name ending in
+/// `-token` so a custom gateway header (`X-Api-Token`, `X-Upstream-Token`, ...) is covered without
+/// enumerating every vendor's spelling.
+fn header_name_is_credential_bearing(name: &str) -> bool {
+    matches!(name, "authorization" | "private-token" | "cookie") || name.ends_with("-token")
 }
 
 impl RequestConfig {
     /// Insert an extra request header from `TryInto<HeaderName>` / `TryInto<HeaderValue>` args. A
     /// conversion failure is recorded in [`header_error`](Self::header_error) (first one wins) and
     /// surfaced later by [`check`](Self::check); the header is simply not inserted.
+    ///
+    /// A credential-bearing header name (`authorization`, `private-token`, `cookie`, or any
+    /// `*-token` name) is marked [`set_sensitive`](header::HeaderValue::set_sensitive), the same
+    /// treatment [`apply_auth`](Self::apply_auth) gives the derived `Authorization` header: it keeps
+    /// the value out of the transports' own header logging and renders it as `Sensitive` in any
+    /// `Debug`, including the `Debug` this struct and every backend builder inherit. Without this, a
+    /// user-supplied `request_header("Authorization", ..)` -- which [`apply_auth`] gives
+    /// *precedence* over the backend's own token -- would print verbatim.
     pub(crate) fn insert_header<N, V>(&mut self, name: N, value: V)
     where
         N: ::core::convert::TryInto<crate::http_client::header::HeaderName>,
@@ -464,7 +659,7 @@ impl RequestConfig {
                 return;
             }
         };
-        let value = match value.try_into() {
+        let mut value = match value.try_into() {
             Ok(v) => v,
             Err(_) => {
                 if self.header_error.is_none() {
@@ -474,6 +669,9 @@ impl RequestConfig {
                 return;
             }
         };
+        if header_name_is_credential_bearing(name.as_str()) {
+            value.set_sensitive(true);
+        }
         self.headers.insert(name, value);
     }
 
@@ -504,6 +702,12 @@ impl RequestConfig {
         let Some(token) = self.auth_token.as_deref() else {
             return Ok(());
         };
+        // A blank (empty/whitespace-only) token is treated as unset, same as an absent one: it must
+        // not block a would-be env fallback upstream and must not produce a literal
+        // `Authorization: token ` header (see `is_blank_token`).
+        if is_blank_token(Some(token)) {
+            return Ok(());
+        }
         if !self.auth_allowed_for(url) {
             log::warn!(
                 "self_update: not attaching the auth token to {url}: its host is not the configured \
@@ -662,9 +866,10 @@ pub(crate) struct CommonBuilderConfig {
     pub progress_chars: String,
     pub auth_token: Option<String>,
     /// `true` when [`auth_token`](Self::auth_token) was filled from the environment by the generated
-    /// `auth_token_from_env()` setter. Cleared by every explicit `auth_token(..)` call. Read at
-    /// `build()` time by [`warn_if_env_token_off_canonical_host`] so an ambient credential bound to
-    /// a non-canonical host is reported.
+    /// `auth_token_from_env()` setter. Cleared by every explicit `auth_token(..)` call (via
+    /// [`set_explicit_auth_token`]). Read at `build()` time by [`env_token_host_decision`] so an
+    /// ambient credential bound to an unacknowledged host is reported (or, for a backend with no
+    /// canonical host, withheld).
     pub auth_token_from_env: bool,
     /// The backend's authorization scheme. Defaults to [`AuthScheme::Token`] (github/gitea); gitlab
     /// sets [`AuthScheme::Bearer`]. Threaded into the resolved [`RequestConfig::auth_scheme`].
@@ -687,43 +892,79 @@ impl std::fmt::Debug for CommonBuilderConfig {
     /// [`RequestConfig::fmt`] does (`None` stays `None`, so "is a token set?" is still answerable
     /// from a debug dump without the value leaking).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, no `..`: a field added to the struct and not listed here is a compile error,
+        // rather than one that silently stops rendering (see `debug_renders_every_field`'s comment
+        // for what the *runtime* test can and cannot catch).
+        let Self {
+            request,
+            target,
+            asset_identifier,
+            bin_name,
+            bin_install_path,
+            check_install_path_writable,
+            bin_path_in_archive,
+            bin_path_in_archive_auto,
+            bundle_path_in_archive,
+            bundle_install_path,
+            show_download_progress,
+            show_output,
+            no_confirm,
+            show_release_notes,
+            update_strategy,
+            tag_prefix,
+            current_version,
+            release_tag,
+            #[cfg(feature = "progress-bar")]
+            progress_template,
+            #[cfg(feature = "progress-bar")]
+            progress_chars,
+            auth_token,
+            auth_token_from_env,
+            auth_scheme,
+            progress_callback,
+            verify,
+            asset_matcher,
+            #[cfg(feature = "checksums")]
+            checksum,
+            #[cfg(feature = "checksums")]
+            verify_release_digest,
+            #[cfg(feature = "signatures")]
+            verifying_keys,
+        } = self;
         let mut s = f.debug_struct("CommonBuilderConfig");
-        s.field("request", &self.request)
-            .field("target", &self.target)
-            .field("asset_identifier", &self.asset_identifier)
-            .field("bin_name", &self.bin_name)
-            .field("bin_install_path", &self.bin_install_path)
-            .field(
-                "check_install_path_writable",
-                &self.check_install_path_writable,
-            )
-            .field("bin_path_in_archive", &self.bin_path_in_archive)
-            .field("bin_path_in_archive_auto", &self.bin_path_in_archive_auto)
-            .field("bundle_path_in_archive", &self.bundle_path_in_archive)
-            .field("bundle_install_path", &self.bundle_install_path)
-            .field("show_download_progress", &self.show_download_progress)
-            .field("show_output", &self.show_output)
-            .field("no_confirm", &self.no_confirm)
-            .field("show_release_notes", &self.show_release_notes)
-            .field("update_strategy", &self.update_strategy)
-            .field("tag_prefix", &self.tag_prefix)
-            .field("current_version", &self.current_version)
-            .field("release_tag", &self.release_tag);
+        s.field("request", request)
+            .field("target", target)
+            .field("asset_identifier", asset_identifier)
+            .field("bin_name", bin_name)
+            .field("bin_install_path", bin_install_path)
+            .field("check_install_path_writable", check_install_path_writable)
+            .field("bin_path_in_archive", bin_path_in_archive)
+            .field("bin_path_in_archive_auto", bin_path_in_archive_auto)
+            .field("bundle_path_in_archive", bundle_path_in_archive)
+            .field("bundle_install_path", bundle_install_path)
+            .field("show_download_progress", show_download_progress)
+            .field("show_output", show_output)
+            .field("no_confirm", no_confirm)
+            .field("show_release_notes", show_release_notes)
+            .field("update_strategy", update_strategy)
+            .field("tag_prefix", tag_prefix)
+            .field("current_version", current_version)
+            .field("release_tag", release_tag);
         #[cfg(feature = "progress-bar")]
-        s.field("progress_template", &self.progress_template)
-            .field("progress_chars", &self.progress_chars);
-        s.field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
-            .field("auth_token_from_env", &self.auth_token_from_env)
-            .field("auth_scheme", &self.auth_scheme)
-            .field("progress_callback", &self.progress_callback)
-            .field("verify", &self.verify)
-            .field("asset_matcher", &self.asset_matcher);
+        s.field("progress_template", progress_template)
+            .field("progress_chars", progress_chars);
+        s.field("auth_token", &auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", auth_token_from_env)
+            .field("auth_scheme", auth_scheme)
+            .field("progress_callback", progress_callback)
+            .field("verify", verify)
+            .field("asset_matcher", asset_matcher);
         #[cfg(feature = "checksums")]
-        s.field("checksum", &self.checksum)
-            .field("verify_release_digest", &self.verify_release_digest);
+        s.field("checksum", checksum)
+            .field("verify_release_digest", verify_release_digest);
         // Verifying keys are public by construction, so they render as they did under the derive.
         #[cfg(feature = "signatures")]
-        s.field("verifying_keys", &self.verifying_keys);
+        s.field("verifying_keys", verifying_keys);
         s.finish()
     }
 }
@@ -937,6 +1178,8 @@ pub(crate) struct CommonConfig {
 #[cfg(test)]
 mod tests {
     use super::{CommonBuilderConfig, RequestConfig};
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     /// A PEM-framed certificate whose body is not valid X.509 DER (base64 of "not a valid cert").
     /// reqwest accepts the PEM framing but rejects it at client-build time, so it reliably produces
@@ -1120,74 +1363,323 @@ mod tests {
         assert_eq!(super::first_env_token(&candidates).as_deref(), Some("real"));
     }
 
-    // --- H: an env-sourced token bound to a non-canonical host --------------------------------
+    // --- H/A1/A2: deciding what to do with an env-sourced token bound to an unacknowledged host ---
+
+    use super::EnvTokenDecision;
+
+    // No `auth_hosts` entries in play for most of these; a short alias keeps the calls readable.
+    const NO_EXTRA_HOSTS: &[String] = &[];
 
     // The canonical host is the expected case and must stay silent: the env var list is a
     // convention of that very service.
     #[test]
-    fn no_warning_when_an_env_token_targets_the_canonical_host() {
-        assert!(
-            !super::warn_if_env_token_off_canonical_host(
+    fn sends_silently_when_an_env_token_targets_the_canonical_host() {
+        assert_eq!(
+            super::env_token_host_decision(
                 true,
                 Some("api.github.com"),
+                NO_EXTRA_HOSTS,
                 Some("api.github.com")
             ),
+            EnvTokenDecision::Sent,
             "the canonical host must not warn"
         );
         // Host comparison is case-insensitive, like the request-time host gate.
-        assert!(!super::warn_if_env_token_off_canonical_host(
-            true,
-            Some("API.GitHub.com"),
-            Some("api.github.com")
-        ));
+        assert_eq!(
+            super::env_token_host_decision(
+                true,
+                Some("API.GitHub.com"),
+                NO_EXTRA_HOSTS,
+                Some("api.github.com")
+            ),
+            EnvTokenDecision::Sent
+        );
     }
 
     // The case this guard exists for: a custom `api_base_url`/`host` plus a token the application
     // never typed. The request-time host gate cannot catch it (the configured host *is*
     // `auth_base_host`), so an app that exposes its update URL as config and runs in CI would hand
-    // `GITHUB_TOKEN` to an attacker-chosen host with no signal at all.
+    // `GITHUB_TOKEN` to an attacker-chosen host with no signal at all. A backend WITH a canonical
+    // host still sends it, just with a warning (DECIDED, A1).
     #[test]
-    fn warns_when_an_env_token_targets_a_custom_host() {
-        assert!(
-            super::warn_if_env_token_off_canonical_host(
+    fn warns_and_sends_when_an_env_token_targets_an_unacknowledged_custom_host() {
+        assert_eq!(
+            super::env_token_host_decision(
                 true,
                 Some("evil.example.com"),
+                NO_EXTRA_HOSTS,
                 Some("api.github.com")
             ),
-            "an env-sourced token bound to a non-canonical host must warn"
+            EnvTokenDecision::WarnedAndSent,
+            "an env-sourced token bound to an unacknowledged host must warn but still be sent"
+        );
+    }
+
+    // A2: an `allow_auth_host` entry is itself the user's explicit "send it here" -- once the
+    // configured host is in that set, the warning falls silent even though it is not the canonical
+    // host, exactly as if it were. Case-insensitive, like every other host comparison here.
+    #[test]
+    fn sends_silently_when_the_host_is_acknowledged_via_allow_auth_host() {
+        let auth_hosts = ["Evil.Example.com".to_string()];
+        assert_eq!(
+            super::env_token_host_decision(
+                true,
+                Some("evil.example.com"),
+                &auth_hosts,
+                Some("api.github.com")
+            ),
+            EnvTokenDecision::Sent,
+            "a host present in allow_auth_host must not warn, even though it is not canonical"
+        );
+        // An UNLISTED custom host on the same builder still warns -- acknowledging one host does not
+        // silence the check for every other one.
+        assert_eq!(
+            super::env_token_host_decision(
+                true,
+                Some("other.example.com"),
+                &auth_hosts,
+                Some("api.github.com")
+            ),
+            EnvTokenDecision::WarnedAndSent
         );
     }
 
     // An explicitly-set token is the application's own decision about which host to trust, so the
     // same custom host must stay silent -- otherwise every enterprise/self-hosted user with an
-    // explicit token would be nagged.
+    // explicit token would be nagged. Not env-sourced short-circuits before any host comparison.
     #[test]
-    fn no_warning_for_an_explicitly_set_token_on_a_custom_host() {
-        assert!(
-            !super::warn_if_env_token_off_canonical_host(
+    fn no_action_for_an_explicitly_set_token_on_a_custom_host() {
+        assert_eq!(
+            super::env_token_host_decision(
                 false,
                 Some("github.mycorp.com"),
+                NO_EXTRA_HOSTS,
                 Some("api.github.com")
             ),
-            "an explicitly-set token must never warn"
+            EnvTokenDecision::Sent,
+            "an explicitly-set token must never warn or be withheld"
         );
     }
 
-    // A backend with no canonical host (gitea is always self-hosted) has nothing to compare
-    // against and must never warn, whatever host is configured.
+    // A1 (DECIDED): a backend with NO canonical host (gitea is always self-hosted) has nothing to
+    // compare against, so an unacknowledged env-sourced token is WITHHELD rather than silently sent
+    // to whatever host happens to be configured -- the opposite of the canonical-host backends,
+    // which still send it.
     #[test]
-    fn no_warning_for_a_backend_without_a_canonical_host() {
-        assert!(!super::warn_if_env_token_off_canonical_host(
-            true,
-            Some("gitea.example.com"),
-            None
-        ));
-        // Nor when the configured URL had no parseable host at all.
-        assert!(!super::warn_if_env_token_off_canonical_host(
-            true,
-            None,
-            Some("api.github.com")
-        ));
+    fn withholds_for_a_backend_without_a_canonical_host_and_no_acknowledgement() {
+        assert_eq!(
+            super::env_token_host_decision(true, Some("gitea.example.com"), NO_EXTRA_HOSTS, None),
+            EnvTokenDecision::Withheld
+        );
+    }
+
+    // A1's remedy: `allow_auth_host(configured_host)` re-affirms the host and the token is sent,
+    // even though the backend still has no canonical host of its own. This is the "explicit
+    // re-affirmation" half of A1's contract (the other half, an explicit `auth_token(..)`, never
+    // reaches this function at all -- it clears `env_sourced`).
+    #[test]
+    fn sends_for_a_backend_without_a_canonical_host_once_the_host_is_acknowledged() {
+        let auth_hosts = ["gitea.example.com".to_string()];
+        assert_eq!(
+            super::env_token_host_decision(true, Some("gitea.example.com"), &auth_hosts, None),
+            EnvTokenDecision::Sent
+        );
+    }
+
+    // No parseable host at all: the request-time gate (`auth_allowed_for`) will not attach the
+    // token to anything regardless, so there is nothing to warn about or withhold -- fail-closed in
+    // both directions (canonical-host and canonical-host-less backends alike).
+    #[test]
+    fn sends_silently_when_there_is_no_host_at_all() {
+        assert_eq!(
+            super::env_token_host_decision(true, None, NO_EXTRA_HOSTS, Some("api.github.com")),
+            EnvTokenDecision::Sent
+        );
+        assert_eq!(
+            super::env_token_host_decision(true, None, NO_EXTRA_HOSTS, None),
+            EnvTokenDecision::Sent
+        );
+    }
+
+    // --- A5/B6: a blank auth token is treated as unset -----------------------------------------
+
+    // Neither an absent nor a whitespace-only token counts as "configured"; only real content does.
+    #[test]
+    fn is_blank_token_treats_none_and_whitespace_as_blank() {
+        assert!(super::is_blank_token(None));
+        assert!(super::is_blank_token(Some("")));
+        assert!(super::is_blank_token(Some("   \n\t")));
+        assert!(!super::is_blank_token(Some("ghp_abc")));
+        // Surrounding whitespace around real content does not make it blank (it is not trimmed away
+        // here -- only the blank-vs-not judgment ignores it; see the `first_env_token` trimming
+        // asymmetry documented on `auth_token`).
+        assert!(!super::is_blank_token(Some("  ghp_abc  ")));
+    }
+
+    // A5: `auth_token("").auth_token_from_env()` must not leave the blank explicit value blocking
+    // the fallback -- the resolved env token must land in the slot.
+    #[test]
+    fn fill_env_token_if_unset_fills_over_a_blank_explicit_token() {
+        let mut slot = Some("".to_string());
+        let filled = super::fill_env_token_if_unset(&mut slot, Some("from-env".to_string()));
+        assert!(
+            filled,
+            "a blank explicit token must not block the env fallback"
+        );
+        assert_eq!(slot.as_deref(), Some("from-env"));
+
+        let mut slot = Some("   ".to_string());
+        let filled = super::fill_env_token_if_unset(&mut slot, Some("from-env".to_string()));
+        assert!(
+            filled,
+            "an all-whitespace explicit token must not block the env fallback"
+        );
+        assert_eq!(slot.as_deref(), Some("from-env"));
+    }
+
+    // A5: with nothing in the environment either, a blank explicit token is left exactly as it was
+    // (still blank) -- `is_blank_token` is what makes it inert downstream (`apply_auth`,
+    // `has_auth_token`), not a mutation here.
+    #[test]
+    fn fill_env_token_if_unset_leaves_a_blank_token_blank_when_the_env_resolves_to_none() {
+        let mut slot = Some("".to_string());
+        let filled = super::fill_env_token_if_unset(&mut slot, None);
+        assert!(!filled);
+        assert_eq!(slot.as_deref(), Some(""));
+    }
+
+    // A5: `apply_auth` must not send a literal `Authorization: token ` for a blank token -- the
+    // request goes out exactly as an anonymous one would.
+    #[test]
+    fn apply_auth_treats_a_blank_token_as_unset() {
+        for blank in ["", "   ", "\n\t"] {
+            let req = RequestConfig {
+                auth_token: Some(blank.to_string()),
+                auth_base_host: Some("api.github.com".to_string()),
+                ..Default::default()
+            };
+            let mut headers = crate::http_client::HeaderMap::new();
+            req.apply_auth("https://api.github.com/repos/o/r/releases", &mut headers)
+                .expect("a blank token must not fail encoding");
+            assert!(
+                headers
+                    .get(crate::http_client::header::AUTHORIZATION)
+                    .is_none(),
+                "a blank token ({blank:?}) must not produce an Authorization header"
+            );
+        }
+        // Sanity check: the same config with a real token DOES attach one, so the assertions above
+        // are exercising the blank-token path and not some other reason nothing was sent.
+        let req = RequestConfig {
+            auth_token: Some("real".to_string()),
+            auth_base_host: Some("api.github.com".to_string()),
+            ..Default::default()
+        };
+        let mut headers = crate::http_client::HeaderMap::new();
+        req.apply_auth("https://api.github.com/repos/o/r/releases", &mut headers)
+            .unwrap();
+        assert!(
+            headers
+                .get(crate::http_client::header::AUTHORIZATION)
+                .is_some()
+        );
+    }
+
+    // --- A6: the env lookup must not run when its result would be discarded ---------------------
+
+    // With an explicit, non-blank token already in the slot, the resolver closure must never be
+    // invoked -- proving the "using the auth token from $X" log (and the non-UTF-8 warning) cannot
+    // fire for a lookup whose result is thrown away.
+    #[test]
+    fn fill_env_token_if_unset_with_does_not_call_the_resolver_when_the_slot_is_filled() {
+        let mut slot = Some("explicit".to_string());
+        let mut called = false;
+        let filled = super::fill_env_token_if_unset_with(&mut slot, || {
+            called = true;
+            Some("from-env".to_string())
+        });
+        assert!(!filled);
+        assert!(
+            !called,
+            "the resolver must not run when the slot already holds a real token"
+        );
+        assert_eq!(slot.as_deref(), Some("explicit"));
+    }
+
+    // The resolver DOES run for an empty slot -- confirms the guard above is "already filled", not
+    // "never call it".
+    #[test]
+    fn fill_env_token_if_unset_with_calls_the_resolver_when_the_slot_is_empty() {
+        let mut slot = None;
+        let mut called = false;
+        let filled = super::fill_env_token_if_unset_with(&mut slot, || {
+            called = true;
+            Some("from-env".to_string())
+        });
+        assert!(filled);
+        assert!(called);
+        assert_eq!(slot.as_deref(), Some("from-env"));
+    }
+
+    // A5+A6 together: a BLANK explicit token is not "already filled" either, so the resolver still
+    // runs and its result lands in the slot.
+    #[test]
+    fn fill_env_token_if_unset_with_calls_the_resolver_when_the_slot_is_blank() {
+        let mut slot = Some("   ".to_string());
+        let mut called = false;
+        let filled = super::fill_env_token_if_unset_with(&mut slot, || {
+            called = true;
+            Some("from-env".to_string())
+        });
+        assert!(filled);
+        assert!(called);
+        assert_eq!(slot.as_deref(), Some("from-env"));
+    }
+
+    // --- E4: the shared explicit-token setter -----------------------------------------------
+
+    #[test]
+    fn set_explicit_auth_token_sets_the_value_and_clears_env_sourced() {
+        let mut slot = None;
+        let mut env_sourced = true;
+        super::set_explicit_auth_token(&mut slot, &mut env_sourced, "explicit");
+        assert_eq!(slot.as_deref(), Some("explicit"));
+        assert!(
+            !env_sourced,
+            "an explicit token must clear the env-sourced flag"
+        );
+    }
+
+    // The blank-token rule (A5) applies to the *slot*, not to this setter: `auth_token(..)`
+    // unconditionally overwrites and unconditionally clears the flag, even with a blank value. So the
+    // two orders around a BLANK explicit token are NOT symmetric, unlike a real one:
+    //
+    //   auth_token("").auth_token_from_env()  -> env token wins (the slot was blank, so it filled)
+    //   auth_token_from_env().auth_token("")  -> anonymous (the blank overwrote the env token)
+    //
+    // The second is the "last writer wins with an unset value" reading, and it is what
+    // `has_auth_token()` then reports (`false`). Pinned here because nothing else states it: a future
+    // "don't clobber a live token with a blank" change would be a real behavior change and must not
+    // slip in silently. (See the certification note on `macros.rs`'s `auth_token` rustdoc, which
+    // claims this case works "in either call order".)
+    #[test]
+    fn set_explicit_auth_token_with_a_blank_value_overwrites_an_env_sourced_token() {
+        let mut slot = Some("from-env".to_string());
+        let mut env_sourced = true;
+        super::set_explicit_auth_token(&mut slot, &mut env_sourced, "   ");
+        assert_eq!(
+            slot.as_deref(),
+            Some("   "),
+            "an explicit blank value overwrites the slot rather than being ignored"
+        );
+        assert!(
+            !env_sourced,
+            "the token is no longer env-sourced once an explicit setter ran, blank or not"
+        );
+        assert!(
+            super::is_blank_token(slot.as_deref()),
+            "and the resulting slot is blank, i.e. no token is configured at all"
+        );
     }
 
     // --- A: the builder config's Debug must not leak the token ---------------------------------
@@ -1223,10 +1715,15 @@ mod tests {
 
     // The other failure mode of a hand-written `Debug`: not leaking a secret but silently *losing*
     // a field. Every backend's `UpdateBuilder` derives its `Debug` over this struct, so this is the
-    // dump an application pastes into a bug report; a field that stops rendering (because a new one
-    // was added to the struct and not to the impl, or an existing line was dropped while adding the
-    // redaction) makes the dump quietly misleading. The assertion above -- "does not contain the
-    // secret" -- passes for a `Debug` that prints nothing at all.
+    // dump an application pastes into a bug report; an existing line dropped while adding the
+    // redaction makes the dump quietly misleading. This RUNTIME test only catches that direction --
+    // a field removed from `fmt` while still on the struct -- because it asserts a hardcoded literal
+    // list, so a field added to neither the struct nor the list would pass silently. It does NOT
+    // catch a field added to the struct and never added to `fmt`: that direction is instead a
+    // COMPILE error, from the exhaustive `let Self { .. } = self;` destructure at the top of `fmt`
+    // (no `..`), which fails to build the moment a new field exists on the struct but not in the
+    // pattern. The assertion above -- "does not contain the secret" -- passes for a `Debug` that
+    // prints nothing at all.
     #[test]
     fn debug_renders_every_field() {
         let rendered = format!("{:?}", CommonBuilderConfig::default());
@@ -1339,6 +1836,207 @@ mod tests {
         );
     }
 
+    // --- A3: a user-supplied `request_header("Authorization", ..)` must not leak in `Debug` -------
+
+    // `apply_auth` gives a user-supplied `Authorization` header PRECEDENCE over the backend's own
+    // token (see `apply_auth`'s doc, point 1), so it is exactly as much a live credential as
+    // `auth_token` -- and before this fix it rendered verbatim in `RequestConfig`'s `Debug` (and so
+    // in every backend builder's `Debug`, which embeds it). `insert_header` must mark it sensitive
+    // the same way `apply_auth` marks the derived header.
+    #[test]
+    fn request_config_debug_redacts_a_user_supplied_authorization_header() {
+        let mut req = RequestConfig::default();
+        req.insert_header("Authorization", "Bearer user-supplied-secret");
+        let rendered = format!("{req:?}");
+        assert!(
+            !rendered.contains("user-supplied-secret"),
+            "a user-supplied Authorization header must never appear in Debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Sensitive"),
+            "a redacted header renders as `Sensitive` in http's HeaderValue Debug, got: {rendered}"
+        );
+    }
+
+    // The other credential-shaped header names `insert_header` must redact: gitlab's `PRIVATE-TOKEN`
+    // (case-insensitive; `HeaderName` always lowercases), `Cookie`, and the generic `*-token` shape a
+    // custom gateway header might use. A header that does NOT match must render in the clear, so the
+    // rule is not "redact everything".
+    #[test]
+    fn insert_header_marks_every_credential_shaped_header_name_sensitive() {
+        for name in [
+            "PRIVATE-TOKEN",
+            "Cookie",
+            "X-Upstream-Token",
+            "authorization",
+        ] {
+            let mut req = RequestConfig::default();
+            req.insert_header(name, "super-secret-value");
+            let rendered = format!("{req:?}");
+            assert!(
+                !rendered.contains("super-secret-value"),
+                "`{name}` must be redacted in Debug output, got: {rendered}"
+            );
+        }
+        // A non-credential header is unaffected: it must still render in the clear.
+        let mut req = RequestConfig::default();
+        req.insert_header("X-Request-Id", "not-a-secret");
+        assert!(
+            format!("{req:?}").contains("not-a-secret"),
+            "a non-credential header must not be redacted"
+        );
+    }
+
+    // A3, the other half: `set_sensitive` must be a *marking*, not a mutation. The redaction is only
+    // acceptable because the header still goes out byte-for-byte as the application wrote it -- a
+    // "fix" that stored a placeholder, trimmed, or dropped the value would silence the Debug leak and
+    // simultaneously break every gateway that needs the header. Asserted through the stored
+    // `HeaderValue` (which is what the transports send) rather than the Debug rendering.
+    #[test]
+    fn insert_header_marks_a_credential_sensitive_without_altering_its_value() {
+        let mut req = RequestConfig::default();
+        req.insert_header("Authorization", "Bearer user-supplied-secret");
+        req.insert_header("X-Request-Id", "not-a-secret");
+        let auth = req
+            .headers
+            .get(crate::http_client::header::AUTHORIZATION)
+            .expect("the user-supplied header must still be stored");
+        assert_eq!(
+            auth.to_str().unwrap(),
+            "Bearer user-supplied-secret",
+            "the value sent on the wire must be exactly what the application passed"
+        );
+        assert!(
+            auth.is_sensitive(),
+            "a credential-bearing header must be flagged sensitive, which is what keeps it out of \
+             Debug output and the transports' own header logging"
+        );
+        // The flag is per-value, not per-map: an ordinary header stays unflagged, so `is_sensitive`
+        // above is discriminating and not simply true for everything in the map.
+        assert!(
+            !req.headers
+                .get("x-request-id")
+                .expect("the ordinary header must be stored")
+                .is_sensitive(),
+            "a non-credential header must not be marked sensitive"
+        );
+    }
+
+    // --- E6: the destructured `Debug` impls must pair each name with its OWN value ---------------
+
+    // The exhaustive `let Self { .. } = self;` destructure (E6) makes a *missing* field a compile
+    // error, and `request_config_debug_renders_every_field` catches a *dropped* line -- but neither
+    // catches the failure mode the destructure itself introduces: every field is now a bare local, so
+    // rendering `.field("auth_base_host", auth_hosts)` (or swapping the two `Duration`s, or the two
+    // `Option<String>` error slots) compiles and keeps every field name present. The dump would then
+    // be confidently wrong about exactly the fields an application reads to answer "why was my token
+    // not sent?". Distinct values per field, asserted as name/value PAIRS.
+    #[test]
+    fn request_config_debug_pairs_each_field_with_its_own_value() {
+        let req = RequestConfig {
+            timeout: Some(Duration::from_secs(11)),
+            retries: 7,
+            retry_base_delay: Duration::from_millis(13),
+            retry_max_delay: Duration::from_millis(17),
+            header_error: Some("header-error-marker".to_string()),
+            cert_error: Some("cert-error-marker".to_string()),
+            auth_base_host: Some("base.example.test".to_string()),
+            auth_hosts: vec!["extra.example.test".to_string()],
+            allow_insecure_auth: true,
+            ..Default::default()
+        };
+        let rendered = format!("{req:?}");
+        for (field, value) in [
+            ("timeout", "Some(11s)"),
+            ("retries", "7"),
+            ("retry_base_delay", "13ms"),
+            ("retry_max_delay", "17ms"),
+            ("header_error", "Some(\"header-error-marker\")"),
+            ("cert_error", "Some(\"cert-error-marker\")"),
+            ("auth_base_host", "Some(\"base.example.test\")"),
+            ("auth_hosts", "[\"extra.example.test\"]"),
+            ("allow_insecure_auth", "true"),
+        ] {
+            assert!(
+                rendered.contains(&format!("{field}: {value}")),
+                "`{field}` must render its own value (`{value}`), got: {rendered}"
+            );
+        }
+    }
+
+    // Same guard for `CommonBuilderConfig`, which has far more same-typed neighbours to confuse: five
+    // `Option<String>`s, two `Option<PathBuf>`s and six `bool`s, all rendered by hand from locals of
+    // identical type. This is the dump an application pastes into a bug report.
+    #[test]
+    fn common_builder_config_debug_pairs_each_field_with_its_own_value() {
+        let cfg = CommonBuilderConfig {
+            target: Some("target-marker".to_string()),
+            asset_identifier: Some("asset-identifier-marker".to_string()),
+            bin_name: Some("bin-name-marker".to_string()),
+            bin_install_path: Some(PathBuf::from("/bin-install-path-marker")),
+            check_install_path_writable: true,
+            bin_path_in_archive: Some("bin-path-in-archive-marker".to_string()),
+            bin_path_in_archive_auto: true,
+            bundle_path_in_archive: Some("bundle-path-in-archive-marker".to_string()),
+            bundle_install_path: Some(PathBuf::from("/bundle-install-path-marker")),
+            show_download_progress: true,
+            show_output: false,
+            no_confirm: true,
+            show_release_notes: false,
+            tag_prefix: Some("tag-prefix-marker".to_string()),
+            current_version: Some("current-version-marker".to_string()),
+            release_tag: Some("release-tag-marker".to_string()),
+            auth_token_from_env: true,
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        for (field, value) in [
+            ("target", "Some(\"target-marker\")"),
+            ("asset_identifier", "Some(\"asset-identifier-marker\")"),
+            ("bin_name", "Some(\"bin-name-marker\")"),
+            ("check_install_path_writable", "true"),
+            (
+                "bin_path_in_archive",
+                "Some(\"bin-path-in-archive-marker\")",
+            ),
+            ("bin_path_in_archive_auto", "true"),
+            (
+                "bundle_path_in_archive",
+                "Some(\"bundle-path-in-archive-marker\")",
+            ),
+            ("show_download_progress", "true"),
+            ("show_output", "false"),
+            ("no_confirm", "true"),
+            ("show_release_notes", "false"),
+            ("tag_prefix", "Some(\"tag-prefix-marker\")"),
+            ("current_version", "Some(\"current-version-marker\")"),
+            ("release_tag", "Some(\"release-tag-marker\")"),
+            ("auth_token_from_env", "true"),
+        ] {
+            assert!(
+                rendered.contains(&format!("{field}: {value}")),
+                "`{field}` must render its own value (`{value}`), got: {rendered}"
+            );
+        }
+        // The two `Option<PathBuf>`s render platform-dependently (`Some("/x")` vs `Some("\\x")`), so
+        // pair them by marker substring rather than by an exact literal.
+        for (field, marker) in [
+            ("bin_install_path", "bin-install-path-marker"),
+            ("bundle_install_path", "bundle-install-path-marker"),
+        ] {
+            let at = rendered
+                .find(&format!("{field}: "))
+                .unwrap_or_else(|| panic!("`{field}` must be rendered, got: {rendered}"));
+            let tail = &rendered[at..];
+            let end = tail.find(", ").unwrap_or(tail.len());
+            assert!(
+                tail[..end].contains(marker),
+                "`{field}` must render its own value (`{marker}`), got: {}",
+                &tail[..end]
+            );
+        }
+    }
+
     // --- `host_of`: the input to BOTH the request-time auth gate and the new host warning --------
 
     // `host_of` decides which host may receive the token (`auth_base_host`) and which host the
@@ -1387,12 +2085,14 @@ mod tests {
             super::host_of("gitlab.mycorp.com").as_deref(),
             Some("gitlab.mycorp.com")
         );
-        assert!(
-            super::warn_if_env_token_off_canonical_host(
+        assert_eq!(
+            super::env_token_host_decision(
                 true,
                 super::host_of("gitlab.mycorp.com").as_deref(),
+                NO_EXTRA_HOSTS,
                 Some("gitlab.com")
             ),
+            EnvTokenDecision::WarnedAndSent,
             "a scheme-less custom host must still be reported for an env-sourced token"
         );
     }
@@ -1404,8 +2104,9 @@ mod tests {
     fn host_of_is_none_without_a_host() {
         assert_eq!(super::host_of(""), None);
         assert_eq!(super::host_of("/just/a/path"), None);
-        assert!(
-            !super::warn_if_env_token_off_canonical_host(true, None, Some("gitlab.com")),
+        assert_eq!(
+            super::env_token_host_decision(true, None, NO_EXTRA_HOSTS, Some("gitlab.com")),
+            EnvTokenDecision::Sent,
             "no parseable host means no token is sent, so there is nothing to warn about"
         );
     }
@@ -1594,8 +2295,6 @@ mod tests {
     }
 
     // --- bundle mode (BNDL-1) ----------------------------------------------------------------
-
-    use std::path::PathBuf;
 
     // A builder config with the required single-file fields set, as a base for the bundle tests.
     fn bundle_base() -> CommonBuilderConfig {

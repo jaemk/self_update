@@ -9,12 +9,15 @@
 //! *concurrently on many threads*, so a second `#[test]` in this file could be reading the
 //! environment at the moment this one writes it.
 //!
-//! Each integration-test file is compiled into its **own binary**, and cargo runs the binaries as
-//! separate processes. With exactly one test here, the `set_var` call happens on the only thread
-//! that exists in this process, before anything else reads the environment -- which is what makes
-//! it sound. **Do not add a second `#[test]` (or any `#[bench]`) to this file**: put it in the
-//! in-crate `#[cfg(test)]` modules, which cover the resolution rules through the pure helpers
-//! without touching process env, or in a new single-test file of its own.
+//! SAFETY: `std::env::set_var` is sound only while no other thread may read the
+//! environment concurrently. What holds here is NOT "this process is single-threaded":
+//! libtest keeps its harness thread alive in `recv_timeout` while the body runs on a
+//! worker at default concurrency. What holds is that no environment-reading thread
+//! exists yet -- this binary contains exactly ONE `#[test]`, and every env write below
+//! happens BEFORE the first HTTP client is built. That ordering is load-bearing: a
+//! reqwest blocking client spawns a background thread that reads `HTTP_PROXY` /
+//! `http_proxy`. So do not add a second `#[test]` here, and do not place a `set_var` /
+//! `remove_var` after the first `build()` -- either is a genuine data race, not style.
 #![cfg(feature = "gitee")]
 
 use std::sync::{Arc, Mutex};

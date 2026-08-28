@@ -1,20 +1,19 @@
 //! End-to-end check of `auth_token_from_env()` on the **github** builders against a real process
 //! environment, observed on the wire.
 //!
-//! Sibling of `auth_token_env.rs`, which pins the same contract on the `Update` builder through the
-//! public `UpdateConfig::auth_token` accessor and covers the `GH_TOKEN` > `GITHUB_TOKEN`
-//! precedence. This file goes one layer further out -- the `Authorization` header a custom
-//! transport actually receives -- and covers the `ReleaseList` builder's precedence, which
-//! `auth_token_env.rs` does not reach (a built `ReleaseList` exposes no token accessor).
+//! This file pins the whole env-token contract on both github builders: pickup, the `GH_TOKEN` >
+//! `GITHUB_TOKEN` precedence against a genuinely populated environment, and that an explicit
+//! `auth_token(..)` still wins in either call order. It goes one layer further out than the
+//! builders' own accessors -- the `Authorization` header a custom transport actually receives --
+//! which also covers the `ReleaseList` builder, whose built form exposes no token accessor.
 //!
 //! # Why this file holds exactly ONE `#[test]`
 //!
 //! `std::env::set_var` is `unsafe` since the 2024 edition: the environment is process-global, and
-//! mutating it while another thread reads it (directly, or through libc calls such as
-//! `getaddrinfo`) is undefined behavior, and the harness runs the tests of one binary concurrently
-//! on many threads. Each integration-test file is its own binary and its own process, so with
-//! exactly one test here the `set_var` call happens on the only thread that exists. **Do not add a
-//! second `#[test]` to this file**; put it in a new single-test file of its own.
+//! mutating it while another thread reads it is undefined behavior. Each integration-test file is
+//! its own binary and its own process; see the `// SAFETY:` comment at the `set_var` call below for
+//! the exact invariant that makes the call sound here. **Do not add a second `#[test]` to this
+//! file**; put it in a new single-test file of its own.
 #![cfg(feature = "github")]
 
 use std::sync::{Arc, Mutex};
@@ -75,13 +74,27 @@ fn auth_header_of(f: impl FnOnce(Arc<dyn HttpClient>)) -> Option<String> {
 /// explicit `auth_token(..)` must beat a **populated** environment in either call order, on both
 /// builders.
 ///
+/// `GITHUB_TOKEN` is also exported, and set to a value that must lose: `GH_TOKEN` has precedence
+/// over `GITHUB_TOKEN`, matching the `gh` CLI. Exercising that against a real environment (rather
+/// than asserting off the declared const list) matters because GitHub Actions auto-populates
+/// `GITHUB_TOKEN`, so a reversed list would silently ignore a deliberately exported `GH_TOKEN`.
+///
 /// The in-crate github tests run in whatever environment cargo was invoked with, which is normally
 /// clean, so their precedence assertions hold vacuously -- nothing was resolved to lose to.
 #[test]
 fn env_token_reaches_the_wire_and_an_explicit_token_still_wins() {
-    // Set before any other thread exists in this process (see the module comment for why).
+    // SAFETY: `std::env::set_var` is sound only while no other thread may read the
+    // environment concurrently. What holds here is NOT "this process is single-threaded":
+    // libtest keeps its harness thread alive in `recv_timeout` while the body runs on a
+    // worker at default concurrency. What holds is that no environment-reading thread
+    // exists yet -- this binary contains exactly ONE `#[test]`, and every env write below
+    // happens BEFORE the first HTTP client is built. That ordering is load-bearing: a
+    // reqwest blocking client spawns a background thread that reads `HTTP_PROXY` /
+    // `http_proxy`. So do not add a second `#[test]` here, and do not place a `set_var` /
+    // `remove_var` after the first `build()` -- either is a genuine data race, not style.
     unsafe {
         std::env::set_var("GH_TOKEN", "env-token");
+        std::env::set_var("GITHUB_TOKEN", "github-token-must-lose");
     }
 
     // 1. Pickup on the ReleaseList builder, rendered with github's `token` scheme.

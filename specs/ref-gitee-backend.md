@@ -63,10 +63,12 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`; on
   `UpdateBuilder` it comes through the common setters and is stored in `CommonConfig`.
 - `auth_token_from_env()` on either builder resolves the token from `GITEE_TOKEN`
-  (`AUTH_TOKEN_ENV_VARS`, `gitee.rs:213`/`403`); it is opt-in (nothing reads the environment
-  without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` always
-  wins over it, whatever the call order; `has_auth_token()` reports whether either source set a
-  token.
+  (`AUTH_TOKEN_ENV_VARS`, `gitee.rs:225`/`418`); it is opt-in (nothing reads the environment
+  without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` with a
+  non-blank value always wins over it, whatever the call order (a blank explicit token is the
+  documented exception: `auth_token("").auth_token_from_env()` still picks up the env token, but
+  `auth_token_from_env().auth_token("")` discards it -- see `ref-common-config.md`);
+  `has_auth_token()` reports whether either source set a token.
 - Auth is applied centrally by `apply_auth` (`common.rs`), which renders the token as
   `Authorization: Bearer <token>`. This matches the scheme used by Gitee's official
   client (oschina/mcp-gitee `utils/gitee_client.go:172`, verified 2026-07-17).
@@ -78,11 +80,14 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 - A token that cannot parse into a header value surfaces as `Error::InvalidAuthToken`.
 - Headers always include `User-Agent: rust-reqwest/self-update`.
 - An env-sourced token is bound to whatever host `host(..)` is configured with (or the default
-  `gitee.com`), which `build()` flags via `warn_if_env_token_off_canonical_host`
-  (`gitee.rs:242-246` `ReleaseListBuilder`, and the `Update` path's equivalent call) when the
-  resolved host is not gitee's canonical `gitee.com` (`CANONICAL_AUTH_HOST`, `gitee.rs:22`); an
-  explicitly-set token is never warned about. Both builders' `Debug` impls redact the token to
-  `"<token>"`.
+  `gitee.com`), which `build()` flags via `env_token_host_decision`
+  (`gitee.rs:258-263` `ReleaseListBuilder`, `:461-466` `Update`). It returns
+  `EnvTokenDecision::WarnedAndSent` (warns, but still attaches the token) when the resolved host is
+  neither gitee's canonical `gitee.com` (`CANONICAL_AUTH_HOST`, `gitee.rs:23`) nor an acknowledged
+  `allow_auth_host` entry -- unchanged from before; a host passed to `allow_auth_host(..)` is now
+  acknowledged (`host_is_acknowledged`, `backends/common.rs`) and yields `EnvTokenDecision::Sent`
+  with no warning. An explicitly-set token is never warned about either. Both builders' `Debug`
+  impls redact the token to `"<token>"`.
 
 ### Pagination and ordering
 
@@ -209,7 +214,8 @@ or change the latest-release endpoint shape) would not be caught by CI automatic
 - `auth_token_from_env()` reads `GITEE_TOKEN` only (`AUTH_TOKEN_ENV_VARS`). An explicit
   `auth_token(..)` always wins over it, whatever the call order. `has_auth_token()` reports
   whether either source set a token. An env-sourced token bound to a non-`gitee.com` host (from a
-  custom `host(..)`) logs a warning at `build()`.
+  custom `host(..)`) logs a warning at `build()` and is still sent, unless that host was also
+  passed to `allow_auth_host(..)`, in which case it is acknowledged and no warning fires.
 - A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota or a
   usable `Retry-After`; a bare 403 with neither stays `Unauthorized`. `retry`/`retry_async` never
   spend budget retrying a `RateLimited` response.
@@ -241,7 +247,7 @@ external network):
 - **Malformed response**: a non-array payload from the listing endpoint surfaces as
   `Error::InvalidResponse`.
 - **Env token**: `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEE_TOKEN"]` on both builders
-  (`gitee.rs:853-856`), and a first-wins check over the candidate pairs mirrors the shared
+  (`gitee.rs:875-881`), and a first-wins check over the candidate pairs mirrors the shared
   `first_env_token` behavior for this single-variable list.
 
 ## Related

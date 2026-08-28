@@ -112,6 +112,17 @@ impl UreqClient {
     }
 }
 
+/// Whether the per-request `http_status_as_error(false)` override in [`get`](HttpClient::get) is
+/// needed for this call. Only an injected agent whose OWN config still has
+/// `http_status_as_error(true)` (ureq's default) needs it. A caller who already disabled it at the
+/// agent level needs no override -- skipping it there avoids the request-level TLS-config-cache
+/// cost documented at the call site, and it is the only lane that keeps that agent's own TLS cache
+/// warm across requests. A crate-built (non-injected) agent never takes this path at all, since it
+/// is always built with `http_status_as_error(false)` (see `build_call_agent`).
+fn needs_status_override(is_injected: bool, agent: &Agent) -> bool {
+    is_injected && agent.config().http_status_as_error()
+}
+
 impl HttpClient for UreqClient {
     fn get(
         &self,
@@ -139,12 +150,28 @@ impl HttpClient for UreqClient {
             }
         };
         let mut req = agent.get(url);
-        if is_injected {
-            // An injected agent keeps ureq's default `http_status_as_error(true)`, which would turn
-            // a non-2xx into a headerless `ureq::Error::StatusCode`. ureq 3 supports overriding that
-            // per request, so apply the override here: the response then reaches the header-aware
-            // check at the bottom of `get` and every client lane classifies a non-2xx identically.
-            // Nothing else about the injected agent's own timeout/TLS/proxy config is touched.
+        // Skip the override entirely when the injected agent's own config already disables
+        // ureq's status-error (see the cost this avoids, described below) -- a free win for that
+        // class of callers, and it makes this a genuinely distinct code path from the one below.
+        if needs_status_override(is_injected, agent) {
+            // An injected agent that still has ureq's default `http_status_as_error(true)` would
+            // turn a non-2xx into a headerless `ureq::Error::StatusCode`. ureq 3 supports overriding
+            // that per request, so apply the override here: the response then reaches the
+            // header-aware check at the bottom of `get` and every client lane classifies a non-2xx
+            // identically. Nothing about the *values* of the injected agent's own timeout/TLS/proxy
+            // config is touched by this -- but the override is not free. Verified against the locked
+            // ureq 3.3.0 (`Cargo.lock`): `RequestBuilder::config()` inserts a `RequestLevelConfig`
+            // extension into the request, which `run()` (`run.rs:37-41`) reads back as
+            // `ConnectionDetails::request_level = true` for that connection. Both TLS backends'
+            // connectors (`tls/rustls.rs:97-114`, `tls/native_tls.rs:86-103`) refuse to *populate*
+            // the agent's `OnceLock` TLS-config cache on a request-level connection -- they may only
+            // reuse a value an agent-level connection already cached. An agent injected solely for
+            // this crate never makes an agent-level connection, so this branch rebuilds the
+            // `ClientConfig` / `TlsConnector` (root store included) on every new HTTPS connection.
+            // ureq 3 exposes no way to derive a modified `Config` from an injected agent other than
+            // this per-request override, so the cost is unavoidable for a caller who wants
+            // `http_status_as_error(true)` from an injected agent; the `&&` above is the only lane
+            // that avoids it (and, as a side effect, lets that agent's own TLS cache stay warm).
             req = req.config().http_status_as_error(false).build();
         }
 
@@ -155,10 +182,15 @@ impl HttpClient for UreqClient {
         let res = match req.call() {
             Ok(r) => r,
             Err(ureq::Error::StatusCode(code)) if is_injected => {
-                // Defensive fallback. The per-request override above means an injected agent
-                // normally falls through to the header-aware check below, so this arm is not
-                // expected to fire; if a future ureq ignores the request-level override, map the
-                // bare code rather than surfacing it as an opaque transport error. `StatusCode`
+                // Deliberately-kept dead code, in both lanes above. When the override in `get` runs
+                // (agent had `http_status_as_error(true)`), it forces the *effective* config for this
+                // connection to `false` (`run.rs:128-129` only raises `StatusCode` when
+                // `config.http_status_as_error()` is true), so this arm is not expected to fire; if a
+                // future ureq ignores the request-level override, map the bare code rather than
+                // surfacing it as an opaque transport error. When the override is *skipped* (agent
+                // already had `http_status_as_error(false)`), `run()` falls back to the agent-level
+                // config (`run.rs:37-41`), which is that same `false` -- so this arm stays unreachable
+                // there too, for the same reason, not because the skip reopened it. `StatusCode`
                 // carries no headers, so this path cannot see a spent quota on a 403 (it stays
                 // `Unauthorized`) and a 429 classifies as `RateLimited` carrying no wait -- the
                 // status alone is the rate-limit signal (RFC 6585).
@@ -378,7 +410,8 @@ mod tests {
     #[test]
     fn injected_agent_with_status_error_disabled_sees_rate_limit_headers() {
         // The OTHER injected case: the user already built the agent with
-        // `http_status_as_error(false)`, so `get`'s per-request override is a no-op. This lane must
+        // `http_status_as_error(false)`, so `get` skips the per-request override entirely (see
+        // `needs_status_override`) rather than applying a redundant no-op one. This lane must still
         // classify the spent quota identically -- pinned separately from the default-injected agent
         // above so a failure names which injected path broke.
         let agent = ureq::Agent::new_with_config(
@@ -396,6 +429,44 @@ mod tests {
             matches!(err, Error::RateLimited { status: 403, .. }),
             "an injected agent that defers status handling must reach the header-aware check, got {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn needs_status_override_skips_agents_that_already_disabled_status_error() {
+        // Pins the decision `get` makes before ever touching the network (A8): an injected agent
+        // whose own config still has ureq's default `http_status_as_error(true)` must be overridden
+        // per request (this is the only lane that pays the request-level TLS-config-cache cost
+        // documented at the call site in `get`); an injected agent that already disabled it must be
+        // skipped rather than overridden again (the free win: no request-level marking at all, so
+        // that agent's own TLS-config cache stays eligible to warm up). Without the `&&` on the
+        // agent's own setting, the first two assertions below would both see `true` and this test
+        // would fail on the second one.
+        let default_status_error_agent =
+            ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
+        assert!(
+            needs_status_override(true, &default_status_error_agent),
+            "an injected agent that still has ureq's default http_status_as_error(true) must be \
+             overridden"
+        );
+
+        let status_error_disabled_agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build(),
+        );
+        assert!(
+            !needs_status_override(true, &status_error_disabled_agent),
+            "an injected agent that already disabled http_status_as_error must be skipped, not \
+             overridden again"
+        );
+
+        // is_injected gates the whole branch independently of the agent's own setting: a crate-built
+        // (non-injected) agent never takes this path, even if (hypothetically) its config still had
+        // http_status_as_error(true).
+        assert!(
+            !needs_status_override(false, &default_status_error_agent),
+            "a non-injected agent must never take the injected-only override path"
         );
     }
 

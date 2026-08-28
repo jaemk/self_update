@@ -13,8 +13,9 @@ use crate::{
 use serde::Deserialize;
 
 /// GitHub's canonical API host. A token resolved from the environment is bound to whatever host the
-/// application configured, so `build()` warns when that host is not this one (see
-/// [`warn_if_env_token_off_canonical_host`](crate::backends::common::warn_if_env_token_off_canonical_host)).
+/// application configured, so `build()` warns when that host is neither this one nor an
+/// acknowledged `allow_auth_host` entry (see
+/// [`env_token_host_decision`](crate::backends::common::env_token_host_decision)).
 const CANONICAL_AUTH_HOST: &str = "api.github.com";
 
 /// GitHub release-asset JSON shape. Private DTO deserialized directly from the response bytes, then
@@ -116,14 +117,25 @@ pub struct ReleaseListBuilder {
 impl std::fmt::Debug for ReleaseListBuilder {
     /// Every field, with the token redacted exactly as `RequestConfig`'s `Debug` does.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, no `..`: a field added to the struct and not listed here is a compile error
+        // (E6, same guard as the gitea/gitee twins and both `common.rs` impls).
+        let Self {
+            repo_owner,
+            repo_name,
+            target,
+            auth_token,
+            auth_token_from_env,
+            custom_url,
+            request,
+        } = self;
         f.debug_struct("ReleaseListBuilder")
-            .field("repo_owner", &self.repo_owner)
-            .field("repo_name", &self.repo_name)
-            .field("target", &self.target)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
-            .field("auth_token_from_env", &self.auth_token_from_env)
-            .field("custom_url", &self.custom_url)
-            .field("request", &self.request)
+            .field("repo_owner", repo_owner)
+            .field("repo_name", repo_name)
+            .field("target", target)
+            .field("auth_token", &auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", auth_token_from_env)
+            .field("custom_url", custom_url)
+            .field("request", request)
             .finish()
     }
 }
@@ -175,10 +187,11 @@ impl ReleaseListBuilder {
     /// [`auth_token_from_env`](Self::auth_token_from_env). This setter always wins over that one,
     /// in either call order.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
-        self.auth_token = Some(auth_token.into());
-        // An explicit token is the application's own credential and always wins over the
-        // environment, whatever the call order, so this is no longer an env-sourced token.
-        self.auth_token_from_env = false;
+        crate::backends::common::set_explicit_auth_token(
+            &mut self.auth_token,
+            &mut self.auth_token_from_env,
+            auth_token,
+        );
         self
     }
 
@@ -215,16 +228,19 @@ impl ReleaseListBuilder {
                 .as_deref()
                 .unwrap_or("https://api.github.com"),
         );
-        // An env-sourced token is bound to whatever host was configured, which the request-time host
-        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
-        // github's canonical API host.
-        crate::backends::common::warn_if_env_token_off_canonical_host(
-            self.auth_token_from_env,
-            request.auth_base_host.as_deref(),
-            Some(CANONICAL_AUTH_HOST),
-        );
         request.build_client();
         request.check()?;
+        // An env-sourced token is bound to whatever host was configured, which the request-time host
+        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
+        // github's canonical API host (or an acknowledged `allow_auth_host` entry). github always has
+        // a canonical host, so the token is still sent either way (DECIDED, A1) -- checked after
+        // `request.check()?` so a builder that is about to fail validation does not also log.
+        crate::backends::common::env_token_host_decision(
+            self.auth_token_from_env,
+            request.auth_base_host.as_deref(),
+            &request.auth_hosts,
+            Some(CANONICAL_AUTH_HOST),
+        );
         Ok(ReleaseList {
             repo_owner: if let Some(ref owner) = self.repo_owner {
                 owner.to_owned()
@@ -418,10 +434,13 @@ impl UpdateBuilder {
                 );
                 // An env-sourced token is bound to whatever host was configured, which the
                 // request-time host gate cannot flag (the configured host *is* `auth_base_host`);
-                // warn when that is not github's canonical API host.
-                crate::backends::common::warn_if_env_token_off_canonical_host(
+                // warn when that is not github's canonical API host (or an acknowledged
+                // `allow_auth_host` entry). github always has a canonical host, so the token is
+                // still sent either way (DECIDED, A1).
+                crate::backends::common::env_token_host_decision(
                     self.common.auth_token_from_env,
                     resolved.request.auth_base_host.as_deref(),
+                    &resolved.request.auth_hosts,
                     Some(CANONICAL_AUTH_HOST),
                 );
                 resolved
@@ -751,9 +770,14 @@ mod tests {
 
     // --- AUTH-1: the environment-sourced auth token -------------------------------------------
 
-    // AUTH-1: `auth_token_from_env()` exists on both github builders, is chainable, and leaves a
-    // buildable configuration whatever the environment holds (nothing set is the no-op case). The
-    // env-var precedence itself is unit-tested in `backends::common` without touching process env.
+    // AUTH-1: `auth_token_from_env()` exists on both github builders and is chainable. This is
+    // effectively a "the method exists and does not panic" check, not a behavioral one: it reads the
+    // REAL process environment, so it means something different on a clean machine (nothing set,
+    // exercises the no-op path) than on a dev box exporting `GH_TOKEN`/`GITHUB_TOKEN` (exercises the
+    // pickup path) -- either way it only asserts `build()` stays `Ok`, which passes in both cases.
+    // The env-var precedence itself is unit-tested in `backends::common` without touching process
+    // env; the actual pickup-from-environment behavior is pinned on the wire by the per-backend
+    // integration binary `tests/auth_token_env_github.rs`, which controls the environment directly.
     #[test]
     fn auth_token_from_env_is_available_on_both_builders() {
         super::Update::configure()
@@ -788,35 +812,6 @@ mod tests {
             super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
             ["GH_TOKEN", "GITHUB_TOKEN"]
         );
-    }
-
-    // ...and that declared list is the one actually consulted: candidate `(name, value)` pairs
-    // built FROM the const, run through the very resolver the setter uses, resolve to the first
-    // name in it. Proves the const is not a stale copy of the real list, without mutating env.
-    //
-    // Both builders' consts are driven, not just the `UpdateBuilder`'s: they are declared by two
-    // separate macro invocations, so a typo or a reordering in the `ReleaseListBuilder`'s list is a
-    // real (and previously untested) way for the two builders of one backend to disagree about
-    // which credential to use.
-    #[test]
-    fn the_declared_env_vars_drive_the_resolver() {
-        for (builder, vars) in [
-            ("UpdateBuilder", super::UpdateBuilder::AUTH_TOKEN_ENV_VARS),
-            (
-                "ReleaseListBuilder",
-                super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
-            ),
-        ] {
-            let candidates: Vec<(&str, Option<String>)> = vars
-                .iter()
-                .map(|name| (*name, Some(format!("token-for-{name}"))))
-                .collect();
-            assert_eq!(
-                crate::backends::common::first_env_token(&candidates).as_deref(),
-                Some("token-for-GH_TOKEN"),
-                "the first declared variable must win on {builder}"
-            );
-        }
     }
 
     // C: an explicit `auth_token(..)` always wins over the environment, in EITHER call order -- the
@@ -878,9 +873,9 @@ mod tests {
         }
     }
 
-    // K: `has_auth_token()` answers "am I about to run authenticated?" on both builders without the
+    // K: `has_auth_token()` answers "is a token configured?" on both builders without the
     // application reimplementing the variable list. (The env-pickup half is covered by the
-    // single-test integration binary `tests/auth_token_env.rs`, which may set process env.)
+    // single-test integration binary `tests/auth_token_env_github.rs`, which may set process env.)
     #[test]
     fn has_auth_token_reports_an_explicitly_set_token() {
         let mut upd = super::Update::configure();
@@ -895,6 +890,53 @@ mod tests {
         assert!(!list.has_auth_token());
         list.auth_token("explicit");
         assert!(list.has_auth_token());
+    }
+
+    // A5: a blank explicit token (empty or all-whitespace) is not "configured" -- otherwise
+    // `auth_token(cfg.token.unwrap_or_default())` against a missing config value would report a
+    // token is set when none actually is, and `apply_auth` would go on to send a literal
+    // `Authorization: token ` header.
+    #[test]
+    fn has_auth_token_treats_a_blank_explicit_token_as_unset() {
+        let mut upd = super::Update::configure();
+        upd.auth_token("");
+        assert!(
+            !upd.has_auth_token(),
+            "an empty token must not count as configured"
+        );
+        upd.auth_token("   ");
+        assert!(
+            !upd.has_auth_token(),
+            "an all-whitespace token must not count as configured"
+        );
+
+        let mut list = super::ReleaseList::configure();
+        list.auth_token("");
+        assert!(!list.has_auth_token());
+        list.auth_token("   ");
+        assert!(!list.has_auth_token());
+    }
+
+    // A1 (DECIDED): github has a canonical host, so an env-sourced token bound to an unacknowledged
+    // custom host is still SENT (only the warning differs from the canonical-host case; gitea is the
+    // backend that withholds instead -- see `backends::gitea`'s equivalent test). Threading
+    // `auth_hosts` through the host-decision call at `build()` must not regress this.
+    #[test]
+    fn release_list_still_sends_an_env_sourced_token_off_the_canonical_host() {
+        let mut list = super::ReleaseList::configure();
+        list.repo_owner("o")
+            .repo_name("r")
+            .api_base_url("https://github.mycorp.com/api/v3");
+        list.auth_token = Some("ambient".to_string());
+        list.auth_token_from_env = true;
+        let built = list
+            .build()
+            .expect("an unacknowledged host must not fail build()");
+        assert_eq!(
+            built.request.auth_token.as_deref(),
+            Some("ambient"),
+            "github must still send an env-sourced token off its canonical host"
+        );
     }
 
     // A: `Debug` on either builder must never print the token. Both derive/embed a plaintext
@@ -2625,6 +2667,65 @@ mod tests {
             urls[0].contains("/repos/o/r/releases"),
             "the fake client recorded the URL the backend requested through the trait, got {:?}",
             urls[0]
+        );
+    }
+
+    /// A test-double client that records the whole `HeaderMap` it was handed, so a test can assert
+    /// on a header's *flags* (sensitivity) and not just on its rendered text.
+    struct HeaderCapturingClient(
+        std::sync::Arc<std::sync::Mutex<Vec<crate::http_client::HeaderMap>>>,
+    );
+
+    impl crate::http_client::HttpClient for HeaderCapturingClient {
+        fn get(
+            &self,
+            _url: &str,
+            headers: &crate::http_client::HeaderMap,
+            _timeout: Option<std::time::Duration>,
+        ) -> crate::errors::Result<Box<dyn crate::http_client::HttpResponse>> {
+            self.0.lock().unwrap().push(headers.clone());
+            Ok(Box::new(FakeResponse {
+                body: "[]".to_string(),
+                headers: crate::http_client::HeaderMap::new(),
+            }))
+        }
+    }
+
+    // A3, end of the line: `insert_header` marks a credential-bearing header sensitive, and that
+    // marking has to survive the merge `send` performs (`base.insert(name.clone(), value.clone())`)
+    // to reach the transport -- otherwise the redaction is only skin deep and a client that logs its
+    // request headers still prints the credential. The value itself must arrive byte-for-byte: this
+    // is the header `apply_auth` gives PRECEDENCE over the backend's own token, so mangling it would
+    // silently deauthenticate every user of the override.
+    #[test]
+    fn a_user_supplied_authorization_header_reaches_the_transport_intact_and_sensitive() {
+        use crate::backends::common::RequestConfig;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut cfg = RequestConfig {
+            // A backend token is configured too, so the precedence rule is exercised rather than
+            // assumed: the user's header wins and the derived `token backend-token` is not sent.
+            auth_token: Some("backend-token".to_string()),
+            auth_base_host: Some("example.test".to_string()),
+            client: Some(std::sync::Arc::new(HeaderCapturingClient(seen.clone()))),
+            ..Default::default()
+        };
+        cfg.insert_header("Authorization", "Bearer user-supplied-secret");
+        let _ = fetch_all_releases("https://example.test/repos/o/r/releases", &cfg).unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one request must have been issued");
+        let value = seen[0]
+            .get(crate::http_client::header::AUTHORIZATION)
+            .expect("the user-supplied Authorization header must reach the transport");
+        assert_eq!(
+            value.to_str().unwrap(),
+            "Bearer user-supplied-secret",
+            "the user's header wins over the backend token and is sent verbatim"
+        );
+        assert!(
+            value.is_sensitive(),
+            "the sensitivity marking must survive the header merge, or the credential still shows \
+             up in a transport's request logging"
         );
     }
 

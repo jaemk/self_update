@@ -13,13 +13,14 @@ token, but the crate makes each consumer plumb one in itself, and the resulting
 Current behavior:
 
 - `auth_token(impl Into<String>)` on every backend builder is the only way to
-  supply a token (`src/backends/github.rs:147`). There is no env-var path, so
+  supply a token (`src/backends/github.rs:189`). There is no env-var path, so
   every consumer writes the same `std::env::var("GITHUB_TOKEN")` plumbing,
   including the skip-when-empty case.
 - The token is already forwarded safely: `apply_auth` attaches it only to a URL
   whose host matches the configured API base or an `allow_auth_host` entry, and
-  only over https (`src/backends/common.rs:322-356`), with a per-backend scheme
-  (github/gitea `Token`, gitlab `Bearer`, `common.rs:196`). Nothing about the
+  only over https (`src/backends/common.rs:697-729` `apply_auth`, `:737-766`
+  `auth_allowed_for`), with a per-backend scheme (github/gitea `Token`, gitlab
+  `Bearer`; the `AuthScheme` enum is in `common.rs`). Nothing about the
   env source changes that gate.
 - A rate-limited response surfaces as `Error::Unauthorized { status: 403, url }`
   (`src/errors.rs:75`), the same variant as a bad token, so a caller cannot tell
@@ -31,26 +32,26 @@ Current behavior:
 
 AUTH-1-1 (revised 2026-08-27). `auth_token_from_env()` is added to the backend
 `UpdateBuilder` and `ReleaseListBuilder` types that take an `auth_token`, emitted by
-`impl_auth_token_from_env!` (`src/macros.rs:484-555`). It reads the backend's conventional
+`impl_auth_token_from_env!` (`src/macros.rs:468-571`). It reads the backend's conventional
 env vars in order and uses the first that is present and non-empty after trimming
 surrounding whitespace:
 
-- github: `GH_TOKEN`, then `GITHUB_TOKEN` (`src/backends/github.rs:191` ReleaseListBuilder,
-  `:379` UpdateBuilder). This order was **flipped from the original `GITHUB_TOKEN` then
+- github: `GH_TOKEN`, then `GITHUB_TOKEN` (`src/backends/github.rs:204` ReleaseListBuilder,
+  `:395` UpdateBuilder). This order was **flipped from the original `GITHUB_TOKEN` then
   `GH_TOKEN`**: `gh help environment` documents "GH_TOKEN, GITHUB_TOKEN (in order of
-  precedence)" (`github.rs:188-190`, `:376-378`), so the original order was the reverse of the
+  precedence)" (`github.rs:201-204`, `:392-395`), so the original order was the reverse of the
   CLI it claimed to match. Inside GitHub Actions `GITHUB_TOKEN` is auto-populated, so a
   deliberately-exported `GH_TOKEN` should win over it, not be silently shadowed by it.
-- gitlab: `GITLAB_TOKEN` only (`src/backends/gitlab.rs:203` ReleaseListBuilder, `:388`
+- gitlab: `GITLAB_TOKEN` only (`src/backends/gitlab.rs:216` ReleaseListBuilder, `:404`
   UpdateBuilder). `CI_JOB_TOKEN` was **removed** from the list (it was originally the second
   fallback): it is exported in every GitLab CI job, but this crate's backend pins
   `Authorization: Bearer`, which is not GitLab's job-token mechanism (the `JOB-TOKEN` header
   or a `job_token` request parameter), and job tokens are project-scoped. Keeping it in the
   list meant the call was never the advertised no-op inside CI (AUTH-1-2) -- it silently
   turned a working anonymous fetch against a public project into a 401/403 sent with a token
-  the backend cannot actually use correctly. See `gitlab.rs:209`, `:394` for the removal note.
-- gitea: `GITEA_TOKEN` (`src/backends/gitea.rs:183`, `:378`).
-- gitee: `GITEE_TOKEN` (`src/backends/gitee.rs:213`, `:403`).
+  the backend cannot actually use correctly. See `gitlab.rs:222`, `:410` for the removal note.
+- gitea: `GITEA_TOKEN` (`src/backends/gitea.rs:194`, `:400`).
+- gitee: `GITEE_TOKEN` (`src/backends/gitee.rs:225`, `:418`).
 
 AUTH-1-2. No variable set (or all empty) leaves `auth_token` unset: the request
 goes out unauthenticated exactly as today, no error. This makes the call safe to
@@ -68,17 +69,52 @@ The rule for how `auth_token(..)` and `auth_token_from_env()` interact was origi
 the existing value alone". A review of that reading replaced it with the rule below, which is
 now the normative one:
 
-**An explicit `auth_token(..)` call always wins, whatever the call order.** The environment is
-purely a *fallback* that fills the token slot only when it is still empty:
+**An explicit `auth_token(..)` call with a non-blank value always wins, whatever the call order.**
+The environment is purely a *fallback* that fills the token slot only when it is still blank:
 `auth_token(t).auth_token_from_env()` and `auth_token_from_env().auth_token(t)` both end up
-with `t`. A lookup that finds nothing leaves the slot exactly as it was, so the call can never
-clear a token (unchanged from the original reading). Enforced by
-`crate::backends::common::fill_env_token_if_unset(slot: &mut Option<String>, resolved:
-Option<String>) -> bool` (`src/backends/common.rs:255-266`; renamed from the earlier
-`apply_env_token`), called from the generated `auth_token_from_env()` setter
-(`macros.rs:533-542`). The explicit `auth_token(..)` setter unconditionally overwrites the slot
-and clears the env-sourced flag (AUTH-1-8) so a later `auth_token_from_env()` call cannot
-re-fill it (`macros.rs:594-600`, per-backend equivalents e.g. `github.rs:177-183`).
+with `t`, for a non-blank `t`. A lookup that finds nothing leaves the slot exactly as it was, so
+the call can never clear a token (unchanged from the original reading). **A blank explicit token
+is the one documented exception to order-independence** -- see the blank-token rule below for the
+asymmetry. Enforced by
+`crate::backends::common::fill_env_token_if_unset_with(slot: &mut Option<String>, resolve: impl
+FnOnce() -> Option<String>) -> bool` (`src/backends/common.rs:287-301`), which checks
+`is_blank_token(slot)` (`common.rs:256-258`) before calling `resolve` at all -- so the
+environment is not even read, let alone logged, for a call whose result would be discarded. The
+generated `auth_token_from_env()` setter (`macros.rs:545-557`) calls it with a closure over
+`token_from_env`. `fill_env_token_if_unset(slot: &mut Option<String>, resolved: Option<String>)
+-> bool` (`common.rs:308-310`; renamed from the earlier `apply_env_token`) still exists as a thin
+wrapper over an already-resolved value, kept only so its original unit tests stand -- it is not
+what the generated setter calls. The explicit `auth_token(..)` setter unconditionally overwrites
+the slot and clears the env-sourced flag (AUTH-1-8) so a later `auth_token_from_env()` call
+cannot re-fill it, via the shared `set_explicit_auth_token(slot: &mut Option<String>,
+env_sourced: &mut bool, value: impl Into<String>)` (`common.rs:473-480`), called from the
+macro-generated setter (`macros.rs:622-629`) and each hand-written `ReleaseListBuilder::auth_token`
+(e.g. `github.rs:189-196`).
+
+**Blank-token rule (added 2026-08-27).** A blank explicit token (`auth_token("")` or
+`auth_token("   ")`, e.g. from `auth_token(cfg.token.unwrap_or_default())` applied to a missing
+config value) is treated the same as an unset one everywhere a token is consulted:
+`is_blank_token` (`common.rs:256-258`) backs `fill_env_token_if_unset_with` above (so a blank
+explicit token does not block the environment fallback), `RequestConfig::apply_auth`
+(`common.rs:697-729`, see `ref-common-config.md`, so a blank token never produces a literal
+`Authorization: token ` header), and `has_auth_token()` (AUTH-1-6). This is distinct from
+`first_env_token`'s trimming: an explicit `auth_token(..)` value is never trimmed, so a token
+merely *surrounded* by whitespace still surfaces as `Error::InvalidAuthToken` at request time
+rather than being silently repaired.
+
+**Documented asymmetry: a blank token is not order-independent.** `set_explicit_auth_token`
+overwrites the slot unconditionally (`common.rs:473-480`), regardless of what value it holds, so
+call order decides the outcome for a blank explicit token specifically:
+
+- `auth_token("").auth_token_from_env()` picks up the env token: `auth_token("")` leaves the slot
+  blank, and `fill_env_token_if_unset_with` fills a blank slot.
+- `auth_token_from_env().auth_token("")` discards it: `auth_token_from_env()` fills the slot from
+  the environment, then `auth_token("")` unconditionally overwrites that back to blank.
+
+So "an explicit `auth_token(..)` call always wins, whatever the call order" (above) holds only for
+a non-blank value; a blank one behaves like last-call-wins against `auth_token_from_env()`. This
+was a deliberate tradeoff, not an oversight: fixing it would mean `auth_token(..)` sometimes does
+not overwrite the slot, which is a bigger behavior change than the asymmetry itself.
 
 Why the order-sensitive last-wins reading was replaced: it was surprising (two setters on the
 same builder disagreeing about which one "wins" depending on call order is not how any other
@@ -100,40 +136,71 @@ taking the candidate `(name, value)` pairs, so no test mutates process env
 whitespace-trim, and none-set.
 
 AUTH-1-6 (added 2026-08-27). `has_auth_token() -> bool` is added alongside `auth_token_from_env()`
-on every builder that has it (`macros.rs:544-553`, part of `impl_auth_token_from_env!`). It
+on every builder that has it (`macros.rs:559-569`, part of `impl_auth_token_from_env!`). It
 reports whether a token is currently set on the builder, from either `auth_token(..)` or a
 successful `auth_token_from_env()`, without exposing the value -- so an application can decide
 "am I about to run authenticated?" (e.g. to pick a polling interval, or warn that a private repo
-will be unreachable) without reimplementing the env-var list itself.
+will be unreachable) without reimplementing the env-var list itself. It answers `false` for a
+blank slot too (the blank-token rule, AUTH-1-3), not just an unset one.
 
 AUTH-1-7 (added 2026-08-27). Each builder carries a crate-internal `AUTH_TOKEN_ENV_VARS: &'static
-[&'static str]` constant (`macros.rs:494`) holding the exact list from AUTH-1-1, in precedence
+[&'static str]` constant (`macros.rs:505`) holding the exact list from AUTH-1-1, in precedence
 order. It is the literal list `auth_token_from_env()` reads (not a copy that could drift), and is
 also the value backend tests assert against so a test failure means the real behavior changed, not
-a documentation-only mismatch (e.g. `github.rs:784-789`, `gitlab.rs:781-784`, `gitea.rs:767-770`,
-`gitee.rs:853-856`).
+a documentation-only mismatch (`github.rs:806-814`, `gitlab.rs:804-809`, `gitea.rs:802-808`,
+`gitee.rs:875-881`).
 
-AUTH-1-8 (added 2026-08-27). Because the env var list is tied to the backend *type* (`GITHUB_TOKEN`
-for github, etc.) while the token is sent to whatever host the application configured via
-`api_base_url` / `host`, an application that exposes its update URL as configuration and runs in
-CI could hand a `GITHUB_TOKEN` to an attacker-chosen host with no signal at all -- the request-time
-host gate (`ref-common-config.md` "Auth scheme") cannot catch this, because the configured host
-*is* `auth_base_host`. `warn_if_env_token_off_canonical_host(env_sourced: bool, auth_base_host:
-Option<&str>, canonical_host: Option<&str>) -> bool` (`common.rs:308-329`) closes that gap: when
-the current token is env-sourced (the `auth_token_from_env` flag, cleared by any explicit
-`auth_token(..)`) and the resolved `auth_base_host` does not case-insensitively match the backend's
-canonical host, it logs a `log::warn!` naming both hosts. Github's canonical host is
-`api.github.com`, gitlab's `gitlab.com`, gitee's `gitee.com` (each a `CANONICAL_AUTH_HOST` const,
-e.g. `github.rs:18`); called from `build()` on both builders (e.g. `github.rs:221-225` ReleaseList,
-`:422-426` Update). **Gitea has no canonical host** (it is always self-hosted) and passes `None`,
-so the call is made for symmetry but never warns (`gitea.rs:207-213`, `:418-424`). An explicitly-set
-token is the application's own decision and is never warned about.
+AUTH-1-8 (revised 2026-08-27; gitea's outcome changed, see revision note below). Because the env
+var list is tied to the backend *type* (`GITHUB_TOKEN` for github, etc.) while the token is sent
+to whatever host the application configured via `api_base_url` / `host`, an application that
+exposes its update URL as configuration and runs in CI could hand a `GITHUB_TOKEN` to an
+attacker-chosen host with no signal at all -- the request-time host gate (`ref-common-config.md`
+"Auth scheme") cannot catch this, because the configured host *is* `auth_base_host`.
+`env_token_host_decision(env_sourced: bool, auth_base_host: Option<&str>, auth_hosts: &[String],
+canonical_host: Option<&str>) -> EnvTokenDecision` (`common.rs:413-453`) closes that gap. It first
+checks `host_is_acknowledged(host, auth_hosts, canonical_host)` (`common.rs:382-385`) -- the host
+is the backend's canonical one, **or** one the application already passed to
+`allow_auth_host(..)` -- and returns `EnvTokenDecision::Sent` (no warning) when the token is not
+env-sourced, has no host to check, or the host is acknowledged. Otherwise it branches on whether
+the backend has a canonical host at all (`common.rs:349-361` for the three-state
+`EnvTokenDecision` enum):
+
+- **github/gitlab/gitee** (a `CANONICAL_AUTH_HOST` const each, e.g. `github.rs:19`, `gitlab.rs:19`,
+  `gitee.rs:23`): logs a `log::warn!` naming both hosts and returns
+  `EnvTokenDecision::WarnedAndSent` -- the token is still attached. This is today's original
+  behavior, decided to stay unchanged; the only new escape hatch is `allow_auth_host(..)` above,
+  which previously had no effect on the warning at all (`github.rs:238-243` `ReleaseListBuilder`,
+  `:440-445` `Update`; gitlab.rs equivalents `:247-252`/`:447-452`; gitee.rs equivalents
+  `:258-263`/`:461-466`).
+- **gitea** (no canonical host -- it is always self-hosted, so passes `None`): logs a `log::warn!`
+  naming the host and both remedies (`auth_token(..)` or `allow_auth_host(the_same_host)`) and
+  returns `EnvTokenDecision::Withheld`. The caller (gitea's `build()` /
+  `build_update()`, `gitea.rs:211-238`/`:415-459`) clears `request.auth_token` on that outcome, so
+  the request goes out anonymous; `build()` still returns `Ok`, since a hard failure here would be
+  a worse outcome than the anonymous request it replaces. **This is a change**: gitea previously
+  passed `None` for symmetry and the call never warned or acted, silently binding an ambient
+  `GITEA_TOKEN` to whatever host the application configured -- see the revision note below and
+  `ref-gitea-backend.md`.
+
+An explicitly-set token (`auth_token(..)`) is never flagged either way, since it is not
+env-sourced (`EnvTokenDecision::Sent`).
+
+*Revision note.* The original reading gave gitea *no* signal at all: the helper (then named
+`warn_if_env_token_off_canonical_host`, since replaced by `env_token_host_decision` above)
+early-returned on a `None` canonical host, so an ambient `GITEA_TOKEN` was bound to whatever host
+the application was pointed at with nothing logged and nothing withheld. Review flagged this as
+strictly worse than the warn-and-send behavior the other three backends get, since gitea's whole
+premise is a self-hosted, caller-chosen host -- there is no "the token probably belongs here"
+default to fall back to. The user decided: github/gitlab/gitee keep warn-and-send (a behavior
+change there would surprise existing callers for no gain), but a backend with no canonical host
+withholds instead, since silence is the wrong default when there is nothing to compare the host
+against.
 
 AUTH-1-9 (added 2026-08-27). Both config structs that can hold a raw token now carry a
 hand-written `Debug` impl that redacts it to `"<token>"` (`None` still renders `None`):
-`RequestConfig::fmt` (`common.rs:416-440`, unchanged in spirit) and, new, `CommonBuilderConfig::fmt`
-(`common.rs:679-723`) -- `CommonBuilderConfig` holds its own separate `auth_token: Option<String>`
-field (`common.rs:657`, distinct from `RequestConfig::auth_token`), so a `#[derive(Debug)]` on it
+`RequestConfig::fmt` (`common.rs:568-619`, unchanged in spirit) and, new, `CommonBuilderConfig::fmt`
+(`common.rs:890-970`) -- `CommonBuilderConfig` holds its own separate `auth_token: Option<String>`
+field (`common.rs:867`, distinct from `RequestConfig::auth_token`), so a `#[derive(Debug)]` on it
 (the pre-fix state) would have printed a live credential from a plain `log::debug!("{builder:?}")`,
 including one the application author never typed themselves (an ambient CI token picked up by
 `auth_token_from_env()`). `CommonBuilderConfig::fmt` also renders the `auth_token_from_env` flag
@@ -144,14 +211,15 @@ from the environment?" without leaking the value.
 
 AUTH-2-1. New variant `Error::RateLimited { status, url, reset_at, retry_after }`
 (`Error` is `#[non_exhaustive]`, `src/errors.rs:21`, so this is a minor-version
-addition; the variant itself is at `errors.rs:111-132`). `reset_at` is the parsed reset instant
+addition; the variant itself is at `errors.rs:116-141`). `reset_at` is the parsed reset instant
 (`Option<SystemTime>`) when the response carries one, `retry_after` the `Retry-After` delay
 (`Option<Duration>`; only the delta-seconds form is parsed, the HTTP-date form
 yields `None` rather than adding a date-parsing dependency). Both are capped at 24h; see
 AUTH-2-7.
 
-AUTH-2-2 (broadened 2026-08-27). `classify_status(status, url, RateLimitSignals)`
-(`errors.rs:853-875`) classifies a response as `RateLimited` instead of falling through to
+AUTH-2-2 (broadened 2026-08-27; zero-`Retry-After` floor added 2026-08-27, see below).
+`classify_status(status, url, RateLimitSignals)`
+(`errors.rs:899-921`) classifies a response as `RateLimited` instead of falling through to
 `status_to_error`:
 
 - **429 is always `RateLimited`**, with or without any quota headers -- RFC 6585 defines the
@@ -160,55 +228,71 @@ AUTH-2-2 (broadened 2026-08-27). `classify_status(status, url, RateLimitSignals)
   429, so a bare 429 misclassified as `HttpStatus`.)
 - **403 is `RateLimited` when EITHER**: the remaining-quota header parses as `0`
   (`x-ratelimit-remaining: 0` on github/gitea/gitee, or gitlab's `RateLimit-Remaining: 0`), **or**
-  a `Retry-After` header is present and parses (AUTH-2-7's clamp still applies). The second
-  condition is new: GitHub's *secondary* rate limit (abuse-detection / high-frequency-request
-  throttling, as opposed to the primary per-hour quota) answers with 403 + `Retry-After` while
-  `x-ratelimit-remaining` is still nonzero, which the original remaining-only rule misclassified as
-  `Unauthorized` -- a genuine credential failure and "back off, you're going too fast" produced the
-  same variant.
+  a `Retry-After` header is present and parses to a nonzero delay (AUTH-2-7's clamp still
+  applies). The second condition is new: GitHub's *secondary* rate limit (abuse-detection /
+  high-frequency-request throttling, as opposed to the primary per-hour quota) answers with 403 +
+  `Retry-After` while `x-ratelimit-remaining` is still nonzero, which the original remaining-only
+  rule misclassified as `Unauthorized` -- a genuine credential failure and "back off, you're going
+  too fast" produced the same variant. A `Retry-After: 0` does **not** satisfy this branch (see the
+  zero-`Retry-After` floor below): a bare 403 whose only rate-limit header is a literal
+  `Retry-After: 0` stays `Unauthorized` rather than becoming a `RateLimited` with a zero-second
+  wait.
 - A bare 403 with **neither** signal stays `Unauthorized` (a genuine credential failure); this
   carve-out is unchanged.
 - Every other status is untouched by the quota headers and falls through to `status_to_error`.
 
 The remaining-quota and reset headers are read from `x-ratelimit-remaining` / `x-ratelimit-reset`
-falling back to `ratelimit-remaining` / `ratelimit-reset` (`errors.rs:912-913`); `HeaderMap`
+falling back to `ratelimit-remaining` / `ratelimit-reset` (`errors.rs:976-977`); `HeaderMap`
 lookups are case-insensitive, so *that* fallback is only needed to bridge github/gitea/gitee's
 `x-ratelimit-*` spelling and gitlab's differently-named `RateLimit-*` header, not to cover casing
 within either spelling.
 
+**Zero-`Retry-After` floor (added 2026-08-27).** `parse_retry_after` (`errors.rs:946-949`) treats a
+literal `Retry-After: 0` the same as an absent or unparseable header: it returns `None` rather than
+`Some(Duration::ZERO)`. Without this floor, `classify_status`'s 403 branch (which keys on
+`retry_after.is_some()`) would promote a bare authorization failure to `RateLimited` carrying a
+zero-second wait -- and a caller following this crate's own documented sleep-then-continue pattern
+would spin in a tight loop against the server. A 429 is unaffected: it classifies as `RateLimited`
+on the status code alone, whatever `Retry-After` says.
+
 AUTH-2-3. `Error::http_status()` returns the status for `RateLimited` as it does
 for the other HTTP variants, and `Error::url()` returns its URL
-(`src/errors.rs:362-370`, `:374-382`).
+(`src/errors.rs:373-381`, `:385-393`).
 
-AUTH-2-4 (exact string corrected 2026-08-27). The `Display` string (`errors.rs:563-579`) names
+AUTH-2-4 (exact string corrected 2026-08-27). The `Display` string (`errors.rs:578-607`) names
 rate limiting, the reset time when known, and the token remedy, rather than reading as an auth
 failure. Exact form: `"RateLimitedError: request to {url} was rate limited (HTTP {status})"`, then
-when `rate_limit_delay()` (AUTH-2-8) resolves to `Some(wait)`, `"; quota resets in {n}s"`, then
-always `"; set an auth token to raise the limit, or check less often"`. The wait clause and the
-`http_status()`/`url()`/`Display` precedence all route through the same `rate_limit_delay()`
-accessor rather than re-deriving the `Retry-After`-then-`reset_at` choice inline, so they cannot
-disagree.
+a wait clause: `"; retry in {n}s"` when `retry_after` is `Some` (a requested back-off, not
+necessarily proof the quota is spent), else `"; quota resets in {n}s"` when `rate_limit_delay()`
+(AUTH-2-8) derives a still-future wait from `reset_at` (omitted when neither yields a wait), then
+always `"; set an auth token to raise the limit, or check less often"`. All clauses are joined with
+`"; "`. The wait clause and the `http_status()`/`url()`/`Display` precedence all route through the
+same `rate_limit_delay()` accessor rather than re-deriving the `Retry-After`-then-`reset_at` choice
+inline, so they cannot disagree.
 
 AUTH-2-6 (added 2026-08-27; gap closed 2026-08-27, see revision note below). The same
 classification is reachable from a custom `HttpClient` via the public
-`Error::http_status_error_with_headers(status, url, &HeaderMap)` (`errors.rs:493-499`); the
-header-less `Error::http_status_error` (`errors.rs:475-477`) keeps its behavior and never
+`Error::http_status_error_with_headers(status, url, &HeaderMap)` (`errors.rs:508-514`); the
+header-less `Error::http_status_error` (`errors.rs:490-492`) keeps its behavior and never
 produces `RateLimited`, having no headers to read.
 
 The ureq *injected-agent* path was originally the one built-in exception: an injected
 `ureq::Agent` keeps ureq's own default `http_status_as_error(true)`, so a non-2xx response fired
 `ureq::Error::StatusCode(code)` from `call()?`, which carries no headers, so that path fell back to
 `Unauthorized` even for a spent-quota 403. **This gap is now closed.** `UreqClient::get`
-(`http_client/ureq.rs:115-178`) applies a **per-request** override on an injected agent's request
-builder: `req.config().http_status_as_error(false).build()` (`ureq.rs:142-149`), which does not
-touch the injected agent's own persistent timeout/TLS/proxy config, only this one request's status
-handling. With that override, an injected agent's non-2xx response reaches the same header-aware
-`status_to_error_with_headers` check at the bottom of `get` (`ureq.rs:168-174`) as the
-default (per-call) agent, which is built with the same option at agent-construction time
-(`build_call_agent`, `ureq.rs:75`). All three client lanes (default ureq agent, injected ureq
-agent, reqwest) now classify a given status + headers identically.
+(`http_client/ureq.rs:127-211`) applies a **per-request** override on an injected agent's request
+builder, when the agent's own config has not already disabled ureq's status-error
+(`needs_status_override`, `ureq.rs:122-124`): `req.config().http_status_as_error(false).build()`
+(`ureq.rs:175`), which does not touch the injected agent's own persistent timeout/TLS/proxy config,
+only this one request's status handling. With that override, an injected agent's non-2xx response
+reaches the same header-aware `status_to_error_with_headers` check at the bottom of `get`
+(`ureq.rs:202-208`) as the default (per-call) agent, which is built with the same option at
+agent-construction time (`build_call_agent`, `ureq.rs:75`). All three client lanes (default ureq
+agent, injected ureq agent, reqwest) now classify a given status + headers identically. See
+`ref-http-client.md` for the full mechanism, including the TLS-config-cache cost the conditional
+skip avoids.
 
-The `Err(ureq::Error::StatusCode(code)) if is_injected` arm (`ureq.rs:157-164`) is retained only as
+The `Err(ureq::Error::StatusCode(code)) if is_injected` arm (`ureq.rs:184-198`) is retained only as
 a **defensive fallback** for a future ureq release that stops honoring the per-request override; it
 maps through the header-less `status_to_error`, where a 429 is still `RateLimited` (carrying no
 wait) but a 403 stays `Unauthorized`, since only a header distinguishes a spent quota from a
@@ -240,10 +324,10 @@ covered separately in `http_client/ureq.rs` (`injected_agent_sees_rate_limit_hea
 `rate_limit_delay()` test lists.
 
 AUTH-2-7 (added 2026-08-27). Both server-supplied wait values are clamped to a 24h ceiling:
-`MAX_RATE_LIMIT_WAIT` (`errors.rs:840`) is `Duration::from_secs(24 * 60 * 60)`. `parse_reset_epoch`
-(`errors.rs:880-887`, feeding `reset_at`) discards a parsed instant more than 24h in the future,
+`MAX_RATE_LIMIT_WAIT` (`errors.rs:882`) is `Duration::from_secs(24 * 60 * 60)`. `parse_reset_epoch`
+(`errors.rs:926-933`, feeding `reset_at`) discards a parsed instant more than 24h in the future,
 yielding `None` instead; an instant already in the past is kept as-is (it renders no wait via
-AUTH-2-8). `parse_retry_after` (`errors.rs:892-895`, feeding `retry_after`) discards a delta-seconds
+AUTH-2-8). `parse_retry_after` (`errors.rs:946-949`, feeding `retry_after`) discards a delta-seconds
 value above 24h, also yielding `None`. Both values are attacker-controlled -- anything able to shape
 the response chooses them -- and the documented use is "sleep this long before retrying", so an
 unbounded value is a way to park a caller (and with it its update/security-patch channel)
@@ -252,10 +336,15 @@ ceiling, so a caller falls back to its own policy instead of trusting an implaus
 comfortably above any real forge window (GitHub's is one hour) while staying well short of
 "indefinitely". Tests: `parse_retry_after_keeps_a_normal_delay`,
 `parse_retry_after_clamps_at_twenty_four_hours`, `parse_retry_after_rejects_the_u64_max_delay`,
-`classify_status_ignores_an_over_ceiling_retry_after_on_a_403` (`errors.rs`).
+`classify_status_ignores_an_over_ceiling_retry_after_on_a_403` (`errors.rs`). The zero-`Retry-After`
+floor (see AUTH-2-2) is a distinct rule tested separately:
+`parse_retry_after_treats_a_zero_delay_as_no_signal`,
+`classify_status_keeps_a_403_with_zero_retry_after_unauthorized`,
+`classify_status_still_rate_limits_a_spent_quota_403_with_zero_retry_after`,
+`classify_status_keeps_a_429_with_zero_retry_after_rate_limited` (`errors.rs`).
 
 AUTH-2-8 (added 2026-08-27). `Error::rate_limit_delay(&self) -> Option<std::time::Duration>`
-(`errors.rs:406-417`) is a public accessor giving "how long to wait before retrying", `None` for
+(`errors.rs:417-428`) is a public accessor giving "how long to wait before retrying", `None` for
 every non-`RateLimited` variant. It prefers `retry_after` and falls back to `reset_at` minus the
 current time (`None` when that subtraction would be negative, i.e. the window already elapsed):
 neither field alone is the right answer, since GitHub's *primary* rate limit sends only
@@ -270,7 +359,7 @@ exactly one place. Tests: `rate_limit_delay_prefers_retry_after_over_reset_at`,
 AUTH-2-9 (added 2026-08-27). The "no automatic wait-and-retry on `RateLimited`" policy (see
 Non-goals) is now structurally enforced, not just a documented intention: `is_rate_limited(err:
 &Error) -> bool` (`backends/mod.rs:364-366`) matches `Error::RateLimited { .. }`, and both `retry`
-(`backends/mod.rs:376-396`) and its async sibling `retry_async` (`backends/mod.rs:401-431`) check it
+(`backends/mod.rs:377-397`) and its async sibling `retry_async` (`backends/mod.rs:403-432`) check it
 alongside the existing `attempts >= retries` budget check and return the error immediately when
 either is true -- so a `RateLimited` response is returned on the *first* attempt and never consumes
 retry budget, regardless of how `retries` is configured. Every other error still consumes the
@@ -313,22 +402,32 @@ Landed 2026-08-27; review-driven fixes landed the same day (superseding some of 
 choices, per the revision notes on AUTH-1-1/1-3/2-2/2-6 above):
 
 - `auth_token_from_env()` on the `Update` and `ReleaseList` builders of all four git backends,
-  emitted by `impl_auth_token_from_env!` (`src/macros.rs:484-555`) and by the
+  emitted by `impl_auth_token_from_env!` (`src/macros.rs:468-571`) and by the
   `impl_common_builder_setters!(auth_env: [..])` form. Resolution is
-  `backends::common::token_from_env` -> `first_env_token`; the write is `fill_env_token_if_unset`
-  (renamed from `apply_env_token`). Env var lists: github `["GH_TOKEN", "GITHUB_TOKEN"]` (flipped
-  order), gitlab `["GITLAB_TOKEN"]` (`CI_JOB_TOKEN` removed), gitea `["GITEA_TOKEN"]`, gitee
-  `["GITEE_TOKEN"]`, each also a crate-internal `AUTH_TOKEN_ENV_VARS` const (AUTH-1-7). An
-  explicit `auth_token(..)` always wins over the environment regardless of call order (AUTH-1-3).
-  `has_auth_token()` (AUTH-1-6) queries whether a token is set from either source.
-- `warn_if_env_token_off_canonical_host` (AUTH-1-8) flags an env-sourced token bound to a
-  non-canonical host; a hand-written redacting `Debug` on `CommonBuilderConfig` (AUTH-1-9)
-  complements the existing one on `RequestConfig`.
+  `backends::common::token_from_env` -> `first_env_token`; the write goes through
+  `fill_env_token_if_unset_with` (a lazy closure form so the environment is only read, and its
+  diagnostics only logged, when the slot is actually blank -- `fill_env_token_if_unset` is kept as
+  a thin wrapper over an already-resolved value, renamed from the earlier `apply_env_token`). Env
+  var lists: github `["GH_TOKEN", "GITHUB_TOKEN"]` (flipped order), gitlab `["GITLAB_TOKEN"]`
+  (`CI_JOB_TOKEN` removed), gitea `["GITEA_TOKEN"]`, gitee `["GITEE_TOKEN"]`, each also a
+  crate-internal `AUTH_TOKEN_ENV_VARS` const (AUTH-1-7). An explicit `auth_token(..)` always wins
+  over the environment regardless of call order (AUTH-1-3), via the shared
+  `set_explicit_auth_token` helper. A blank explicit token (empty or all-whitespace) is treated as
+  unset everywhere a token is consulted (the blank-token rule, AUTH-1-3). `has_auth_token()`
+  (AUTH-1-6) queries whether a non-blank token is set from either source.
+- `env_token_host_decision` (AUTH-1-8; replaces the earlier `warn_if_env_token_off_canonical_host`)
+  flags an env-sourced token bound to an unacknowledged host: github/gitlab/gitee warn and still
+  send it, gitea (no canonical host) withholds it instead. An `allow_auth_host(..)` entry
+  acknowledges a host for either outcome, silencing the warning or letting gitea send. A
+  hand-written redacting `Debug` on `CommonBuilderConfig` (AUTH-1-9) complements the existing one
+  on `RequestConfig`.
 - `Error::RateLimited` plus `classify_status` / `status_to_error_with_headers` in `src/errors.rs`,
   called by both built-in clients (sync + async reqwest, ureq), and the public
   `Error::http_status_error_with_headers` constructor. Classification broadened (AUTH-2-2): 429
   always classifies, and a 403 also classifies on a usable `Retry-After` (GitHub's secondary rate
-  limit), not just a spent quota. Both `reset_at` and `retry_after` are capped at 24h
+  limit), not just a spent quota -- except a literal `Retry-After: 0`, which is floored to no
+  signal so a bare 403 carrying only that header stays `Unauthorized`. Both `reset_at` and
+  `retry_after` are capped at 24h
   (`MAX_RATE_LIMIT_WAIT`, AUTH-2-7); `Error::rate_limit_delay()` (AUTH-2-8) is the one place the
   `Retry-After`-then-`reset_at` precedence is computed, reused by `Display`. The ureq
   injected-agent classification gap is closed via a per-request `http_status_as_error(false)`
