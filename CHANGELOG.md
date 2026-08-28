@@ -3,6 +3,29 @@
 ## [unreleased]
 
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.0.0]
+The stable 1.0. `1.x` releases from here are backwards compatible.
+
+Upgrading from 0.x: see the [1.0 migration guide](docs/migrations/0.x-to-1.0-human.md) (and its
+[agent-oriented version](docs/migrations/0.x-to-1.0.md) for automated tooling), which covers every
+break across the release-candidate series.
+
+Upgrading from a release candidate: the API is unchanged since rc.6, but rate-limited responses
+are classified differently and credential handling is stricter. A 429, or a 403 reporting a spent
+quota or carrying a usable `Retry-After`, is now `Error::RateLimited` rather than
+`Error::Unauthorized`, so a `match` arm that keyed on `Unauthorized` for those cases needs a
+`RateLimited` arm (use `err.rate_limit_delay()` for the wait). `retry` / `retry_async` return such
+a response immediately instead of spending the retry budget. On gitea, a token resolved by
+`auth_token_from_env()` is withheld unless the configured host was acknowledged with
+`allow_auth_host(..)` or set explicitly with `auth_token(..)`. A blank `auth_token("")` is treated
+as unset. See the entries below for the full list.
+
+### Added
 - `auth_token_from_env()` on the github/gitlab/gitea/gitee `Update` and `ReleaseList` builders
   (eight builders in all): read the token from the backend's conventional environment variables
   instead of plumbing `std::env::var` through the application. Reads `GH_TOKEN` then `GITHUB_TOKEN`
@@ -250,8 +273,6 @@
 - Rollback failures log paths through `Path::display()` rather than `{:?}`, so a windows path in
   those messages keeps single separators. Diagnostic `debug!` logs keep `{:?}`, which renders a
   non-UTF-8 path unambiguously.
-
-### Removed
 
 ## [1.0.0-rc.6]
 Additive over rc.5: automatic verification against github's per-asset release digests, default
