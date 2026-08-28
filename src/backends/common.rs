@@ -882,6 +882,10 @@ pub(crate) struct CommonBuilderConfig {
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
+    /// Name of a release asset carrying published digests (e.g. `SHA256SUMS`), set by
+    /// `checksum_from_asset(..)`. Resolved into a `Checksum` during the update.
+    #[cfg(feature = "checksums")]
+    pub checksum_from_asset: Option<String>,
     /// Verify the download against the backend-published asset digest when one is present.
     /// On by default; `verify_release_digest(false)` opts out.
     #[cfg(feature = "checksums")]
@@ -931,6 +935,8 @@ impl std::fmt::Debug for CommonBuilderConfig {
             #[cfg(feature = "checksums")]
             checksum,
             #[cfg(feature = "checksums")]
+            checksum_from_asset,
+            #[cfg(feature = "checksums")]
             verify_release_digest,
             #[cfg(feature = "signatures")]
             verifying_keys,
@@ -966,6 +972,7 @@ impl std::fmt::Debug for CommonBuilderConfig {
             .field("asset_matcher", asset_matcher);
         #[cfg(feature = "checksums")]
         s.field("checksum", checksum)
+            .field("checksum_from_asset", checksum_from_asset)
             .field("verify_release_digest", verify_release_digest);
         // Verifying keys are public by construction, so they render as they did under the derive.
         #[cfg(feature = "signatures")]
@@ -1008,6 +1015,8 @@ impl Default for CommonBuilderConfig {
             asset_matcher: None,
             #[cfg(feature = "checksums")]
             checksum: None,
+            #[cfg(feature = "checksums")]
+            checksum_from_asset: None,
             #[cfg(feature = "checksums")]
             verify_release_digest: true,
             #[cfg(feature = "signatures")]
@@ -1079,6 +1088,8 @@ impl CommonBuilderConfig {
             asset_matcher: self.asset_matcher.clone(),
             #[cfg(feature = "checksums")]
             checksum: self.checksum.clone(),
+            #[cfg(feature = "checksums")]
+            checksum_from_asset: self.checksum_from_asset.clone(),
             #[cfg(feature = "checksums")]
             verify_release_digest: self.verify_release_digest,
             #[cfg(feature = "signatures")]
@@ -1179,6 +1190,10 @@ pub(crate) struct CommonConfig {
     pub asset_matcher: Option<crate::AssetMatcher>,
     #[cfg(feature = "checksums")]
     pub checksum: Option<crate::Checksum>,
+    /// Name of the release asset to resolve a digest from; see
+    /// [`CommonBuilderConfig::checksum_from_asset`].
+    #[cfg(feature = "checksums")]
+    pub checksum_from_asset: Option<String>,
     #[cfg(feature = "checksums")]
     pub verify_release_digest: bool,
     #[cfg(feature = "signatures")]
@@ -1767,7 +1782,7 @@ mod tests {
         #[cfg(feature = "progress-bar")]
         fields.extend(["progress_template", "progress_chars"]);
         #[cfg(feature = "checksums")]
-        fields.extend(["checksum", "verify_release_digest"]);
+        fields.extend(["checksum", "checksum_from_asset", "verify_release_digest"]);
         #[cfg(feature = "signatures")]
         fields.push("verifying_keys");
         for field in fields {

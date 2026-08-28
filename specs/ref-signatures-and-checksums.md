@@ -54,6 +54,30 @@ Verification (`Checksum::verify`, `src/checksum.rs:Checksum::verify`):
 In the pipeline the pinned-checksum gate runs first, only when a checksum was
 configured (`src/update.rs:finish_update_owned`).
 
+### Published-sums digest verification
+
+Also gated on the `checksums` feature. `checksum_from_asset(name)`
+(`src/macros.rs:checksum_from_asset`) names a release asset carrying digests, e.g. `SHA256SUMS`.
+The orchestrators resolve it *before* the artifact download (`src/update.rs:update_extended`,
+`src/update.rs:update_extended_async`): `sums_asset_for` (`src/update.rs:sums_asset_for`) finds the
+named asset on the same release, `build_sums_download` (`src/update.rs:build_sums_download`) fetches
+it over the artifact download's transport with progress reporting cleared, and
+`checksum_from_sums_bytes` (`src/update.rs:checksum_from_sums_bytes`) hands the body to
+`Checksum::from_sums_file` (`src/checksum.rs:Checksum::from_sums_file`).
+
+`from_sums_file` accepts the formats published in practice: coreutils text (`<hex>  <name>`) and
+binary (`<hex> *<name>`) modes, any run of whitespace between the two, a listed name carrying
+leading `/` or `\` path components (matched on its last component), the BSD tag form
+`SHA256 (<name>) = <hex>`, `#` comments and blank lines, and a whole file consisting of one bare
+digest (the `<artifact>.sha256` convention). The algorithm comes from the digest's length, 64 hex
+characters for sha256 and 128 for sha512, so a `SHA512SUMS` asset needs no extra configuration.
+Names are compared exactly.
+
+Every way the lookup can fail to produce a digest is `Error::ChecksumSourceInvalid { asset, reason }`
+rather than a skipped check: no such asset on the release, a non-UTF-8 body, no entry for the
+selected asset, or an entry whose digest is not a supported length. The resolved digest is verified
+by the same `Checksum::verify` as the pinned gate, immediately after it, and independently of it.
+
 ### Release-published digest verification
 
 Also gated on the `checksums` feature. The selected asset may carry a
@@ -150,6 +174,10 @@ async flows.
   parsing the forge `sha256:<hex>` / `sha512:<hex>` form.
 - `Update::configure().verify_checksum(Checksum)` builder method
   (`src/macros.rs:verify_checksum`).
+- `Checksum::from_sums_file(sums, file_name)` associated fn
+  (`src/checksum.rs:Checksum::from_sums_file`), resolving a digest from a published sums file.
+- `Update::configure().checksum_from_asset(name)` builder method
+  (`src/macros.rs:checksum_from_asset`).
 - `Update::configure().verify_release_digest(bool)` builder method
   (`src/macros.rs:verify_release_digest`), default on. `ReleaseAsset::digest()` getter and
   `ReleaseAsset::with_digest(..)` (`src/update.rs:ReleaseAsset::digest`, `src/update.rs:ReleaseAsset::with_digest`) expose

@@ -123,6 +123,9 @@ In `finish_update`, before any extraction or replacement:
 
 1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
    on the downloaded archive; a mismatch aborts here (`src/update.rs:finish_update_owned`).
+1b. **Published sums digest** (feature `checksums`): if `checksum_from_asset()` names an asset, the
+   digest resolved from it before the download (see below) is verified the same way, independently
+   of gate 1 (`src/update.rs:finish_update_owned`).
 2. **Release digest** (feature `checksums`): if `verify_release_digest()` is on (the default) and
    the selected asset carries a backend-published digest (`ReleaseAsset::digest()`, the
    `algorithm:hex` form github publishes per asset), the digest is parsed via
@@ -148,7 +151,17 @@ In `finish_update`, before any extraction or replacement:
    corrupt download is rejected by the cheap built-in digest check before an external tool is
    spawned on it.
 
-All four run on the *downloaded archive bytes* and before extraction. The last hook,
+The sums digest itself is resolved *before* the artifact download, in both orchestrators
+(`src/update.rs:update_extended`, `src/update.rs:update_extended_async`): after the asset is selected
+and confirmed, `sums_asset_for` finds the release asset named by `checksum_from_asset()`
+(absent => `Error::ChecksumSourceInvalid`, never a skipped check), `build_sums_download` fetches it
+over the artifact download's transport with progress reporting cleared
+(`src/lib.rs:Download::clear_progress_reporting`), and `checksum_from_sums_bytes` ->
+`Checksum::from_sums_file` (`src/checksum.rs`) parses the entry for the selected asset's file name.
+Resolving first means a release missing the sums asset fails without pulling the artifact. The
+algorithm comes from the digest length (64 -> sha256, 128 -> sha512).
+
+All four gates run on the *downloaded archive bytes* and before extraction. The last hook,
 `verify_binary`, runs later inside `install_binary` on the *extracted binary* (in bundle mode, on
 the *staged bundle root*), immediately before the swap. Ordering: verify_checksum -> release
 digest -> verify_keys -> verify_archive -> extract -> verify_binary -> replace.
@@ -311,6 +324,9 @@ under feature `async`; the free `update::update_extended_async` they route to is
   the built-in digest checks before the caller's external verifier is invoked
   (`src/update.rs:finish_update_owned`). It fires in bundle mode too: the hook sits ahead of the
   branch into `install_bundle`.
+- `checksum_from_asset` never degrades to "no verification": a missing sums asset, a missing entry,
+  a non-UTF-8 body, or an unusable digest length all abort with `Error::ChecksumSourceInvalid`
+  (`src/update.rs:sums_asset_for`, `src/checksum.rs:from_sums_file`).
 - The release-digest gate is on by default under `checksums` and only fires when the selected
   asset carries a digest; `verify_release_digest(false)` opts out. A present-but-unparseable
   digest is a hard `Error::InvalidResponse`, not a silent skip (`src/update.rs:finish_update_owned`).

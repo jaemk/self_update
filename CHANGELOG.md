@@ -12,6 +12,15 @@
   `Error::ArchiveVerificationRejected { reason }`, distinct from `verify_binary`'s
   `Error::VerificationRejected`, and built by `Error::archive_verification_rejected(..)`.
 
+- `checksum_from_asset(name)` on every backend's `Update` builder, under the `checksums` feature:
+  name a sums asset of the same release (e.g. `SHA256SUMS`) and the updater fetches it before the
+  artifact download and verifies the artifact against the entry for its file name.
+  `Checksum::from_sums_file(sums, file_name)` is the parser behind it, accepting the coreutils text
+  and binary modes, leading path components, the BSD tag form, `#` comments, and a whole-file bare
+  digest, with the algorithm taken from the digest's length. A lookup that yields no digest is the
+  new `Error::ChecksumSourceInvalid { asset, reason }`, never a silently skipped check. This is the
+  digest source for gitlab / gitea / s3, whose APIs publish no per-asset digest.
+
 ### Changed
 
 ### Removed

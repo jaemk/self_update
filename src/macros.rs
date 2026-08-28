@@ -268,6 +268,10 @@ macro_rules! impl_update_config_accessors {
                 self.common.checksum.as_ref()
             }
             #[cfg(feature = "checksums")]
+            fn checksum_from_asset(&self) -> Option<&str> {
+                self.common.checksum_from_asset.as_deref()
+            }
+            #[cfg(feature = "checksums")]
             fn verify_release_digest(&self) -> bool {
                 self.common.verify_release_digest
             }
@@ -1025,6 +1029,48 @@ macro_rules! impl_common_builder_setters {
         #[cfg(feature = "checksums")]
         pub fn verify_checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
+            self
+        }
+
+        /// Verify the downloaded artifact against a digest published in a sums asset of the same
+        /// release, naming that asset (e.g. `"SHA256SUMS"`).
+        ///
+        /// During the update, after the artifact to install has been selected and confirmed and
+        /// before it is downloaded, the named asset is fetched over the same transport (client,
+        /// headers, auth, timeout, retries) and the entry matching the selected asset's file name
+        /// supplies the expected digest. The algorithm comes from the digest's length, so a
+        /// `SHA512SUMS` asset needs no extra configuration, and the usual formats are accepted (see
+        /// [`Checksum::from_sums_file`](crate::Checksum::from_sums_file) for the exact set). It
+        /// costs one extra request, taken before the artifact download so a missing or unusable
+        /// sums asset fails without pulling the whole release first.
+        ///
+        /// The failure modes before verification (no such asset in the release, no entry for the
+        /// selected asset, an unusable digest) are
+        /// [`Error::ChecksumSourceInvalid`](crate::Error::ChecksumSourceInvalid), distinct from the
+        /// `ChecksumMismatch` a resolved-but-wrong digest produces; a release that publishes no
+        /// sums asset is therefore an error rather than a silently skipped check.
+        ///
+        /// Independent of [`verify_checksum`](Self::verify_checksum) and
+        /// [`verify_release_digest`](Self::verify_release_digest): when more than one applies, all
+        /// of them must pass.
+        ///
+        /// ```rust
+        /// # #[cfg(feature = "checksums")]
+        /// # fn f() -> Result<(), Box<dyn std::error::Error>> {
+        /// self_update::backends::github::Update::configure()
+        ///     .repo_owner("jaemk")
+        ///     .repo_name("self_update")
+        ///     .bin_name("github")
+        ///     .current_version(self_update::cargo_crate_version!())
+        ///     .checksum_from_asset("SHA256SUMS")
+        ///     .build()?
+        ///     .update()?;
+        /// # Ok(())
+        /// # }
+        /// ```
+        #[cfg(feature = "checksums")]
+        pub fn checksum_from_asset(&mut self, asset_name: impl Into<String>) -> &mut Self {
+            self.common.checksum_from_asset = Some(asset_name.into());
             self
         }
 

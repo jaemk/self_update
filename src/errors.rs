@@ -58,6 +58,21 @@ pub enum Error {
         /// The reason the verification was rejected — the hook error's message, if any.
         reason: Option<String>,
     },
+    /// A checksum could not be resolved from the release's published sums asset
+    /// (`checksum_from_asset`).
+    ///
+    /// Raised before the artifact is verified, not on a mismatch: the release carries no asset with
+    /// the configured name, the sums file is not UTF-8 text, it has no entry for the selected
+    /// asset, or the entry's digest is not a supported length. `asset` is the artifact a digest was
+    /// being resolved for; `reason` says which of those it was. A digest that *is* resolved and
+    /// then does not match produces [`ChecksumMismatch`](Error::ChecksumMismatch) as usual.
+    #[non_exhaustive]
+    ChecksumSourceInvalid {
+        /// The release asset a checksum was being resolved for.
+        asset: String,
+        /// Why no checksum could be resolved.
+        reason: String,
+    },
     /// The downloaded artifact's checksum did not match the expected digest.
     ///
     /// `expected` is the configured digest; `computed` is the one actually produced from the
@@ -614,6 +629,11 @@ impl std::fmt::Display for Error {
                     "ArchiveVerificationRejectedError: verification rejected the downloaded archive"
                 ),
             },
+            ChecksumSourceInvalid { asset, reason } => write!(
+                f,
+                "ChecksumSourceInvalidError: could not resolve a checksum for `{}`: {}",
+                asset, reason
+            ),
             ChecksumMismatch { expected, computed } => write!(
                 f,
                 "ChecksumMismatchError: checksum mismatch (expected {}, computed {})",
@@ -2668,6 +2688,24 @@ mod tests {
         );
     }
 
+    // `ChecksumSourceInvalid` Display names both the artifact a digest was wanted for and why none
+    // could be resolved, so the message alone distinguishes "no such sums asset" from "no entry for
+    // this artifact" without matching on fields.
+    #[test]
+    fn checksum_source_invalid_display_names_asset_and_reason() {
+        let err = Error::ChecksumSourceInvalid {
+            asset: "app-1.0.0.tar.gz".into(),
+            reason: "release 1.0.0 has no asset named `SHA256SUMS`".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "ChecksumSourceInvalidError: could not resolve a checksum for `app-1.0.0.tar.gz`: \
+             release 1.0.0 has no asset named `SHA256SUMS`"
+        );
+        assert_eq!(err.http_status(), None);
+        assert!(err.source().is_none());
+    }
+
     // The constructor fills `reason`, mirroring `verification_rejected`.
     #[test]
     fn archive_verification_rejected_constructor_sets_reason() {
@@ -2807,7 +2845,7 @@ mod tests {
     //
     // Variants with `#[non_exhaustive]` on the variant itself (in addition to the enum-level
     // `#[non_exhaustive]`): `Internal`, `VerificationRejected`, `ArchiveVerificationRejected`,
-    // `NoReleaseFound`,
+    // `ChecksumSourceInvalid`, `NoReleaseFound`,
     // `MissingAssetField`, `InvalidResponse`, `MissingField`, `InvalidHeader`,
     // `InvalidAuthToken`, `Unauthorized`, `HttpStatus`, `InvalidAssetName`.
     #[test]
@@ -2990,6 +3028,13 @@ mod tests {
             (
                 Error::ArchiveVerificationRejected { reason: None },
                 "ArchiveVerificationRejectedError:",
+            ),
+            (
+                Error::ChecksumSourceInvalid {
+                    asset: "a.tar.gz".into(),
+                    reason: "no entry".into(),
+                },
+                "ChecksumSourceInvalidError:",
             ),
             (Error::NoReleaseFound { target: None }, "ReleaseError:"),
             (Error::missing_asset_field("f"), "ReleaseError:"),
