@@ -36,7 +36,7 @@ the crate docs and adding an example that uses it.
 
 ### Multi-key / any-of semantics (confirmed)
 
-`zipsign_api::verify::find_match` (`zipsign-api-0.1.5/src/verify/mod.rs:57`)
+`zipsign_api::verify::find_match` (called from `src/update.rs:verify_signature`)
 iterates all (key, signature) pairs and returns on the first match. Both
 `verify_tar` and `verify_zip` call `find_match` identically. An archive can carry
 multiple signatures; the header encodes a `SignatureCountLeInt` count followed by

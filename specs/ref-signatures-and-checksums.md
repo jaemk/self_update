@@ -16,43 +16,43 @@ Two independent, opt-in mechanisms:
 - Signature verification (`signatures` feature): zipsign / ed25519ph signatures
   embedded in the archive are verified against caller-supplied public keys.
 
-Both run inside the shared `finish_update` tail (`src/update.rs:798`), after the
+Both run inside the shared `finish_update` tail (`src/update.rs:finish_update`), after the
 archive is downloaded to a temp file and before any extraction or install.
 
 ## Behavior
 
 ### Checksum verification
 
-Gated entirely on the `checksums` feature: `src/checksum.rs:8` (`#![cfg(feature
+Gated entirely on the `checksums` feature: `src/checksum.rs:Checksum` (`#![cfg(feature
 = "checksums")]`). The feature enables `sha2` (`Cargo.toml:75`,
 `checksums = ["dep:sha2"]`).
 
-The pinned digest is carried by the `Checksum` enum (`src/checksum.rs:31`), a
+The pinned digest is carried by the `Checksum` enum (`src/checksum.rs:Checksum`), a
 `#[non_exhaustive]` enum with two variants, `Sha256(String)` and `Sha512(String)`
-(`src/checksum.rs:33`, `src/checksum.rs:35`). The variant selects the algorithm
-(sha2's `Sha256` / `Sha512`, `src/checksum.rs:13`); the contained `String` is the
+(`src/checksum.rs:Sha256`, `src/checksum.rs:Sha512`). The variant selects the algorithm
+(sha2's `Sha256` / `Sha512`, `src/checksum.rs:Sha256`); the contained `String` is the
 expected digest, hex encoded.
 
 A caller pins a digest with the builder method
-`Update::configure().verify_checksum(..)` (`src/macros.rs:439`), which stores
-`Some(checksum)` on the common config (`src/macros.rs:440`). The
-`UpdateConfig::verify_checksum` accessor returns it (`src/update.rs:537`, backed by
-`src/macros.rs:191`).
+`Update::configure().verify_checksum(..)` (`src/macros.rs:verify_checksum`), which stores
+`Some(checksum)` on the common config (`src/macros.rs:verify_checksum`). The
+`UpdateConfig::verify_checksum` accessor returns it (`src/update.rs:UpdateConfig::verify_checksum`, backed by
+`src/macros.rs:verify_checksum`).
 
-Verification (`Checksum::verify`, `src/checksum.rs:55`):
-- The expected hex string is trimmed (`src/checksum.rs:56`).
+Verification (`Checksum::verify`, `src/checksum.rs:Checksum::verify`):
+- The expected hex string is trimmed (`src/checksum.rs:Checksum::verify`).
 - The file is streamed in 8 KiB chunks through the selected digest and lowercase
-  hex-encoded (`hash_file`, `src/checksum.rs:70`; `hex_encode`, `src/checksum.rs:84`).
+  hex-encoded (`hash_file`, `src/checksum.rs:hash_file`; `hex_encode`, `src/checksum.rs:hex_encode`).
 - Comparison is case-insensitive via `eq_ignore_ascii_case`
-  (`src/checksum.rs:58`), so upper- or lower-case hex and surrounding whitespace
+  (`src/checksum.rs:eq_ignore_ascii_case`), so upper- or lower-case hex and surrounding whitespace
   are tolerated.
 - On mismatch it returns `Error::ChecksumMismatch { expected, computed }`
-  (`src/checksum.rs:61`), whose `Display` is
+  (`src/checksum.rs:Checksum::verify`), whose `Display` is
   `"ChecksumMismatchError: checksum mismatch (expected <e>, computed <c>)"`
-  (`src/errors.rs:153`-`158`). Both fields are lowercase hex digests.
+  (`src/errors.rs:Error::ChecksumMismatch`). Both fields are lowercase hex digests.
 
 In the pipeline the pinned-checksum gate runs first, only when a checksum was
-configured (`src/update.rs:1314`-`1316`).
+configured (`src/update.rs:finish_update_owned`).
 
 ### Release-published digest verification
 
@@ -63,9 +63,9 @@ gitlab/gitea/s3 leave it `None`, since their APIs publish none). A custom
 `ReleaseSource` supplies one via `ReleaseAsset::with_digest(..)`.
 
 When `verify_release_digest()` is on (the default; opt out with the builder setter
-`verify_release_digest(false)`, `src/macros.rs:713`) and the selected asset carries
-a digest, the digest is parsed with `Checksum::parse_digest` (`src/checksum.rs:54`)
-and verified against the downloaded archive (`src/update.rs:1320`-`1324`).
+`verify_release_digest(false)`, `src/macros.rs:verify_release_digest`) and the selected asset carries
+a digest, the digest is parsed with `Checksum::parse_digest` (`src/checksum.rs:Checksum::parse_digest`)
+and verified against the downloaded archive (`src/update.rs:finish_update_owned`).
 `parse_digest` splits on the first `:`, matching `sha256`/`sha512`
 (case-insensitive, surrounding whitespace ignored) onto the `Checksum` variant; an
 unsupported algorithm or a string with no `:` separator returns
@@ -85,52 +85,52 @@ features turn on the matching zipsign verify backends:
 `archive-tar = ["tar", "zipsign-api?/verify-tar"]` (`Cargo.toml:72`).
 
 A caller supplies ed25519ph public keys with the builder method
-`verifying_keys(impl Into<Vec<VerifyingKey>>)` (`src/macros.rs:617`, renamed
+`verifying_keys(impl Into<Vec<VerifyingKey>>)` (`src/macros.rs:verifying_keys`, renamed
 from `verify_keys`), stored on the common config's `verifying_keys` field
-(`src/macros.rs:621`). The doc-hidden accessor keeps the old name:
-`UpdateConfig::verify_keys` (`src/update.rs:710`, `src/macros.rs:260`), which
+(`src/macros.rs:verifying_keys`). The doc-hidden accessor keeps the old name:
+`UpdateConfig::verify_keys` (`src/update.rs:verifying_keys`, `src/macros.rs:verifying_keys`), which
 defaults to an empty slice.
 
-`verify_signature(archive_path, keys)` (`src/update.rs:933`) is public and
+`verify_signature(archive_path, keys)` (`src/update.rs:verify_signature`) is public and
 re-exported at the crate root under `signatures`
 (`self_update::verify_signature`, `src/lib.rs`), so a caller that stages a
 download itself (e.g. an installer fetching a companion binary) can run the same
 check `update()` runs. It takes `impl AsRef<Path>` and a `&[VerifyingKey]` slice:
 - If no keys are supplied it is a no-op returning `Ok(())`
-  (`src/update.rs:937`-`939`). Verification only happens when the feature is on
+  (`src/update.rs:verify_signature`). Verification only happens when the feature is on
   AND at least one key is provided.
 - The archive kind is detected from the file extension via `detect_archive`
-  (`src/update.rs:943`; `detect_archive` at `src/lib.rs:624`).
+  (`src/update.rs:detect_archive`; `detect_archive` at `src/lib.rs:detect_archive`).
 - The archive's file name is used as the zipsign context; if it is not UTF-8,
-  verification fails with `Error::SignatureNonUTF8` (`src/update.rs:946`-`950`).
+  verification fails with `Error::SignatureNonUTF8` (`src/update.rs:verify_signature`).
 - The keys are collected with `zipsign_api::verify::collect_keys`
-  (`src/update.rs:953`); the archive file is opened (`src/update.rs:956`).
-- Dispatch on archive kind (`src/update.rs:958`):
+  (`src/update.rs:collect_keys`); the archive file is opened (`src/update.rs:verify_signature`).
+- Dispatch on archive kind (`src/update.rs:verify_signature`):
   - `ArchiveKind::Tar(Some(Compression::Gz))` (a `.tar.gz`, under `archive-tar`)
-    is verified with `zipsign_api::verify::verify_tar` (`src/update.rs:961`).
+    is verified with `zipsign_api::verify::verify_tar` (`src/update.rs:verify_tar`).
   - `ArchiveKind::Zip` (a `.zip`, under `archive-zip`) is verified with
-    `zipsign_api::verify::verify_zip` (`src/update.rs:967`).
+    `zipsign_api::verify::verify_zip` (`src/update.rs:verify_zip`).
   - Any other kind (plain, bare `.tar`, etc.) falls through to
-    `Err(Error::NoSignatures(archive_kind))` (`src/update.rs:974`).
+    `Err(Error::NoSignatures(archive_kind))` (`src/update.rs:NoSignatures`).
 - A failed zipsign verification is wrapped into `Error::Signature` via the
-  `From<ZipsignError>` impl (`src/errors.rs:256`); the `.map_err(... ::from)`
-  calls (`src/update.rs:962`, `src/update.rs:968`) produce a `ZipsignError`.
+  `From<ZipsignError>` impl (`src/errors.rs:Error::Signature`); the `.map_err(... ::from)`
+  calls (`src/update.rs:verify_tar`, `src/update.rs:verify_zip`) produce a `ZipsignError`.
 
 `detect_archive` only yields `Tar(..)` under `archive-tar` and `Zip` under
-`archive-zip` (`src/lib.rs:587`-`597`); without the matching archive feature the
-whole `match` block is `#[cfg]`-compiled out (`src/update.rs:944`) and every kind
+`archive-zip` (`src/lib.rs:detect_archive`); without the matching archive feature the
+whole `match` block is `#[cfg]`-compiled out (`src/update.rs:verify_signature`) and every kind
 falls through to `Error::NoSignatures`.
 
 ### Ordering within the pipeline
 
-Inside `finish_update_owned` (`src/update.rs:1305`), in order, under
-`#[cfg(feature = "checksums")]` (`src/update.rs:1312`-`1325`):
+Inside `finish_update_owned` (`src/update.rs:finish_update_owned`), in order, under
+`#[cfg(feature = "checksums")]` (`src/update.rs:finish_update_owned`):
 
 1. Pinned-checksum gate: if a checksum is configured, verify it; mismatch returns
-   immediately via `?` (`src/update.rs:1314`-`1316`).
+   immediately via `?` (`src/update.rs:finish_update_owned`).
 2. Release-digest gate: if `verify_release_digest` is on and the selected asset
    carries a digest, parse and verify it; a mismatch or unparseable digest returns
-   via `?` (`src/update.rs:1320`-`1324`).
+   via `?` (`src/update.rs:finish_update_owned`).
 3. Signature gate (`#[cfg(feature = "signatures")]`): `verify_signature` runs; any
    failure returns via `?`.
 4. Archive extraction of the target binary.
@@ -145,73 +145,73 @@ async flows.
 ## Public surface
 
 - `self_update::Checksum` enum (`Sha256` / `Sha512`), re-exported under
-  `checksums` (`src/lib.rs:500`); `#[non_exhaustive]`.
-- `Checksum::parse_digest("algorithm:hex")` associated fn (`src/checksum.rs:54`),
+  `checksums` (`src/checksum.rs:Checksum`); `#[non_exhaustive]`.
+- `Checksum::parse_digest("algorithm:hex")` associated fn (`src/checksum.rs:Checksum::parse_digest`),
   parsing the forge `sha256:<hex>` / `sha512:<hex>` form.
 - `Update::configure().verify_checksum(Checksum)` builder method
-  (`src/macros.rs:692`).
+  (`src/macros.rs:verify_checksum`).
 - `Update::configure().verify_release_digest(bool)` builder method
-  (`src/macros.rs:713`), default on. `ReleaseAsset::digest()` getter and
-  `ReleaseAsset::with_digest(..)` (`src/update.rs:66`, `src/update.rs:44`) expose
+  (`src/macros.rs:verify_release_digest`), default on. `ReleaseAsset::digest()` getter and
+  `ReleaseAsset::with_digest(..)` (`src/update.rs:ReleaseAsset::digest`, `src/update.rs:ReleaseAsset::with_digest`) expose
   and populate the `algorithm:hex` digest.
 - `self_update::VerifyingKey` type alias = `[u8; zipsign_api::PUBLIC_KEY_LENGTH]`,
-  re-exported under `signatures` (`src/lib.rs:470`).
+  re-exported under `signatures` (`src/lib.rs:VerifyingKey`).
 - `self_update::zipsign_api` re-export of the underlying crate, under
-  `signatures` (`src/lib.rs:462`).
+  `signatures` (`src/lib.rs:VerifyingKey`).
 - `verifying_keys(impl Into<Vec<VerifyingKey>>)` builder method
-  (`src/macros.rs:617`); the doc-hidden `verify_keys()` accessor keeps its name.
+  (`src/macros.rs:verifying_keys`); the doc-hidden `verify_keys()` accessor keeps its name.
 - `self_update::verify_signature(impl AsRef<Path>, &[VerifyingKey])` free
   function, re-exported under `signatures` (`src/update.rs`, `src/lib.rs`), for
   running the signature check standalone (e.g. from an installer).
 - Errors: `Error::ChecksumMismatch { expected, computed }` (checksum mismatch,
-  `src/errors.rs:29`), `Error::Signature` (wrapped `ZipsignError`,
-  `src/errors.rs:110`), `Error::SignatureNonUTF8` (`src/errors.rs:114`),
-  `Error::NoSignatures(ArchiveKind)` (`src/errors.rs:103`).
+  `src/errors.rs:Error::ChecksumMismatch`), `Error::Signature` (wrapped `ZipsignError`,
+  `src/errors.rs:Error::Signature`), `Error::SignatureNonUTF8` (`src/errors.rs:Error::SignatureNonUTF8`),
+  `Error::NoSignatures(ArchiveKind)` (`src/errors.rs:Error::NoSignatures`).
 
 ## Invariants and regression checklist
 
 - Verification runs before the binary is committed/replaced: both the checksum and
   signature gates execute before extraction and before `install_binary` replaces
-  the executable (`src/update.rs:806`-`841`).
+  the executable (`src/update.rs:finish_update_owned`, `src/update.rs:install_binary`).
 - A checksum mismatch aborts the update: `Checksum::verify` returns
-  `Error::ChecksumMismatch` (`src/checksum.rs:61`) propagated by `?`
-  (`src/update.rs:1314`-`1316`), so no extraction or install happens.
+  `Error::ChecksumMismatch` (`src/checksum.rs:Checksum::verify`) propagated by `?`
+  (`src/update.rs:finish_update_owned`), so no extraction or install happens.
 - The release-digest gate is on by default and only fires when the selected asset
   carries a digest; `verify_release_digest(false)` skips it. A mismatch aborts via
   `Error::ChecksumMismatch`, and a present-but-unparseable digest aborts via
   `Error::InvalidResponse` naming the digest (not a silent skip)
-  (`src/update.rs:1320`-`1324`).
+  (`src/update.rs:finish_update_owned`).
 - The pinned-checksum and release-digest gates are independent: when both apply,
   both must pass.
 - `ReleaseAsset::digest()` is `None` on gitlab/gitea/s3 (their APIs publish no
   per-asset digest); only github fills it. The digest is integrity-only (the forge
   recomputes it if an asset is replaced), not a signature substitute.
 - A signature-verification failure aborts the update via `?`
-  (`src/update.rs:812`).
+  (`src/update.rs:finish_update_owned`).
 - Checksum comparison is case-insensitive and trims surrounding whitespace
-  (`src/checksum.rs:56`, `src/checksum.rs:58`).
+  (`src/checksum.rs:Checksum::verify`, `src/checksum.rs:eq_ignore_ascii_case`).
 - A SHA-256 hex passed as a `Sha512` (or vice versa) does not match: lengths and
   contents differ.
 - An empty `verifying_keys` set means signature verification is skipped, not an
-  error (`src/update.rs:937`).
+  error (`src/update.rs:verify_signature`).
 - Only `.tar.gz` and `.zip` archives are signature-verifiable; any other kind
-  yields `Error::NoSignatures` (`src/update.rs:974`).
+  yields `Error::NoSignatures` (`src/update.rs:NoSignatures`).
 - A non-UTF-8 archive file name yields `Error::SignatureNonUTF8`
-  (`src/update.rs:950`).
+  (`src/update.rs:verify_signature`).
 - The signature dispatch arms are `#[cfg]`-gated on the matching archive feature,
   so a kind whose feature is off falls through to `NoSignatures`
-  (`src/update.rs:959`, `src/update.rs:965`).
+  (`src/update.rs:verify_tar`, `src/update.rs:verify_zip`).
 
 ## Tests
 
-- `src/checksum.rs:105` `sha256_matches_known_digest`: known digest matches;
+- `src/checksum.rs:sha256_matches_known_digest` `sha256_matches_known_digest`: known digest matches;
   upper-case and surrounding whitespace are tolerated.
-- `src/checksum.rs:117` `sha512_matches_known_digest`: known SHA-512 digest matches.
-- `src/checksum.rs:125` `mismatch_is_rejected`: an all-zero digest is rejected, and
+- `src/checksum.rs:sha512_matches_known_digest` `sha512_matches_known_digest`: known SHA-512 digest matches.
+- `src/checksum.rs:mismatch_is_rejected` `mismatch_is_rejected`: an all-zero digest is rejected, and
   a SHA-256 digest used as a `Sha512` is rejected.
-- `src/checksum.rs:138` `mismatch_yields_checksum_mismatch_variant`: a mismatch
+- `src/checksum.rs:mismatch_yields_checksum_mismatch_variant` `mismatch_yields_checksum_mismatch_variant`: a mismatch
   produces `Error::ChecksumMismatch` carrying the expected and computed digests;
-  `src/checksum.rs:166` `mismatch_display_contains_expected_and_computed` checks the
+  `src/checksum.rs:mismatch_display_contains_expected_and_computed` `mismatch_display_contains_expected_and_computed` checks the
   `Display` starts with `ChecksumMismatchError:` and embeds both digests.
 - `src/update.rs` `finish_update_rejects_a_mismatched_checksum_before_extracting`:
   a bad checksum aborts at the gate with a "checksum mismatch" message, before any
@@ -232,8 +232,8 @@ async flows.
 - `src/backends/github.rs` `github_dto_parses_sample_payload_through_getters`:
   the API `digest` field maps onto `ReleaseAsset::digest()`; a digest-less asset is
   `None`.
-- `src/errors.rs:478` checks the signatures-gated non-UTF8 variant is named
-  `SignatureNonUTF8`; `src/errors.rs:455` / `src/errors.rs:438` cover the boxed
+- `src/errors.rs:signature_non_utf8_variant_is_renamed_and_displays` checks the signatures-gated non-UTF8 variant is named
+  `SignatureNonUTF8`; `src/errors.rs:signature_error_display_includes_prefix_and_inner_message` / `src/errors.rs:signature_error_is_opaque_with_source` cover the boxed
   `Signature` error's `Display` and `source()`.
 
 ## Related

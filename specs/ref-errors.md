@@ -30,16 +30,16 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. `#[non_exhaustive]`. | none | no (struct fields) |
 | `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
-| `RateLimited { status: u16, url: String, reset_at: Option<SystemTime>, retry_after: Option<Duration> }` | A 429 (always), or a 403 whose response carried a spent request quota (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) *or* a usable `Retry-After` (GitHub's secondary rate limit, which can answer 403 + `Retry-After` while the remaining-quota header is still nonzero; a `Retry-After: 0` does not count as usable, see below). Raised by both HTTP clients via `status_to_error_with_headers` (`errors.rs:966-981`), including the ureq injected-agent path (`http_client/ureq.rs:156-176` applies a per-request `http_status_as_error(false)` override, skipped when the injected agent's own config already disables it, so it reaches the header-aware check; the `StatusCode` arm at `ureq.rs:184-198` is now only a defensive fallback). `reset_at` comes from `x-ratelimit-reset` / `RateLimit-Reset` (a unix timestamp), `retry_after` from a delta-seconds `Retry-After`; both `None` when absent, unparseable, or beyond the 24h ceiling (`MAX_RATE_LIMIT_WAIT`, `errors.rs:882`). A `Retry-After: 0` is treated the same as absent (`parse_retry_after` floors a zero delay to `None`), so a bare 403 carrying only `Retry-After: 0` stays `Unauthorized` instead of becoming a zero-wait `RateLimited`. `#[non_exhaustive]`. | none | no (struct fields) |
+| `RateLimited { status: u16, url: String, reset_at: Option<SystemTime>, retry_after: Option<Duration> }` | A 429 (always), or a 403 whose response carried a spent request quota (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) *or* a usable `Retry-After` (GitHub's secondary rate limit, which can answer 403 + `Retry-After` while the remaining-quota header is still nonzero; a `Retry-After: 0` does not count as usable, see below). Raised by both HTTP clients via `status_to_error_with_headers` (`src/errors.rs:status_to_error_with_headers`), including the ureq injected-agent path (`src/http_client/ureq.rs:UreqClient::get` applies a per-request `http_status_as_error(false)` override, skipped when the injected agent's own config already disables it, so it reaches the header-aware check; the `StatusCode` arm at `src/http_client/ureq.rs:UreqClient::get` is now only a defensive fallback). `reset_at` comes from `x-ratelimit-reset` / `RateLimit-Reset` (a unix timestamp), `retry_after` from a delta-seconds `Retry-After`; both `None` when absent, unparseable, or beyond the 24h ceiling (`MAX_RATE_LIMIT_WAIT`, `src/errors.rs:MAX_RATE_LIMIT_WAIT`). A `Retry-After: 0` is treated the same as absent (`parse_retry_after` floors a zero delay to `None`), so a bare 403 carrying only `Retry-After: 0` stays `Unauthorized` instead of becoming a zero-wait `RateLimited`. `#[non_exhaustive]`. | none | no (struct fields) |
 | `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
 | `NoReleaseFound { target: Option<String> }` | The clean negative of a release lookup: no release / no matching release for a tag/version (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), or the resolved release had no asset for the requested target (`update.rs`, with `target: Some(...)`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidResponse { source: Box<dyn Error + Send + Sync> }` | A backend response could not be parsed: a malformed (non-array) JSON release-listing body (`github.rs`, `gitlab.rs`, `gitea.rs`), the S3 listing regex build failure, and the S3 XML parse failure (`s3.rs`). The underlying error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `MissingField { field: &'static str }` | A required builder/configuration field was not set: `current_version`/`bin_name`/`bin_path_in_archive` (`common.rs`), `version` (`update.rs`), `source` (`custom.rs`), `repo_owner`/`repo_name` (`github.rs`, `gitlab.rs`, `gitea.rs`), `host` (`gitea.rs`), `bucket_name`/`region` (`s3.rs`). `#[non_exhaustive]`. | none | no (struct fields) |
-| `InstallPathNotWritable { path: PathBuf }` | The opt-in preflight probe (`check_install_path_writable(true)`, `probe_writable` at `update.rs:1865`) when the path is definitely not writable, or the install step (`map_install_io_error` at `update.rs:1582`) when the replace/move fails with `PermissionDenied`. `path` is the configured `bin_install_path`, or in bundle mode the bundle's parent directory. `#[non_exhaustive]`. | none | no (struct fields) |
-| `NoAppBundle { exe: PathBuf }` | Bundle mode with no explicit `bundle_install_path` on macOS, when `current_exe()` has no `.app` ancestor to derive it from (`default_bundle_install_path` at `update.rs:1801`). `exe` is the running executable. macOS only: other targets get `MissingField { field: "bundle_install_path" }`. `#[non_exhaustive]`. | none | no (struct fields) |
-| `ConflictingConfig { field: &'static str, conflict: &'static str }` | Two builder settings that cannot both apply were set; raised from `build()` (`resolve_bundle_mode` at `backends/common.rs:638`) for `bundle_path_in_archive` combined with an explicit `bin_install_path` or `bin_path_in_archive`. `field` is the rejected setting, `conflict` the one it clashes with. `#[non_exhaustive]`. | none | no (struct fields) |
-| `AppTranslocated { exe: PathBuf }` | Bundle mode on macOS when the running executable is inside an `AppTranslocation` mount, i.e. a quarantined copy on a read-only randomized path whose bundle is not the installed one (`is_translocated` at `update.rs:1838`, via `default_bundle_install_path`). `#[non_exhaustive]`. | none | no (struct fields) |
+| `InstallPathNotWritable { path: PathBuf }` | The opt-in preflight probe (`check_install_path_writable(true)`, `probe_writable` at `src/update.rs:probe_writable`) when the path is definitely not writable, or the install step (`map_install_io_error` at `src/update.rs:map_install_io_error`) when the replace/move fails with `PermissionDenied`. `path` is the configured `bin_install_path`, or in bundle mode the bundle's parent directory. `#[non_exhaustive]`. | none | no (struct fields) |
+| `NoAppBundle { exe: PathBuf }` | Bundle mode with no explicit `bundle_install_path` on macOS, when `current_exe()` has no `.app` ancestor to derive it from (`default_bundle_install_path` at `src/update.rs:default_bundle_install_path`). `exe` is the running executable. macOS only: other targets get `MissingField { field: "bundle_install_path" }`. `#[non_exhaustive]`. | none | no (struct fields) |
+| `ConflictingConfig { field: &'static str, conflict: &'static str }` | Two builder settings that cannot both apply were set; raised from `build()` (`resolve_bundle_mode` at `src/backends/common.rs:resolve_bundle_mode`) for `bundle_path_in_archive` combined with an explicit `bin_install_path` or `bin_path_in_archive`. `field` is the rejected setting, `conflict` the one it clashes with. `#[non_exhaustive]`. | none | no (struct fields) |
+| `AppTranslocated { exe: PathBuf }` | Bundle mode on macOS when the running executable is inside an `AppTranslocation` mount, i.e. a quarantined copy on a read-only randomized path whose bundle is not the installed one (`is_translocated` at `src/update.rs:is_translocated`, via `default_bundle_install_path`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A request header (`request_header` on the builders or on `Download`) was not a valid HTTP header. The setters are infallible; the error is deferred and surfaced from `build()` (via `common.rs`) or from `Download::download_to` / `download_to_async` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. Exception: on a ureq-only build a malformed **DER** certificate is not caught at `build()` (ureq's `from_der` is infallible) and surfaces as `Transport` at connection time; PEM is validated at `build()` on both clients. `#[non_exhaustive]`. | none | yes (boxed source) |
@@ -184,7 +184,7 @@ errors (a header-value parse error, a quick-xml reader error, or a regex build e
 pub fn http_status(&self) -> Option<u16>
 ```
 
-(`errors.rs:373-381`.) Returns the HTTP status code when the error came from a completed non-2xx
+(`src/errors.rs:http_status`.) Returns the HTTP status code when the error came from a completed non-2xx
 response:
 - `NotFound { .. }` -> `Some(404)`
 - `Unauthorized { status, .. }` -> `Some(status)`
@@ -198,7 +198,7 @@ response:
 pub fn url(&self) -> Option<&str>
 ```
 
-(`errors.rs:385-393`.) Returns the request URL for the HTTP error variants; `None` for everything
+(`src/errors.rs:url`.) Returns the request URL for the HTTP error variants; `None` for everything
 else:
 - `NotFound { url }` -> `Some(url)`
 - `Unauthorized { url, .. }` -> `Some(url)`
@@ -212,7 +212,7 @@ else:
 pub fn rate_limit_delay(&self) -> Option<std::time::Duration>
 ```
 
-(`errors.rs:417-428`.) `None` for every variant except `RateLimited`. Returns how long to wait,
+(`src/errors.rs:rate_limit_delay`.) `None` for every variant except `RateLimited`. Returns how long to wait,
 measured from now, before retrying: `retry_after` when present, else `reset_at` minus the current
 time (`None` when that difference would be negative, i.e. the window has already elapsed). This is
 the single place the `Retry-After`-then-`reset_at` precedence is computed -- neither field alone is
@@ -221,8 +221,8 @@ missing `retry_after` as a zero wait would spend more quota immediately, while n
 an elapsed `reset_at` from now would underflow/panic. `Display`'s optional wait clause (see the
 `RateLimited` row above) calls this same accessor, so the rendered string and a caller's
 programmatic back-off can never disagree. Both source values are capped at 24h before they
-ever reach this accessor (`MAX_RATE_LIMIT_WAIT`, `errors.rs:882`; see `parse_reset_epoch`,
-`errors.rs:926-933`, and `parse_retry_after`, `errors.rs:946-949`), so a hostile or malformed
+ever reach this accessor (`MAX_RATE_LIMIT_WAIT`, `src/errors.rs:MAX_RATE_LIMIT_WAIT`; see `parse_reset_epoch`,
+`src/errors.rs:parse_reset_epoch`, and `parse_retry_after`, `src/errors.rs:parse_retry_after`), so a hostile or malformed
 response cannot use this accessor to park a caller indefinitely. `parse_retry_after` also floors a
 zero-second `Retry-After` to `None` (a separate rule from the 24h ceiling): see "HTTP status
 construction mapping" below.
@@ -230,17 +230,17 @@ construction mapping" below.
 ### HTTP status construction mapping (both clients)
 
 Both `reqwest` and `ureq` clients call `errors::status_to_error_with_headers(status_code, url, headers)`
-(`errors.rs:966-981`), which reads the rate-limit signals off `headers` into a `RateLimitSignals`
-and delegates to the pure `classify_status(status_code, url, signals)` (`errors.rs:899-921`), which
+(`src/errors.rs:status_to_error_with_headers`), which reads the rate-limit signals off `headers` into a `RateLimitSignals`
+and delegates to the pure `classify_status(status_code, url, signals)` (`src/errors.rs:classify_status`), which
 classifies the rate-limit case first and otherwise delegates to `status_to_error(status_code, url)`
-(`errors.rs:844-857`):
+(`src/errors.rs:status_to_error`):
 - 429 -> `Error::RateLimited { status, url, reset_at, retry_after }`, **always**, with or without
   any quota headers.
 - 403 whose remaining-quota header parses as `0`, **or** whose `Retry-After` header parses to a
   nonzero delay (within the 24h ceiling) -> `Error::RateLimited { .. }`. The `Retry-After` branch
   covers GitHub's *secondary* rate limit, which can answer 403 + `Retry-After` while the
   remaining-quota header is still nonzero. A `Retry-After: 0` does **not** satisfy this branch
-  (`parse_retry_after` treats a zero delay as no signal, `errors.rs:946-949`): a bare 403 carrying
+  (`parse_retry_after` treats a zero delay as no signal, `src/errors.rs:parse_retry_after`): a bare 403 carrying
   only a zero `Retry-After` stays `Unauthorized` rather than becoming a `RateLimited` with a
   zero-second wait, which would otherwise mask a genuine authorization failure and make a caller
   following this crate's own sleep-then-continue guidance spin in a tight loop.
@@ -249,7 +249,7 @@ classifies the rate-limit case first and otherwise delegates to `status_to_error
 - any other non-2xx -> `Error::HttpStatus { status, url }`
 
 The remaining-quota and reset signals are read from `x-ratelimit-remaining` / `x-ratelimit-reset`
-falling back to `ratelimit-remaining` / `ratelimit-reset` (`errors.rs:976-977`), and the delay from
+falling back to `ratelimit-remaining` / `ratelimit-reset` (`src/errors.rs:status_to_error_with_headers`), and the delay from
 `Retry-After`. **Why the fallback is needed at all:** `HeaderMap` lookups are already
 case-insensitive, so a single lookup key matches every casing of a *given* header name (e.g. it is
 why `RateLimit-Remaining` matches a lookup for `ratelimit-remaining`); that alone does not bridge
@@ -257,25 +257,25 @@ github/gitea/gitee's `x-ratelimit-*` name and gitlab's *differently spelled* `Ra
 those are two distinct header names, and it is the explicit `.or_else(...)` chain, not case
 insensitivity, that reads both. A 403 with none of the rate-limit signals keeps its `Unauthorized`
 classification; a 429 is never `Unauthorized` or `HttpStatus`, only `RateLimited`. Both `reset_at`
-and `retry_after` are capped at 24h (`MAX_RATE_LIMIT_WAIT`, `errors.rs:882`): a value beyond the
+and `retry_after` are capped at 24h (`MAX_RATE_LIMIT_WAIT`, `src/errors.rs:MAX_RATE_LIMIT_WAIT`): a value beyond the
 ceiling resolves to `None` rather than being clamped down to it.
 
 For ureq specifically (`http_client/ureq.rs`), all three lanes now classify a given status +
 headers identically:
 - The **default (built-in) per-call agent** is built with `.http_status_as_error(false)`
-  (`build_call_agent`, `ureq.rs:75`) so ureq does not short-circuit on non-2xx, and the explicit
+  (`build_call_agent`, `src/http_client/ureq.rs:build_call_agent`) so ureq does not short-circuit on non-2xx, and the explicit
   `!res.status().is_success()` check at the bottom of `get` runs with `res.status().as_u16()` and
-  `res.headers()` feeding `status_to_error_with_headers` (`ureq.rs:202-208`).
+  `res.headers()` feeding `status_to_error_with_headers` (`src/http_client/ureq.rs:UreqClient::get`).
 - An **injected agent** (caller-supplied) keeps ureq's own default `http_status_as_error(true)` at
   the agent level, but `get` applies a **per-request** override on the request builder when the
   agent's own config has not already disabled ureq's status-error (`needs_status_override`,
-  `ureq.rs:122-124`) -- `req.config().http_status_as_error(false).build()` (`ureq.rs:175`, inside
-  the conditional block at `ureq.rs:156-176`) -- before calling it. This does not touch the injected
+  `src/http_client/ureq.rs:needs_status_override`) -- `req.config().http_status_as_error(false).build()` (`src/http_client/ureq.rs:UreqClient::get`, inside
+  the conditional block at `src/http_client/ureq.rs:UreqClient::get`) -- before calling it. This does not touch the injected
   agent's own persistent timeout/TLS/proxy configuration, only this request's status handling, and
   it means an injected agent's non-2xx response reaches the same
-  header-aware `status_to_error_with_headers` check as the default agent (`ureq.rs:202-208`), so it
+  header-aware `status_to_error_with_headers` check as the default agent (`src/http_client/ureq.rs:UreqClient::get`), so it
   **can** and does reach `RateLimited`. The `Err(ureq::Error::StatusCode(code)) if is_injected` arm
-  (`ureq.rs:184-198`), which maps via the header-less `status_to_error(code, url)` (a 429 there is
+  (`src/http_client/ureq.rs:UreqClient::get`), which maps via the header-less `status_to_error(code, url)` (a 429 there is
   still `RateLimited`, carrying no wait; a 403 there stays `Unauthorized`, since only a header can
   tell a spent quota from a credential failure), is retained only as a **defensive fallback** for a
   future ureq that
@@ -296,11 +296,11 @@ type directly, since `std::io::Error` is stable std.)
 ## Public surface
 
 - `pub enum Error` with the variants above; `#[non_exhaustive]`.
-- `pub type Result<T> = std::result::Result<T, Error>;` (`errors.rs:8`).
+- `pub type Result<T> = std::result::Result<T, Error>;` (`src/errors.rs:Result`).
 - `pub fn http_status(&self) -> Option<u16>` inherent method on `Error`.
 - `pub fn url(&self) -> Option<&str>` inherent method on `Error`.
 - `pub fn rate_limit_delay(&self) -> Option<std::time::Duration>` inherent method on `Error`
-  (`errors.rs:417-428`); `None` except for `RateLimited`.
+  (`src/errors.rs:rate_limit_delay`); `None` except for `RateLimited`.
 - Public constructors for custom `ReleaseSource` implementors (the release-flow variants are
   `#[non_exhaustive]`, so downstream code cannot build them with a struct literal):
   `Error::no_release_found()` and `Error::no_release_found_for_target(target: impl Into<String>)`,

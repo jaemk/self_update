@@ -18,7 +18,7 @@ Source files: `src/update.rs` (trait definitions), `src/backends/custom.rs` (ada
 
 ### The source traits and the Send contract
 
-`ReleaseSource` (`update.rs:325-340`) is synchronous and has three methods, all returning the
+`ReleaseSource` (`src/update.rs:ReleaseSource`) is synchronous and has three methods, all returning the
 public `Result` type:
 
 - `get_latest_release(&self) -> Result<Release>`
@@ -31,7 +31,7 @@ dropped): the updater re-filters downstream, discarding releases not strictly ne
 preferring the newest semver-compatible one, and otherwise offering the newest available, so the
 source need not pre-filter. Releases should be returned newest-first.
 
-`AsyncReleaseSource` (`update.rs:372-392`, gated on `feature = "async"`) is the async analog.
+`AsyncReleaseSource` (`src/update.rs:AsyncReleaseSource`, gated on `feature = "async"`) is the async analog.
 It also requires `Send + Sync` and has the same three methods, but each returns a
 return-position `impl Trait` future rather than a value:
 
@@ -41,61 +41,61 @@ return-position `impl Trait` future rather than a value:
 
 The `+ Send` bound on each returned future is load-bearing. Because the trait is consumed
 through generics (the async updater is generic over its source, never `dyn AsyncReleaseSource`),
-the futures stay unboxed and there is **no `async-trait` dependency** (`update.rs:355-359`). The
+the futures stay unboxed and there is **no `async-trait` dependency** (`src/update.rs:AsyncReleaseSource`). The
 `+ Send` bound forces the `Send` check at the impl site: a non-`Send` implementation fails to
-compile where it is defined, not later at the spawn site (`update.rs:357-361`, `375-377`).
+compile where it is defined, not later at the spawn site (`src/update.rs:AsyncReleaseSource`).
 Implementors may still write the bodies as `async fn`; the compiler checks the resulting future
 is `Send`.
 
 On failure, both traits return public `Error` variants (`Error::NoReleaseFound`, `Error::MissingAssetField`, `Error::InvalidResponse` (for release failures), `Error::MissingField { field }` (for config failures), or a
 request variant such as `Error::NotFound { url }` / `Error::HttpStatus { status, url }` /
-`Error::Transport`), which are constructible from a custom source (`update.rs:321-324`,
-`367-370`).
+`Error::Transport`), which are constructible from a custom source (`src/update.rs:ReleaseSource`,
+`src/update.rs:AsyncReleaseSource`).
 
 ### The custom adapter and Blocking
 
-`custom::Update` (`custom.rs:189-192`, `#[non_exhaustive]`) holds an `Arc<dyn ReleaseSource>`
-and a `CommonConfig`. It is built through `UpdateBuilder` (`custom.rs:143-185`): `.source(...)`
-takes `impl ReleaseSource + 'static` and boxes it into the `Arc` (`custom.rs:164-167`);
-`build()` (`custom.rs:175-184`) takes `&self`, clones the `Arc` source, and errors with
+`custom::Update` (`src/backends/custom.rs:Update`, `#[non_exhaustive]`) holds an `Arc<dyn ReleaseSource>`
+and a `CommonConfig`. It is built through `UpdateBuilder` (`src/backends/custom.rs:UpdateBuilder`): `.source(...)`
+takes `impl ReleaseSource + 'static` and boxes it into the `Arc` (`src/backends/custom.rs:UpdateBuilder::source`);
+`build()` (`src/backends/custom.rs:UpdateBuilder::build`) takes `&self`, clones the `Arc` source, and errors with
 `Error::MissingField { field: "source" }` when no source was set, so a configured builder can be
-built repeatedly. `Update::configure()` returns a fresh `UpdateBuilder` (`custom.rs:205-207`).
+built repeatedly. `Update::configure()` returns a fresh `UpdateBuilder` (`src/backends/custom.rs:Update::configure`).
 
-`AsyncUpdate<S>` (`custom.rs:303-306`, `#[non_exhaustive]`, `feature = "async"`) is generic over
+`AsyncUpdate<S>` (`src/backends/custom.rs:AsyncUpdate`, `#[non_exhaustive]`, `feature = "async"`) is generic over
 `S: AsyncReleaseSource` and stores `Arc<S>`. A trait object is never used, so the source's
 `async fn`s need no boxing and `S` is not required to be `Clone` (the builder stores
-`Arc<S>`). It is built through `AsyncUpdateBuilder<S>` (`custom.rs:240-295`) whose
-`build_async()` (`custom.rs:285-294`) mirrors the sync builder (`&self`, clones the `Arc`,
+`Arc<S>`). It is built through `AsyncUpdateBuilder<S>` (`src/backends/custom.rs:AsyncUpdateBuilder`) whose
+`build_async()` (`src/backends/custom.rs:AsyncUpdateBuilder::build_async`) mirrors the sync builder (`&self`, clones the `Arc`,
 errors when no source).
 
-`Blocking<S>` (`custom.rs:357-359`, `feature = "async"`) adapts a `Clone` sync `ReleaseSource`
+`Blocking<S>` (`src/backends/custom.rs:Blocking`, `feature = "async"`) adapts a `Clone` sync `ReleaseSource`
 into an `AsyncReleaseSource`. Its single `source: S` field is **private**; the only ways to
-construct or inspect it are the three methods (`custom.rs:362-377`):
+construct or inspect it are the three methods (`src/backends/custom.rs:Blocking`):
 
-- `Blocking::new(source: S) -> Self` (`custom.rs:364`)
-- `into_inner(self) -> S` (`custom.rs:369`)
-- `as_inner(&self) -> &S` (`custom.rs:374`)
+- `Blocking::new(source: S) -> Self` (`src/backends/custom.rs:Blocking::new`)
+- `into_inner(self) -> S` (`src/backends/custom.rs:Blocking::into_inner`)
+- `as_inner(&self) -> &S` (`src/backends/custom.rs:Blocking::as_inner`)
 
 `impl AsyncReleaseSource for Blocking<S> where S: ReleaseSource + Clone + 'static`
-(`custom.rs:380-401`) runs each sync fetch on `tokio::task::spawn_blocking`, cloning the inner
+(`src/backends/custom.rs:Blocking`) runs each sync fetch on `tokio::task::spawn_blocking`, cloning the inner
 source into the blocking task; a `JoinError` is mapped to `Error::Internal { message, source }`
 (the `JoinError` chained via `source()`). The inner source's own error is returned unchanged.
 
 ### Integration with the pipeline
 
-`Update` implements the sealed `ReleaseUpdate` trait (`custom.rs:214-234`) by delegating its
+`Update` implements the sealed `ReleaseUpdate` trait (`src/backends/custom.rs:Update`) by delegating its
 three fetch methods to the source. `get_latest_release` wraps the single release in a
 one-element `Releases` carrying the configured `current_version` (so `is_update_available()`
 works without a second fetch); the trait's `get_newer_releases` wraps the `Vec` from the
 source's `get_latest_releases` likewise (the source method keeps its name);
 `get_release_version` returns the source's `Release` directly. The inherent update verbs
 (including `is_update_available`) come from `impl_sync_update_verbs!(Update)`
-(`custom.rs:236`). Shared config accessors come from
-`impl_update_config_accessors!(Update)` (`custom.rs:212`), and the sealed marker is
-`impl sealed::Sealed for Update` (`custom.rs:210`). From there the crate runs its usual
+(`src/macros.rs:impl_sync_update_verbs`). Shared config accessors come from
+`impl_update_config_accessors!(Update)` (`src/macros.rs:impl_update_config_accessors`), and the sealed marker is
+`impl sealed::Sealed for Update` (`src/backends/custom.rs:Update`). From there the crate runs its usual
 compare -> select-asset -> download -> verify -> extract -> install flow over the source's
 releases; the implementor never touches the low-level `Download`/`Extract`/`Move` primitives
-(`custom.rs:5-10`).
+(`src/backends/custom.rs:Update`).
 
 `AsyncUpdate<S>` implements the public sealed `AsyncReleaseUpdate` trait the same way, plus
 `sealed::Sealed` and the config accessors, so the async orchestrator drives the same flow
@@ -106,7 +106,7 @@ Transport caveats: the shared `.timeout()`, `.request_header()`, and injected-cl
 configure only the crate-controlled **download**; `.retries()` has no effect here because the
 listing is entirely the source's responsibility. There is no `auth_token` on this backend (the
 builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `custom::ReleaseList`
-(`custom.rs:43-51`, `120-121`, `130-140`).
+(`src/backends/custom.rs:UpdateBuilder`).
 
 ## Public surface
 
@@ -137,7 +137,7 @@ builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `cu
 
 ## Tests
 
-In `src/backends/custom.rs` (`custom.rs:403-1191`):
+In `src/backends/custom.rs` (`src/backends/custom.rs:tests`):
 
 - `build_requires_a_source`, `build_is_repeatable`, `fetches_delegate_to_the_source`,
   `shared_accessors_are_wired` (including `auth_token() == None`).

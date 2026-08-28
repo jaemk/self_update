@@ -36,7 +36,7 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 
 ### Fetch and select
 
-1. Print the target-arch / current-version header (`print_check_header`, `update.rs:620`),
+1. Print the target-arch / current-version header (`print_check_header`, `src/update.rs:print_check_header`),
    gated on `show_output`.
 2. If `release_tag()` is set, fetch exactly that tag via `get_release_version`.
    Otherwise fetch the candidate list via `get_newer_releases()` and run
@@ -46,11 +46,11 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
    (default) it prefers the newest semver-*compatible* release and falls back to the newest
    available (flagged "*NOT* compatible"); under `UpdateStrategy::Latest` it always takes the
    newest available, even across a major bump. Empty candidate list => `Ok(None)` => `UpToDate`
-   (`update.rs:640-711`). Unparseable versions are dropped by the leading
+   (`src/update.rs:choose_latest_release`). Unparseable versions are dropped by the leading
    `.unwrap_or(false)` filter and never reach the comparator.
-3. `resolve_and_confirm` (`update.rs:716`) selects the asset: a custom `asset_matcher()` closure
+3. `resolve_and_confirm` (`src/update.rs:resolve_and_confirm`) selects the asset: a custom `asset_matcher()` closure
    if present, otherwise `Release::asset_for(target, asset_identifier())`
-   (`update.rs:86`), which matches by `target` substring (optionally `identifier`), then by
+   (`src/update.rs:Release::asset_for`), which matches by `target` substring (optionally `identifier`), then by
    `OS`+`ARCH` substring, then by `identifier` alone. No match =>
    `Error::NoReleaseFound { target: Some(...) }`. A server-supplied asset name that is empty,
    `.`/`..`, contains a path separator, contains a control character, or is absolute =>
@@ -62,44 +62,44 @@ and `update_extended_async`'s future stays `Send` (the `PageRequest::parse` pars
 ### Download
 
 `resolve_and_confirm` prints the release-status block and (unless `no_confirm`) prompts
-(see below). If `check_install_path_writable()` is `true`, `probe_writable` (`update.rs:1865`) runs
+(see below). If `check_install_path_writable()` is `true`, `probe_writable` (`src/update.rs:probe_writable`) runs
 immediately after the confirmation and before any download, probing the bundle's parent directory in
 bundle mode (`probe_dir_writable`) and otherwise `bin_install_path`
 (`probe_install_path_writable`)
-(`update.rs:1005-1009` sync, `update.rs:1509-1510` async): only a definite `PermissionDenied`
+(`src/update.rs:update_extended` sync, `src/update.rs:update_extended_async` async): only a definite `PermissionDenied`
 errors as `Error::InstallPathNotWritable { path }`; any other result (missing parent directory,
 unusual filesystem, `Ok`) proceeds. Default is `false` (off). Then a `tempfile::TempDir` is
-created and the asset is downloaded to `<tmpdir>/<asset.name>` (`update.rs:608-613`). `build_download` (`update.rs:741`) builds the
+created and the asset is downloaded to `<tmpdir>/<asset.name>` (`src/update.rs:update_extended`). `build_download` (`src/update.rs:build_download`) builds the
 `Download` from the asset URL, applies auth/`api_headers`, sets `ACCEPT:
 application/octet-stream`, merges the user's `request_headers()` *after* (so a same-named
 user header overrides), forwards the injected HTTP client, per-request timeout, progress
-callback, and progress style. The download is driven by `download_to` (sync, `lib.rs:1305`)
-or `download_to_async` (`lib.rs:1375`). The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried.
+callback, and progress style. The download is driven by `download_to` (sync, `src/lib.rs:download_to`)
+or `download_to_async` (`src/lib.rs:download_to_async`). The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried.
 
 ### Extract
 
-`finish_update` (`update.rs:770`) runs verification (below), then extracts. The in-archive
+`finish_update` (`src/update.rs:finish_update`) runs verification (below), then extracts. The in-archive
 binary path comes from `bin_path_in_archive()` with `{{ version }}`, `{{ target }}`, and
-`{{ bin }}` placeholders substituted (`update.rs:792-800`). Extraction is
-`Extract::from_source(archive).extract_file(tmpdir, bin_path)` (`update.rs:802`). Archive kind
-is detected from the file extension by `detect_archive` (`lib.rs:588`) unless overridden via
+`{{ bin }}` placeholders substituted (`src/update.rs:substitute`). Extraction is
+`Extract::from_source(archive).extract_file(tmpdir, bin_path)` (`src/update.rs:finish_update_owned`). Archive kind
+is detected from the file extension by `detect_archive` (`src/lib.rs:detect_archive`) unless overridden via
 `Extract::archive`: `.zip` => `Zip`; `.tar` => `Tar(None)`; `.tgz` and `.tar.gz` =>
 `Tar(Some(Gz))`; a bare `.gz` => `Plain(Some(Gz))`; `.txz` and `.tar.xz` => `Tar(Some(Xz))`;
 a bare `.xz` => `Plain(Some(Xz))`; anything else => `Plain(None)`. A kind whose archive
 feature is not enabled yields `Error::ArchiveNotEnabled`, and a recognized compression whose
 codec feature is off (a `.gz` without `compression-tar-gz`, a `.xz` without
 `compression-tar-xz`) yields `Error::CompressionNotEnabled` rather than installing the still
--compressed bytes (`lib.rs:602`). `ArchiveKind` (`lib.rs:574`) and `Compression` (`Gz`, `Xz`)
+-compressed bytes (`src/lib.rs:detect_archive`). `ArchiveKind` (`src/lib.rs:ArchiveKind`) and `Compression` (`Gz`, `Xz`)
 are `#[non_exhaustive]`; the `Tar` and `Zip` variants are feature-gated on `archive-tar` /
 `archive-zip`. `Plain` files are copied (gz/xz-decoded when the matching codec feature is on),
 `Tar` is unpacked via the `tar` crate over the decoded stream, `Zip` via the `zip` crate
-(`lib.rs:805-885`). The extracted binary is `<tmpdir>/<bin_path>`
-(`update.rs:803`).
+(`src/lib.rs:extract_into`, `src/lib.rs:extract_file`). The extracted binary is `<tmpdir>/<bin_path>`
+(`src/update.rs:finish_update_owned`).
 
 Zip entry names that would escape `into_dir` are rejected via `enclosed_name` (zip-slip defense,
-`lib.rs:1108`). On unix, `extract_into` restores a zip symlink entry (unix mode carrying
+`src/lib.rs:enclosed_name`). On unix, `extract_into` restores a zip symlink entry (unix mode carrying
 `S_IFLNK`, detected by `ZipFile::is_symlink`) as a real symlink rather than writing its target
-string out as a regular file (`lib.rs:1132`), preserving symlink-dependent trees such as a macOS
+string out as a regular file (`src/lib.rs:extract_into`), preserving symlink-dependent trees such as a macOS
 `.app` bundle's `Frameworks/*/Versions/Current` links; `tar` extraction already restores symlinks
 itself. A symlink target that escapes the extraction root (absolute, or `..` resolving above
 `into_dir`) is rejected by `symlink_target_escapes` with an `Error::Internal`, mirroring the
@@ -114,7 +114,7 @@ descent through a symlinked ancestor (or a canonicalize failure) is rejected wit
 `Error::Internal`, while descent through real directories is allowed. On non-unix targets the
 symlink-restore
 block is compiled out and such an entry is written as a regular file (creating symlinks needs
-elevated privileges on windows). `extract_file` errors on a symlink entry (`lib.rs:1304`) rather
+elevated privileges on windows). `extract_file` errors on a symlink entry (`src/lib.rs:extract_file`) rather
 than writing its target string as the requested file.
 
 ### Verify ordering
@@ -122,16 +122,16 @@ than writing its target string as the requested file.
 In `finish_update`, before any extraction or replacement:
 
 1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
-   on the downloaded archive; a mismatch aborts here (`update.rs:1314-1316`).
+   on the downloaded archive; a mismatch aborts here (`src/update.rs:finish_update_owned`).
 2. **Release digest** (feature `checksums`): if `verify_release_digest()` is on (the default) and
    the selected asset carries a backend-published digest (`ReleaseAsset::digest()`, the
    `algorithm:hex` form github publishes per asset), the digest is parsed via
-   `Checksum::parse_digest` and verified against the archive (`update.rs:1320-1324`). A digest
+   `Checksum::parse_digest` and verified against the archive (`src/update.rs:finish_update_owned`). A digest
    that is present but malformed or an unsupported algorithm aborts with
    `Error::InvalidResponse` naming the digest (no silent skip); an absent digest skips the gate.
    Independent of gate 1: when both apply, both must pass.
 3. **Signature** (feature `signatures`): `verify_signature(archive_path, verify_keys())`
-   (`update.rs:1328`). Empty key set is a no-op; otherwise the archive is detected and verified
+   (`src/update.rs:verify_signature`). Empty key set is a no-op; otherwise the archive is detected and verified
    with zipsign (`verify_tar` for `Tar(Some(Gz))`, `verify_zip` for `Zip`), keyed with the
    archive file name as context; any other kind => `Error::NoSignatures(kind)`,
    whose message names the kind via its `Display` impl
@@ -145,19 +145,19 @@ digest -> verify_keys -> extract -> verify_binary -> replace.
 
 ### Replace
 
-`install_binary` (`update.rs:867`): runs the `verify_binary` hook first; `Err(..)` => bail
+`install_binary` (`src/update.rs:install_binary`): runs the `verify_binary` hook first; `Err(..)` => bail
 `Error::VerificationRejected { reason }` with nothing replaced. Then
 if `bin_install_path()` equals `std::env::current_exe()`, the swap goes through
 `self_replace::self_replace(new_exe)` (atomic in-place replace of the running exe,
-`update.rs:882`). Otherwise `Move::from_source(new_exe).to_dest(bin_install_path)`
-(`update.rs:884`). `Move::to_dest` (`lib.rs:928`) renames source -> dest; with
+`src/update.rs:install_binary`). Otherwise `Move::from_source(new_exe).to_dest(bin_install_path)`
+(`src/update.rs:install_binary`). `Move::to_dest` (`src/lib.rs:Move::to_dest`) renames source -> dest; with
 `replace_using_temp` set and an existing dest, it first renames dest aside to the temp path
 and renames it back if the source->dest rename fails (rollback). `rename` cannot cross
 filesystems, so source, dest, and temp must share one. The high-level flow does not call
 `replace_using_temp`.
 
 Both the `self_replace` call and the `Move::to_dest` call have their IO errors wrapped by
-`map_install_io_error` (`update.rs:1582`): a `PermissionDenied` becomes
+`map_install_io_error` (`src/update.rs:map_install_io_error`): a `PermissionDenied` becomes
 `Error::InstallPathNotWritable { path }` naming the install path; any other `io::Error` kind is
 rewrapped as `Error::Io` with the message `"installing to {path}: {orig}"`, preserving the
 original `ErrorKind` for inspection. This annotation is always on, independent of the opt-in
@@ -166,18 +166,18 @@ preflight probe (`check_install_path_writable`).
 ### Bundle install (directory bundles)
 
 `bundle_path_in_archive()` being `Some` selects bundle mode, resolved at `build()` time by
-`CommonBuilderConfig::resolve_bundle_mode` (`backends/common.rs:638`): an explicit
+`CommonBuilderConfig::resolve_bundle_mode` (`src/backends/common.rs:CommonBuilderConfig::resolve_bundle_mode`): an explicit
 `bin_install_path` or a non-auto `bin_path_in_archive` alongside it is
 `Error::ConflictingConfig { field, conflict }`; a `bundle_install_path` set *without*
 `bundle_path_in_archive` is `Error::MissingField { field: "bundle_path_in_archive" }` rather than a
 silently discarded path; and an unset `bundle_install_path` resolves via
-`default_bundle_install_path` (`update.rs:1801`) -- on macOS the nearest `.app` ancestor of
-`current_exe()` (`enclosing_app_bundle`, `update.rs:1825`), with a translocated exe
-(`is_translocated`, `update.rs:1838`) rejected as `Error::AppTranslocated` and no `.app` ancestor as
+`default_bundle_install_path` (`src/update.rs:default_bundle_install_path`) -- on macOS the nearest `.app` ancestor of
+`current_exe()` (`enclosing_app_bundle`, `src/update.rs:enclosing_app_bundle`), with a translocated exe
+(`is_translocated`, `src/update.rs:is_translocated`) rejected as `Error::AppTranslocated` and no `.app` ancestor as
 `Error::NoAppBundle`; on every other target `Error::MissingField { field: "bundle_install_path" }`.
 
 In the finish tail the same `{{ bin }}` / `{{ target }}` / `{{ version }}` substitution runs over
-the bundle path, then `install_bundle` (`update.rs:1630`) replaces the single-file
+the bundle path, then `install_bundle` (`src/update.rs:install_bundle`) replaces the single-file
 extract-and-install pair: the configured path is first run through `resolve_bundle_target`, which
 maps a live symlink to the tree it designates (`rename` does not follow a path's final component, so
 swapping onto the link itself would stash the link and orphan the installed tree; a dangling link and
@@ -187,16 +187,16 @@ case; `Extract::extract_into` unpacks the whole archive into staging; the staged
 `staging/<substituted bundle path>`. Failure to create either temp dir goes through
 `map_install_io_error` naming the bundle path.
 
-`swap_bundle` (`update.rs:1683`) performs the swap, taking the running exe as a parameter (so it is
+`swap_bundle` (`src/update.rs:swap_bundle`) performs the swap, taking the running exe as a parameter (so it is
 testable against a temp tree). Pre-swap checks, none of which touch the destination: the staged root
 must exist and be a directory (else `Error::Io` NotFound naming it); when `exe_inside_bundle`
-(`update.rs:1771`, canonicalizing both sides like `same_file`) reports the running exe inside the
+(`src/update.rs:exe_inside_bundle`, canonicalizing both sides like `same_file`) reports the running exe inside the
 installed bundle, the staged tree must carry a file at the same relative path; then the
 `verify_binary` hook runs against the *staged bundle root* via the shared `run_verify_hook`
-(`update.rs:1611`). Then, in order: rename the running exe to `stash/exe-aside` (only when it is
+(`src/update.rs:run_verify_hook`). Then, in order: rename the running exe to `stash/exe-aside` (only when it is
 inside the bundle), rename `bundle_install_path` to `stash/old` (only when it exists), rename the
 staged root onto `bundle_install_path`. A failure at either later step reverses the applied renames
-(old tree first, then the exe, via `restore_stashed`, `update.rs:1753`) and returns the original
+(old tree first, then the exe, via `restore_stashed`, `src/update.rs:restore_stashed`) and returns the original
 error mapped by `map_install_io_error`; rollback is best-effort and logged, matching the `MoveAll`
 contract. After the final rename the update is committed and the file at the running exe's path is
 the new tree's executable, so no `self_replace` call is involved. On unix the stashed old image is
@@ -216,12 +216,12 @@ test and the renames are not atomic as a unit, so racing updaters can interleave
 
 ### Multi-file install
 
-`MoveAll` (`lib.rs:988`) is the transactional multi-file primitive, not used by the
+`MoveAll` (`src/lib.rs:MoveAll`) is the transactional multi-file primitive, not used by the
 single-binary `update()` flow; callers drive it by hand after extracting an archive
 themselves. `from_temp(temp)` starts it, `add(source, dest)` queues moves, `commit()` applies
-them in order (`lib.rs:1021`). Each existing destination is stashed under `temp` so it can be
+them in order (`src/lib.rs:commit`). Each existing destination is stashed under `temp` so it can be
 restored; on the first failed rename, the just-stashed dest is restored and all
-already-applied moves are rolled back in reverse via `rollback` (`lib.rs:1083`), restoring
+already-applied moves are rolled back in reverse via `rollback` (`src/lib.rs:rollback`), restoring
 stashed originals or removing freshly-installed files, and the original error is returned.
 Rollback is best-effort: a failing rollback step is logged via `log::error!`, not surfaced.
 `commit` drains the queue (`std::mem::take`), so a second `commit` is a no-op returning
@@ -230,29 +230,29 @@ Rollback is best-effort: a failing rollback step is logged via `log::error!`, no
 ### Confirm and output
 
 `no_confirm()` controls the prompt; `show_output()` controls informational printing. In
-`resolve_and_confirm` (`update.rs:1242-1269`), the release-status block (current exe, new exe
+`resolve_and_confirm` (`src/update.rs:resolve_and_confirm`), the release-status block (current exe, new exe
 name, download URL, "will be downloaded/extracted and replaced") prints when either
 `show_output` is true or a confirmation will be prompted, so it prints even with
 `show_output(false)` unless `no_confirm(true)` is also set. The install-target line is built by
-`install_target_line` (`update.rs:1206`), which formats the path with `Path::display()`, so it
+`install_target_line` (`src/update.rs:install_target_line`), which formats the path with `Path::display()`, so it
 prints unquoted and with one separator per component on windows; the asset name and the redacted
 download URL are strings formatted with `{:?}` and stay quoted. The confirmation prompt
-(`confirm("Do you want to continue? [Y/n] ")`, `lib.rs:521`) reads stdin; blank or `y`
+(`confirm("Do you want to continue? [Y/n] ")`, `src/lib.rs:confirm`) reads stdin; blank or `y`
 continues, anything else => `Error::Aborted` (Display "AbortedError: the update was not
-confirmed", `lib.rs:528`). `print_check_header`,
+confirmed", `src/lib.rs:confirm`). `print_check_header`,
 `finish_update`'s "Extracting archive..."/"Done"/"Replacing binary file..." messages, and
 `choose_latest_release`'s release messages are all gated on `show_output`
-(`print_flush`/`println` helpers, `update.rs:890-902`). `show_download_progress()` toggles the
-`indicatif` terminal bar in `Download` (`lib.rs:1329`); the bar is suppressed when the server
+(`print_flush`/`println` helpers, `src/update.rs:print_flush`, `src/update.rs:println`). `show_download_progress()` toggles the
+`indicatif` terminal bar in `Download` (`src/lib.rs:show_download_progress`); the bar is suppressed when the server
 sends no `Content-Length`. An independent `progress_callback` fires per chunk regardless of
 the bar.
 
 ### Status reported
 
-`ReleaseStatus` (`update.rs:41`) is `UpToDate` or `Updated(Release)` (carries the full installed
+`ReleaseStatus` (`src/update.rs:ReleaseStatus`) is `UpToDate` or `Updated(Release)` (carries the full installed
 `Release`). `update_extended` returns `Updated(release)` after a successful install
-(`update.rs:844`) or `UpToDate` when nothing newer was found. `update()` collapses this to
-`VersionStatus` (`lib.rs:545`), `UpToDate(String)` / `Updated(String)` carrying only the version tag,
+(`src/update.rs:update_extended`) or `UpToDate` when nothing newer was found. `update()` collapses this to
+`VersionStatus` (`src/lib.rs:VersionStatus`), `UpToDate(String)` / `Updated(String)` carrying only the version tag,
 via `into_version_status`.
 
 ## Public surface
@@ -291,13 +291,13 @@ under feature `async`; the free `update::update_extended_async` they route to is
 
 - Verify-before-replace: checksum, release digest, and signature all run on the downloaded
   archive *before* extraction; `verify_binary` runs on the extracted binary *before* the swap.
-  Nothing is replaced if any of the four rejects (`update.rs:1312-1332`, `1444-1451`).
+  Nothing is replaced if any of the four rejects (`src/update.rs:finish_update_owned`, `src/update.rs:install_binary`).
 - The release-digest gate is on by default under `checksums` and only fires when the selected
   asset carries a digest; `verify_release_digest(false)` opts out. A present-but-unparseable
-  digest is a hard `Error::InvalidResponse`, not a silent skip (`update.rs:1320-1324`).
+  digest is a hard `Error::InvalidResponse`, not a silent skip (`src/update.rs:finish_update_owned`).
 - Order independence: `choose_latest_release` sorts candidates semver-descending and filters
   to strictly-newer, so a custom source's unordered/stale list selects correctly and never
-  re-installs the current version (`update.rs:640-711`).
+  re-installs the current version (`src/update.rs:choose_latest_release`).
 - Download/extract happen entirely under a `tempfile::TempDir`; it is cleaned up on drop. The
   running exe is replaced atomically via `self_replace` when it is the install target.
 - `MoveAll` is all-or-nothing: success replaces every dest, first failure restores every
@@ -307,11 +307,11 @@ under feature `async`; the free `update::update_extended_async` they route to is
   `!no_confirm`. Suppressing one does not suppress the other.
 - The status block's install-target line goes through `Path::display()`, never `{:?}`: a path is
   shown exactly as the platform writes it, so a windows path keeps single backslashes
-  (`install_target_line`, `update.rs:1206`).
+  (`install_target_line`, `src/update.rs:install_target_line`).
 - The retry budget covers the download's request-establishment phase (before bytes stream); mid-stream failures are not retried. User `request_headers` override the crate's ACCEPT/auth
   headers on the download.
 - When `check_install_path_writable` is `true`, the preflight probe (`probe_writable`,
-  `update.rs:1865`) runs after confirmation and before any download, targeting the bundle's parent
+  `src/update.rs:probe_writable`) runs after confirmation and before any download, targeting the bundle's parent
   directory in bundle mode and `bin_install_path` otherwise; only a definite `PermissionDenied`
   errors, indeterminate results proceed. Default is `false`.
 - Bundle mode is all-or-nothing at whole-tree granularity: nothing under `bundle_install_path`
@@ -323,7 +323,7 @@ under feature `async`; the free `update::update_extended_async` they route to is
   `Error::ConflictingConfig` from `build()`, not a silently-dropped setter.
 - The install step always annotates IO failures with the install path: `PermissionDenied` becomes
   `Error::InstallPathNotWritable { path }` and other kinds become `Error::Io` with the path in the
-  message, `ErrorKind` preserved (`map_install_io_error`, `update.rs:1582`). Independent of the
+  message, `ErrorKind` preserved (`map_install_io_error`, `src/update.rs:map_install_io_error`). Independent of the
   preflight probe.
 - `update()` reports `VersionStatus` (version only); `update_extended()` reports `ReleaseStatus`
   (`UpToDate` or `Updated(Release)`).

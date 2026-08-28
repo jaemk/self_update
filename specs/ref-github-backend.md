@@ -18,29 +18,29 @@ with shared HTTP helpers in `src/backends/common.rs` and `src/backends/mod.rs`.
 `ReleaseList::configure()` returns a `ReleaseListBuilder` with all fields `None`
 and a default `RequestConfig`. Setters: `repo_owner` (required),
 `repo_name` (required), `filter_target` (optional asset-target filter),
-`api_base_url` (custom API base URL, `github.rs:171-174`), `auth_token`,
+`api_base_url` (custom API base URL, `src/backends/github.rs:api_base_url`), `auth_token`,
 plus the shared transport setters from
 `request_config_setters!(request)`. The builder-setter
 doc-aliases were dropped, so `filter_target`, `api_base_url`, and the others carry no
 `#[doc(alias)]`. The string setters (`repo_owner`, `repo_name`, `api_base_url`,
 `filter_target`, `auth_token`, and the `Update` builder's common setters) take
-`impl Into<String>`. `build()` (`github.rs:220`) calls `self.request.check()` first (surfacing a
+`impl Into<String>`. `build()` (`src/backends/github.rs:build`) calls `self.request.check()` first (surfacing a
 deferred `request_header` conversion error as `Error::InvalidHeader`), then requires
 `repo_owner` and `repo_name`, bailing `Error::MissingField { field }` if either is missing.
 `ReleaseList` has `fetch` and, under the `async` feature, `fetch_async`
-(`github.rs:317`), both returning `Result<Releases>`.
+(`src/backends/github.rs:fetch_async`), both returning `Result<Releases>`.
 
 `Update::configure()` returns an `UpdateBuilder` (`Default`-constructed).
 Setters: `repo_owner` (required), `repo_name` (required),
-`api_base_url` (custom API base URL, no doc-alias, `github.rs:377-380`), plus the full shared
+`api_base_url` (custom API base URL, no doc-alias, `src/backends/github.rs:api_base_url`), plus the full shared
 common surface from `impl_common_builder_setters!()`: target,
 bin name, current version, auth token, timeout, retries, request headers,
 progress, confirm, asset matcher, verify hook, checksum, injected HTTP clients,
 etc. `build_update()` requires `repo_owner`/`repo_name` (else
 `Error::MissingField { field }`) and calls `self.common.build()` (which validates and
 requires `current_version`/`bin_name`/`bin_path_in_archive`).
-`build()` returns the concrete `Update` (`github.rs:459-461`), as does
-`build_async()` (feature `async`, `github.rs:469-471`). `Update` is `Send` and exposes
+`build()` returns the concrete `Update` (`src/backends/github.rs:build`), as does
+`build_async()` (feature `async`, `src/backends/github.rs:build_async`). `Update` is `Send` and exposes
 the update verbs as inherent methods (`update`, `update_extended`,
 `get_latest_release`, `get_newer_releases`, `get_release_version`,
 `is_update_available`), so `.build()?.update()?` needs no trait import.
@@ -65,14 +65,14 @@ Routes built (all GET), each via a shared URL helper (`releases_url`, `latest_ur
 - Fetch by tag: `{base}/repos/{owner}/{name}/releases/tags/{tag}` where `tag` is
   `urlencoding::encode(ver)`. Used by `get_release_version` and `get_release_version_async`.
 
-The list routes go through `first_page_url` (`common.rs:58`), which appends
+The list routes go through `first_page_url` (`src/backends/mod.rs:first_page_url`), which appends
 `?per_page=100` only when the base URL carries no `?` query.
 
 ### Auth
 
 `auth_token` is optional and is carried as `Option<String>` on both `ReleaseList`
 (its own field) and `Update` (via `CommonConfig::auth_token`). The free `api_headers()`
-(`github.rs:745-754`) only sets the shared `self_update/<version>` User-Agent (github rejects
+(`src/backends/github.rs:api_headers`) only sets the shared `self_update/<version>` User-Agent (github rejects
 requests with no User-Agent); the `Authorization` header is no longer built there. Auth is
 applied centrally by `RequestConfig::apply_auth` (`common.rs`) on both the listing and download
 paths, rendering `Authorization: token {token}` (the GitHub legacy "token" scheme, not "Bearer")
@@ -80,7 +80,7 @@ and honoring a user `request_header(AUTHORIZATION, ..)` override.
 A token that fails to parse as a header value is surfaced as `Error::InvalidAuthToken`.
 The token is supplied explicitly via `auth_token(...)`, or read from the environment on request via
 `auth_token_from_env()` (`GH_TOKEN`, then `GITHUB_TOKEN`; the crate-internal `AUTH_TOKEN_ENV_VARS`
-list, `github.rs:204`/`395`) on both the `Update` and `ReleaseList` builders. This order was flipped
+list, `src/macros.rs:AUTH_TOKEN_ENV_VARS`) on both the `Update` and `ReleaseList` builders. This order was flipped
 from the reverse (`GITHUB_TOKEN` then `GH_TOKEN`) to match what `gh help environment` actually
 documents ("GH_TOKEN, GITHUB_TOKEN, in order of precedence"): inside GitHub Actions `GITHUB_TOKEN`
 is auto-populated, so a deliberately-exported `GH_TOKEN` should win over it, not be silently
@@ -93,11 +93,11 @@ the download path so the same User-Agent and token scheme are used there too.
 
 An env-sourced token is bound to whatever host `api_base_url` is configured with (or the default
 `api.github.com`), which the request-time host gate cannot flag on its own (the configured host
-*is* `auth_base_host`). `build()` calls `env_token_host_decision` (`github.rs:238-243`
-`ReleaseListBuilder`, `:440-445` `Update`) after resolving the host. It returns
+*is* `auth_base_host`). `build()` calls `env_token_host_decision` (`src/backends/common.rs:env_token_host_decision`
+`ReleaseListBuilder`, `src/backends/common.rs:env_token_host_decision` `Update`) after resolving the host. It returns
 `EnvTokenDecision::WarnedAndSent` (logging a warning, but still attaching the token) when the
 current token is env-sourced and the resolved host is neither github's canonical
-`api.github.com` (`CANONICAL_AUTH_HOST`, `github.rs:19`) nor an acknowledged `allow_auth_host`
+`api.github.com` (`CANONICAL_AUTH_HOST`, `src/backends/github.rs:CANONICAL_AUTH_HOST`) nor an acknowledged `allow_auth_host`
 entry -- this is unchanged from before; the only addition is that a host passed to
 `allow_auth_host(..)` now counts as acknowledged (`host_is_acknowledged`, `backends/common.rs`) and
 yields `EnvTokenDecision::Sent` with no warning. An explicitly-set token is never warned about
@@ -184,9 +184,9 @@ pipeline verifies the download against it by default (see `ref-signatures-and-ch
 
 Releases are returned in the order GitHub's API returns them, which is newest
 first; no client-side re-sort is applied. `ReleaseList::fetch` returns them as-is
-(after the optional target filter) (`github.rs:294-313`). `Update`'s list paths
+(after the optional target filter) (`src/backends/github.rs:fetch`). `Update`'s list paths
 filter to strictly-newer-than-current via `bump_is_greater(current, release.version())`
-(`github.rs:650`, inside `releases_plan`'s page parser) but preserve order.
+(`src/version.rs:bump_is_greater`, inside `releases_plan`'s page parser) but preserve order.
 
 ### Errors
 
@@ -228,9 +228,9 @@ The setter was renamed `url` -> `api_base_url` (and earlier `with_url` / `instan
 ## Invariants and regression checklist
 
 - The fetch-by-tag route percent-encodes the caller-supplied tag: `tag_url`
-  (`github.rs:522-530`) applies `urlencoding::encode(ver)`, shared by both
-  `get_release_version` (`github.rs:560`) and `get_release_version_async`
-  (`github.rs:726`). A tag with a URL-special `+` must appear as `%2B` on the wire, never raw.
+  (`src/backends/github.rs:tag_url`) applies `urlencoding::encode(ver)`, shared by both
+  `get_release_version` (`src/backends/github.rs:get_release_version`) and `get_release_version_async`
+  (`src/backends/github.rs:get_release_version_async`). A tag with a URL-special `+` must appear as `%2B` on the wire, never raw.
 - Releases are returned newest-first (GitHub API order), with no client-side
   re-sort in this backend.
 - Route shapes are exactly `/repos/{owner}/{name}/releases`,
@@ -275,19 +275,19 @@ stub (no external network):
   `Error::InvalidResponse` with a chained `source()`.
 - `get_latest_release_sync_wraps_single_object_into_one_element_releases`
   and `..._reports_not_available_when_newest_equals_current`: the `/latest` single-object path.
-- `get_newer_releases_sync_returns_releases_and_precheck` (`github.rs:1785`):
+- `get_newer_releases_sync_returns_releases_and_precheck` (`src/backends/github.rs:get_newer_releases_sync_returns_releases_and_precheck`):
   strictly-newer filtering and the returned `Releases` pre-check.
 - `get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two`
-  (`github.rs:1335`): per-item filtering keeps paginating.
+  (`src/backends/github.rs:get_newer_releases_continues_past_non_newer_releases_and_fetches_page_two`): per-item filtering keeps paginating.
 - `release_list_fetch_async_returns_releases_and_into_vec_recovers_them`
-  (`github.rs:1508`): the async listing path.
+  (`src/backends/github.rs:release_list_fetch_async_returns_releases_and_into_vec_recovers_them`): the async listing path.
 - `api_headers_override_uses_github_user_agent_and_token_scheme`:
   User-Agent `rust/self-update` and `Authorization: token secret`.
 - `release_list_applies_its_request_config`: `ReleaseList`
   transport setters (retries) flow through `fetch`.
 - Transport/builder tests: timeout, retries, custom request header on the wire,
   injected reqwest/ureq/async clients, progress/verify/checksum/asset-matcher storage.
-- `auth_token_env_vars_are_gh_token_then_github_token` (`github.rs:806-814`): pins
+- `auth_token_env_vars_are_gh_token_then_github_token` (`src/backends/github.rs:auth_token_env_vars_are_gh_token_then_github_token`): pins
   `AUTH_TOKEN_ENV_VARS` to `["GH_TOKEN", "GITHUB_TOKEN"]` on both builders. The wire-level
   "`GH_TOKEN` beats `GITHUB_TOKEN` when both are set" check lives in the integration binary
   `tests/auth_token_env_github.rs`, not here.
