@@ -12,6 +12,11 @@ use crate::{
 };
 use serde::Deserialize;
 
+/// GitLab's canonical host. A token resolved from the environment is bound to whatever host the
+/// application configured, so `build()` warns when that host is not this one (see
+/// [`warn_if_env_token_off_canonical_host`](crate::backends::common::warn_if_env_token_off_canonical_host)).
+const CANONICAL_AUTH_HOST: &str = "gitlab.com";
+
 /// GitLab release-asset link JSON shape (assets live under `assets.links`). Private DTO converted
 /// into the public [`ReleaseAsset`]; keeping it private keeps `Deserialize` out of `ReleaseAsset`'s
 /// public API.
@@ -103,7 +108,10 @@ impl ReleaseDto {
 }
 
 /// `ReleaseList` Builder
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written (not derived) so `auth_token` renders as `"<token>"` instead of printing
+/// a live credential from a `log::debug!("{builder:?}")`.
+#[derive(Clone)]
 #[must_use]
 pub struct ReleaseListBuilder {
     host: String,
@@ -111,8 +119,26 @@ pub struct ReleaseListBuilder {
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
+    /// `true` when `auth_token` came from `auth_token_from_env()`; cleared by `auth_token(..)`.
+    auth_token_from_env: bool,
     request: RequestConfig,
 }
+
+impl std::fmt::Debug for ReleaseListBuilder {
+    /// Every field, with the token redacted exactly as `RequestConfig`'s `Debug` does.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleaseListBuilder")
+            .field("host", &self.host)
+            .field("repo_owner", &self.repo_owner)
+            .field("repo_name", &self.repo_name)
+            .field("target", &self.target)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", &self.auth_token_from_env)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
 impl ReleaseListBuilder {
     /// Set the base URL of the GitLab instance, e.g. `https://gitlab.com`. Defaults to
     /// `https://gitlab.com`.
@@ -159,12 +185,34 @@ impl ReleaseListBuilder {
     /// **Make sure not to bake the token into your app**; it is recommended
     /// you obtain it via another mechanism, such as environment variables
     /// or prompting the user for input
+    ///
+    /// The token can also be taken from the environment with
+    /// [`auth_token_from_env`](Self::auth_token_from_env). This setter always wins over that one,
+    /// in either call order.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
         self.auth_token = Some(auth_token.into());
+        // An explicit token is the application's own credential and always wins over the
+        // environment, whatever the call order, so this is no longer an env-sourced token.
+        self.auth_token_from_env = false;
         self
     }
 
-    impl_auth_token_from_env!(auth_token, ["GITLAB_TOKEN", "CI_JOB_TOKEN"]);
+    impl_auth_token_from_env!(
+        token: auth_token,
+        env_sourced: auth_token_from_env,
+        vars: ["GITLAB_TOKEN"],
+        rationale: "Authenticating lifts the anonymous request budget the instance applies -- \
+                    typically counted **per source IP**, so behind a NAT'd network it is shared \
+                    with everyone else on that IP and can be exhausted by unrelated traffic, \
+                    surfacing as \
+                    [`RateLimited`](crate::errors::Error::RateLimited). See the crate-level \
+                    rate-limit notes.\n\n`CI_JOB_TOKEN` is deliberately **not** read, even though \
+                    every GitLab CI job exports it: this backend sends `Authorization: Bearer`, \
+                    which is not GitLab's job-token mechanism (the `JOB-TOKEN` header / `job_token` \
+                    parameter), and job tokens are project-scoped -- reading it would turn a \
+                    working anonymous fetch of a public project into a 401/403 inside CI. Pass one \
+                    explicitly with `auth_token(..)` if you want it.",
+    );
 
     request_config_setters!(request);
 
@@ -176,6 +224,14 @@ impl ReleaseListBuilder {
         request.auth_scheme = crate::backends::common::AuthScheme::Bearer;
         request.auth_token = self.auth_token.clone();
         request.auth_base_host = crate::backends::common::host_of(&self.host);
+        // An env-sourced token is bound to whatever host was configured, which the request-time host
+        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
+        // gitlab.com.
+        crate::backends::common::warn_if_env_token_off_canonical_host(
+            self.auth_token_from_env,
+            request.auth_base_host.as_deref(),
+            Some(CANONICAL_AUTH_HOST),
+        );
         request.build_client();
         request.check()?;
         Ok(ReleaseList {
@@ -217,6 +273,7 @@ impl ReleaseList {
             repo_name: None,
             target: None,
             auth_token: None,
+            auth_token_from_env: false,
             request: RequestConfig::default(),
         }
     }
@@ -327,7 +384,20 @@ impl UpdateBuilder {
         self
     }
 
-    impl_common_builder_setters!(auth_env: ["GITLAB_TOKEN", "CI_JOB_TOKEN"]);
+    impl_common_builder_setters!(
+        auth_env: ["GITLAB_TOKEN"],
+        rationale: "Authenticating lifts the anonymous request budget the instance applies -- \
+                    typically counted **per source IP**, so behind a NAT'd network it is shared \
+                    with everyone else on that IP and can be exhausted by unrelated traffic, \
+                    surfacing as \
+                    [`RateLimited`](crate::errors::Error::RateLimited). See the crate-level \
+                    rate-limit notes.\n\n`CI_JOB_TOKEN` is deliberately **not** read, even though \
+                    every GitLab CI job exports it: this backend sends `Authorization: Bearer`, \
+                    which is not GitLab's job-token mechanism (the `JOB-TOKEN` header / `job_token` \
+                    parameter), and job tokens are project-scoped -- reading it would turn a \
+                    working anonymous fetch of a public project into a 401/403 inside CI. Pass one \
+                    explicitly with `auth_token(..)` if you want it.",
+    );
 
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
@@ -353,6 +423,14 @@ impl UpdateBuilder {
                 // Only the gitlab host receives the token; a server-supplied external asset link
                 // (gitlab allows arbitrary asset URLs) does not.
                 resolved.request.auth_base_host = crate::backends::common::host_of(&self.host);
+                // An env-sourced token is bound to whatever host was configured, which the
+                // request-time host gate cannot flag (the configured host *is* `auth_base_host`);
+                // warn when that is not gitlab.com.
+                crate::backends::common::warn_if_env_token_off_canonical_host(
+                    self.common.auth_token_from_env,
+                    resolved.request.auth_base_host.as_deref(),
+                    Some(CANONICAL_AUTH_HOST),
+                );
                 resolved
             },
         })
@@ -667,12 +745,17 @@ fn api_headers() -> Result<header::HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+    use super::Update;
+    use crate::update::UpdateConfig;
 
-    // AUTH-1: `auth_token_from_env()` (GITLAB_TOKEN, then CI_JOB_TOKEN) is present on both gitlab
-    // builders and leaves them buildable whatever the environment holds.
+    // --- AUTH-1: the environment-sourced auth token -------------------------------------------
+
+    // AUTH-1: `auth_token_from_env()` is present on both gitlab builders and leaves them buildable
+    // whatever the environment holds. The env-var precedence itself is unit-tested in
+    // `backends::common` without touching process env.
     #[test]
     fn auth_token_from_env_is_available_on_both_builders() {
-        Update::configure()
+        super::Update::configure()
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -687,8 +770,235 @@ mod tests {
             .build()
             .expect("an env-sourced token must leave the release-list builder buildable");
     }
-    use super::Update;
-    use crate::update::UpdateConfig;
+
+    // The exact variable list, on both builders. `CI_JOB_TOKEN` must NOT be here: every GitLab CI
+    // job exports it, this backend pins `Authorization: Bearer` (which is not GitLab's job-token
+    // mechanism -- that is the `JOB-TOKEN` header / `job_token` parameter) and job tokens are
+    // project-scoped, so reading it turned a working anonymous fetch of a public project into a
+    // 401/403 inside CI, exactly where the call is advertised as a no-op.
+    #[test]
+    fn auth_token_env_vars_are_gitlab_token_only() {
+        assert_eq!(super::UpdateBuilder::AUTH_TOKEN_ENV_VARS, ["GITLAB_TOKEN"]);
+        assert_eq!(
+            super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
+            ["GITLAB_TOKEN"]
+        );
+    }
+
+    // ...and that declared list is the one actually consulted: candidate `(name, value)` pairs
+    // built FROM the const, run through the very resolver the setter uses, resolve to the first
+    // name in it. Proves the const is not a stale copy of the real list, without mutating env.
+    //
+    // Both builders' consts are driven, not just the `UpdateBuilder`'s: they are declared by two
+    // separate macro invocations, so a typo in the `ReleaseListBuilder`'s list is a real (and
+    // previously untested) way for the two builders of one backend to disagree about which
+    // credential to use.
+    #[test]
+    fn the_declared_env_vars_drive_the_resolver() {
+        for (builder, vars) in [
+            ("UpdateBuilder", super::UpdateBuilder::AUTH_TOKEN_ENV_VARS),
+            (
+                "ReleaseListBuilder",
+                super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
+            ),
+        ] {
+            let candidates: Vec<(&str, Option<String>)> = vars
+                .iter()
+                .map(|name| (*name, Some(format!("token-for-{name}"))))
+                .collect();
+            assert_eq!(
+                crate::backends::common::first_env_token(&candidates).as_deref(),
+                Some("token-for-GITLAB_TOKEN"),
+                "the first declared variable must win on {builder}"
+            );
+        }
+    }
+
+    // C: an explicit `auth_token(..)` always wins over the environment, in EITHER call order, on
+    // both builders -- the pair is order-independent like every other setter pair.
+    #[test]
+    fn an_explicit_auth_token_wins_over_the_env_lookup_in_either_order() {
+        let env_then_explicit = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token_from_env()
+            .auth_token("explicit")
+            .build()
+            .unwrap();
+        let explicit_then_env = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("explicit")
+            .auth_token_from_env()
+            .build()
+            .unwrap();
+        for upd in [env_then_explicit, explicit_then_env] {
+            assert_eq!(upd.auth_token(), Some("explicit"));
+        }
+
+        let env_then_explicit = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token_from_env()
+            .auth_token("explicit")
+            .build()
+            .unwrap();
+        let explicit_then_env = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token("explicit")
+            .auth_token_from_env()
+            .build()
+            .unwrap();
+        for list in [env_then_explicit, explicit_then_env] {
+            assert_eq!(list.request.auth_token.as_deref(), Some("explicit"));
+        }
+    }
+
+    // K: `has_auth_token()` answers "am I about to run authenticated?" on both builders without the
+    // application reimplementing the variable list. (The env-pickup half is covered by the
+    // single-test integration binary `tests/auth_token_env.rs`, which may set process env.)
+    #[test]
+    fn has_auth_token_reports_an_explicitly_set_token() {
+        let mut upd = super::Update::configure();
+        assert!(
+            !upd.has_auth_token(),
+            "a fresh builder has no token: the update runs anonymously"
+        );
+        upd.auth_token("explicit");
+        assert!(upd.has_auth_token());
+
+        let mut list = super::ReleaseList::configure();
+        assert!(!list.has_auth_token());
+        list.auth_token("explicit");
+        assert!(list.has_auth_token());
+    }
+
+    // A: `Debug` on either builder must never print the token. Both hold a plaintext
+    // `Option<String>`, so a plain `log::debug!("{builder:?}")` used to dump a live credential --
+    // and `auth_token_from_env()` is exactly what puts an ambient CI credential there.
+    #[test]
+    fn builder_debug_redacts_the_auth_token() {
+        let mut upd = super::Update::configure();
+        upd.repo_owner("owner-o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("glpat_supersecret");
+        let rendered = format!("{upd:?}");
+        assert!(
+            !rendered.contains("glpat_supersecret"),
+            "the UpdateBuilder must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(
+            rendered.contains("owner-o"),
+            "other fields must survive the hand-written Debug, got: {rendered}"
+        );
+
+        let mut list = super::ReleaseList::configure();
+        list.repo_owner("owner-o")
+            .repo_name("r")
+            .auth_token("glpat_supersecret");
+        let rendered = format!("{list:?}");
+        assert!(
+            !rendered.contains("glpat_supersecret"),
+            "the ReleaseListBuilder must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(rendered.contains("owner-o"), "got: {rendered}");
+    }
+
+    // A hand-written `Debug` can leak a secret, and it can also silently *lose* a field -- a
+    // regression the "does not contain the secret" assertion above would happily pass. Pin the
+    // full field list of `ReleaseListBuilder`'s (this is the debug dump an application prints when
+    // an update misbehaves; a dropped `host` or `auth_token_from_env` makes it useless).
+    #[test]
+    fn release_list_builder_debug_renders_every_field() {
+        let rendered = format!("{:?}", super::ReleaseList::configure());
+        for field in [
+            "host",
+            "repo_owner",
+            "repo_name",
+            "target",
+            "auth_token",
+            "auth_token_from_env",
+            "request",
+        ] {
+            assert!(
+                rendered.contains(&format!("{field}:")),
+                "the hand-written Debug dropped `{field}`, got: {rendered}"
+            );
+        }
+    }
+
+    // A: the redaction must hold on every public type reachable from a configured builder, not just
+    // on the builders themselves. `Update` / `AsyncUpdate` / `ReleaseList` are what an application
+    // actually keeps around (and dumps into a bug report); they carry the resolved token inside
+    // `RequestConfig`, which is a different `Debug` impl from the builders' -- so it needs its own
+    // assertion rather than an assumption.
+    #[test]
+    fn built_types_debug_redacts_the_auth_token() {
+        let upd = super::Update::configure()
+            .repo_owner("owner-o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("glpat_supersecret")
+            .build()
+            .unwrap();
+        let rendered = format!("{upd:?}");
+        assert!(
+            !rendered.contains("glpat_supersecret"),
+            "the built Update must not print the token, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<token>"),
+            "the token must still render as the redaction marker, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("owner-o"),
+            "non-secret fields must survive, got: {rendered}"
+        );
+
+        let list = super::ReleaseList::configure()
+            .repo_owner("owner-o")
+            .repo_name("r")
+            .auth_token("glpat_supersecret")
+            .build()
+            .unwrap();
+        let rendered = format!("{list:?}");
+        assert!(
+            !rendered.contains("glpat_supersecret"),
+            "the built ReleaseList must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(rendered.contains("owner-o"), "got: {rendered}");
+
+        // The async newtype wraps the same `Update`, but it is a separate public type with its own
+        // derived `Debug`.
+        #[cfg(feature = "async")]
+        {
+            let upd = super::Update::configure()
+                .repo_owner("owner-o")
+                .repo_name("r")
+                .bin_name("app")
+                .current_version("0.1.0")
+                .auth_token("glpat_supersecret")
+                .build_async()
+                .unwrap();
+            let rendered = format!("{upd:?}");
+            assert!(
+                !rendered.contains("glpat_supersecret"),
+                "the built AsyncUpdate must not print the token, got: {rendered}"
+            );
+            assert!(rendered.contains("<token>"), "got: {rendered}");
+        }
+    }
 
     /// Async test wrapper over `releases_plan` + the async driver (unfiltered, all pages).
     #[cfg(feature = "async")]

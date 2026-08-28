@@ -413,34 +413,20 @@ last recorded check, and `record_check()` stamps the current time. The caller ow
 path. It is a guard, not a scheduler -- no threads or timers, and no extra dependencies. See the
 [`check_interval`](crate::check_interval) module for the semantics.
 
-### GitHub rate limits
+### Authentication
 
-Requests to the GitHub REST API are rate limited by GitHub itself, not by this crate:
+Every forge backend's `Update` **and** `ReleaseList` builder -- github, gitlab, gitea, gitee, eight
+builders in all -- takes an authorization token. A token is what reaches a private repository at
+all, and what lifts the host's anonymous request budget (see
+[GitHub rate limits](#github-rate-limits) below). There are two setters:
 
-- **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
-  requests (set any personal access token via `auth_token`) get **5000 per hour**. A token needs no
-  scopes to raise the limit for a public repository.
-- That budget is counted **per source IP, not per application**. Behind a shared egress IP -- a
-  NAT'd corporate network, a CI runner pool, a VPN exit -- it is pooled across everyone on that IP
-  and can be spent entirely by other people, so a lightly-used application still sees 403s there.
-- An update check costs **one** API request (the latest-release lookup, or one request per page of a
-  paginated listing). The asset **download** itself is a CDN redirect and does not count against the
-  core API limit.
-- When you are rate limited, GitHub responds with **HTTP 403** and an `x-ratelimit-remaining: 0`
-  header. This crate reads that header and surfaces
-  [`Error::RateLimited`](crate::errors::Error::RateLimited) -- distinct from the
-  `Error::Unauthorized` a genuine credential failure produces -- carrying the reset instant and any
-  `Retry-After` delay, so you can match on it to back off. (A 403 with no quota headers stays
-  `Unauthorized`.)
-- To avoid it: set a token, and check less often -- the
-  [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
-  The retry/backoff setters do **not** help here; retrying a rate-limited request only consumes more
-  quota.
-
-The one-line remedy is `auth_token_from_env()`, on every git backend's `Update` and `ReleaseList`
-builder. It reads the host's conventional variables -- `GITHUB_TOKEN` then `GH_TOKEN` (matching the
-`gh` CLI), `GITLAB_TOKEN` then `CI_JOB_TOKEN`, `GITEA_TOKEN`, `GITEE_TOKEN` -- and uses the first
-that is set and non-empty:
+* `auth_token(t)` -- a token your application already holds.
+* `auth_token_from_env()` -- take it from the backend's conventional environment variables, using
+  the first that is set and non-empty (surrounding whitespace is trimmed):
+  * **github**: `GH_TOKEN`, then `GITHUB_TOKEN` (matching the `gh` CLI's documented precedence).
+  * **gitlab**: `GITLAB_TOKEN`.
+  * **gitea**: `GITEA_TOKEN`.
+  * **gitee**: `GITEE_TOKEN`.
 
 ```rust
 let status = self_update::backends::github::Update::configure()
@@ -454,11 +440,96 @@ let status = self_update::backends::github::Update::configure()
     .update()?;
 ```
 
-Reading the environment is opt-in -- the crate never does it on its own, since the configured API
-base can be a self-hosted host and sending a user's token there should be your decision. With no
-variable set the call is a no-op and the request goes out unauthenticated, so it is safe to place
-unconditionally in an application that also runs outside CI or a corporate network. It never clears
-a token you set with `auth_token(..)`.
+**Precedence: an explicit `auth_token(..)` always wins, in either call order.** The environment is a
+*fallback* that only fills an unset token, so `auth_token(t).auth_token_from_env()` and
+`auth_token_from_env().auth_token(t)` both end up with `t`, and an ambient `*_TOKEN` can never
+displace the credential your application provisioned. When no variable is set the call is a no-op --
+the token is left as it was and the request goes out exactly as before -- so it is safe to place
+unconditionally in an application that also runs outside CI or a corporate network. `has_auth_token()`
+(on the same eight builders) reports whether a token is configured, from either source; use it to
+answer "am I about to run authenticated?" without reimplementing the variable list. It reports
+presence only, never validity and never the value -- the builders' `Debug` renders the token as
+`"<token>"`, so logging a builder does not leak an ambient CI credential.
+
+Reading the environment is opt-in: the crate never does it on its own, since the configured API base
+can be a self-hosted host and sending a user's token there should be your decision. The one caveat
+to "safe to call unconditionally" is that a variable which is *set* but stale, expired, revoked, or
+scoped to a different resource makes the request **fail** (401/403) where an anonymous request
+against a public repository would have succeeded.
+
+**The variable set does not change with the host.** A custom `api_base_url` / `host` -- GitHub
+Enterprise, a self-hosted GitLab -- is still served by exactly the variables above, so an ambient
+`GITHUB_TOKEN` is sent to whatever host the builder points at. When an env-sourced token is about to
+be bound to a host other than the backend's canonical one (`api.github.com`, `gitlab.com`,
+`gitee.com`), `build()` emits a `log::warn!`; gitea is always self-hosted, has no canonical host, and
+never warns. Note also that `gh` reads `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for a
+GitHub Enterprise host and this crate does not, so an enterprise `api_base_url` still needs one of
+the variables above (or an explicit `auth_token(..)`).
+
+`CI_JOB_TOKEN` is deliberately **not** read on gitlab, even though every GitLab CI job exports it:
+this backend sends `Authorization: Bearer`, which is not GitLab's job-token mechanism (the
+`JOB-TOKEN` header / `job_token` parameter), and job tokens are project-scoped -- reading it would
+turn a working anonymous fetch of a public project into a 401/403 inside CI. Pass it explicitly with
+`auth_token(..)` if you want it.
+
+### GitHub rate limits
+
+Requests to the GitHub REST API are rate limited by GitHub itself, not by this crate:
+
+- **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
+  requests (a token via `auth_token` / `auth_token_from_env`, see
+  [Authentication](#authentication)) get **5000 per hour**. A token needs no scopes to raise the
+  limit for a public repository.
+- That budget is counted **per source IP, not per application**. Behind a shared egress IP -- a
+  NAT'd corporate network, a CI runner pool, a VPN exit -- it is pooled across everyone on that IP
+  and can be spent entirely by other people, so a lightly-used application still sees 403s there.
+- An update check costs **one** API request (the latest-release lookup, or one request per page of a
+  paginated listing). The asset **download** itself is a CDN redirect and does not count against the
+  core API limit.
+- A rate-limited response surfaces as [`Error::RateLimited`](crate::errors::Error::RateLimited),
+  distinct from the `Error::Unauthorized` a genuine credential failure produces. A response is
+  classified that way when it is a **429** (RFC 6585 defines that status as rate limiting, so it
+  always lands here, with or without quota headers), or a **403** carrying either a zero
+  remaining-quota header (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) or a
+  usable `Retry-After` -- that last case is GitHub's *secondary* rate limit, which answers 403 +
+  `Retry-After` while `x-ratelimit-remaining` is still nonzero. A bare 403 with no such header stays
+  `Unauthorized`. The rule is the same on every backend, not just github.
+- Back off by [`Error::rate_limit_delay()`](crate::errors::Error::rate_limit_delay), which resolves
+  the wait to an `Option<Duration>`: the server's `Retry-After` when it sent one, otherwise
+  `reset_at` minus now, and `None` when the window has already elapsed or nothing is known. Reading
+  the raw fields instead is the footgun -- on GitHub's *primary* limit only `x-ratelimit-reset` is
+  sent, so `retry_after.unwrap_or_default()` sleeps zero and burns more quota. Both server-supplied
+  values are clamped to a 24h ceiling; beyond it they resolve to `None`, so a hostile `Retry-After`
+  cannot park an update channel indefinitely.
+- The retry/backoff setters do **not** apply here: a `RateLimited` response short-circuits the retry
+  loop and is returned immediately instead of spending the budget, since the quota is already at
+  zero and a sub-second backoff cannot outlast the window.
+- To avoid it: set a token, and check less often -- the
+  [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
+
+```rust
+fn check() -> Result<(), Box<dyn std::error::Error>> {
+    let update = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("self_update_example")
+        .current_version(self_update::cargo_crate_version!())
+        .auth_token_from_env()
+        .build()?;
+
+    match update.update() {
+        Ok(status) => println!("update status: `{}`", status.version()),
+        Err(err @ self_update::Error::RateLimited { .. }) => match err.rate_limit_delay() {
+            // A wait is known: sleep it out, or hand the delay to your scheduler.
+            Some(wait) => std::thread::sleep(wait),
+            // Nothing usable: reschedule the check rather than retrying now.
+            None => println!("rate limited; retrying on the next scheduled check"),
+        },
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+```
 
 ### Listing releases (`ReleaseList`)
 
@@ -601,6 +672,15 @@ to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does n
 injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and
 `reqwest_async_client` the async ones — injecting only one and calling the other half just uses the
 crate's per-call client for that half.
+
+A fully custom transport also owns the job of **classifying** a non-2xx response. Map it with
+[`Error::http_status_error_with_headers(status, url, &headers)`](crate::errors::Error::http_status_error_with_headers),
+not the header-blind [`Error::http_status_error`](crate::errors::Error::http_status_error): the
+rate-limit signal lives entirely in the response headers, so the header-blind form can never return
+[`Error::RateLimited`](crate::errors::Error::RateLimited) and a rate-limited response silently
+arrives as `Unauthorized`, losing the reset instant and the `Retry-After` and spending the retry
+budget on a quota that is already at zero. The built-in reqwest and ureq clients (including an
+injected `ureq::Agent`) all use the header-aware form, so they classify identically.
 
 ```rust
 fn update() -> Result<(), Box<dyn std::error::Error>> {

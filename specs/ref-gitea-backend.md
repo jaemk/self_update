@@ -69,8 +69,15 @@ under `async`, `fetch_async` (`gitea.rs:225`), both returning `Result<Releases>`
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`
   (`gitea.rs:113-116`); on `UpdateBuilder` it comes through the common setters and is
   stored in `CommonConfig`.
-- `auth_token_from_env()` on either builder resolves the token from `GITEA_TOKEN`; it is opt-in
-  (nothing reads the environment without it) and a no-op when the variable is unset or empty.
+- `auth_token_from_env()` on either builder resolves the token from `GITEA_TOKEN`
+  (`AUTH_TOKEN_ENV_VARS`, `gitea.rs:183`/`378`); it is opt-in (nothing reads the environment
+  without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` always
+  wins over it, whatever the call order; `has_auth_token()` reports whether either source set a
+  token.
+- `build()` calls `warn_if_env_token_off_canonical_host` for symmetry with the other backends, but
+  passes `None` for the canonical host (`gitea.rs:207-213`, `:418-424`): gitea has no well-known
+  public instance (it is always self-hosted), so this call **never warns**, whatever host is
+  configured.
 - Headers are built by the free function `api_headers(auth_token)`.
   It always sets `User-Agent: rust-reqwest/self-update`. Auth is
   applied centrally by `apply_auth` (`common.rs`), which renders the token as
@@ -177,6 +184,14 @@ fields do not break downstream code; it is constructed only through the builder.
 - Auth uses the `token <token>` scheme with a fixed `rust-reqwest/self-update`
   User-Agent, and the token is only sent to the configured instance host (or an
   `allow_auth_host` entry) over https.
+- `auth_token_from_env()` reads `GITEA_TOKEN` only (`AUTH_TOKEN_ENV_VARS`). An explicit
+  `auth_token(..)` always wins over it, whatever the call order. `has_auth_token()` reports
+  whether either source set a token. The canonical-host warning
+  (`warn_if_env_token_off_canonical_host`) never fires for gitea: it has no canonical host to
+  compare against, so an env-sourced token bound to any `host(..)` is silent.
+- A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota or a
+  usable `Retry-After`; a bare 403 with neither stays `Unauthorized`. `retry`/`retry_async` never
+  spend budget retrying a `RateLimited` response.
 - `version` has a single leading `v` stripped; `name` defaults to the tag.
 
 ## Tests
@@ -196,6 +211,8 @@ In `src/backends/gitea.rs` `mod tests` (`gitea.rs:517-1186`), backed by a loopba
   `/tags/{ver}` single-object parse, missing-`tag_name` error, newer-only filtering,
   empty-when-up-to-date, accumulate-then-filter across pages, empty-array error
   (`NoReleaseFound`), non-array-payload error (`InvalidResponse`).
+- `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEA_TOKEN"]` on both builders (`gitea.rs:767-770`), with
+  a comment guarding against a copy-pasted `GITHUB_TOKEN`-style list arriving here by mistake.
 
 ## Related
 

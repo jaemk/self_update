@@ -184,6 +184,34 @@ pub(crate) fn first_env_token(candidates: &[(&str, Option<String>)]) -> Option<S
     None
 }
 
+/// Convert one raw environment value into a candidate token string.
+///
+/// A value that is not valid UTF-8 cannot be an HTTP header value, so it is reported and treated as
+/// unset rather than silently ignored (which is what `std::env::var(..).ok()` would do, making a
+/// mangled `GITHUB_TOKEN` indistinguishable from an absent one). Pure -- it takes the raw value, so
+/// the non-UTF-8 path is testable without mutating process env.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn env_token_value(name: &str, raw: Option<std::ffi::OsString>) -> Option<String> {
+    match raw?.into_string() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            log::warn!(
+                "self_update: ignoring ${name}: its value is not valid UTF-8, so it cannot be used \
+                 as an auth token. The request proceeds as if it were unset."
+            );
+            None
+        }
+    }
+}
+
 /// Read `names` from the environment in order and return the first present, non-empty value.
 /// `None` when none is set, which leaves the builder's `auth_token` untouched.
 #[cfg_attr(
@@ -198,17 +226,23 @@ pub(crate) fn first_env_token(candidates: &[(&str, Option<String>)]) -> Option<S
 pub(crate) fn token_from_env(names: &[&str]) -> Option<String> {
     let candidates = names
         .iter()
-        .map(|name| (*name, std::env::var(name).ok()))
+        .map(|name| (*name, env_token_value(name, std::env::var_os(name))))
         .collect::<Vec<_>>();
     first_env_token(&candidates)
 }
 
-/// Write an env-resolved token into a builder's token slot.
+/// Fill a builder's token slot from an env-resolved token, **only when the slot is empty**.
 ///
-/// A resolved token replaces whatever was there; *not* finding one leaves the slot alone, so
-/// `auth_token_from_env()` can never silently drop a token an application set explicitly (which
-/// would turn a missing env var into a surprise 403). Split out from the `auth_token_from_env`
-/// macro so this rule is tested once rather than per backend.
+/// The environment is a *fallback*, never an override: an explicit `auth_token(..)` always wins,
+/// whatever the call order, so the setter pair is order-independent like every other pair on these
+/// builders, and an ambient developer/CI credential can never displace the credential the
+/// application deliberately provisioned. Not finding one likewise leaves the slot alone, so
+/// `auth_token_from_env()` can never silently drop a token (which would turn a missing env var into
+/// a surprise 403).
+///
+/// Returns `true` when the slot was filled from the environment, which is what the generated setter
+/// records in its `auth_token_from_env` flag. Split out from the `auth_token_from_env` macro so this
+/// rule is tested once rather than per backend.
 #[cfg_attr(
     not(any(
         feature = "github",
@@ -218,9 +252,16 @@ pub(crate) fn token_from_env(names: &[&str]) -> Option<String> {
     )),
     allow(dead_code)
 )]
-pub(crate) fn apply_env_token(slot: &mut Option<String>, resolved: Option<String>) {
-    if let Some(token) = resolved {
-        *slot = Some(token);
+pub(crate) fn fill_env_token_if_unset(slot: &mut Option<String>, resolved: Option<String>) -> bool {
+    if slot.is_some() {
+        return false;
+    }
+    match resolved {
+        Some(token) => {
+            *slot = Some(token);
+            true
+        }
+        None => false,
     }
 }
 
@@ -241,6 +282,50 @@ pub(crate) fn host_of(url: &str) -> Option<String> {
             .trim_end_matches(']')
             .to_ascii_lowercase()
     })
+}
+
+/// Warn when a token taken from the environment would be bound to a host that is not the backend's
+/// canonical one. Returns whether it warned (so the rule is testable without capturing logs).
+///
+/// The env var list is tied to the backend *type* (`GITHUB_TOKEN` for github, ...), but the token is
+/// sent to whatever host the application configured via `api_base_url` / `host`. The request-time
+/// host gate cannot help here, because the configured host *is* `auth_base_host`. So an application
+/// that exposes its update URL as configuration and runs in CI would hand `GITHUB_TOKEN` to an
+/// attacker-chosen host with no signal at all. An explicitly-set token is the application's own
+/// decision and is never warned about; only the env-sourced case is.
+///
+/// `canonical_host` is `None` for a backend that has no canonical host (gitea is always
+/// self-hosted), which never warns.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn warn_if_env_token_off_canonical_host(
+    env_sourced: bool,
+    auth_base_host: Option<&str>,
+    canonical_host: Option<&str>,
+) -> bool {
+    if !env_sourced {
+        return false;
+    }
+    let (Some(canonical), Some(host)) = (canonical_host, auth_base_host) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case(canonical) {
+        return false;
+    }
+    log::warn!(
+        "self_update: the auth token resolved from the environment will be sent to `{host}`, which \
+         is not `{canonical}`. The environment variables are conventions of the backend's own \
+         service, so a token meant for `{canonical}` may be exposed to a different host. Set the \
+         token explicitly with auth_token(..) if this host is intended."
+    );
+    true
 }
 #[cfg(feature = "progress-bar")]
 use crate::{DEFAULT_PROGRESS_CHARS, DEFAULT_PROGRESS_TEMPLATE};
@@ -350,6 +435,12 @@ impl std::fmt::Debug for RequestConfig {
                 &format_args!("<{} root_certificates>", self.root_certificates.len()),
             )
             .field("cert_error", &self.cert_error)
+            // The auth-host gate carries no secret (a hostname), and it decides whether the token is
+            // attached at all -- including which host the env-token warning compares against -- so a
+            // debug dump that hides it cannot answer "why was my token not sent?".
+            .field("auth_base_host", &self.auth_base_host)
+            .field("auth_hosts", &self.auth_hosts)
+            .field("allow_insecure_auth", &self.allow_insecure_auth)
             .finish()
     }
 }
@@ -525,7 +616,12 @@ impl RequestConfig {
 }
 
 /// The common, backend-independent options of an `Update` builder, before validation.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written (not derived) so [`auth_token`](Self::auth_token) renders as `"<token>"`:
+/// every backend's `UpdateBuilder` derives `Debug` over this struct, so a plain
+/// `log::debug!("{builder:?}")` would otherwise print a live credential -- one the application
+/// author may not even have typed, since `auth_token_from_env()` can put an ambient CI token there.
+#[derive(Clone)]
 pub(crate) struct CommonBuilderConfig {
     pub request: RequestConfig,
     pub target: Option<String>,
@@ -565,6 +661,11 @@ pub(crate) struct CommonBuilderConfig {
     #[cfg(feature = "progress-bar")]
     pub progress_chars: String,
     pub auth_token: Option<String>,
+    /// `true` when [`auth_token`](Self::auth_token) was filled from the environment by the generated
+    /// `auth_token_from_env()` setter. Cleared by every explicit `auth_token(..)` call. Read at
+    /// `build()` time by [`warn_if_env_token_off_canonical_host`] so an ambient credential bound to
+    /// a non-canonical host is reported.
+    pub auth_token_from_env: bool,
     /// The backend's authorization scheme. Defaults to [`AuthScheme::Token`] (github/gitea); gitlab
     /// sets [`AuthScheme::Bearer`]. Threaded into the resolved [`RequestConfig::auth_scheme`].
     pub auth_scheme: AuthScheme,
@@ -579,6 +680,52 @@ pub(crate) struct CommonBuilderConfig {
     pub verify_release_digest: bool,
     #[cfg(feature = "signatures")]
     pub verifying_keys: Vec<[u8; zipsign_api::PUBLIC_KEY_LENGTH]>,
+}
+
+impl std::fmt::Debug for CommonBuilderConfig {
+    /// Renders every field, with `auth_token` redacted to `"<token>"` exactly as
+    /// [`RequestConfig::fmt`] does (`None` stays `None`, so "is a token set?" is still answerable
+    /// from a debug dump without the value leaking).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("CommonBuilderConfig");
+        s.field("request", &self.request)
+            .field("target", &self.target)
+            .field("asset_identifier", &self.asset_identifier)
+            .field("bin_name", &self.bin_name)
+            .field("bin_install_path", &self.bin_install_path)
+            .field(
+                "check_install_path_writable",
+                &self.check_install_path_writable,
+            )
+            .field("bin_path_in_archive", &self.bin_path_in_archive)
+            .field("bin_path_in_archive_auto", &self.bin_path_in_archive_auto)
+            .field("bundle_path_in_archive", &self.bundle_path_in_archive)
+            .field("bundle_install_path", &self.bundle_install_path)
+            .field("show_download_progress", &self.show_download_progress)
+            .field("show_output", &self.show_output)
+            .field("no_confirm", &self.no_confirm)
+            .field("show_release_notes", &self.show_release_notes)
+            .field("update_strategy", &self.update_strategy)
+            .field("tag_prefix", &self.tag_prefix)
+            .field("current_version", &self.current_version)
+            .field("release_tag", &self.release_tag);
+        #[cfg(feature = "progress-bar")]
+        s.field("progress_template", &self.progress_template)
+            .field("progress_chars", &self.progress_chars);
+        s.field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", &self.auth_token_from_env)
+            .field("auth_scheme", &self.auth_scheme)
+            .field("progress_callback", &self.progress_callback)
+            .field("verify", &self.verify)
+            .field("asset_matcher", &self.asset_matcher);
+        #[cfg(feature = "checksums")]
+        s.field("checksum", &self.checksum)
+            .field("verify_release_digest", &self.verify_release_digest);
+        // Verifying keys are public by construction, so they render as they did under the derive.
+        #[cfg(feature = "signatures")]
+        s.field("verifying_keys", &self.verifying_keys);
+        s.finish()
+    }
 }
 
 impl Default for CommonBuilderConfig {
@@ -607,6 +754,7 @@ impl Default for CommonBuilderConfig {
             #[cfg(feature = "progress-bar")]
             progress_chars: DEFAULT_PROGRESS_CHARS.to_string(),
             auth_token: None,
+            auth_token_from_env: false,
             auth_scheme: AuthScheme::default(),
             progress_callback: None,
             verify: None,
@@ -742,6 +890,18 @@ pub(crate) struct CommonConfig {
     pub asset_identifier: Option<String>,
     pub current_version: String,
     pub release_tag: Option<String>,
+    /// Only the forge backends (github/gitlab/gitea/gitee) read this; the attribute keeps a build
+    /// without any of them (e.g. `--no-default-features --features "reqwest rustls s3"`)
+    /// warning-free, like the helpers above.
+    #[cfg_attr(
+        not(any(
+            feature = "github",
+            feature = "gitlab",
+            feature = "gitea",
+            feature = "gitee"
+        )),
+        allow(dead_code)
+    )]
     pub tag_prefix: Option<String>,
     pub bin_name: String,
     pub bin_install_path: PathBuf,
@@ -797,12 +957,12 @@ mod tests {
     }
 
     // AUTH-1-1: the first candidate that is set and non-empty wins, even when a later one is also
-    // set. This pins the documented precedence (e.g. GITHUB_TOKEN over GH_TOKEN).
+    // set. This pins the documented precedence (e.g. GH_TOKEN over GITHUB_TOKEN, matching `gh`).
     #[test]
     fn first_env_token_takes_the_first_present_value() {
         let got = super::first_env_token(&candidates(&[
-            ("GITHUB_TOKEN", Some("first")),
-            ("GH_TOKEN", Some("second")),
+            ("GH_TOKEN", Some("first")),
+            ("GITHUB_TOKEN", Some("second")),
         ]));
         assert_eq!(
             got.as_deref(),
@@ -850,36 +1010,404 @@ mod tests {
         );
     }
 
-    // A resolved token overwrites whatever the slot held, so `auth_token("x").auth_token_from_env()`
-    // ends up with the environment's token.
+    // The environment is a FALLBACK, never an override: a resolved token must NOT displace a token
+    // the application set explicitly, so `auth_token("x").auth_token_from_env()` keeps `x`. The old
+    // behavior (overwrite) made the setter pair order-sensitive and let an ambient developer/CI
+    // credential -- or one an attacker who can influence the environment plants -- silently replace
+    // a deliberately provisioned one.
     #[test]
-    fn apply_env_token_overwrites_with_a_resolved_token() {
+    fn fill_env_token_if_unset_keeps_an_explicit_token() {
         let mut slot = Some("explicit".to_string());
-        super::apply_env_token(&mut slot, Some("from-env".to_string()));
+        let filled = super::fill_env_token_if_unset(&mut slot, Some("from-env".to_string()));
+        assert_eq!(
+            slot.as_deref(),
+            Some("explicit"),
+            "an explicitly-set token must survive a resolved env token"
+        );
+        assert!(
+            !filled,
+            "nothing was taken from the environment, so the token is not env-sourced"
+        );
+    }
+
+    // An empty slot is what the environment is for: the resolved token lands, and the call reports
+    // that the token is env-sourced (which is what drives the non-canonical-host warning).
+    #[test]
+    fn fill_env_token_if_unset_fills_an_empty_slot() {
+        let mut slot = None;
+        let filled = super::fill_env_token_if_unset(&mut slot, Some("from-env".to_string()));
         assert_eq!(slot.as_deref(), Some("from-env"));
+        assert!(
+            filled,
+            "filling an empty slot must report an env-sourced token"
+        );
     }
 
     // The other half of that rule: an unresolved lookup must NOT clear an explicitly-set token.
     // Clearing it would turn an unset env var into a silent loss of authorization (a surprise 403
     // against a private repo), so `auth_token_from_env()` is additive when the environment is empty.
     #[test]
-    fn apply_env_token_keeps_an_existing_token_when_env_resolves_to_none() {
+    fn fill_env_token_if_unset_keeps_an_existing_token_when_env_resolves_to_none() {
         let mut slot = Some("explicit".to_string());
-        super::apply_env_token(&mut slot, None);
+        let filled = super::fill_env_token_if_unset(&mut slot, None);
         assert_eq!(
             slot.as_deref(),
             Some("explicit"),
             "an empty environment must leave an explicitly-set token in place"
         );
+        assert!(!filled);
     }
 
     // With no token set and nothing in the environment, the slot stays empty: the request goes out
     // unauthenticated exactly as it would without the call.
     #[test]
-    fn apply_env_token_leaves_an_empty_slot_empty() {
+    fn fill_env_token_if_unset_leaves_an_empty_slot_empty() {
         let mut slot = None;
-        super::apply_env_token(&mut slot, None);
+        let filled = super::fill_env_token_if_unset(&mut slot, None);
         assert_eq!(slot, None);
+        assert!(!filled);
+    }
+
+    /// An `OsString` that is not valid UTF-8, built without touching process env. Both platform
+    /// families can hold such a value (a raw byte on unix, an unpaired surrogate on windows).
+    #[cfg(any(unix, windows))]
+    fn non_utf8_os_string() -> std::ffi::OsString {
+        #[cfg(unix)]
+        {
+            std::os::unix::ffi::OsStringExt::from_vec(vec![b'g', b'h', b'p', 0x80])
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::ffi::OsStringExt::from_wide(&[0x0067, 0x0068, 0xD800])
+        }
+    }
+
+    // A variable whose value is not valid UTF-8 cannot become an HTTP header value. It is reported
+    // (via `log::warn!`) and treated as unset, rather than silently swallowed the way the old
+    // `std::env::var(name).ok()` did -- which made a mangled token indistinguishable from an absent
+    // one. Exercised through the pure helper, so no process env is mutated.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn env_token_value_treats_a_non_utf8_value_as_unset() {
+        assert_eq!(
+            super::env_token_value("GH_TOKEN", Some(non_utf8_os_string())),
+            None,
+            "a non-UTF-8 value must resolve to None"
+        );
+        // ... and a valid value still passes through untouched (trimming happens later).
+        assert_eq!(
+            super::env_token_value("GH_TOKEN", Some(std::ffi::OsString::from(" ghp_abc "))),
+            Some(" ghp_abc ".to_string())
+        );
+        assert_eq!(super::env_token_value("GH_TOKEN", None), None);
+    }
+
+    // H: a non-UTF-8 value falls through to the NEXT candidate rather than aborting the lookup, so
+    // a mangled `GH_TOKEN` still lets `GITHUB_TOKEN` supply the token.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_non_utf8_candidate_falls_through_to_the_next_variable() {
+        let candidates = vec![
+            (
+                "GH_TOKEN",
+                super::env_token_value("GH_TOKEN", Some(non_utf8_os_string())),
+            ),
+            (
+                "GITHUB_TOKEN",
+                super::env_token_value("GITHUB_TOKEN", Some(std::ffi::OsString::from("real"))),
+            ),
+        ];
+        assert_eq!(super::first_env_token(&candidates).as_deref(), Some("real"));
+    }
+
+    // --- H: an env-sourced token bound to a non-canonical host --------------------------------
+
+    // The canonical host is the expected case and must stay silent: the env var list is a
+    // convention of that very service.
+    #[test]
+    fn no_warning_when_an_env_token_targets_the_canonical_host() {
+        assert!(
+            !super::warn_if_env_token_off_canonical_host(
+                true,
+                Some("api.github.com"),
+                Some("api.github.com")
+            ),
+            "the canonical host must not warn"
+        );
+        // Host comparison is case-insensitive, like the request-time host gate.
+        assert!(!super::warn_if_env_token_off_canonical_host(
+            true,
+            Some("API.GitHub.com"),
+            Some("api.github.com")
+        ));
+    }
+
+    // The case this guard exists for: a custom `api_base_url`/`host` plus a token the application
+    // never typed. The request-time host gate cannot catch it (the configured host *is*
+    // `auth_base_host`), so an app that exposes its update URL as config and runs in CI would hand
+    // `GITHUB_TOKEN` to an attacker-chosen host with no signal at all.
+    #[test]
+    fn warns_when_an_env_token_targets_a_custom_host() {
+        assert!(
+            super::warn_if_env_token_off_canonical_host(
+                true,
+                Some("evil.example.com"),
+                Some("api.github.com")
+            ),
+            "an env-sourced token bound to a non-canonical host must warn"
+        );
+    }
+
+    // An explicitly-set token is the application's own decision about which host to trust, so the
+    // same custom host must stay silent -- otherwise every enterprise/self-hosted user with an
+    // explicit token would be nagged.
+    #[test]
+    fn no_warning_for_an_explicitly_set_token_on_a_custom_host() {
+        assert!(
+            !super::warn_if_env_token_off_canonical_host(
+                false,
+                Some("github.mycorp.com"),
+                Some("api.github.com")
+            ),
+            "an explicitly-set token must never warn"
+        );
+    }
+
+    // A backend with no canonical host (gitea is always self-hosted) has nothing to compare
+    // against and must never warn, whatever host is configured.
+    #[test]
+    fn no_warning_for_a_backend_without_a_canonical_host() {
+        assert!(!super::warn_if_env_token_off_canonical_host(
+            true,
+            Some("gitea.example.com"),
+            None
+        ));
+        // Nor when the configured URL had no parseable host at all.
+        assert!(!super::warn_if_env_token_off_canonical_host(
+            true,
+            None,
+            Some("api.github.com")
+        ));
+    }
+
+    // --- A: the builder config's Debug must not leak the token ---------------------------------
+
+    // `CommonBuilderConfig` is embedded (and `Debug`-derived over) by every backend's
+    // `UpdateBuilder`, so a plain `log::debug!("{builder:?}")` used to print a live credential --
+    // one the application author may not even have typed, since `auth_token_from_env()` puts an
+    // ambient CI token there. It renders as `"<token>"`, exactly like `RequestConfig`'s Debug, and
+    // the other fields still show.
+    #[test]
+    fn debug_redacts_the_auth_token_but_keeps_other_fields() {
+        let cfg = CommonBuilderConfig {
+            auth_token: Some("ghp_supersecret".to_string()),
+            bin_name: Some("app".to_string()),
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the token value must never appear in Debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<token>"),
+            "the token must render as the redaction marker, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"app\""),
+            "non-secret fields must still be rendered, got: {rendered}"
+        );
+        // An unset token still renders as `None`, so "is a token set?" stays answerable.
+        assert!(format!("{:?}", CommonBuilderConfig::default()).contains("auth_token: None"));
+    }
+
+    // The other failure mode of a hand-written `Debug`: not leaking a secret but silently *losing*
+    // a field. Every backend's `UpdateBuilder` derives its `Debug` over this struct, so this is the
+    // dump an application pastes into a bug report; a field that stops rendering (because a new one
+    // was added to the struct and not to the impl, or an existing line was dropped while adding the
+    // redaction) makes the dump quietly misleading. The assertion above -- "does not contain the
+    // secret" -- passes for a `Debug` that prints nothing at all.
+    #[test]
+    fn debug_renders_every_field() {
+        let rendered = format!("{:?}", CommonBuilderConfig::default());
+        let mut fields = vec![
+            "request",
+            "target",
+            "asset_identifier",
+            "bin_name",
+            "bin_install_path",
+            "check_install_path_writable",
+            "bin_path_in_archive",
+            "bin_path_in_archive_auto",
+            "bundle_path_in_archive",
+            "bundle_install_path",
+            "show_download_progress",
+            "show_output",
+            "no_confirm",
+            "show_release_notes",
+            "update_strategy",
+            "tag_prefix",
+            "current_version",
+            "release_tag",
+            "auth_token",
+            "auth_token_from_env",
+            "auth_scheme",
+            "progress_callback",
+            "verify",
+            "asset_matcher",
+        ];
+        #[cfg(feature = "progress-bar")]
+        fields.extend(["progress_template", "progress_chars"]);
+        #[cfg(feature = "checksums")]
+        fields.extend(["checksum", "verify_release_digest"]);
+        #[cfg(feature = "signatures")]
+        fields.push("verifying_keys");
+        for field in fields {
+            assert!(
+                rendered.contains(&format!("{field}:")),
+                "the hand-written Debug dropped `{field}`, got: {rendered}"
+            );
+        }
+    }
+
+    // `RequestConfig`'s `Debug` is hand-written too (to redact `auth_token`) and is reached from
+    // every backend's dump through the embedded `request` field, so it has the same "silently lost a
+    // field" failure mode. It had actually lost three: `auth_base_host`, `auth_hosts` and
+    // `allow_insecure_auth` -- the fields that decide whether the token is attached to a given
+    // request at all, and the host the env-token warning compares against. A dump missing them
+    // cannot answer "why was my token not sent?" or "which host did the warning mean?", and the
+    // "does not contain the secret" assertion below passes for a `Debug` that renders nothing at all.
+    #[test]
+    fn request_config_debug_renders_every_field() {
+        let req = RequestConfig {
+            auth_token: Some("ghp_supersecret".to_string()),
+            auth_base_host: Some("api.github.com".to_string()),
+            auth_hosts: vec!["cdn.example.com".to_string()],
+            allow_insecure_auth: true,
+            ..Default::default()
+        };
+        let rendered = format!("{req:?}");
+        let mut fields = vec![
+            "timeout",
+            "headers",
+            "retries",
+            "retry_base_delay",
+            "retry_max_delay",
+            "auth_scheme",
+            "auth_token",
+            "client",
+            "header_error",
+            "root_certificates",
+            "cert_error",
+            "auth_base_host",
+            "auth_hosts",
+            "allow_insecure_auth",
+        ];
+        // `cfg!` rather than a `#[cfg]` attribute so the `mut` above is used on every lane.
+        if cfg!(feature = "async") {
+            fields.push("async_client");
+        }
+        for field in fields {
+            // Matched with the leading separator space so `client` cannot be satisfied by
+            // `async_client`'s rendering.
+            assert!(
+                rendered.contains(&format!(" {field}:")),
+                "the hand-written Debug dropped `{field}`, got: {rendered}"
+            );
+        }
+        // The three host-gate fields must render their *values*, not just their names: they are
+        // hostnames and a flag, carrying nothing secret.
+        assert!(
+            rendered.contains("api.github.com")
+                && rendered.contains("cdn.example.com")
+                && rendered.contains("allow_insecure_auth: true"),
+            "the auth-host gate must be readable from the dump, got: {rendered}"
+        );
+        // And the token redaction is untouched by the addition.
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the token value must never appear in Debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("auth_token: Some(\"<token>\")"),
+            "the token must still render as the redaction marker, got: {rendered}"
+        );
+        // An unset token still renders as `None`, so "is a token set?" stays answerable.
+        assert!(
+            format!("{:?}", RequestConfig::default()).contains("auth_token: None"),
+            "an unset token must render as None"
+        );
+    }
+
+    // --- `host_of`: the input to BOTH the request-time auth gate and the new host warning --------
+
+    // `host_of` decides which host may receive the token (`auth_base_host`) and which host the
+    // env-token warning compares against, so its edge cases are security-relevant rather than
+    // cosmetic. It had no direct test: the case folding, the port, and the IPv6 brackets were only
+    // exercised incidentally through backends configured with a plain `https://host` URL.
+    #[test]
+    fn host_of_extracts_a_comparable_host() {
+        assert_eq!(
+            super::host_of("https://api.github.com").as_deref(),
+            Some("api.github.com")
+        );
+        // A path (github enterprise's `/api/v3`) and a port are not part of the host.
+        assert_eq!(
+            super::host_of("https://github.mycorp.com:8443/api/v3").as_deref(),
+            Some("github.mycorp.com"),
+            "the port and path must not become part of the host"
+        );
+        // Lowercased, so the comparisons against a canonical host and against a request URL are
+        // both case-insensitive (DNS is).
+        assert_eq!(
+            super::host_of("https://API.GitHub.COM").as_deref(),
+            Some("api.github.com")
+        );
+        // IPv6 literals lose their brackets, matching what the request-time gate compares.
+        assert_eq!(
+            super::host_of("https://[::1]:8080/x").as_deref(),
+            Some("::1")
+        );
+        // Userinfo does not leak into the host (it would otherwise never match, silently dropping
+        // the token).
+        assert_eq!(
+            super::host_of("https://user:pw@gitlab.com/x").as_deref(),
+            Some("gitlab.com")
+        );
+    }
+
+    // A scheme-less host (`host("gitlab.mycorp.com")`, an easy mistake given the setter takes an
+    // "instance host") still yields a host, because `http::Uri` accepts authority form. That
+    // matters for the env-token warning: it still fires for such a host instead of being silently
+    // skipped. (The token itself is separately withheld at request time, since the resulting
+    // request URL has no `https` scheme.)
+    #[test]
+    fn host_of_accepts_a_scheme_less_authority() {
+        assert_eq!(
+            super::host_of("gitlab.mycorp.com").as_deref(),
+            Some("gitlab.mycorp.com")
+        );
+        assert!(
+            super::warn_if_env_token_off_canonical_host(
+                true,
+                super::host_of("gitlab.mycorp.com").as_deref(),
+                Some("gitlab.com")
+            ),
+            "a scheme-less custom host must still be reported for an env-sourced token"
+        );
+    }
+
+    // A URL with no host at all yields `None`, which disables the token entirely
+    // (`auth_allowed_for` requires a host match) *and* silences the canonical-host warning -- a
+    // fail-closed pairing: nothing is sent, so there is nothing to warn about.
+    #[test]
+    fn host_of_is_none_without_a_host() {
+        assert_eq!(super::host_of(""), None);
+        assert_eq!(super::host_of("/just/a/path"), None);
+        assert!(
+            !super::warn_if_env_token_off_canonical_host(true, None, Some("gitlab.com")),
+            "no parseable host means no token is sent, so there is nothing to warn about"
+        );
     }
 
     // `name_tag_in_semver_error` names the tag in the message and keeps the original

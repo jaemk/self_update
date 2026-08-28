@@ -83,15 +83,33 @@ Three invocation forms: `()` emits the `@shared` set plus `auth_token`;
 environment variables (the form the github/gitlab/gitea/gitee `UpdateBuilder`s use); and
 `(no_auth_token)` emits only `@shared`, for backends like s3 that authenticate differently.
 
-`auth_token_from_env()` itself is emitted by the standalone `impl_auth_token_from_env!($field,
-[$vars])` macro, which the `ReleaseListBuilder`s (whose token is their own field, not
-`common.auth_token`) invoke directly. It resolves the variables through
-`backends::common::token_from_env` -> `first_env_token` (first present and non-empty after
-trimming wins) and writes the result with `apply_env_token`: a resolved token replaces whatever the
-slot held, and an unresolved lookup leaves it untouched, so the call can never clear a token set by
-`auth_token(..)`. The lookup happens in the setter, not at request time. Variables per backend:
-github `GITHUB_TOKEN`, `GH_TOKEN`; gitlab `GITLAB_TOKEN`, `CI_JOB_TOKEN`; gitea `GITEA_TOKEN`;
-gitee `GITEE_TOKEN`. Reading the environment is opt-in: nothing reads it without this call.
+`auth_token_from_env()` itself is emitted by the standalone `impl_auth_token_from_env!(token:
+.., env_sourced: .., vars: [..], rationale: ..)` macro (`macros.rs:484-555`), which the
+`ReleaseListBuilder`s (whose token is their own field, not `common.auth_token`) invoke directly.
+It resolves the variables through `backends::common::token_from_env` -> `first_env_token` (first
+present and non-empty after trimming wins) and writes the result with
+`fill_env_token_if_unset(slot, resolved)` (`common.rs:255-266`; renamed from the earlier
+`apply_env_token`): a resolved token fills the slot **only when it is currently empty**, and an
+unresolved lookup leaves it untouched either way. Concretely: an explicit `auth_token(..)` always
+wins over `auth_token_from_env()`, in either call order -- `auth_token(t).auth_token_from_env()`
+and `auth_token_from_env().auth_token(t)` both end up with `t`. This supersedes an earlier
+"last-setter-wins when the environment supplies a token" reading, which let a later
+`auth_token_from_env()` call silently displace a token the application had explicitly set; see
+`auth-token-from-env.md` AUTH-1-3 for the rationale. The explicit `auth_token(..)` setter always
+overwrites the slot and clears an `auth_token_from_env` bookkeeping flag (`macros.rs:594-600`),
+so a subsequent `auth_token_from_env()` call sees a filled slot and is a no-op; the flag exists
+so `build()` can tell whether the *current* token came from the environment (for the
+canonical-host warning below) even after an intervening call. The lookup happens in the setter,
+not at request time. Variables per backend, in precedence order: github `GH_TOKEN`,
+`GITHUB_TOKEN` (flipped from `GITHUB_TOKEN`-then-`GH_TOKEN` to match `gh help environment`'s
+documented precedence); gitlab `GITLAB_TOKEN` only (`CI_JOB_TOKEN` was removed -- it is
+project-scoped and not compatible with the `Authorization: Bearer` scheme this crate sends, so
+keeping it meant `auth_token_from_env()` was not the advertised no-op inside GitLab CI); gitea
+`GITEA_TOKEN`; gitee `GITEE_TOKEN`. Each list is also exposed as a crate-internal
+`AUTH_TOKEN_ENV_VARS: &'static [&'static str]` constant (`macros.rs:494`). Reading the environment
+is opt-in: nothing reads it without this call. `has_auth_token() -> bool` (`macros.rs:544-553`) is
+emitted alongside it, reporting whether a token is set from either source without exposing the
+value.
 
 The `@shared` vocabulary (`macros.rs:231-462`):
 
@@ -203,7 +221,10 @@ The five verbs mirror the blocking API:
 The builder setters and the five async verbs are `pub` and reach users (the async verbs via the
 public sealed `AsyncReleaseUpdate` trait, which callers bring into scope). `CommonBuilderConfig`,
 `CommonConfig`, and `RequestConfig` are `pub(crate)`; the `UpdateConfig` accessor methods are
-largely `#[doc(hidden)]` plumbing.
+largely `#[doc(hidden)]` plumbing. `has_auth_token()` (where emitted, i.e. every backend that has
+`auth_token_from_env()`) is `pub`, reachable from user code; the `AUTH_TOKEN_ENV_VARS` list each
+builder carries is `pub(crate)` -- not part of the public API, but the literal list the public
+setter reads.
 
 ## Invariants and regression checklist
 
@@ -226,9 +247,19 @@ largely `#[doc(hidden)]` plumbing.
 - `target` defaults to `get_target()`, `bin_install_path` to
   `current_exe()`; `show_output` defaults `true`, the other toggles `false`.
 - The `()` form emits `auth_token`; `(auth_env: [..])` emits `auth_token` plus
-  `auth_token_from_env`; `(no_auth_token)` omits both.
+  `auth_token_from_env` and `has_auth_token`; `(no_auth_token)` omits all three.
 - `auth_token_from_env()` never clears an existing token: with nothing set in the environment
   the builder's token is left exactly as it was.
+- An explicit `auth_token(..)` always wins over `auth_token_from_env()`, whatever the call
+  order: the environment is a fallback that only fills an empty slot, never an override for a
+  populated one.
+- `CommonBuilderConfig` and `RequestConfig` each carry a hand-written `Debug` that redacts
+  `auth_token` to `"<token>"`; neither derives `Debug` for that field.
+- `token_from_env` reads via `std::env::var_os`, not `var`: a present-but-non-UTF-8 value is
+  logged and treated as unset, not silently dropped like `var(..).ok()` would.
+- The canonical-host warning (`warn_if_env_token_off_canonical_host`) fires only for an
+  env-sourced token bound to a non-canonical host; an explicitly-set token is never warned
+  about, and gitea (no canonical host) never warns.
 
 ## Tests
 
@@ -240,6 +271,16 @@ largely `#[doc(hidden)]` plumbing.
 the required-field errors name the setter to call, and the `insert_header` /
 `check` cases (`common.rs:222-296`) covering deferred invalid-name /
 invalid-value errors, first-error-wins, and the ok path.
+
+Env-token resolution (`common.rs` `mod tests`): `first_env_token_takes_the_first_present_value`,
+`first_env_token_skips_empty_and_whitespace_values`, `first_env_token_trims_surrounding_whitespace`,
+`first_env_token_returns_none_when_nothing_is_set` pin `first_env_token`'s precedence rules;
+`fill_env_token_if_unset_keeps_an_explicit_token`, `fill_env_token_if_unset_fills_an_empty_slot`,
+`fill_env_token_if_unset_keeps_an_existing_token_when_env_resolves_to_none`,
+`fill_env_token_if_unset_leaves_an_empty_slot_empty` pin the "explicit token always wins, env only
+fills an empty slot" rule (AUTH-1-3); `debug_redacts_the_auth_token_but_keeps_other_fields` pins the
+`CommonBuilderConfig::fmt` redaction. Each backend module (`github.rs`, `gitlab.rs`, `gitea.rs`,
+`gitee.rs`) separately asserts its own `AUTH_TOKEN_ENV_VARS` list and `has_auth_token()` behavior.
 
 ## Auth scheme, retry backoff, and progress style
 
@@ -257,6 +298,33 @@ invalid-value errors, first-error-wins, and the ok path.
   `dangerously_allow_non_https_auth_forwarding()` lifts only the https requirement
   for a host-matched request. The per-backend `api_headers` overrides now only set the
   User-Agent; the `UpdateConfig::api_headers` trait default is a no-op.
+- **Token resolution from the environment.** `token_from_env(names: &[&str]) -> Option<String>`
+  (`common.rs:226-232`) reads each candidate variable with `std::env::var_os` (not `var`), passing
+  the raw `OsString` through `env_token_value` (`common.rs:202-213`): a value that is present but
+  not valid UTF-8 cannot become an HTTP header value anyway, so it is logged with `log::warn!` and
+  treated as unset (rather than silently ignored the way `var(..).ok()` would, which would make a
+  mangled variable indistinguishable from an absent one). The first present, non-empty,
+  whitespace-trimmed value wins (`first_env_token`, `common.rs:174-185`).
+- **Canonical-host warning.** `warn_if_env_token_off_canonical_host(env_sourced: bool,
+  auth_base_host: Option<&str>, canonical_host: Option<&str>) -> bool` (`common.rs:308-329`) is
+  called from every forge backend's `build()` after `auth_base_host` is resolved. It warns only
+  when the current token is env-sourced (the `auth_token_from_env` bookkeeping flag) and the
+  resolved host is not (case-insensitively) the backend's canonical one -- because the request-time
+  host gate above cannot catch this case: the configured host *is* `auth_base_host`, so an
+  application that exposes its update URL as configuration and runs the env-token call in CI could
+  otherwise hand a `GITHUB_TOKEN` to an attacker-chosen host with no signal. github/gitlab/gitee
+  each have a `CANONICAL_AUTH_HOST` const (`api.github.com` / `gitlab.com` / `gitee.com`); gitea has
+  none (always self-hosted) and passes `None`, so its call is made for symmetry but never warns. An
+  explicitly-set token (`auth_token(..)`) is never warned about.
+- **Redacting `Debug`.** Both config structs that can hold a raw token carry a hand-written `Debug`
+  that redacts it to `"<token>"` (`None` renders `None`): `RequestConfig::fmt` (`common.rs:416-440`)
+  and `CommonBuilderConfig::fmt` (`common.rs:679-723`). `CommonBuilderConfig` holds its own separate
+  `auth_token: Option<String>` field (`common.rs:657`, distinct from `RequestConfig::auth_token`,
+  which is only populated at `build()` time), so a derived `Debug` on it would print a live
+  credential -- including one the application author never typed, since `auth_token_from_env()` can
+  put an ambient CI credential there. `CommonBuilderConfig::fmt` also renders `auth_token_from_env`
+  verbatim (it carries no secret), so a debug dump still answers "is a token set, and did it come
+  from the environment?".
 - **Retry backoff.** `RequestConfig::{retry_base_delay, retry_max_delay}`
   (defaults 100ms / 3200ms) drive `retry_backoff_ms(attempt, base, max)`; set via the
   `retry_backoff(base, max)` builder setter.

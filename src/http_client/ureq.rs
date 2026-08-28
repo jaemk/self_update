@@ -6,7 +6,8 @@ use ureq::tls::TlsProvider;
 use ureq::{Agent, Body, http::Response};
 
 use super::{HeaderMap, HttpClient, HttpResponse};
-use crate::{Error, Result, errors::status_to_error};
+use crate::errors::{status_to_error, status_to_error_with_headers};
+use crate::{Error, Result};
 
 /// The certificate set a crate-built ureq agent trusts. `Vec<Certificate<'static>>` so the roots
 /// outlive the per-call agent built from them.
@@ -68,8 +69,9 @@ fn build_call_agent(
         .timeout_global(timeout)
         // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
         .proxy(ureq::Proxy::try_from_env())
-        // Disable ureq's built-in status-error so we reach our own is_success() check, which maps
-        // the status to the structured NotFound/Unauthorized/HttpStatus variants.
+        // Disable ureq's built-in status-error so we reach our own is_success() check, which has
+        // the response headers in hand and maps the status through `status_to_error_with_headers`
+        // (NotFound / Unauthorized / RateLimited / HttpStatus).
         .http_status_as_error(false)
         .build();
     Agent::new_with_config(config)
@@ -137,6 +139,14 @@ impl HttpClient for UreqClient {
             }
         };
         let mut req = agent.get(url);
+        if is_injected {
+            // An injected agent keeps ureq's default `http_status_as_error(true)`, which would turn
+            // a non-2xx into a headerless `ureq::Error::StatusCode`. ureq 3 supports overriding that
+            // per request, so apply the override here: the response then reaches the header-aware
+            // check at the bottom of `get` and every client lane classifies a non-2xx identically.
+            // Nothing else about the injected agent's own timeout/TLS/proxy config is touched.
+            req = req.config().http_status_as_error(false).build();
+        }
 
         for (key, value) in headers.iter() {
             req = req.header(key, value);
@@ -145,19 +155,20 @@ impl HttpClient for UreqClient {
         let res = match req.call() {
             Ok(r) => r,
             Err(ureq::Error::StatusCode(code)) if is_injected => {
-                // An injected agent has http_status_as_error=true (the ureq default) and cannot be
-                // reconfigured. When it fires StatusCode, extract the code and map to structured
-                // error. `StatusCode` carries no headers, so this path cannot distinguish a
-                // rate-limited 403 from an authorization failure: it maps to `Unauthorized`. An
-                // agent built with `http_status_as_error(false)` reaches the header-aware check
-                // below instead.
+                // Defensive fallback. The per-request override above means an injected agent
+                // normally falls through to the header-aware check below, so this arm is not
+                // expected to fire; if a future ureq ignores the request-level override, map the
+                // bare code rather than surfacing it as an opaque transport error. `StatusCode`
+                // carries no headers, so this path cannot see a spent quota on a 403 (it stays
+                // `Unauthorized`) and a 429 classifies as `RateLimited` carrying no wait -- the
+                // status alone is the rate-limit signal (RFC 6585).
                 return Err(status_to_error(code, url));
             }
             Err(e) => return Err(Error::Transport(Box::new(e))),
         };
 
         if !res.status().is_success() {
-            return Err(crate::errors::status_to_error_with_headers(
+            return Err(status_to_error_with_headers(
                 res.status().as_u16(),
                 url,
                 res.headers(),
@@ -187,30 +198,14 @@ mod tests {
 
     /// Serve a single HTTP response (the given status line + a short body) over a fresh loopback
     /// listener, then close. Returns the base URL (`http://127.0.0.1:<port>/`). No external network.
+    /// Thin wrapper over [`stub_with_headers`] with no extra headers, so there is one stub server.
     fn stub(status: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let body = "err";
-                let out = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status,
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(out.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        base
+        stub_with_headers(status, "")
     }
 
     /// Default-agent path (`is_injected == false`): the per-call agent is built with
     /// `http_status_as_error(false)`, so a non-2xx response is returned to our own `is_success()`
-    /// check at the bottom of `get`, which routes it through `status_to_error`.
+    /// check at the bottom of `get`, which routes it through `status_to_error_with_headers`.
     fn get_default(status: &'static str) -> Error {
         let client = UreqClient::default();
         let base = stub(status);
@@ -221,9 +216,9 @@ mod tests {
     }
 
     /// Injected-agent path (`is_injected == true`): a user-supplied default `ureq::Agent` has
-    /// `http_status_as_error == true` (the ureq default) and fires `ureq::Error::StatusCode(code)`
-    /// on a non-2xx. That hits the `Err(ureq::Error::StatusCode(code)) if is_injected` arm, which
-    /// extracts the code and maps it through `status_to_error`.
+    /// `http_status_as_error == true` (the ureq default), but `get` overrides that *per request*, so
+    /// a non-2xx is returned as a response and routed through the same header-aware
+    /// `status_to_error_with_headers` check as the crate-built agents.
     fn get_injected(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
         let client = UreqClient::from(agent);
@@ -235,9 +230,9 @@ mod tests {
     }
 
     /// Injected agent built with `http_status_as_error(false)` (the OTHER injected case): the user
-    /// disabled ureq's status-error, so `call()` returns `Ok(res)` even on a non-2xx. The
-    /// `StatusCode` arm is therefore NOT taken; instead control falls through to the bottom-of-`get`
-    /// `!res.status().is_success()` check, which routes the status through `status_to_error`.
+    /// disabled ureq's status-error at the agent level too, so the per-request override in `get` is
+    /// a no-op and `call()` returns `Ok(res)` on a non-2xx. Control reaches the same bottom-of-`get`
+    /// `!res.status().is_success()` check, routing the status through `status_to_error_with_headers`.
     fn get_injected_no_status_error(status: &'static str) -> Error {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
@@ -253,8 +248,11 @@ mod tests {
     }
 
     /// Like [`stub`], but injects `extra_headers` (a pre-formatted `Name: value\r\n` block), so a
-    /// response can carry the rate-limit headers a spent quota comes with.
-    fn stub_with_headers(status: &'static str, extra_headers: &'static str) -> String {
+    /// response can carry the rate-limit headers a spent quota comes with. Takes a plain `&str`
+    /// (copied into the serving thread) so a header block can carry a value derived at runtime, e.g.
+    /// a reset epoch relative to *now*.
+    fn stub_with_headers(status: &'static str, extra_headers: &str) -> String {
+        let extra_headers = extra_headers.to_string();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -276,16 +274,58 @@ mod tests {
         base
     }
 
+    /// The `x-ratelimit-reset` / `RateLimit-Reset` header value for a window resetting
+    /// `offset_secs` from *now*, as the unix timestamp those headers carry.
+    ///
+    /// Derived rather than hardcoded: a fixed epoch silently ages into the past, and the classifier
+    /// keeps a past instant (it just renders no wait), so tests pinned to one stop exercising the
+    /// future-window path without ever failing. `offset_secs` must stay under the 24h ceiling
+    /// (`MAX_RATE_LIMIT_WAIT`), past which a reset instant is rejected as `None`.
+    fn reset_epoch(offset_secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the unix epoch")
+            .as_secs();
+        (now + offset_secs).to_string()
+    }
+
+    /// The header block for a spent primary quota (`remaining: 0`) whose window resets in
+    /// [`RESET_WINDOW`] seconds, in the `x-ratelimit-*` (github/gitea/gitee) spelling.
+    fn spent_quota_headers() -> String {
+        format!(
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: {}\r\n",
+            reset_epoch(RESET_WINDOW)
+        )
+    }
+
+    /// The reset window every derived-epoch test serves: comfortably inside the 24h ceiling, and
+    /// long enough that the remaining wait cannot round down to zero on a loaded CI box.
+    const RESET_WINDOW: u64 = 600;
+
+    /// Assert that `err` is a `RateLimited` whose `reset_at` resolves to a *positive* wait bounded by
+    /// the window that was served -- the assertion `reset_at: Some(_)` cannot make, since a reset
+    /// instant in the past is kept as `Some` and yields no wait at all.
+    fn assert_wait_within_window(err: &Error, context: &str) {
+        let wait = err
+            .rate_limit_delay()
+            .unwrap_or_else(|| panic!("{context}: a future reset instant must yield a wait"));
+        assert!(
+            wait > Duration::from_secs(RESET_WINDOW / 2)
+                && wait <= Duration::from_secs(RESET_WINDOW),
+            "{context}: the wait must be derived from the served future window (~{RESET_WINDOW}s), \
+             got {wait:?}"
+        );
+    }
+
     #[test]
     fn default_agent_maps_a_spent_quota_403_to_rate_limited() {
         // The default per-call agent reaches the bottom-of-`get` check with the response in hand, so
         // it must classify a 403 carrying `x-ratelimit-remaining: 0` as RateLimited rather than
-        // Unauthorized -- matching the reqwest lane.
+        // Unauthorized -- matching the reqwest lane. The reset epoch is derived from now and the
+        // wait asserted positive, so a future window is really exercised (a hardcoded epoch ages into
+        // the past, where `reset_at: Some(_)` still holds but carries no wait).
         let client = UreqClient::default();
-        let base = stub_with_headers(
-            "403 Forbidden",
-            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1780000000\r\n",
-        );
+        let base = stub_with_headers("403 Forbidden", &spent_quota_headers());
         let err = client
             .get(&base, &HeaderMap::new(), None)
             .err()
@@ -302,30 +342,45 @@ mod tests {
             "default-agent 403 with a spent quota must map to RateLimited, got {:?}",
             err
         );
+        assert_wait_within_window(&err, "ureq default agent, 403 spent quota");
     }
 
     #[test]
-    fn injected_agent_status_code_arm_cannot_see_rate_limit_headers() {
-        // Documented limitation: an injected agent with ureq's default `http_status_as_error(true)`
-        // surfaces `ureq::Error::StatusCode(code)`, which carries no headers, so the rate-limit
-        // classification is impossible on that path and the 403 stays Unauthorized. Pinning it here
-        // keeps the caveat in the `get` comment honest; injecting an agent built with
-        // `http_status_as_error(false)` gets the header-aware classification (below).
+    fn injected_agent_sees_rate_limit_headers() {
+        // An injected agent keeps ureq's default `http_status_as_error(true)`, which used to make a
+        // non-2xx surface as a headerless `ureq::Error::StatusCode` and left a spent-quota 403
+        // classified as `Unauthorized` -- disagreeing with both reqwest lanes. `get` now overrides
+        // that per request, so the injected lane must see the quota headers and classify the same
+        // `RateLimited` (with the reset instant) the default agent does.
         let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().build());
         let client = UreqClient::from(agent);
-        let base = stub_with_headers("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let base = stub_with_headers("403 Forbidden", &spent_quota_headers());
         let err = client
             .get(&base, &HeaderMap::new(), None)
             .err()
             .expect("non-2xx must be an Err");
         assert!(
-            matches!(err, Error::Unauthorized { status: 403, .. }),
-            "the headerless StatusCode arm must fall back to Unauthorized, got {:?}",
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "an injected agent must reach the header-aware check and classify a spent quota, got {:?}",
             err
         );
+        assert_wait_within_window(&err, "ureq injected agent, 403 spent quota");
+        assert_eq!(err.http_status(), Some(403));
+    }
 
-        // The same injected agent with ureq's status-error disabled falls through to the
-        // header-aware check and does classify the spent quota.
+    #[test]
+    fn injected_agent_with_status_error_disabled_sees_rate_limit_headers() {
+        // The OTHER injected case: the user already built the agent with
+        // `http_status_as_error(false)`, so `get`'s per-request override is a no-op. This lane must
+        // classify the spent quota identically -- pinned separately from the default-injected agent
+        // above so a failure names which injected path broke.
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .http_status_as_error(false)
@@ -341,6 +396,65 @@ mod tests {
             matches!(err, Error::RateLimited { status: 403, .. }),
             "an injected agent that defers status handling must reach the header-aware check, got {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn get_maps_a_429_with_gitlab_header_spelling_to_rate_limited() {
+        // The 429 status branch and gitlab's un-prefixed `RateLimit-Remaining` spelling, end to end
+        // through the real client: the header names travel over the wire and through ureq's own
+        // `HeaderMap`, so a typo in either the status branch or the header lookup fails here. The
+        // reset epoch is derived from now and the resulting wait asserted, so the gitlab spelling is
+        // proven to feed a *usable* future window rather than a stale instant.
+        let client = UreqClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            &format!(
+                "RateLimit-Remaining: 0\r\nRateLimit-Reset: {}\r\n",
+                reset_epoch(RESET_WINDOW)
+            ),
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "a 429 with gitlab's un-prefixed spent-quota header must map to RateLimited, got {:?}",
+            err
+        );
+        assert_wait_within_window(&err, "ureq default agent, 429 gitlab spelling");
+        assert_eq!(err.http_status(), Some(429));
+    }
+
+    #[test]
+    fn get_parses_retry_after_from_the_response_headers() {
+        // `Retry-After` is read off the live response headers by name; every other test builds the
+        // signals struct directly, so this is the only coverage that the `retry-after` lookup finds
+        // a real served header. Assert the parsed delta-seconds `Duration`, not just the variant.
+        let client = UreqClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            "RateLimit-Remaining: 0\r\nRetry-After: 120\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        let Error::RateLimited { retry_after, .. } = err else {
+            panic!("a 429 with a spent quota must be RateLimited, got {err:?}");
+        };
+        assert_eq!(
+            retry_after,
+            Some(Duration::from_secs(120)),
+            "the served `Retry-After: 120` must be parsed into a 120s Duration"
         );
     }
 
@@ -377,8 +491,8 @@ mod tests {
 
     #[test]
     fn injected_agent_no_status_error_falls_through_to_is_success_check() {
-        // 404 must still map to NotFound via the bottom-of-`get` is_success() path (not the
-        // StatusCode arm, which never fires when http_status_as_error(false)).
+        // 404 must still map to NotFound via the bottom-of-`get` is_success() path (the
+        // defensive `StatusCode` arm never fires when http_status_as_error(false)).
         let err = get_injected_no_status_error("404 Not Found");
         assert!(
             matches!(err, Error::NotFound { .. }),
@@ -398,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_agent_status_code_arm_maps_404_to_not_found() {
+    fn injected_agent_maps_404_to_not_found() {
         let err = get_injected("404 Not Found");
         assert!(
             matches!(err, Error::NotFound { .. }),
@@ -409,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_agent_status_code_arm_maps_401_and_403_to_unauthorized() {
+    fn injected_agent_maps_401_and_403_to_unauthorized() {
         let err = get_injected("401 Unauthorized");
         assert!(
             matches!(err, Error::Unauthorized { status: 401, .. }),
@@ -425,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_agent_status_code_arm_maps_500_and_400_to_http_status() {
+    fn injected_agent_maps_500_and_400_to_http_status() {
         let err = get_injected("500 Internal Server Error");
         assert!(
             matches!(err, Error::HttpStatus { status: 500, .. }),
@@ -443,8 +557,8 @@ mod tests {
     #[test]
     fn default_agent_path_maps_statuses_identically_to_injected() {
         // The default per-call agent (`http_status_as_error(false)`) reaches the bottom-of-`get`
-        // `is_success()` check and must produce the SAME structured variants as the injected-agent
-        // `StatusCode` arm, so both ureq lanes agree.
+        // `is_success()` check and must produce the SAME structured variants as an injected agent
+        // (which gets the same setting via the per-request override), so both ureq lanes agree.
         assert!(matches!(
             get_default("404 Not Found"),
             Error::NotFound { .. }

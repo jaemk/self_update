@@ -94,7 +94,21 @@ into a header value yields `Error::InvalidAuthToken`. There is no `PRIVATE-TOKEN
 implicit environment lookup: the token comes from the builder setter
 (`ReleaseListBuilder::auth_token`) or the common `auth_token` setter for `Update`
 (`self.common.auth_token`), or on request from `auth_token_from_env()` on either builder, which
-reads `GITLAB_TOKEN` then `CI_JOB_TOKEN` and is a no-op when neither is set.
+reads **`GITLAB_TOKEN` only** (`AUTH_TOKEN_ENV_VARS`, `gitlab.rs:203`/`388`) and is a no-op when it
+is unset. `CI_JOB_TOKEN` was deliberately removed from the list (`gitlab.rs:209`/`394`): it is
+exported in every GitLab CI job, but this backend sends `Authorization: Bearer`, not GitLab's
+job-token mechanism (the `JOB-TOKEN` header or a `job_token` request parameter), and job tokens are
+project-scoped -- so keeping it meant `auth_token_from_env()` was not the advertised no-op inside
+CI (it could turn a working anonymous fetch against a public project into a 401/403). An explicit
+`auth_token(..)` always wins over `auth_token_from_env()`, whatever the call order; `has_auth_token()`
+reports whether either source set a token.
+
+An env-sourced token is bound to whatever host `host(..)` is configured with (or the default
+`gitlab.com`), which `build()` flags via `warn_if_env_token_off_canonical_host`
+(`gitlab.rs:230-234` `ReleaseListBuilder`, and the `Update` path's equivalent call) when the
+resolved host is not gitlab's canonical `gitlab.com` (`CANONICAL_AUTH_HOST`, `gitlab.rs:18`); an
+explicitly-set token is never warned about. Both builders' `Debug` impls redact the token to
+`"<token>"`.
 
 ### Pagination and ordering
 
@@ -177,8 +191,16 @@ surface as `Error::MissingField { field }`; a deferred bad `request_header` surf
   order; empty/non-array payloads error rather than panic.
 - Newer-than filtering is per-item and preserves order; pagination walks all pages.
 - Auth uses `Authorization: Bearer <token>` plus a fixed `User-Agent`; no `PRIVATE-TOKEN`
-  header, no env var. The token is only sent to the configured instance host (or an
+  header. The token is only sent to the configured instance host (or an
   `allow_auth_host` entry) over https.
+- `auth_token_from_env()` reads `GITLAB_TOKEN` only (`AUTH_TOKEN_ENV_VARS`); `CI_JOB_TOKEN` is
+  deliberately not read (it is project-scoped and incompatible with the `Bearer` scheme this
+  backend sends). An explicit `auth_token(..)` always wins over `auth_token_from_env()`, whatever
+  the call order. `has_auth_token()` reports whether either source set a token. An env-sourced
+  token bound to a non-`gitlab.com` host (from a custom `host(..)`) logs a warning at `build()`.
+- A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota
+  (`RateLimit-Remaining: 0`) or a usable `Retry-After`; a bare 403 with neither stays
+  `Unauthorized`. `retry`/`retry_async` never spend budget retrying a `RateLimited` response.
 - `Update` is `#[non_exhaustive]`.
 
 ## Tests
@@ -194,7 +216,8 @@ non-array (`InvalidResponse`) error paths; missing `tag_name` and missing
 `api_headers` User-Agent wiring and the centrally-applied Bearer scheme; invalid-header
 `Error::InvalidHeader` at build; `ReleaseList::fetch_async` returning a bare listing; and
 `identifier`/`bin_name` wiring. Shared pagination/retry helpers are tested in
-`src/backends/mod.rs`.
+`src/backends/mod.rs`. `AUTH_TOKEN_ENV_VARS` is pinned to `["GITLAB_TOKEN"]` on both builders
+(`gitlab.rs:781-784`), with a comment noting `CI_JOB_TOKEN` must not be reintroduced.
 
 ## Related
 

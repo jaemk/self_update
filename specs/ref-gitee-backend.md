@@ -62,8 +62,11 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
 
 - `auth_token` is set on `ReleaseListBuilder` via `auth_token(impl Into<String>)`; on
   `UpdateBuilder` it comes through the common setters and is stored in `CommonConfig`.
-- `auth_token_from_env()` on either builder resolves the token from `GITEE_TOKEN`; it is opt-in
-  (nothing reads the environment without it) and a no-op when the variable is unset or empty.
+- `auth_token_from_env()` on either builder resolves the token from `GITEE_TOKEN`
+  (`AUTH_TOKEN_ENV_VARS`, `gitee.rs:213`/`403`); it is opt-in (nothing reads the environment
+  without it) and a no-op when the variable is unset or empty. An explicit `auth_token(..)` always
+  wins over it, whatever the call order; `has_auth_token()` reports whether either source set a
+  token.
 - Auth is applied centrally by `apply_auth` (`common.rs`), which renders the token as
   `Authorization: Bearer <token>`. This matches the scheme used by Gitee's official
   client (oschina/mcp-gitee `utils/gitee_client.go:172`, verified 2026-07-17).
@@ -74,6 +77,12 @@ under `async`, `fetch_async`, both returning `Result<Releases>`.
   user-set `Authorization` via `request_header` overrides it.
 - A token that cannot parse into a header value surfaces as `Error::InvalidAuthToken`.
 - Headers always include `User-Agent: rust-reqwest/self-update`.
+- An env-sourced token is bound to whatever host `host(..)` is configured with (or the default
+  `gitee.com`), which `build()` flags via `warn_if_env_token_off_canonical_host`
+  (`gitee.rs:242-246` `ReleaseListBuilder`, and the `Update` path's equivalent call) when the
+  resolved host is not gitee's canonical `gitee.com` (`CANONICAL_AUTH_HOST`, `gitee.rs:22`); an
+  explicitly-set token is never warned about. Both builders' `Debug` impls redact the token to
+  `"<token>"`.
 
 ### Pagination and ordering
 
@@ -197,6 +206,13 @@ or change the latest-release endpoint shape) would not be caught by CI automatic
 - `tag_name` and `created_at` remain required at the release level.
 - Non-semver `tag_name` values cause the release to be skipped during scans (debug log).
 - `version` has a single leading `v` stripped; `name` defaults to the tag.
+- `auth_token_from_env()` reads `GITEE_TOKEN` only (`AUTH_TOKEN_ENV_VARS`). An explicit
+  `auth_token(..)` always wins over it, whatever the call order. `has_auth_token()` reports
+  whether either source set a token. An env-sourced token bound to a non-`gitee.com` host (from a
+  custom `host(..)`) logs a warning at `build()`.
+- A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota or a
+  usable `Retry-After`; a bare 403 with neither stays `Unauthorized`. `retry`/`retry_async` never
+  spend budget retrying a `RateLimited` response.
 
 ## Tests
 
@@ -224,6 +240,9 @@ external network):
   `Error::NoReleaseFound`.
 - **Malformed response**: a non-array payload from the listing endpoint surfaces as
   `Error::InvalidResponse`.
+- **Env token**: `AUTH_TOKEN_ENV_VARS` is pinned to `["GITEE_TOKEN"]` on both builders
+  (`gitee.rs:853-856`), and a first-wins check over the candidate pairs mirrors the shared
+  `first_env_token` behavior for this single-variable list.
 
 ## Related
 

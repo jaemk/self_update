@@ -357,10 +357,22 @@ pub(crate) fn retry_backoff_ms(
     doubled.min(max_ms)
 }
 
+/// Whether an error must not be retried because the request quota is already exhausted. Retrying
+/// [`Error::RateLimited`] cannot succeed within the sub-second backoff window and only spends more
+/// of a budget that is already at zero (and, on the unauthenticated per-IP GitHub budget, shared
+/// with everyone behind the same egress IP), so both retry loops return it immediately.
+fn is_rate_limited(err: &Error) -> bool {
+    matches!(err, Error::RateLimited { .. })
+}
+
 /// Run `attempt` until it succeeds or the retry budget is spent, invoking `on_retry(err, backoff)`
 /// (which logs the failure and sleeps) between tries. With `retries == 0` the attempt runs exactly
 /// once. The transport and the sleep are injected so the retry/backoff control flow can be
 /// unit-tested without real requests or real delays.
+///
+/// [`Error::RateLimited`] is never retried: the quota is already spent, so the sub-second backoff
+/// would only fire more requests against an exhausted (and, behind a shared egress IP, shared)
+/// budget. That error returns immediately regardless of the remaining budget.
 pub(crate) fn retry<R>(
     retries: u32,
     base: std::time::Duration,
@@ -373,7 +385,7 @@ pub(crate) fn retry<R>(
         match attempt() {
             Ok(r) => return Ok(r),
             Err(e) => {
-                if attempts >= retries {
+                if attempts >= retries || is_rate_limited(&e) {
                     return Err(e);
                 }
                 on_retry(&e, retry_backoff_ms(attempts, base, max));
@@ -385,7 +397,7 @@ pub(crate) fn retry<R>(
 
 /// Async sibling of [`retry`]: the same retry/backoff loop with an injected async transport and
 /// async `sleep`. `log_retry` runs synchronously between tries (so the error is never held across
-/// the await); `sleep` performs the backoff delay.
+/// the await); `sleep` performs the backoff delay. [`Error::RateLimited`] short-circuits here too.
 #[cfg(feature = "async")]
 pub(crate) async fn retry_async<R, A, Fut, S, SFut>(
     retries: u32,
@@ -406,7 +418,7 @@ where
         match attempt().await {
             Ok(r) => return Ok(r),
             Err(e) => {
-                if attempts >= retries {
+                if attempts >= retries || is_rate_limited(&e) {
                     return Err(e);
                 }
                 let backoff = retry_backoff_ms(attempts, base, max);
@@ -1067,6 +1079,162 @@ mod test {
     }
 
     #[test]
+    fn retry_does_not_retry_a_rate_limited_error() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        // The quota is already spent, so retrying can only fire more requests against an exhausted
+        // (and possibly shared) budget. Even with a budget of 5 the attempt must run exactly ONCE
+        // and no backoff may be scheduled; the RateLimited error is returned unchanged.
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::RateLimited {
+                    status: 403,
+                    url: "u".into(),
+                    reset_at: None,
+                    retry_after: None,
+                })
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(
+            matches!(res, Err(Error::RateLimited { status: 403, .. })),
+            "the RateLimited error must be returned unchanged, got {:?}",
+            res
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "a rate-limited attempt must not be retried, even with retries = 5"
+        );
+        assert!(
+            backoffs.borrow().is_empty(),
+            "no backoff may be scheduled for a rate-limited attempt"
+        );
+    }
+
+    #[test]
+    fn retry_still_consumes_the_budget_for_a_non_rate_limited_error() {
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        // Guard the other side of the RateLimited short-circuit: every other error still consumes
+        // the whole budget (initial attempt + 5 retries) with the full backoff sequence.
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::HttpStatus {
+                    status: 503,
+                    url: "u".into(),
+                })
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
+        assert_eq!(calls.get(), 6, "initial attempt + 5 retries");
+        assert_eq!(*backoffs.borrow(), vec![100, 200, 400, 800, 1600]);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn retry_async_does_not_retry_a_rate_limited_error() {
+        use crate::backends::retry_async;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        // Async sibling of `retry_does_not_retry_a_rate_limited_error`: the async loop must
+        // short-circuit the spent quota identically, so the two lanes cannot drift.
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let slept = Cell::new(0u32);
+        let res: crate::errors::Result<i32> = retry_async(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                async {
+                    Err(Error::RateLimited {
+                        status: 429,
+                        url: "u".into(),
+                        reset_at: None,
+                        retry_after: None,
+                    })
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+            |_b| {
+                slept.set(slept.get() + 1);
+                async {}
+            },
+        )
+        .await;
+        assert!(
+            matches!(res, Err(Error::RateLimited { status: 429, .. })),
+            "the RateLimited error must be returned unchanged (async), got {:?}",
+            res
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "a rate-limited attempt must not be retried (async), even with retries = 5"
+        );
+        assert!(backoffs.borrow().is_empty());
+        assert_eq!(
+            slept.get(),
+            0,
+            "no backoff sleep for a rate-limited attempt"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn retry_async_still_consumes_the_budget_for_a_non_rate_limited_error() {
+        use crate::backends::retry_async;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        // The other side of the async short-circuit: a non-RateLimited error still spends the whole
+        // budget and sleeps between each try.
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let slept = Cell::new(0u32);
+        let res: crate::errors::Result<i32> = retry_async(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                async {
+                    Err(Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    })
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+            |_b| {
+                slept.set(slept.get() + 1);
+                async {}
+            },
+        )
+        .await;
+        assert!(matches!(res, Err(Error::HttpStatus { .. })));
+        assert_eq!(calls.get(), 6, "initial attempt + 5 retries (async)");
+        assert_eq!(*backoffs.borrow(), vec![100, 200, 400, 800, 1600]);
+        assert_eq!(slept.get(), 5);
+    }
+
+    #[test]
     fn retry_backoff_sequence_through_the_loop_climbs_and_caps() {
         use crate::backends::retry;
         use crate::errors::Error;
@@ -1523,6 +1691,429 @@ mod test {
             matches!(res, Err(crate::errors::Error::InvalidResponse { .. })),
             "async: a body over the cap must error with InvalidResponse, got: {:?}",
             res
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AUTH-RL: a rate-limited response is never re-issued.
+    //
+    // The unit tests above drive `retry`/`retry_async` with a hand-built
+    // `Error::RateLimited`. These tests close the loop end-to-end over the real
+    // transport: a loopback stub that COUNTS the requests it served proves the
+    // number of HTTP requests actually put on the wire, and each rate-limit case
+    // is paired with a control that still spends the whole retry budget — so a
+    // short-circuit that fired for EVERY error (or one keyed on the 403 status
+    // rather than on the classified variant) could not pass this set.
+    // -----------------------------------------------------------------------
+
+    /// Bind a loopback stub that answers EVERY connection with the same fixed response and counts
+    /// the requests it served. `status_line` is e.g. `"403 Forbidden"`; `extra_headers` is a block
+    /// of CRLF-terminated header lines (possibly empty). Every response carries `Connection: close`,
+    /// so one connection is one request and the counter is the exact number of requests the client
+    /// issued. Unlike the one-shot stubs above it accepts in a loop, so a retried request is served
+    /// (and counted) rather than hanging.
+    fn counting_stub(
+        status_line: &str,
+        extra_headers: &str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let status_line = status_line.to_string();
+        let extra_headers = extra_headers.to_string();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    continue;
+                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = "stub";
+                let out = format!(
+                    "HTTP/1.1 {status_line}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, hits)
+    }
+
+    /// A `RequestConfig` with `retries` retries and a 1ms backoff, so a control test that really
+    /// does spend its whole budget stays fast (the backoff *values* are covered by the
+    /// `retry_backoff_*` tests; here only the request COUNT matters).
+    fn fast_retry_config(retries: u32) -> RequestConfig {
+        RequestConfig {
+            retries,
+            retry_base_delay: std::time::Duration::from_millis(1),
+            retry_max_delay: std::time::Duration::from_millis(1),
+            ..Default::default()
+        }
+    }
+
+    fn hits_of(hits: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn send_issues_exactly_one_request_for_a_rate_limited_response() {
+        // End-to-end guard for the RateLimited short-circuit: a 403 reporting a spent quota must
+        // put exactly ONE request on the wire even with retries = 3. Before the fix this issued 4
+        // requests against an already-exhausted (and, behind a shared egress IP, shared) budget.
+        let (base, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(3));
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::RateLimited { status: 403, .. })
+            ),
+            "a 403 with a spent quota must surface as RateLimited, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "a rate-limited response must not be retried: exactly one request may reach the server"
+        );
+    }
+
+    #[test]
+    fn send_spends_the_whole_budget_for_a_server_error() {
+        // The control for the test above. A 500 is NOT rate limiting, so the retry budget is still
+        // spent in full: 1 initial attempt + 3 retries = 4 requests on the wire. Without this pair,
+        // a `retry` that short-circuited on EVERY error would pass the rate-limit test.
+        let (base, hits) = counting_stub("500 Internal Server Error", "");
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(3));
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::HttpStatus { status: 500, .. })
+            ),
+            "a 500 must surface as HttpStatus, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits_of(&hits),
+            4,
+            "a non-rate-limited failure must still consume the retry budget (1 + 3 requests)"
+        );
+    }
+
+    #[test]
+    fn send_issues_exactly_one_request_for_a_bare_429() {
+        // The second production path into `Error::RateLimited`: a bare 429 with no quota headers at
+        // all (what proxies, CDNs and self-hosted forges return). It must short-circuit exactly like
+        // the header-bearing 403 — the classification, not the header presence, drives the loop.
+        let (base, hits) = counting_stub("429 Too Many Requests", "");
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(3));
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::RateLimited { status: 429, .. })
+            ),
+            "a bare 429 must surface as RateLimited, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "a 429 must not be retried, even with no quota headers on the response"
+        );
+    }
+
+    #[test]
+    fn send_issues_one_request_for_a_secondary_rate_limit_and_keeps_the_retry_after() {
+        // GitHub's *secondary* rate limit: 403 + `Retry-After` while the primary quota is still
+        // nonzero. It classifies as RateLimited, so it must short-circuit too — and the wait the
+        // server asked for has to survive back to the caller, since the crate no longer retries on
+        // the caller's behalf.
+        let (base, hits) = counting_stub(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 42\r\nretry-after: 1\r\n",
+        );
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(3));
+        match res {
+            Err(crate::errors::Error::RateLimited { retry_after, .. }) => assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs(1)),
+                "the server-supplied Retry-After must reach the caller"
+            ),
+            Err(other) => panic!("expected RateLimited for a 403 + Retry-After, got: {other:?}"),
+            Ok(_) => panic!("expected RateLimited for a 403 + Retry-After, got a success"),
+        }
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "a secondary rate limit (nonzero remaining + Retry-After) must not be retried"
+        );
+    }
+
+    #[test]
+    fn send_still_retries_a_plain_403_authorization_failure() {
+        // The sharpest control: a *bare* 403 with no quota signal is an authorization failure
+        // (`Unauthorized`), not a rate limit, and must still consume the retry budget. A
+        // short-circuit keyed on the 403 STATUS instead of on the `RateLimited` variant would issue
+        // one request here and fail this test.
+        let (base, hits) = counting_stub("403 Forbidden", "");
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(3));
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::Unauthorized { status: 403, .. })
+            ),
+            "a bare 403 must stay Unauthorized, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits_of(&hits),
+            4,
+            "a plain 403 authorization failure is not rate limiting: the budget is still spent"
+        );
+    }
+
+    #[test]
+    fn send_with_zero_retries_is_unchanged_by_the_rate_limit_short_circuit() {
+        // The `retries = 0` boundary: the short-circuit must be a no-op there (one request either
+        // way), so the fix cannot have changed the default-configuration behavior.
+        let (base, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let res = crate::backends::send(&base, HeaderMap::new(), &fast_retry_config(0));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::RateLimited { status: 403, .. })
+        ));
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "retries = 0 still issues exactly one request"
+        );
+    }
+
+    #[test]
+    fn run_paginated_issues_one_request_for_a_rate_limited_first_page() {
+        // The paginated driver reaches the transport through `send`, so the short-circuit must hold
+        // for a listing walk too: a rate-limited first page ends the walk after one request.
+        let (base, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let res =
+            crate::backends::run_paginated(int_page(format!("{base}/p1")), &fast_retry_config(3));
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::RateLimited { status: 403, .. })
+            ),
+            "the paginated driver must surface RateLimited, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "a rate-limited listing page must not be retried"
+        );
+    }
+
+    #[test]
+    fn run_paginated_spends_the_whole_budget_for_a_server_error() {
+        // Control for the paginated rate-limit test: a 500 on the first page still retries.
+        let (base, hits) = counting_stub("500 Internal Server Error", "");
+        let res =
+            crate::backends::run_paginated(int_page(format!("{base}/p1")), &fast_retry_config(3));
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 500, .. })
+        ));
+        assert_eq!(
+            hits_of(&hits),
+            4,
+            "a 500 listing page still consumes the retry budget (1 + 3 requests)"
+        );
+    }
+
+    #[test]
+    fn retry_short_circuits_mid_sequence_when_a_later_attempt_is_rate_limited() {
+        // The short-circuit must also fire *after* the budget is partially spent: attempt 1 fails
+        // with a retryable 503 (logged + backed off), attempt 2 comes back rate limited and must end
+        // the loop immediately — 2 attempts and exactly 1 logged retry, not the full budget of 5.
+        use crate::backends::retry;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let res: crate::errors::Result<i32> = retry(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Err(Error::HttpStatus {
+                        status: 503,
+                        url: "u".into(),
+                    })
+                } else {
+                    Err(Error::RateLimited {
+                        status: 403,
+                        url: "u".into(),
+                        reset_at: None,
+                        retry_after: None,
+                    })
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+        );
+        assert!(
+            matches!(res, Err(Error::RateLimited { status: 403, .. })),
+            "the rate-limit error from the second attempt must be the one returned, got {:?}",
+            res
+        );
+        assert_eq!(
+            calls.get(),
+            2,
+            "the loop must stop at the rate-limited attempt"
+        );
+        assert_eq!(
+            *backoffs.borrow(),
+            vec![100],
+            "only the first (retryable) failure may log/schedule a retry; the rate-limited one must not"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn retry_async_short_circuits_mid_sequence_when_a_later_attempt_is_rate_limited() {
+        // Async sibling of the mid-sequence test: one logged retry and one sleep for the 503, then
+        // an immediate return on the rate-limited second attempt.
+        use crate::backends::retry_async;
+        use crate::errors::Error;
+        use std::cell::{Cell, RefCell};
+        let calls = Cell::new(0u32);
+        let backoffs = RefCell::new(Vec::<u64>::new());
+        let slept = Cell::new(0u32);
+        let res: crate::errors::Result<i32> = retry_async(
+            5,
+            crate::backends::common::DEFAULT_RETRY_BASE_DELAY,
+            crate::backends::common::DEFAULT_RETRY_MAX_DELAY,
+            || {
+                calls.set(calls.get() + 1);
+                let first = calls.get() == 1;
+                async move {
+                    if first {
+                        Err(Error::HttpStatus {
+                            status: 503,
+                            url: "u".into(),
+                        })
+                    } else {
+                        Err(Error::RateLimited {
+                            status: 429,
+                            url: "u".into(),
+                            reset_at: None,
+                            retry_after: None,
+                        })
+                    }
+                }
+            },
+            |_e, b| backoffs.borrow_mut().push(b),
+            |_b| {
+                slept.set(slept.get() + 1);
+                async {}
+            },
+        )
+        .await;
+        assert!(
+            matches!(res, Err(Error::RateLimited { status: 429, .. })),
+            "the async loop must return the rate-limit error from the second attempt, got {:?}",
+            res
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(*backoffs.borrow(), vec![100]);
+        assert_eq!(slept.get(), 1, "only the retryable failure may sleep");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn send_async_issues_exactly_one_request_for_a_rate_limited_response() {
+        // Async sibling of `send_issues_exactly_one_request_for_a_rate_limited_response`: the async
+        // lane must not re-issue a request against a spent quota either.
+        let (base, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let res = crate::backends::send_async(&base, HeaderMap::new(), &fast_retry_config(3)).await;
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::RateLimited { status: 403, .. })
+            ),
+            "async: a 403 with a spent quota must surface as RateLimited"
+        );
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "async: a rate-limited response must not be retried"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn send_async_spends_the_whole_budget_for_a_server_error() {
+        // Async control: a 500 still spends the full budget (1 + 3 requests), so the async
+        // short-circuit is proven to be rate-limit specific.
+        let (base, hits) = counting_stub("500 Internal Server Error", "");
+        let res = crate::backends::send_async(&base, HeaderMap::new(), &fast_retry_config(3)).await;
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::HttpStatus { status: 500, .. })
+        ));
+        assert_eq!(
+            hits_of(&hits),
+            4,
+            "async: a non-rate-limited failure must still consume the retry budget"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn send_async_still_retries_a_plain_403_authorization_failure() {
+        // Async control on the status-vs-variant distinction: a bare 403 is `Unauthorized` and is
+        // still retried.
+        let (base, hits) = counting_stub("403 Forbidden", "");
+        let res = crate::backends::send_async(&base, HeaderMap::new(), &fast_retry_config(3)).await;
+        assert!(matches!(
+            res,
+            Err(crate::errors::Error::Unauthorized { status: 403, .. })
+        ));
+        assert_eq!(
+            hits_of(&hits),
+            4,
+            "async: a plain 403 authorization failure still consumes the retry budget"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn run_paginated_async_issues_one_request_for_a_rate_limited_first_page() {
+        // The async listing driver inherits the short-circuit through `send_async`.
+        let (base, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let res = crate::backends::run_paginated_async(
+            int_page(format!("{base}/p1")),
+            &fast_retry_config(3),
+        )
+        .await;
+        assert!(
+            matches!(
+                res,
+                Err(crate::errors::Error::RateLimited { status: 403, .. })
+            ),
+            "async: the paginated driver must surface RateLimited"
+        );
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "async: a rate-limited listing page must not be retried"
         );
     }
 }

@@ -12,6 +12,11 @@ use crate::{
 };
 use serde::Deserialize;
 
+/// GitHub's canonical API host. A token resolved from the environment is bound to whatever host the
+/// application configured, so `build()` warns when that host is not this one (see
+/// [`warn_if_env_token_off_canonical_host`](crate::backends::common::warn_if_env_token_off_canonical_host)).
+const CANONICAL_AUTH_HOST: &str = "api.github.com";
+
 /// GitHub release-asset JSON shape. Private DTO deserialized directly from the response bytes, then
 /// converted into the public [`ReleaseAsset`]. Keeping it private means `Deserialize` is never part
 /// of the public `ReleaseAsset` API.
@@ -92,16 +97,37 @@ impl ReleaseDto {
 }
 
 /// `ReleaseList` Builder
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written (not derived) so `auth_token` renders as `"<token>"` instead of printing
+/// a live credential from a `log::debug!("{builder:?}")`.
+#[derive(Clone)]
 #[must_use]
 pub struct ReleaseListBuilder {
     repo_owner: Option<String>,
     repo_name: Option<String>,
     target: Option<String>,
     auth_token: Option<String>,
+    /// `true` when `auth_token` came from `auth_token_from_env()`; cleared by `auth_token(..)`.
+    auth_token_from_env: bool,
     custom_url: Option<String>,
     request: RequestConfig,
 }
+
+impl std::fmt::Debug for ReleaseListBuilder {
+    /// Every field, with the token redacted exactly as `RequestConfig`'s `Debug` does.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleaseListBuilder")
+            .field("repo_owner", &self.repo_owner)
+            .field("repo_name", &self.repo_name)
+            .field("target", &self.target)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<token>"))
+            .field("auth_token_from_env", &self.auth_token_from_env)
+            .field("custom_url", &self.custom_url)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
 impl ReleaseListBuilder {
     /// Required. Set the repo owner, used to build a github api url
     pub fn repo_owner(&mut self, owner: impl Into<String>) -> &mut Self {
@@ -144,12 +170,36 @@ impl ReleaseListBuilder {
     ///
     /// A token also raises GitHub's API rate limit from 60 to 5000 requests/hour (no scopes are
     /// needed for a public repo); see the crate-level "GitHub rate limits" section.
+    ///
+    /// The token can also be taken from the environment with
+    /// [`auth_token_from_env`](Self::auth_token_from_env). This setter always wins over that one,
+    /// in either call order.
     pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
         self.auth_token = Some(auth_token.into());
+        // An explicit token is the application's own credential and always wins over the
+        // environment, whatever the call order, so this is no longer an env-sourced token.
+        self.auth_token_from_env = false;
         self
     }
 
-    impl_auth_token_from_env!(auth_token, ["GITHUB_TOKEN", "GH_TOKEN"]);
+    impl_auth_token_from_env!(
+        token: auth_token,
+        env_sourced: auth_token_from_env,
+        // `gh help environment` documents "GH_TOKEN, GITHUB_TOKEN (in order of precedence)", so
+        // GH_TOKEN wins: inside GitHub Actions GITHUB_TOKEN is auto-populated, whereas a user who
+        // exports GH_TOKEN did so deliberately.
+        vars: ["GH_TOKEN", "GITHUB_TOKEN"],
+        rationale: "The main reason to reach for this is GitHub's unauthenticated budget of 60 \
+                    requests per hour, which is counted **per source IP**: behind a NAT'd corporate \
+                    network it is shared with everyone else on that IP and can be exhausted by \
+                    other people entirely, surfacing as \
+                    [`RateLimited`](crate::errors::Error::RateLimited). A token moves the \
+                    count to its own 5000/hour budget; see the crate-level \"GitHub rate limits\" \
+                    section.\n\nThe variables match the `gh` CLI's precedence. Note that `gh` also \
+                    reads `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for a GitHub Enterprise \
+                    host; this crate does not, so an enterprise `api_base_url` still needs one of \
+                    the variables above (or an explicit `auth_token(..)`).",
+    );
 
     request_config_setters!(request);
 
@@ -164,6 +214,14 @@ impl ReleaseListBuilder {
             self.custom_url
                 .as_deref()
                 .unwrap_or("https://api.github.com"),
+        );
+        // An env-sourced token is bound to whatever host was configured, which the request-time host
+        // gate cannot flag (the configured host *is* `auth_base_host`); warn when that is not
+        // github's canonical API host.
+        crate::backends::common::warn_if_env_token_off_canonical_host(
+            self.auth_token_from_env,
+            request.auth_base_host.as_deref(),
+            Some(CANONICAL_AUTH_HOST),
         );
         request.build_client();
         request.check()?;
@@ -205,6 +263,7 @@ impl ReleaseList {
             repo_name: None,
             target: None,
             auth_token: None,
+            auth_token_from_env: false,
             custom_url: None,
             request: RequestConfig::default(),
         }
@@ -313,7 +372,22 @@ impl UpdateBuilder {
         self
     }
 
-    impl_common_builder_setters!(auth_env: ["GITHUB_TOKEN", "GH_TOKEN"]);
+    impl_common_builder_setters!(
+        // `gh help environment` documents "GH_TOKEN, GITHUB_TOKEN (in order of precedence)", so
+        // GH_TOKEN wins: inside GitHub Actions GITHUB_TOKEN is auto-populated, whereas a user who
+        // exports GH_TOKEN did so deliberately.
+        auth_env: ["GH_TOKEN", "GITHUB_TOKEN"],
+        rationale: "The main reason to reach for this is GitHub's unauthenticated budget of 60 \
+                    requests per hour, which is counted **per source IP**: behind a NAT'd corporate \
+                    network it is shared with everyone else on that IP and can be exhausted by \
+                    other people entirely, surfacing as \
+                    [`RateLimited`](crate::errors::Error::RateLimited). A token moves the \
+                    count to its own 5000/hour budget; see the crate-level \"GitHub rate limits\" \
+                    section.\n\nThe variables match the `gh` CLI's precedence. Note that `gh` also \
+                    reads `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for a GitHub Enterprise \
+                    host; this crate does not, so an enterprise `api_base_url` still needs one of \
+                    the variables above (or an explicit `auth_token(..)`).",
+    );
 
     fn build_update(&self) -> Result<Update> {
         Ok(Update {
@@ -341,6 +415,14 @@ impl UpdateBuilder {
                     self.custom_url
                         .as_deref()
                         .unwrap_or("https://api.github.com"),
+                );
+                // An env-sourced token is bound to whatever host was configured, which the
+                // request-time host gate cannot flag (the configured host *is* `auth_base_host`);
+                // warn when that is not github's canonical API host.
+                crate::backends::common::warn_if_env_token_off_canonical_host(
+                    self.common.auth_token_from_env,
+                    resolved.request.auth_base_host.as_deref(),
+                    Some(CANONICAL_AUTH_HOST),
                 );
                 resolved
             },
@@ -654,6 +736,20 @@ fn api_headers() -> Result<header::HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // The crate-private internal accessors (`request_timeout`, `verify_callback`, `asset_matcher`,
+    // ...) now live on `UpdateInternals`; bring it into scope so `upd.request_timeout()` etc.
+    // resolve.
+    #[allow(unused_imports)]
+    use crate::update::UpdateInternals;
+
+    // The public config accessors (`api_headers`, `no_confirm`, `show_output`, ...) live on the
+    // sealed `UpdateConfig` trait; bring it into scope so they resolve on the concrete `Update`.
+    use crate::update::UpdateConfig;
+
+    // --- AUTH-1: the environment-sourced auth token -------------------------------------------
 
     // AUTH-1: `auth_token_from_env()` exists on both github builders, is chainable, and leaves a
     // buildable configuration whatever the environment holds (nothing set is the no-op case). The
@@ -676,13 +772,60 @@ mod tests {
             .expect("an env-sourced token must leave the release-list builder buildable");
     }
 
-    // Ordering: an explicit `auth_token(..)` after `auth_token_from_env()` wins, so an application
-    // can use the environment as a default and still override it. (Env-independent: it asserts the
+    // The exact variable list, on both builders. `gh help environment` documents
+    // "GH_TOKEN, GITHUB_TOKEN (in order of precedence)", so `GH_TOKEN` must come FIRST -- the list
+    // used to be the reverse of the CLI it claims to match, and inside GitHub Actions (where
+    // `GITHUB_TOKEN` is auto-populated) that silently ignored a deliberately exported `GH_TOKEN`.
+    // Without this assertion nothing catches a typo, a reordering, or another backend's list
+    // arriving here by copy-paste.
+    #[test]
+    fn auth_token_env_vars_are_gh_token_then_github_token() {
+        assert_eq!(
+            super::UpdateBuilder::AUTH_TOKEN_ENV_VARS,
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert_eq!(
+            super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
+            ["GH_TOKEN", "GITHUB_TOKEN"]
+        );
+    }
+
+    // ...and that declared list is the one actually consulted: candidate `(name, value)` pairs
+    // built FROM the const, run through the very resolver the setter uses, resolve to the first
+    // name in it. Proves the const is not a stale copy of the real list, without mutating env.
+    //
+    // Both builders' consts are driven, not just the `UpdateBuilder`'s: they are declared by two
+    // separate macro invocations, so a typo or a reordering in the `ReleaseListBuilder`'s list is a
+    // real (and previously untested) way for the two builders of one backend to disagree about
+    // which credential to use.
+    #[test]
+    fn the_declared_env_vars_drive_the_resolver() {
+        for (builder, vars) in [
+            ("UpdateBuilder", super::UpdateBuilder::AUTH_TOKEN_ENV_VARS),
+            (
+                "ReleaseListBuilder",
+                super::ReleaseListBuilder::AUTH_TOKEN_ENV_VARS,
+            ),
+        ] {
+            let candidates: Vec<(&str, Option<String>)> = vars
+                .iter()
+                .map(|name| (*name, Some(format!("token-for-{name}"))))
+                .collect();
+            assert_eq!(
+                crate::backends::common::first_env_token(&candidates).as_deref(),
+                Some("token-for-GH_TOKEN"),
+                "the first declared variable must win on {builder}"
+            );
+        }
+    }
+
+    // C: an explicit `auth_token(..)` always wins over the environment, in EITHER call order -- the
+    // pair is order-independent like every other setter pair. (Env-independent: it asserts the
     // explicit value, which beats whatever the environment may or may not hold.)
     #[test]
-    fn explicit_auth_token_overrides_the_env_lookup() {
+    fn an_explicit_auth_token_wins_over_the_env_lookup_in_either_order() {
         use crate::http_client::header::{AUTHORIZATION, HeaderMap};
-        let upd = super::Update::configure()
+        let env_then_explicit = super::Update::configure()
             .repo_owner("o")
             .repo_name("r")
             .bin_name("app")
@@ -691,28 +834,190 @@ mod tests {
             .auth_token("explicit")
             .build()
             .unwrap();
-        let mut headers = HeaderMap::new();
-        upd.request_config()
-            .apply_auth("https://api.github.com/repos/o/r/releases", &mut headers)
+        let explicit_then_env = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("explicit")
+            .auth_token_from_env()
+            .build()
             .unwrap();
-        assert_eq!(
-            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
-            "token explicit",
-            "a later auth_token(..) must win over the env lookup"
-        );
+        for upd in [env_then_explicit, explicit_then_env] {
+            let mut headers = HeaderMap::new();
+            upd.request_config()
+                .apply_auth("https://api.github.com/repos/o/r/releases", &mut headers)
+                .unwrap();
+            assert_eq!(
+                headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+                "token explicit",
+                "an explicit auth_token(..) must win in either call order"
+            );
+        }
     }
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
 
-    // The crate-private internal accessors (`request_timeout`, `verify_callback`, `asset_matcher`,
-    // ...) now live on `UpdateInternals`; bring it into scope so `upd.request_timeout()` etc.
-    // resolve.
-    #[allow(unused_imports)]
-    use crate::update::UpdateInternals;
+    // Same rule on the `ReleaseList` builder, read off the resolved request config.
+    #[test]
+    fn release_list_explicit_auth_token_wins_over_the_env_lookup_in_either_order() {
+        let env_then_explicit = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token_from_env()
+            .auth_token("explicit")
+            .build()
+            .unwrap();
+        let explicit_then_env = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .auth_token("explicit")
+            .auth_token_from_env()
+            .build()
+            .unwrap();
+        for list in [env_then_explicit, explicit_then_env] {
+            assert_eq!(list.request.auth_token.as_deref(), Some("explicit"));
+        }
+    }
 
-    // The public config accessors (`api_headers`, `no_confirm`, `show_output`, ...) live on the
-    // sealed `UpdateConfig` trait; bring it into scope so they resolve on the concrete `Update`.
-    use crate::update::UpdateConfig;
+    // K: `has_auth_token()` answers "am I about to run authenticated?" on both builders without the
+    // application reimplementing the variable list. (The env-pickup half is covered by the
+    // single-test integration binary `tests/auth_token_env.rs`, which may set process env.)
+    #[test]
+    fn has_auth_token_reports_an_explicitly_set_token() {
+        let mut upd = super::Update::configure();
+        assert!(
+            !upd.has_auth_token(),
+            "a fresh builder has no token: the update runs anonymously"
+        );
+        upd.auth_token("explicit");
+        assert!(upd.has_auth_token());
+
+        let mut list = super::ReleaseList::configure();
+        assert!(!list.has_auth_token());
+        list.auth_token("explicit");
+        assert!(list.has_auth_token());
+    }
+
+    // A: `Debug` on either builder must never print the token. Both derive/embed a plaintext
+    // `Option<String>`, so a plain `log::debug!("{builder:?}")` used to dump a live credential --
+    // and `auth_token_from_env()` is exactly what puts an ambient CI credential there.
+    #[test]
+    fn builder_debug_redacts_the_auth_token() {
+        let mut upd = super::Update::configure();
+        upd.repo_owner("owner-o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("ghp_supersecret");
+        let rendered = format!("{upd:?}");
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the UpdateBuilder must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(
+            rendered.contains("owner-o"),
+            "other fields must survive the hand-written Debug, got: {rendered}"
+        );
+
+        let mut list = super::ReleaseList::configure();
+        list.repo_owner("owner-o")
+            .repo_name("r")
+            .auth_token("ghp_supersecret");
+        let rendered = format!("{list:?}");
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the ReleaseListBuilder must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(rendered.contains("owner-o"), "got: {rendered}");
+    }
+
+    // A hand-written `Debug` can leak a secret, and it can also silently *lose* a field -- a
+    // regression the "does not contain the secret" assertion above would happily pass. Pin the
+    // full field list of `ReleaseListBuilder`'s (this is the debug dump an application prints when
+    // an update misbehaves; a dropped `custom_url` or `auth_token_from_env` makes it useless).
+    #[test]
+    fn release_list_builder_debug_renders_every_field() {
+        let rendered = format!("{:?}", super::ReleaseList::configure());
+        for field in [
+            "repo_owner",
+            "repo_name",
+            "target",
+            "auth_token",
+            "auth_token_from_env",
+            "custom_url",
+            "request",
+        ] {
+            assert!(
+                rendered.contains(&format!("{field}:")),
+                "the hand-written Debug dropped `{field}`, got: {rendered}"
+            );
+        }
+    }
+
+    // A: the redaction must hold on every public type reachable from a configured builder, not just
+    // on the builders themselves. `Update` / `AsyncUpdate` / `ReleaseList` are what an application
+    // actually keeps around (and dumps into a bug report); they carry the resolved token inside
+    // `RequestConfig`, which is a different `Debug` impl from the builders' -- so it needs its own
+    // assertion rather than an assumption.
+    #[test]
+    fn built_types_debug_redacts_the_auth_token() {
+        let upd = super::Update::configure()
+            .repo_owner("owner-o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .auth_token("ghp_supersecret")
+            .build()
+            .unwrap();
+        let rendered = format!("{upd:?}");
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the built Update must not print the token, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<token>"),
+            "the token must still render as the redaction marker, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("owner-o"),
+            "non-secret fields must survive, got: {rendered}"
+        );
+
+        let list = super::ReleaseList::configure()
+            .repo_owner("owner-o")
+            .repo_name("r")
+            .auth_token("ghp_supersecret")
+            .build()
+            .unwrap();
+        let rendered = format!("{list:?}");
+        assert!(
+            !rendered.contains("ghp_supersecret"),
+            "the built ReleaseList must not print the token, got: {rendered}"
+        );
+        assert!(rendered.contains("<token>"), "got: {rendered}");
+        assert!(rendered.contains("owner-o"), "got: {rendered}");
+
+        // The async newtype wraps the same `Update`, but it is a separate public type with its own
+        // derived `Debug`.
+        #[cfg(feature = "async")]
+        {
+            let upd = super::Update::configure()
+                .repo_owner("owner-o")
+                .repo_name("r")
+                .bin_name("app")
+                .current_version("0.1.0")
+                .auth_token("ghp_supersecret")
+                .build_async()
+                .unwrap();
+            let rendered = format!("{upd:?}");
+            assert!(
+                !rendered.contains("ghp_supersecret"),
+                "the built AsyncUpdate must not print the token, got: {rendered}"
+            );
+            assert!(rendered.contains("<token>"), "got: {rendered}");
+        }
+    }
 
     // The single-release endpoints (`/releases/latest`, `/releases/tags/{ver}`) surface an
     // unparseable body as `InvalidResponse`, matching the paginated listing parser (previously

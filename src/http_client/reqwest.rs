@@ -246,30 +246,17 @@ mod tests {
 
     /// Serve a single HTTP response (the given status line + a short body) over a fresh loopback
     /// listener, then close. Returns the base URL (`http://127.0.0.1:<port>/`). No external network.
+    /// Thin wrapper over [`stub_with_headers`] with no extra headers, so there is one stub server.
     fn stub(status: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let body = "err";
-                let out = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status,
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(out.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        base
+        stub_with_headers(status, "")
     }
 
     /// Like [`stub`], but injects `extra_headers` (a pre-formatted `Name: value\r\n` block) into the
-    /// response. Used to serve the rate-limit headers a spent GitHub quota carries.
-    fn stub_with_headers(status: &'static str, extra_headers: &'static str) -> String {
+    /// response. Used to serve the rate-limit headers a spent GitHub quota carries. Takes a plain
+    /// `&str` (copied into the serving thread) so a header block can carry a value derived at
+    /// runtime, e.g. a reset epoch relative to *now*.
+    fn stub_with_headers(status: &'static str, extra_headers: &str) -> String {
+        let extra_headers = extra_headers.to_string();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -289,6 +276,49 @@ mod tests {
             }
         });
         base
+    }
+
+    /// The `x-ratelimit-reset` / `RateLimit-Reset` header value for a window resetting
+    /// `offset_secs` from *now*, as the unix timestamp those headers carry.
+    ///
+    /// Derived rather than hardcoded: a fixed epoch silently ages into the past, and the classifier
+    /// keeps a past instant (it just renders no wait), so tests pinned to one stop exercising the
+    /// future-window path without ever failing. `offset_secs` must stay under the 24h ceiling
+    /// (`MAX_RATE_LIMIT_WAIT`), past which a reset instant is rejected as `None`.
+    fn reset_epoch(offset_secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the unix epoch")
+            .as_secs();
+        (now + offset_secs).to_string()
+    }
+
+    /// The header block for a spent primary quota (`remaining: 0`) whose window resets in
+    /// [`RESET_WINDOW`] seconds, in the `x-ratelimit-*` (github/gitea/gitee) spelling.
+    fn spent_quota_headers() -> String {
+        format!(
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: {}\r\n",
+            reset_epoch(RESET_WINDOW)
+        )
+    }
+
+    /// The reset window every derived-epoch test serves: comfortably inside the 24h ceiling, and
+    /// long enough that the remaining wait cannot round down to zero on a loaded CI box.
+    const RESET_WINDOW: u64 = 600;
+
+    /// Assert that `err` is a `RateLimited` whose `reset_at` resolves to a *positive* wait bounded by
+    /// the window that was served -- the assertion `reset_at: Some(_)` cannot make, since a reset
+    /// instant in the past is kept as `Some` and yields no wait at all.
+    fn assert_wait_within_window(err: &Error, context: &str) {
+        let wait = err
+            .rate_limit_delay()
+            .unwrap_or_else(|| panic!("{context}: a future reset instant must yield a wait"));
+        assert!(
+            wait > Duration::from_secs(RESET_WINDOW / 2)
+                && wait <= Duration::from_secs(RESET_WINDOW),
+            "{context}: the wait must be derived from the served future window (~{RESET_WINDOW}s), \
+             got {wait:?}"
+        );
     }
 
     /// Serve a single `200 OK` response with the given `body` (a known content type), then close.
@@ -359,9 +389,11 @@ mod tests {
 
     #[test]
     fn sync_get_maps_each_status_to_its_structured_variant() {
-        // `HttpClient::get` runs `status_to_error` on any non-2xx before returning. Pin the full
-        // mapping table so a regression in the per-call client path (not just `status_to_error` in
-        // isolation) is caught: 404 -> NotFound, 401/403 -> Unauthorized, 400/500/503 -> HttpStatus.
+        // `HttpClient::get` runs `status_to_error_with_headers` on any non-2xx before returning. Pin
+        // the full mapping table for a response carrying no quota headers, so a regression in the
+        // per-call client path (not just the classifier in isolation) is caught: 404 -> NotFound,
+        // 401/403 -> Unauthorized, 400/500/503 -> HttpStatus. The quota-header cases (RateLimited)
+        // are pinned separately below.
         let err = get_status("404 Not Found");
         assert!(
             matches!(err, Error::NotFound { .. }),
@@ -397,12 +429,11 @@ mod tests {
         // The classification needs the *response headers*, so this pins that the client actually
         // hands them to `status_to_error_with_headers`: the same 403 that maps to `Unauthorized`
         // above must map to `RateLimited` once it carries `x-ratelimit-remaining: 0`, with the
-        // reset instant recovered from `x-ratelimit-reset`.
+        // reset instant recovered from `x-ratelimit-reset`. The served epoch is derived from now, and
+        // the wait is asserted positive, so the test really exercises a future window (a hardcoded
+        // epoch ages into the past, where `reset_at: Some(_)` still holds but means nothing).
         let client = ReqwestClient::default();
-        let base = stub_with_headers(
-            "403 Forbidden",
-            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1780000000\r\n",
-        );
+        let base = stub_with_headers("403 Forbidden", &spent_quota_headers());
         let err = client
             .get(&base, &HeaderMap::new(), None)
             .err()
@@ -419,7 +450,148 @@ mod tests {
             "a 403 with a spent quota must map to RateLimited, got {:?}",
             err
         );
+        assert_wait_within_window(&err, "sync 403 spent quota");
         assert_eq!(err.http_status(), Some(403));
+    }
+
+    #[test]
+    fn sync_get_maps_a_429_with_gitlab_header_spelling_to_rate_limited() {
+        // The 429 status branch and gitlab's un-prefixed `RateLimit-Remaining` spelling, end to end
+        // through the real client: both the header names and the status travel over the wire and
+        // through reqwest's own `HeaderMap`, so a typo in either the status branch or the header
+        // lookup fails here (the classifier unit tests build the signals struct by hand). The reset
+        // epoch is derived from now and the resulting wait asserted, so the gitlab spelling is proven
+        // to feed a *usable* future window rather than a stale instant.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            &format!(
+                "RateLimit-Remaining: 0\r\nRateLimit-Reset: {}\r\n",
+                reset_epoch(RESET_WINDOW)
+            ),
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "a 429 with gitlab's un-prefixed spent-quota header must map to RateLimited, got {:?}",
+            err
+        );
+        assert_wait_within_window(&err, "sync 429 gitlab spelling");
+        assert_eq!(err.http_status(), Some(429));
+    }
+
+    #[test]
+    fn sync_get_parses_retry_after_from_the_response_headers() {
+        // `Retry-After` is looked up by name on the live response headers; every other test builds
+        // the signals struct directly, so this is the only coverage that the `retry-after` lookup
+        // finds a really-served header. Assert the parsed delta-seconds `Duration`, not the variant.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            "RateLimit-Remaining: 0\r\nRetry-After: 120\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        let Error::RateLimited { retry_after, .. } = err else {
+            panic!("a 429 with a spent quota must be RateLimited, got {err:?}");
+        };
+        assert_eq!(
+            retry_after,
+            Some(Duration::from_secs(120)),
+            "the served `Retry-After: 120` must be parsed into a 120s Duration"
+        );
+    }
+
+    #[test]
+    fn sync_get_maps_a_403_with_only_retry_after_to_rate_limited() {
+        // GitHub's *secondary* rate limit answers 403 + `Retry-After` while the remaining-quota
+        // header is still NONZERO. Nothing else drives that shape through a real response: the
+        // spent-quota tests all serve `remaining: 0`, so a client that only forwarded the
+        // remaining/reset headers (or a classifier that keyed solely on a spent quota) would still
+        // pass them while misfiling this as `Unauthorized` -- "your token is bad" for what is a
+        // back-off. Pin the variant *and* the carried delay.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 57\r\nRetry-After: 60\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        let Error::RateLimited {
+            status,
+            retry_after,
+            ..
+        } = err
+        else {
+            panic!("a 403 carrying Retry-After must be RateLimited, got {err:?}");
+        };
+        assert_eq!(status, 403);
+        assert_eq!(
+            retry_after,
+            Some(Duration::from_secs(60)),
+            "the served `Retry-After: 60` must be carried as a 60s Duration"
+        );
+    }
+
+    #[test]
+    fn sync_get_keeps_a_403_unauthorized_without_a_rate_limit_signal() {
+        // The negative half of the broadened 403 rule, end to end: a 403 is only `RateLimited` when
+        // the response actually reports a spent quota or asks for a `Retry-After`. A 403 whose
+        // headers say quota *remains* is a genuine authorization failure, and must not be softened
+        // into "just wait" by the mere presence of rate-limit headers on the response. The reset
+        // epoch is a live future one, so the 403 is not kept `Unauthorized` merely because the served
+        // window had already elapsed.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            &format!(
+                "x-ratelimit-remaining: 57\r\nx-ratelimit-reset: {}\r\n",
+                reset_epoch(RESET_WINDOW)
+            ),
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a 403 with quota remaining must stay Unauthorized, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn sync_get_keeps_a_403_unauthorized_when_retry_after_is_over_the_ceiling() {
+        // The 24h ceiling is what stops a hostile response from parking an update channel, and it
+        // is applied *before* the 403 decision: a `Retry-After` past the ceiling is no signal at
+        // all, so the 403 stays `Unauthorized` instead of becoming a `RateLimited` carrying no
+        // usable wait. Served over the wire so the ceiling is observable on the client path, not
+        // only in the classifier's unit tests. 30 days.
+        let client = ReqwestClient::default();
+        let base = stub_with_headers("403 Forbidden", "Retry-After: 2592000\r\n");
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "an over-ceiling Retry-After must not promote a 403 to RateLimited, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -460,8 +632,9 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn async_get_maps_each_status_to_its_structured_variant() {
-        // The async client shares the same `status_to_error` mapping as the sync path. Pin it
-        // independently so the async lane cannot drift from the sync lane.
+        // The async client shares the same `status_to_error_with_headers` mapping as the sync path
+        // (here with no quota headers served). Pin it independently so the async lane cannot drift
+        // from the sync lane.
         let err = get_async_status("404 Not Found").await;
         assert!(
             matches!(err, Error::NotFound { .. }),
@@ -487,19 +660,155 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn async_get_maps_a_spent_quota_403_to_rate_limited() {
-        // Async sibling of the sync rate-limit test: the async client must thread the response
-        // headers into the classification too, so the two lanes agree on what a spent quota is.
+        // Async sibling of `sync_get_maps_a_spent_quota_403_to_rate_limited`, deliberately
+        // symmetric with it: the same headers are served (a reset epoch derived from now) and the
+        // same fields asserted, including the positive wait, so the async lane cannot silently drop
+        // the reset instant (or the status) that the sync lane recovers.
         use super::super::AsyncHttpClient;
         let client = ReqwestAsyncClient::default();
-        let base = stub_with_headers("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let base = stub_with_headers("403 Forbidden", &spent_quota_headers());
         let err = client
             .get(&base, &HeaderMap::new(), None)
             .await
             .err()
             .expect("non-2xx must be an Err");
         assert!(
-            matches!(err, Error::RateLimited { status: 403, .. }),
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
             "a 403 with a spent quota must map to RateLimited (async), got {:?}",
+            err
+        );
+        assert_wait_within_window(&err, "async 403 spent quota");
+        assert_eq!(err.http_status(), Some(403));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_maps_a_429_with_gitlab_header_spelling_to_rate_limited() {
+        // Async sibling of `sync_get_maps_a_429_with_gitlab_header_spelling_to_rate_limited`: the
+        // async lane has its own status check and its own `resp.headers()` call, so the 429 branch
+        // and gitlab's un-prefixed `RateLimit-*` spelling need their own end-to-end proof here.
+        // Same served headers and same asserted fields as the sync test, so the lanes cannot drift.
+        use super::super::AsyncHttpClient;
+        let client = ReqwestAsyncClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            &format!(
+                "RateLimit-Remaining: 0\r\nRateLimit-Reset: {}\r\n",
+                reset_epoch(RESET_WINDOW)
+            ),
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .await
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "a 429 with gitlab's un-prefixed spent-quota header must map to RateLimited (async), \
+             got {:?}",
+            err
+        );
+        assert_wait_within_window(&err, "async 429 gitlab spelling");
+        assert_eq!(err.http_status(), Some(429));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_parses_retry_after_from_the_response_headers() {
+        // Async sibling of `sync_get_parses_retry_after_from_the_response_headers`: assert the
+        // parsed delta-seconds `Duration`, not just the variant, so the async lane cannot drop the
+        // served `Retry-After` (which is the only wait GitHub's secondary limit supplies) while
+        // still returning a plausible-looking `RateLimited`.
+        use super::super::AsyncHttpClient;
+        let client = ReqwestAsyncClient::default();
+        let base = stub_with_headers(
+            "429 Too Many Requests",
+            "RateLimit-Remaining: 0\r\nRetry-After: 120\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .await
+            .err()
+            .expect("non-2xx must be an Err");
+        let Error::RateLimited { retry_after, .. } = err else {
+            panic!("a 429 with a spent quota must be RateLimited (async), got {err:?}");
+        };
+        assert_eq!(
+            retry_after,
+            Some(Duration::from_secs(120)),
+            "the served `Retry-After: 120` must be parsed into a 120s Duration (async)"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_maps_a_403_with_only_retry_after_to_rate_limited() {
+        // Async sibling of `sync_get_maps_a_403_with_only_retry_after_to_rate_limited`: GitHub's
+        // secondary rate limit (403 + `Retry-After`, remaining still NONZERO) must classify as
+        // `RateLimited` on the async lane too, carrying the delay rather than reporting a bad
+        // credential.
+        use super::super::AsyncHttpClient;
+        let client = ReqwestAsyncClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 57\r\nRetry-After: 60\r\n",
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .await
+            .err()
+            .expect("non-2xx must be an Err");
+        let Error::RateLimited {
+            status,
+            retry_after,
+            ..
+        } = err
+        else {
+            panic!("a 403 carrying Retry-After must be RateLimited (async), got {err:?}");
+        };
+        assert_eq!(status, 403);
+        assert_eq!(retry_after, Some(Duration::from_secs(60)));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_keeps_a_403_unauthorized_without_a_rate_limit_signal() {
+        // Async sibling of `sync_get_keeps_a_403_unauthorized_without_a_rate_limit_signal`: a 403
+        // whose headers report quota *remaining* (and no `Retry-After`) is a real authorization
+        // failure and must stay `Unauthorized` on the async lane, i.e. the broadened rule did not
+        // become "any 403 with rate-limit headers is a rate limit". The served window is a live
+        // future one (derived from now), not a stale epoch that would make the case vacuous.
+        use super::super::AsyncHttpClient;
+        let client = ReqwestAsyncClient::default();
+        let base = stub_with_headers(
+            "403 Forbidden",
+            &format!(
+                "x-ratelimit-remaining: 57\r\nx-ratelimit-reset: {}\r\n",
+                reset_epoch(RESET_WINDOW)
+            ),
+        );
+        let err = client
+            .get(&base, &HeaderMap::new(), None)
+            .await
+            .err()
+            .expect("non-2xx must be an Err");
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a 403 with quota remaining must stay Unauthorized (async), got {:?}",
             err
         );
     }

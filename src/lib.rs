@@ -422,34 +422,20 @@ last recorded check, and `record_check()` stamps the current time. The caller ow
 path. It is a guard, not a scheduler -- no threads or timers, and no extra dependencies. See the
 [`check_interval`](crate::check_interval) module for the semantics.
 
-### GitHub rate limits
+### Authentication
 
-Requests to the GitHub REST API are rate limited by GitHub itself, not by this crate:
+Every forge backend's `Update` **and** `ReleaseList` builder -- github, gitlab, gitea, gitee, eight
+builders in all -- takes an authorization token. A token is what reaches a private repository at
+all, and what lifts the host's anonymous request budget (see
+[GitHub rate limits](#github-rate-limits) below). There are two setters:
 
-- **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
-  requests (set any personal access token via `auth_token`) get **5000 per hour**. A token needs no
-  scopes to raise the limit for a public repository.
-- That budget is counted **per source IP, not per application**. Behind a shared egress IP -- a
-  NAT'd corporate network, a CI runner pool, a VPN exit -- it is pooled across everyone on that IP
-  and can be spent entirely by other people, so a lightly-used application still sees 403s there.
-- An update check costs **one** API request (the latest-release lookup, or one request per page of a
-  paginated listing). The asset **download** itself is a CDN redirect and does not count against the
-  core API limit.
-- When you are rate limited, GitHub responds with **HTTP 403** and an `x-ratelimit-remaining: 0`
-  header. This crate reads that header and surfaces
-  [`Error::RateLimited`](crate::errors::Error::RateLimited) -- distinct from the
-  `Error::Unauthorized` a genuine credential failure produces -- carrying the reset instant and any
-  `Retry-After` delay, so you can match on it to back off. (A 403 with no quota headers stays
-  `Unauthorized`.)
-- To avoid it: set a token, and check less often -- the
-  [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
-  The retry/backoff setters do **not** help here; retrying a rate-limited request only consumes more
-  quota.
-
-The one-line remedy is `auth_token_from_env()`, on every git backend's `Update` and `ReleaseList`
-builder. It reads the host's conventional variables -- `GITHUB_TOKEN` then `GH_TOKEN` (matching the
-`gh` CLI), `GITLAB_TOKEN` then `CI_JOB_TOKEN`, `GITEA_TOKEN`, `GITEE_TOKEN` -- and uses the first
-that is set and non-empty:
+* `auth_token(t)` -- a token your application already holds.
+* `auth_token_from_env()` -- take it from the backend's conventional environment variables, using
+  the first that is set and non-empty (surrounding whitespace is trimmed):
+  * **github**: `GH_TOKEN`, then `GITHUB_TOKEN` (matching the `gh` CLI's documented precedence).
+  * **gitlab**: `GITLAB_TOKEN`.
+  * **gitea**: `GITEA_TOKEN`.
+  * **gitee**: `GITEE_TOKEN`.
 
 ```rust
 # #[cfg(feature = "github")]
@@ -468,11 +454,97 @@ let status = self_update::backends::github::Update::configure()
 # }
 ```
 
-Reading the environment is opt-in -- the crate never does it on its own, since the configured API
-base can be a self-hosted host and sending a user's token there should be your decision. With no
-variable set the call is a no-op and the request goes out unauthenticated, so it is safe to place
-unconditionally in an application that also runs outside CI or a corporate network. It never clears
-a token you set with `auth_token(..)`.
+**Precedence: an explicit `auth_token(..)` always wins, in either call order.** The environment is a
+*fallback* that only fills an unset token, so `auth_token(t).auth_token_from_env()` and
+`auth_token_from_env().auth_token(t)` both end up with `t`, and an ambient `*_TOKEN` can never
+displace the credential your application provisioned. When no variable is set the call is a no-op --
+the token is left as it was and the request goes out exactly as before -- so it is safe to place
+unconditionally in an application that also runs outside CI or a corporate network. `has_auth_token()`
+(on the same eight builders) reports whether a token is configured, from either source; use it to
+answer "am I about to run authenticated?" without reimplementing the variable list. It reports
+presence only, never validity and never the value -- the builders' `Debug` renders the token as
+`"<token>"`, so logging a builder does not leak an ambient CI credential.
+
+Reading the environment is opt-in: the crate never does it on its own, since the configured API base
+can be a self-hosted host and sending a user's token there should be your decision. The one caveat
+to "safe to call unconditionally" is that a variable which is *set* but stale, expired, revoked, or
+scoped to a different resource makes the request **fail** (401/403) where an anonymous request
+against a public repository would have succeeded.
+
+**The variable set does not change with the host.** A custom `api_base_url` / `host` -- GitHub
+Enterprise, a self-hosted GitLab -- is still served by exactly the variables above, so an ambient
+`GITHUB_TOKEN` is sent to whatever host the builder points at. When an env-sourced token is about to
+be bound to a host other than the backend's canonical one (`api.github.com`, `gitlab.com`,
+`gitee.com`), `build()` emits a `log::warn!`; gitea is always self-hosted, has no canonical host, and
+never warns. Note also that `gh` reads `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for a
+GitHub Enterprise host and this crate does not, so an enterprise `api_base_url` still needs one of
+the variables above (or an explicit `auth_token(..)`).
+
+`CI_JOB_TOKEN` is deliberately **not** read on gitlab, even though every GitLab CI job exports it:
+this backend sends `Authorization: Bearer`, which is not GitLab's job-token mechanism (the
+`JOB-TOKEN` header / `job_token` parameter), and job tokens are project-scoped -- reading it would
+turn a working anonymous fetch of a public project into a 401/403 inside CI. Pass it explicitly with
+`auth_token(..)` if you want it.
+
+### GitHub rate limits
+
+Requests to the GitHub REST API are rate limited by GitHub itself, not by this crate:
+
+- **Unauthenticated** requests are limited to **60 per hour per source IP**; **authenticated**
+  requests (a token via `auth_token` / `auth_token_from_env`, see
+  [Authentication](#authentication)) get **5000 per hour**. A token needs no scopes to raise the
+  limit for a public repository.
+- That budget is counted **per source IP, not per application**. Behind a shared egress IP -- a
+  NAT'd corporate network, a CI runner pool, a VPN exit -- it is pooled across everyone on that IP
+  and can be spent entirely by other people, so a lightly-used application still sees 403s there.
+- An update check costs **one** API request (the latest-release lookup, or one request per page of a
+  paginated listing). The asset **download** itself is a CDN redirect and does not count against the
+  core API limit.
+- A rate-limited response surfaces as [`Error::RateLimited`](crate::errors::Error::RateLimited),
+  distinct from the `Error::Unauthorized` a genuine credential failure produces. A response is
+  classified that way when it is a **429** (RFC 6585 defines that status as rate limiting, so it
+  always lands here, with or without quota headers), or a **403** carrying either a zero
+  remaining-quota header (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) or a
+  usable `Retry-After` -- that last case is GitHub's *secondary* rate limit, which answers 403 +
+  `Retry-After` while `x-ratelimit-remaining` is still nonzero. A bare 403 with no such header stays
+  `Unauthorized`. The rule is the same on every backend, not just github.
+- Back off by [`Error::rate_limit_delay()`](crate::errors::Error::rate_limit_delay), which resolves
+  the wait to an `Option<Duration>`: the server's `Retry-After` when it sent one, otherwise
+  `reset_at` minus now, and `None` when the window has already elapsed or nothing is known. Reading
+  the raw fields instead is the footgun -- on GitHub's *primary* limit only `x-ratelimit-reset` is
+  sent, so `retry_after.unwrap_or_default()` sleeps zero and burns more quota. Both server-supplied
+  values are clamped to a 24h ceiling; beyond it they resolve to `None`, so a hostile `Retry-After`
+  cannot park an update channel indefinitely.
+- The retry/backoff setters do **not** apply here: a `RateLimited` response short-circuits the retry
+  loop and is returned immediately instead of spending the budget, since the quota is already at
+  zero and a sub-second backoff cannot outlast the window.
+- To avoid it: set a token, and check less often -- the
+  [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard) above throttles how often you check.
+
+```rust
+# #[cfg(feature = "github")]
+fn check() -> Result<(), Box<dyn std::error::Error>> {
+    let update = self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("self_update_example")
+        .current_version(self_update::cargo_crate_version!())
+        .auth_token_from_env()
+        .build()?;
+
+    match update.update() {
+        Ok(status) => println!("update status: `{}`", status.version()),
+        Err(err @ self_update::Error::RateLimited { .. }) => match err.rate_limit_delay() {
+            // A wait is known: sleep it out, or hand the delay to your scheduler.
+            Some(wait) => std::thread::sleep(wait),
+            // Nothing usable: reschedule the check rather than retrying now.
+            None => println!("rate limited; retrying on the next scheduled check"),
+        },
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+```
 
 ### Listing releases (`ReleaseList`)
 
@@ -616,6 +688,15 @@ to your client (and a `ureq::Agent` owns its own timeout, so `.timeout()` does n
 injected agent — configure it on the agent). `reqwest_client` feeds the sync verbs and
 `reqwest_async_client` the async ones — injecting only one and calling the other half just uses the
 crate's per-call client for that half.
+
+A fully custom transport also owns the job of **classifying** a non-2xx response. Map it with
+[`Error::http_status_error_with_headers(status, url, &headers)`](crate::errors::Error::http_status_error_with_headers),
+not the header-blind [`Error::http_status_error`](crate::errors::Error::http_status_error): the
+rate-limit signal lives entirely in the response headers, so the header-blind form can never return
+[`Error::RateLimited`](crate::errors::Error::RateLimited) and a rate-limited response silently
+arrives as `Unauthorized`, losing the reset instant and the `Retry-After` and spending the retry
+budget on a quota that is already at zero. The built-in reqwest and ureq clients (including an
+injected `ureq::Agent`) all use the header-aware form, so they classify identically.
 
 ```rust
 # #[cfg(feature = "reqwest")]
@@ -2903,6 +2984,115 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             1,
             "exactly one attempt with retries == 0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The download path routes its request-establishment retries through
+    // `backends::retry`, so it inherits that loop's `Error::RateLimited`
+    // short-circuit. Nothing pinned that from this side: a future `download_to`
+    // that grew its own retry loop (or dropped back to a bare `client.get`
+    // wrapper) would silently start hammering an exhausted quota again. These
+    // two tests count the requests that actually reach the wire, with a real
+    // loopback server and the crate's default client, so the whole
+    // classify-then-short-circuit chain is exercised. The 500 control is what
+    // keeps the pair honest: a short-circuit firing on EVERY error would pass
+    // the rate-limit test alone.
+    // -----------------------------------------------------------------------
+
+    /// Bind a loopback stub that answers EVERY connection with the same fixed response and counts
+    /// the requests it served. `status_line` is e.g. `"403 Forbidden"`; `extra_headers` is a block
+    /// of CRLF-terminated header lines (possibly empty). Every response carries `Connection: close`,
+    /// so one connection is one request and the counter is the exact number of requests the client
+    /// issued. It accepts in a loop, so a retried request is served (and counted) rather than
+    /// hanging. Mirrors the `counting_stub` in `backends::mod`'s tests.
+    fn counting_stub(
+        status_line: &str,
+        extra_headers: &str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/asset.bin", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let status_line = status_line.to_string();
+        let extra_headers = extra_headers.to_string();
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    continue;
+                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = "stub";
+                let out = format!(
+                    "HTTP/1.1 {status_line}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (base, hits)
+    }
+
+    /// A `Download` for `url` with `retries` retries and a 1ms backoff, so the control test that
+    /// really does spend its whole budget stays fast (the backoff *values* are covered by the
+    /// `retry_backoff_*` tests in `backends`; here only the request COUNT matters).
+    fn download_with_retries(url: &str, retries: u32) -> Download {
+        let mut dl = Download::from_url(url);
+        dl.set_retries(
+            retries,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+        );
+        dl
+    }
+
+    #[test]
+    fn download_issues_exactly_one_request_for_a_rate_limited_response() {
+        // A 403 reporting a spent quota must put exactly ONE request on the wire even with a
+        // retry budget of 3: `download_to` retries through `backends::retry`, which returns a
+        // `RateLimited` immediately instead of re-issuing requests against an exhausted (and,
+        // behind a shared egress IP, shared) budget.
+        let (url, hits) = counting_stub("403 Forbidden", "x-ratelimit-remaining: 0\r\n");
+        let mut out = Vec::new();
+        let res = download_with_retries(&url, 3).download_to(&mut out);
+        assert!(
+            matches!(res, Err(Error::RateLimited { status: 403, .. })),
+            "a 403 with a spent quota must surface as RateLimited, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a rate-limited download must not be retried: exactly one request may reach the server"
+        );
+    }
+
+    #[test]
+    fn download_spends_the_whole_retry_budget_for_a_server_error() {
+        // The control for the test above. A 500 is not rate limiting, so the download's retry
+        // budget is still spent in full: 1 initial attempt + 3 retries = 4 requests on the wire.
+        let (url, hits) = counting_stub("500 Internal Server Error", "");
+        let mut out = Vec::new();
+        let res = download_with_retries(&url, 3).download_to(&mut out);
+        assert!(
+            matches!(res, Err(Error::HttpStatus { status: 500, .. })),
+            "a 500 must surface as HttpStatus, got: {:?}",
+            res.err()
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "a non-rate-limited download failure must still consume the retry budget (1 + 3)"
         );
     }
 

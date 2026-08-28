@@ -457,45 +457,99 @@ macro_rules! impl_async_update_verbs {
     };
 }
 
-/// Emit an `auth_token_from_env()` setter that resolves the backend's conventional env vars.
+/// Emit the environment-token surface of a builder: the `AUTH_TOKEN_ENV_VARS` list, the
+/// `auth_token_from_env()` setter that resolves it, and the `has_auth_token()` query.
 ///
-/// `$field` is the path (relative to `self`) of the builder's token field — `common.auth_token` on
-/// an `UpdateBuilder`, plain `auth_token` on a `ReleaseListBuilder` — and `$var`s are the env var
-/// names in precedence order.
+/// * `token:` — the path (relative to `self`) of the builder's token field: `common.auth_token` on
+///   an `UpdateBuilder`, plain `auth_token` on a `ReleaseListBuilder`.
+/// * `env_sourced:` — the path of the `bool` recording that the current token came from the
+///   environment. Set here, cleared by every explicit `auth_token(..)` setter, and read by `build()`
+///   to warn when an env-sourced token would be bound to a non-canonical host.
+/// * `vars:` — the env var names, in precedence order.
+/// * `rationale:` — the backend-specific closing paragraph of the rustdoc, so github's
+///   60/5000-requests-per-hour numbers are not rendered verbatim on backends where they are false.
+///
+/// Only the forge backends invoke this; the attribute keeps a build without any of them (e.g.
+/// `--no-default-features --features "reqwest rustls s3"`) warning-free, matching the `cfg_attr`
+/// gates on the `backends::common` helpers it calls.
+#[cfg_attr(
+    not(any(
+        feature = "github",
+        feature = "gitlab",
+        feature = "gitea",
+        feature = "gitee"
+    )),
+    allow(unused_macros)
+)]
 macro_rules! impl_auth_token_from_env {
-    ($($field:ident).+, [$($var:literal),+ $(,)?]) => {
-        #[doc = concat!(
-            "Set the authorization token from the environment, reading ",
-            $("`", $var, "`, ",)+
-            "in that order and using the first that is set and non-empty (surrounding whitespace \
-             is trimmed)."
-        )]
+    (
+        token: $($field:ident).+,
+        env_sourced: $($env_sourced:ident).+,
+        vars: [$($var:literal),+ $(,)?],
+        rationale: $rationale:literal $(,)?
+    ) => {
+        /// The environment variables [`auth_token_from_env`](Self::auth_token_from_env) reads, in
+        /// precedence order. Crate-internal, and it is the very list the setter uses, so a test
+        /// asserting it is asserting the real behavior.
+        pub(crate) const AUTH_TOKEN_ENV_VARS: &'static [&'static str] = &[$($var),+];
+
+        /// Set the authorization token from the environment, using the first of these variables
+        /// that is set and non-empty (surrounding whitespace is trimmed), in this order:
+        ///
+        $(#[doc = concat!("- `", $var, "`")])+
         ///
         /// Reading the environment is **opt-in**: nothing here happens unless you call this. A
         /// library that harvests credentials on its own would be surprising, and the configured API
         /// base can be a self-hosted host, so the decision to send a token stays with your
         /// application.
         ///
-        /// When none of the variables is set, the token is left as it was and the request goes out
-        /// unauthenticated exactly as before -- so this call is safe to make unconditionally in an
-        /// application that also runs outside CI or a corporate network. It never *clears* a token
-        /// set by [`auth_token`](Self::auth_token); an explicit `auth_token(..)` call after this one
-        /// overrides what the environment supplied.
+        /// **Precedence:** an explicit [`auth_token`](Self::auth_token) always wins, in either call
+        /// order — the environment is only a *fallback* for an unset token. So
+        /// `auth_token(t).auth_token_from_env()` and `auth_token_from_env().auth_token(t)` both end
+        /// up with `t`, and an ambient `*_TOKEN` in the environment can never displace the
+        /// credential your application provisioned. When none of the variables is set, the token is
+        /// left as it was and the request goes out exactly as before. Use
+        /// [`has_auth_token`](Self::has_auth_token) to find out whether anything was picked up.
+        ///
+        /// "Safe to call unconditionally" has one caveat: a variable that is *set* but stale,
+        /// expired, revoked, or scoped to a different resource makes the request **fail** (401/403)
+        /// where an anonymous request would have succeeded against a public repository. That is a
+        /// property of the environment, not of this call, but it means adding the call can turn a
+        /// working anonymous fetch into a failing authenticated one.
         ///
         /// The lookup happens here, not at request time, so the resolved token does not depend on
-        /// env changes made later in the process.
+        /// env changes made later in the process. Validity is *not* checked here: a value that
+        /// cannot be encoded as an HTTP header surfaces as
+        /// [`InvalidAuthToken`](crate::errors::Error::InvalidAuthToken) at **request** time,
+        /// not from `build()`, and its message does not mention the environment — so check the
+        /// variables above when you see it.
         ///
-        /// The main reason to reach for this is GitHub's unauthenticated budget of 60 requests per
-        /// hour, which is counted **per source IP**: behind a NAT'd corporate network it is shared
-        /// with everyone else on that IP and can be exhausted by other people entirely, surfacing as
-        /// [`Error::RateLimited`](crate::errors::Error::RateLimited). A token moves the count to its
-        /// own 5000/hour budget.
+        /// The variable set does **not** change with a custom `api_base_url` / `host`: the same
+        /// names are read whatever host you point the builder at. For a backend that has a
+        /// canonical host, `build()` logs a warning when an env-sourced token would be bound to a
+        /// different one.
+        ///
+        #[doc = $rationale]
         pub fn auth_token_from_env(&mut self) -> &mut Self {
-            crate::backends::common::apply_env_token(
+            let filled = crate::backends::common::fill_env_token_if_unset(
                 &mut self.$($field).+,
-                crate::backends::common::token_from_env(&[$($var),+]),
+                crate::backends::common::token_from_env(Self::AUTH_TOKEN_ENV_VARS),
             );
+            if filled {
+                self.$($env_sourced).+ = true;
+            }
             self
+        }
+
+        /// Whether an authorization token is set on this builder, from either
+        /// [`auth_token`](Self::auth_token) or [`auth_token_from_env`](Self::auth_token_from_env).
+        ///
+        /// This is how an application answers "am I about to run authenticated?" — e.g. to pick a
+        /// polling interval, or to warn that a private repository will not be reachable — without
+        /// reimplementing the variable list above. It reports only that a token is *present*, not
+        /// that it is valid, and never exposes the value.
+        pub fn has_auth_token(&self) -> bool {
+            self.$($field).+.is_some()
         }
     };
 }
@@ -510,22 +564,40 @@ macro_rules! impl_common_builder_setters {
     // Default: every shared setter, including `auth_token`.
     () => {
         impl_common_builder_setters!(@shared);
-
+        impl_common_builder_setters!(@auth_token "");
+    };
+    // Default plus the backend's conventional env-var lookup (`auth_token_from_env`), its
+    // `has_auth_token` query and its `AUTH_TOKEN_ENV_VARS` list. `$var`s are the env var names in
+    // precedence order; `$rationale` is the backend-specific closing rustdoc paragraph.
+    (auth_env: [$($var:literal),+ $(,)?], rationale: $rationale:literal $(,)?) => {
+        impl_common_builder_setters!(@shared);
+        impl_common_builder_setters!(@auth_token
+            "\nThe token can also be taken from the environment with \
+             [`auth_token_from_env`](Self::auth_token_from_env), which reads the backend's \
+             conventional variables. This setter always wins over that one, in either call order.");
+        impl_auth_token_from_env!(
+            token: common.auth_token,
+            env_sourced: common.auth_token_from_env,
+            vars: [$($var),+],
+            rationale: $rationale,
+        );
+    };
+    // The shared `auth_token` setter. `$extra` is an additional rustdoc paragraph, used by the
+    // `auth_env:` form to cross-link `auth_token_from_env` (which the plain form does not emit).
+    (@auth_token $extra:literal) => {
         /// Set the authorization token, used in requests to the backend's api url.
         ///
         /// This is to support private repos where you need an auth token.
         /// **Make sure not to bake the token into your app**; it is recommended you obtain
         /// it via another mechanism, such as environment variables or prompting the user.
+        #[doc = $extra]
         pub fn auth_token(&mut self, auth_token: impl Into<String>) -> &mut Self {
             self.common.auth_token = Some(auth_token.into());
+            // An explicit token is the application's own credential and always wins over the
+            // environment, whatever the call order, so this is no longer an env-sourced token.
+            self.common.auth_token_from_env = false;
             self
         }
-    };
-    // Default plus the backend's conventional env-var lookup (`auth_token_from_env`). `$var`s are
-    // the env var names, in precedence order.
-    (auth_env: [$($var:literal),+ $(,)?]) => {
-        impl_common_builder_setters!();
-        impl_auth_token_from_env!(common.auth_token, [$($var),+]);
     };
     // Variant for backends that don't authenticate via a bearer token (e.g. s3, which uses
     // `access_key`/SigV4). Omits the shared `auth_token` setter so the backend can either drop

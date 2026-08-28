@@ -525,7 +525,10 @@ impl<'a> IntoIterator for &'a Releases {
 /// variants are `#[non_exhaustive]`, so they cannot be built with a struct literal from outside the
 /// crate). For a completed request with a non-2xx status use
 /// [`Error::http_status_error`] — e.g. `Error::http_status_error(503, url)` for a transient server
-/// error or `Error::http_status_error(404, url)` for a missing resource — and [`Error::transport`]
+/// error or `Error::http_status_error(404, url)` for a missing resource — or, when you still have
+/// the response headers in hand, [`Error::http_status_error_with_headers`], which additionally
+/// classifies a rate-limited response as [`Error::RateLimited`] instead of `Unauthorized` /
+/// `HttpStatus`; and [`Error::transport`]
 /// for a request that could not be completed (connection refused, DNS, TLS, timeout). For
 /// release-level failures use [`Error::no_release_found`] /
 /// [`Error::no_release_found_for_target`] (no release / no matching asset) or
@@ -615,7 +618,10 @@ fn release_for_version(releases: Vec<Release>, ver: &str) -> Result<Release> {
 /// variants are `#[non_exhaustive]`, so they cannot be built with a struct literal from outside the
 /// crate). For a completed request with a non-2xx status use
 /// [`Error::http_status_error`] — e.g. `Error::http_status_error(503, url)` for a transient server
-/// error or `Error::http_status_error(404, url)` for a missing resource — and [`Error::transport`]
+/// error or `Error::http_status_error(404, url)` for a missing resource — or, when you still have
+/// the response headers in hand, [`Error::http_status_error_with_headers`], which additionally
+/// classifies a rate-limited response as [`Error::RateLimited`] instead of `Unauthorized` /
+/// `HttpStatus`; and [`Error::transport`]
 /// for a request that could not be completed (connection refused, DNS, TLS, timeout). For
 /// release-level failures use [`Error::no_release_found`] /
 /// [`Error::no_release_found_for_target`] (no release / no matching asset) or

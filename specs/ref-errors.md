@@ -30,7 +30,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. `#[non_exhaustive]`. | none | no (struct fields) |
 | `Unauthorized { status: u16, url: String }` | A request completed and returned HTTP 401 or 403. `status` holds the exact code. Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
-| `RateLimited { status: u16, url: String, reset_at: Option<SystemTime>, retry_after: Option<Duration> }` | A 403 or 429 whose response carried a spent request quota (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`). Raised by both HTTP clients via `status_to_error_with_headers`; the ureq injected-agent `StatusCode` arm cannot reach it (no headers). `reset_at` comes from `x-ratelimit-reset` / `RateLimit-Reset` (a unix timestamp), `retry_after` from a delta-seconds `Retry-After`; both `None` when absent or unparseable. `#[non_exhaustive]`. | none | no (struct fields) |
+| `RateLimited { status: u16, url: String, reset_at: Option<SystemTime>, retry_after: Option<Duration> }` | A 429 (always), or a 403 whose response carried a spent request quota (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) *or* a usable `Retry-After` (GitHub's secondary rate limit, which can answer 403 + `Retry-After` while the remaining-quota header is still nonzero). Raised by both HTTP clients via `status_to_error_with_headers` (`errors.rs:902-917`), including the ureq injected-agent path (`http_client/ureq.rs:142-149` applies a per-request `http_status_as_error(false)` override so it reaches the header-aware check; the `StatusCode` arm at `ureq.rs:157-164` is now only a defensive fallback). `reset_at` comes from `x-ratelimit-reset` / `RateLimit-Reset` (a unix timestamp), `retry_after` from a delta-seconds `Retry-After`; both `None` when absent, unparseable, or beyond the 24h ceiling (`MAX_RATE_LIMIT_WAIT`, `errors.rs:840`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `HttpStatus { status: u16, url: String }` | A request completed and returned any other non-2xx status (e.g. 500, 503). Raised by both HTTP clients. `#[non_exhaustive]`. | none | no (struct fields) |
 | `NoReleaseFound { target: Option<String> }` | The clean negative of a release lookup: no release / no matching release for a tag/version (`github.rs`, `gitlab.rs`, `gitea.rs`, `s3.rs`), or the resolved release had no asset for the requested target (`update.rs`, with `target: Some(...)`). `#[non_exhaustive]`. | none | no (struct fields) |
 | `MissingAssetField { field: String }` | A release/asset payload was missing a required field (`url`/`name`/`tag_name`/`created_at`/`assets`/`browser_download_url`/`assets.links`) in each backend's DTO conversion (`github.rs`, `gitlab.rs`, `gitea.rs`). `String` so a custom source can report a dynamic field path (e.g. `assets[2].url`). `#[non_exhaustive]`. | none | no (struct fields) |
@@ -184,7 +184,8 @@ errors (a header-value parse error, a quick-xml reader error, or a regex build e
 pub fn http_status(&self) -> Option<u16>
 ```
 
-Returns the HTTP status code when the error came from a completed non-2xx response:
+(`errors.rs:362-370`.) Returns the HTTP status code when the error came from a completed non-2xx
+response:
 - `NotFound { .. }` -> `Some(404)`
 - `Unauthorized { status, .. }` -> `Some(status)`
 - `RateLimited { status, .. }` -> `Some(status)`
@@ -197,34 +198,80 @@ Returns the HTTP status code when the error came from a completed non-2xx respon
 pub fn url(&self) -> Option<&str>
 ```
 
-Returns the request URL for the HTTP error variants; `None` for everything else:
+(`errors.rs:374-382`.) Returns the request URL for the HTTP error variants; `None` for everything
+else:
 - `NotFound { url }` -> `Some(url)`
 - `Unauthorized { url, .. }` -> `Some(url)`
 - `RateLimited { url, .. }` -> `Some(url)`
 - `HttpStatus { url, .. }` -> `Some(url)`
 - all other variants -> `None`
 
+### rate_limit_delay() helper
+
+```rust
+pub fn rate_limit_delay(&self) -> Option<std::time::Duration>
+```
+
+(`errors.rs:406-417`.) `None` for every variant except `RateLimited`. Returns how long to wait,
+measured from now, before retrying: `retry_after` when present, else `reset_at` minus the current
+time (`None` when that difference would be negative, i.e. the window has already elapsed). This is
+the single place the `Retry-After`-then-`reset_at` precedence is computed -- neither field alone is
+correct on its own: GitHub's *primary* rate limit sends only `x-ratelimit-reset`, so treating a
+missing `retry_after` as a zero wait would spend more quota immediately, while naively subtracting
+an elapsed `reset_at` from now would underflow/panic. `Display`'s optional "quota resets in {n}s"
+clause (see the `RateLimited` row above) calls this same accessor, so the rendered string and a
+caller's programmatic back-off can never disagree. Both source values are capped at 24h before they
+ever reach this accessor (`MAX_RATE_LIMIT_WAIT`, `errors.rs:840`; see `parse_reset_epoch`,
+`errors.rs:880-887`, and `parse_retry_after`, `errors.rs:892-895`), so a hostile or malformed
+response cannot use this accessor to park a caller indefinitely.
+
 ### HTTP status construction mapping (both clients)
 
-Both `reqwest` and `ureq` clients call `errors::status_to_error_with_headers(status_code, url, headers)`,
-which classifies the rate-limit case first and otherwise delegates to `status_to_error(status_code, url)`:
-- 403 or 429 whose remaining-quota header parses as `0` -> `Error::RateLimited { status, url, reset_at, retry_after }`
+Both `reqwest` and `ureq` clients call `errors::status_to_error_with_headers(status_code, url, headers)`
+(`errors.rs:902-917`), which reads the rate-limit signals off `headers` into a `RateLimitSignals`
+and delegates to the pure `classify_status(status_code, url, signals)` (`errors.rs:853-875`), which
+classifies the rate-limit case first and otherwise delegates to `status_to_error(status_code, url)`
+(`errors.rs:808-815`):
+- 429 -> `Error::RateLimited { status, url, reset_at, retry_after }`, **always**, with or without
+  any quota headers.
+- 403 whose remaining-quota header parses as `0`, **or** whose `Retry-After` header parses (within
+  the 24h ceiling) -> `Error::RateLimited { .. }`. The `Retry-After` branch covers GitHub's
+  *secondary* rate limit, which can answer 403 + `Retry-After` while the remaining-quota header is
+  still nonzero.
 - 404 -> `Error::NotFound { url }`
-- 401 or 403 -> `Error::Unauthorized { status, url }`
+- 401 or a 403 with neither of the above signals -> `Error::Unauthorized { status, url }`
 - any other non-2xx -> `Error::HttpStatus { status, url }`
 
-The remaining-quota signal is read from `x-ratelimit-remaining` (github/gitea/gitee) falling back to
-`ratelimit-remaining` (gitlab's `RateLimit-Remaining`; `HeaderMap` lookups are case-insensitive), the
-reset instant from `x-ratelimit-reset` / `ratelimit-reset`, and the delay from `Retry-After`. A 403
-without those headers keeps its `Unauthorized` classification, and a 429 without them stays
-`HttpStatus`, so only an explicit spent quota reclassifies a status.
+The remaining-quota and reset signals are read from `x-ratelimit-remaining` / `x-ratelimit-reset`
+falling back to `ratelimit-remaining` / `ratelimit-reset` (`errors.rs:912-913`), and the delay from
+`Retry-After`. **Why the fallback is needed at all:** `HeaderMap` lookups are already
+case-insensitive, so a single lookup key matches every casing of a *given* header name (e.g. it is
+why `RateLimit-Remaining` matches a lookup for `ratelimit-remaining`); that alone does not bridge
+github/gitea/gitee's `x-ratelimit-*` name and gitlab's *differently spelled* `RateLimit-*` name --
+those are two distinct header names, and it is the explicit `.or_else(...)` chain, not case
+insensitivity, that reads both. A 403 with none of the rate-limit signals keeps its `Unauthorized`
+classification; a 429 is never `Unauthorized` or `HttpStatus`, only `RateLimited`. Both `reset_at`
+and `retry_after` are capped at 24h (`MAX_RATE_LIMIT_WAIT`, `errors.rs:840`): a value beyond the
+ceiling resolves to `None` rather than being clamped down to it.
 
-For ureq specifically (`http_client/ureq.rs`):
-- The **default (built-in) agent** is configured with `.http_status_as_error(false)` so ureq does
-  not short-circuit on non-2xx, and the explicit `!res.status().is_success()` check runs with
-  `res.status().as_u16()` feeding `status_to_error`.
-- An **injected agent** (caller-supplied, cannot be reconfigured) may fire `ureq::Error::StatusCode(code)`
-  from `call()?`. This arm is caught explicitly and mapped via `status_to_error(code, url)`. All
+For ureq specifically (`http_client/ureq.rs`), all three lanes now classify a given status +
+headers identically:
+- The **default (built-in) per-call agent** is built with `.http_status_as_error(false)`
+  (`build_call_agent`, `ureq.rs:75`) so ureq does not short-circuit on non-2xx, and the explicit
+  `!res.status().is_success()` check at the bottom of `get` runs with `res.status().as_u16()` and
+  `res.headers()` feeding `status_to_error_with_headers` (`ureq.rs:168-174`).
+- An **injected agent** (caller-supplied) keeps ureq's own default `http_status_as_error(true)` at
+  the agent level, but `get` applies a **per-request** override on the request builder --
+  `req.config().http_status_as_error(false).build()` (`ureq.rs:142-149`) -- before calling it. This
+  does not touch the injected agent's own persistent timeout/TLS/proxy configuration, only this
+  request's status handling, and it means an injected agent's non-2xx response reaches the same
+  header-aware `status_to_error_with_headers` check as the default agent (`ureq.rs:168-174`), so it
+  **can** and does reach `RateLimited`. The `Err(ureq::Error::StatusCode(code)) if is_injected` arm
+  (`ureq.rs:157-164`), which maps via the header-less `status_to_error(code, url)` (a 429 there is
+  still `RateLimited`, carrying no wait; a 403 there stays `Unauthorized`, since only a header can
+  tell a spent quota from a credential failure), is retained only as a **defensive fallback** for a
+  future ureq that
+  might stop honoring the per-request override; it is not expected to fire in normal operation. All
   other `ureq::Error` variants are transport failures and map to `Error::Transport` via `From`.
 
 ### Why boxed
@@ -244,14 +291,16 @@ type directly, since `std::io::Error` is stable std.)
 - `pub type Result<T> = std::result::Result<T, Error>;` (`errors.rs:8`).
 - `pub fn http_status(&self) -> Option<u16>` inherent method on `Error`.
 - `pub fn url(&self) -> Option<&str>` inherent method on `Error`.
+- `pub fn rate_limit_delay(&self) -> Option<std::time::Duration>` inherent method on `Error`
+  (`errors.rs:406-417`); `None` except for `RateLimited`.
 - Public constructors for custom `ReleaseSource` implementors (the release-flow variants are
   `#[non_exhaustive]`, so downstream code cannot build them with a struct literal):
   `Error::no_release_found()` and `Error::no_release_found_for_target(target: impl Into<String>)`,
   `Error::missing_asset_field(field: impl Into<String>)`,
   `Error::invalid_response(source: impl Into<Box<dyn Error + Send + Sync>>)`,
   `Error::http_status_error(status: u16, url: impl Into<String>)` (routes through
-  `status_to_error`, so 404 -> `NotFound` and 401/403 -> `Unauthorized`; it never produces
-  `RateLimited`, having no headers to read),
+  `status_to_error`, so 404 -> `NotFound`, 401/403 -> `Unauthorized`, and 429 -> `RateLimited` with
+  both wait fields `None`; having no headers to read, it cannot promote a *403* to `RateLimited`),
   `Error::http_status_error_with_headers(status: u16, url: impl Into<String>, headers: &HeaderMap)`
   (the header-aware form, for a custom `HttpClient` that has the response in hand), and
   `Error::checksum_mismatch(expected: impl Into<String>, computed: impl Into<String>)`.
@@ -261,7 +310,9 @@ type directly, since `std::io::Error` is stable std.)
   and for `s3-auth`: `SystemTimeError`, `hmac::digest::InvalidLength`, `url::ParseError`,
   `time::error::ComponentRange`.
 - `pub(crate) fn status_to_error(status: u16, url: &str) -> Error` (`errors.rs`) maps a status
-  code to `NotFound` / `Unauthorized` / `HttpStatus`.
+  code to `NotFound` / `Unauthorized` / `RateLimited` (429 only, no wait fields) / `HttpStatus`.
+  429 does not need a header to be rate limiting (RFC 6585), so the header-blind and header-aware
+  paths agree on it; the header-aware path only adds the wait fields.
 - `pub(crate) fn status_to_error_with_headers(status: u16, url: &str, headers: &http::HeaderMap) -> Error`
   (`errors.rs`) reads the rate-limit headers off a response and delegates to the pure
   `classify_status(status, url, RateLimitSignals)`, which is what the built-in clients call.
@@ -285,10 +336,21 @@ type directly, since `std::io::Error` is stable std.)
 - Both reqwest and ureq produce identical structured status variants for any given HTTP status code.
   The old reqwest=`Network` / ureq=`Http` inconsistency (documented in the now-superseded
   `error-network-vs-http-semantics.md`) is resolved.
-- 404 -> `NotFound`; 401 or 403 -> `Unauthorized`; any other non-2xx -> `HttpStatus`; except that a
-  403 or 429 carrying a zero remaining-quota header -> `RateLimited`, which is checked first.
-- A 403 with no rate-limit headers must stay `Unauthorized` (a genuine credential failure), and a 429
-  with none must stay `HttpStatus`: only an explicit spent quota promotes a status to `RateLimited`.
+- 404 -> `NotFound`; 401 or a 403 with neither rate-limit signal -> `Unauthorized`; any other
+  non-2xx -> `HttpStatus`; except that 429 is **always** `RateLimited`, and a 403 carrying a zero
+  remaining-quota header **or** a usable `Retry-After` is also `RateLimited` -- the rate-limit
+  check runs first.
+- A 403 with neither a zero remaining-quota header nor a usable `Retry-After` must stay
+  `Unauthorized` (a genuine credential failure); this is the only carve-out left after the
+  broadened rule -- a 429 is never `Unauthorized` or `HttpStatus`, only `RateLimited`, with or
+  without any quota headers at all.
+- `reset_at` and `retry_after` are each capped at 24h (`MAX_RATE_LIMIT_WAIT`); a server-supplied
+  value beyond the ceiling resolves to `None`, never a clamped-down duration.
+- `Error::rate_limit_delay()` is the one place the `Retry-After`-then-`reset_at` precedence is
+  computed; `Display`'s optional wait clause calls it rather than re-deriving the choice.
+- The ureq injected-agent path is **not** an exception to the identical-classification rule: a
+  per-request `http_status_as_error(false)` override makes it reach the header-aware check the
+  same as every other lane, so it can and does produce `RateLimited`.
 - `http_status()` returns `Some(u16)` for `NotFound`/`Unauthorized`/`RateLimited`/`HttpStatus`;
   `None` for all other variants.
 - `url()` returns `Some(&str)` for `NotFound`/`Unauthorized`/`RateLimited`/`HttpStatus`; `None` for
@@ -351,6 +413,34 @@ type directly, since `std::io::Error` is stable std.)
 `aborted_http_status_is_none`, `aborted_url_is_none` pin `Aborted`; `url_helper_*` tests pin the
 `url()` accessor; `archive_not_enabled_display_has_correct_prefix` and
 `signature_non_utf8_display_has_signature_error_prefix` pin the corrected prefixes.
+
+Rate-limit classification (`errors.rs` `mod tests`): `classify_status_maps_a_spent_quota_403_to_rate_limited`,
+`classify_status_keeps_a_plain_403_unauthorized`, `classify_status_keeps_403_unauthorized_when_quota_remains`,
+`classify_status_maps_a_spent_quota_429_to_rate_limited`, `classify_status_maps_a_bare_429_to_rate_limited`,
+`classify_status_maps_a_429_with_only_retry_after_to_rate_limited`,
+`classify_status_maps_a_403_with_retry_after_to_rate_limited`,
+`classify_status_maps_a_403_with_spent_quota_and_no_retry_after_to_rate_limited`,
+`classify_status_ignores_quota_headers_on_a_404`, `classify_status_ignores_quota_headers_on_other_statuses`,
+`classify_status_tolerates_unparseable_reset_and_retry_after`, `classify_status_redacts_the_rate_limited_url`,
+`status_to_error_with_headers_reads_both_header_spellings`, `http_status_and_url_helpers_cover_rate_limited`,
+`rate_limited_display_names_the_limit_and_the_remedy`,
+`rate_limited_display_omits_the_wait_when_unknown_or_elapsed`,
+`rate_limited_display_separates_its_clauses_consistently`. The 24h clamp:
+`parse_retry_after_keeps_a_normal_delay`, `parse_retry_after_clamps_at_twenty_four_hours`,
+`parse_retry_after_rejects_the_u64_max_delay`, `classify_status_ignores_an_over_ceiling_retry_after_on_a_403`.
+`rate_limit_delay()`: `rate_limit_delay_prefers_retry_after_over_reset_at`,
+`rate_limit_delay_uses_retry_after_alone`, `rate_limit_delay_derives_a_wait_from_a_future_reset_at`,
+`rate_limit_delay_is_none_for_an_elapsed_reset_at`, `rate_limit_delay_is_none_when_nothing_is_known`,
+`rate_limit_delay_is_none_for_a_non_rate_limited_variant`.
+
+The ureq injected-agent classification gap closure is pinned in `http_client/ureq.rs` (`mod tests`):
+`injected_agent_sees_rate_limit_headers`, `injected_agent_with_status_error_disabled_sees_rate_limit_headers`,
+`injected_agent_no_status_error_falls_through_to_is_success_check`,
+`default_agent_path_maps_statuses_identically_to_injected`. The retry short-circuit on `RateLimited`
+is pinned in `backends/mod.rs` (`mod tests`): `retry_does_not_retry_a_rate_limited_error`,
+`retry_still_consumes_the_budget_for_a_non_rate_limited_error`,
+`retry_async_does_not_retry_a_rate_limited_error`,
+`retry_async_still_consumes_the_budget_for_a_non_rate_limited_error`.
 
 `checksum.rs` (`mod tests`): `mismatch_yields_checksum_mismatch_variant` asserts that a digest
 mismatch through `Checksum::verify()` produces `Error::ChecksumMismatch` with the correct

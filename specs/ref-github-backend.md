@@ -77,11 +77,26 @@ headers via `api_headers(auth_token)` (`github.rs:488-507`): it always sets
 `Authorization: token {token}` (the GitHub legacy "token" scheme, not "Bearer").
 A token that fails to parse as a header value is surfaced as `Error::InvalidAuthToken`.
 The token is supplied explicitly via `auth_token(...)`, or read from the environment on request via
-`auth_token_from_env()` (`GITHUB_TOKEN`, then `GH_TOKEN`, matching the `gh` CLI), on both the
-`Update` and `ReleaseList` builders. The environment is never read implicitly: without that call the
-backend does not look at `GITHUB_TOKEN` at all. The
-`impl_update_config_accessors!` override arm wires github's `api_headers` into the
-download path so the same User-Agent and token scheme are used there too.
+`auth_token_from_env()` (`GH_TOKEN`, then `GITHUB_TOKEN`; the crate-internal `AUTH_TOKEN_ENV_VARS`
+list, `github.rs:191`/`379`) on both the `Update` and `ReleaseList` builders. This order was flipped
+from the reverse (`GITHUB_TOKEN` then `GH_TOKEN`) to match what `gh help environment` actually
+documents ("GH_TOKEN, GITHUB_TOKEN, in order of precedence"): inside GitHub Actions `GITHUB_TOKEN`
+is auto-populated, so a deliberately-exported `GH_TOKEN` should win over it, not be silently
+shadowed. An explicit `auth_token(...)` always wins over `auth_token_from_env()`, whatever the call
+order -- the environment only fills an empty token slot (see `ref-common-config.md`). `has_auth_token()`
+reports whether a token is currently set from either source, without exposing it. The environment
+is never read implicitly: without calling `auth_token_from_env()` the backend does not look at
+either variable. The `impl_update_config_accessors!` override arm wires github's `api_headers` into
+the download path so the same User-Agent and token scheme are used there too.
+
+An env-sourced token is bound to whatever host `api_base_url` is configured with (or the default
+`api.github.com`), which the request-time host gate cannot flag on its own (the configured host
+*is* `auth_base_host`). `build()` calls `warn_if_env_token_off_canonical_host` (`github.rs:221-225`
+`ReleaseListBuilder`, `:422-426` `Update`) after resolving the host, logging a warning when the
+current token is env-sourced and the resolved host is not github's canonical
+`api.github.com` (`CANONICAL_AUTH_HOST`, `github.rs:18`). An explicitly-set token is never warned
+about. Both builders' `Debug` impls redact the token to `"<token>"` (`RequestConfig::fmt` /
+`CommonBuilderConfig::fmt`, `backends/common.rs`) rather than printing it.
 
 The token is host-gated: it is applied to the release-listing and binary-download requests, but
 only to requests whose host matches the configured API host (or an `allow_auth_host` entry),
@@ -95,17 +110,28 @@ overrides the crate's token header.
 GitHub rate limits its REST API: 60 requests/hour/IP unauthenticated, 5000/hour with a token (no
 scopes needed for a public repo). This crate does not track the limit; it is documented in the
 crate-level "GitHub rate limits" section (`src/lib.rs`) and pointed at from the `auth_token` setter
-rustdoc (`github.rs:138-149`). An update check costs one API request (a `/latest` or `/tags/{tag}`
+rustdoc. An update check costs one API request (a `/latest` or `/tags/{tag}`
 lookup, or one per page of a listing); the asset download is a CDN redirect and does not count
 against the core limit. The 60/hour budget is counted per source IP, so behind a shared egress
 IP (a NAT'd corporate network, a CI runner pool, a VPN exit) it is pooled across everyone on that IP
-and can be spent by other people entirely. A rate-limited response is HTTP 403 with
-`x-ratelimit-remaining: 0`, which `status_to_error_with_headers` classifies as
-`Error::RateLimited { status: 403, reset_at, retry_after }` -- distinct from the `Error::Unauthorized`
-a genuine credential failure produces (a 403 without those headers). Mitigation is a token
+and can be spent by other people entirely.
+
+Two GitHub rate-limit mechanisms are distinguished from an `Error::Unauthorized` (a genuine
+credential failure) by `status_to_error_with_headers`, which classifies both as
+`Error::RateLimited { status, reset_at, retry_after }`:
+- The *primary* per-hour budget above: HTTP 403 with `x-ratelimit-remaining: 0`.
+- GitHub's *secondary* rate limit (abuse-detection / burst throttling): HTTP 403 with a usable
+  `Retry-After` header, which can be present while `x-ratelimit-remaining` is still nonzero. A
+  narrower earlier reading required the spent-quota header on every 403, which misclassified this
+  case as `Unauthorized`; see `ref-errors.md` / `auth-token-from-env.md` AUTH-2-2 for the broadened
+  rule (429 is also always `RateLimited`, with or without headers).
+
+A bare 403 with neither signal stays `Error::Unauthorized`. Mitigation is a token
 (`auth_token` / `auth_token_from_env`) and checking less often (the
-`check_interval::UpdateCheckGuard` throttle); the retry/backoff setters do not help, since retrying
-a rate-limited request only consumes more quota.
+`check_interval::UpdateCheckGuard` throttle); the retry/backoff setters do not help -- and, as of
+the review fix, `retries`/`retry_backoff` cannot even try: `retry` and `retry_async`
+(`backends/mod.rs`) return `Error::RateLimited` on the first attempt, before consuming any of the
+retry budget, since retrying a rate-limited request only consumes more quota.
 
 ### Pagination
 
@@ -214,6 +240,15 @@ The setter was renamed `url` -> `api_base_url` (and earlier `with_url` / `instan
 - `version` strips a single leading `v` from `tag_name` by default; with a configured
   `tag_prefix`, only tags carrying that prefix are kept (the prefix, plus any inner `v`, is
   stripped), and non-matching tags are skipped.
+- `auth_token_from_env()` reads `GH_TOKEN` before `GITHUB_TOKEN` (`AUTH_TOKEN_ENV_VARS`); an
+  explicit `auth_token(..)` always wins over it, whatever the call order. `has_auth_token()`
+  reports whether either source set a token. An env-sourced token bound to a non-`api.github.com`
+  host (from a custom `api_base_url`) logs a warning at `build()`; an explicitly-set token never
+  does.
+- A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota
+  (`x-ratelimit-remaining: 0`) *or* a usable `Retry-After` (the secondary rate limit); a bare 403
+  with neither stays `Unauthorized`. `retry`/`retry_async` never spend budget retrying a
+  `RateLimited` response.
 
 ## Tests
 
@@ -241,6 +276,9 @@ stub (no external network):
   transport setters (retries) flow through `fetch`.
 - Transport/builder tests: timeout, retries, custom request header on the wire,
   injected reqwest/ureq/async clients, progress/verify/checksum/asset-matcher storage.
+- `github.rs:784-810`: `AUTH_TOKEN_ENV_VARS` pins `["GH_TOKEN", "GITHUB_TOKEN"]` on both
+  builders, and a first-wins check over the candidate pairs asserts `GH_TOKEN` beats
+  `GITHUB_TOKEN` when both are set.
 
 ## Related
 
