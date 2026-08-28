@@ -159,7 +159,8 @@ async flows.
 - `self_update::zipsign_api` re-export of the underlying crate, under
   `signatures` (`src/lib.rs:VerifyingKey`).
 - `verifying_keys(impl Into<Vec<VerifyingKey>>)` builder method
-  (`src/macros.rs:verifying_keys`); the doc-hidden `verify_keys()` accessor keeps its name.
+  (`src/macros.rs:verifying_keys`), with a matching `verifying_keys()` accessor (renamed from
+  `verify_keys()`).
 - `self_update::verify_signature(impl AsRef<Path>, &[VerifyingKey])` free
   function, re-exported under `signatures` (`src/update.rs`, `src/lib.rs`), for
   running the signature check standalone (e.g. from an installer).

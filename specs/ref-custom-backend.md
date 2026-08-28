@@ -22,11 +22,15 @@ Source files: `src/update.rs` (trait definitions), `src/backends/custom.rs` (ada
 public `Result` type:
 
 - `get_latest_release(&self) -> Result<Release>`
-- `get_latest_releases(&self) -> Result<Vec<Release>>`
+- `get_releases(&self) -> Result<Vec<Release>>`
 - `get_release_version(&self, ver: &str) -> Result<Release>`
 
+Only `get_releases` is required; `get_latest_release` and `get_release_version` have default
+implementations in terms of it (override either to use a dedicated endpoint).
+
 The trait requires `Send + Sync`. It is documented as **not sealed**, so downstream crates may
-implement it. `get_latest_releases` takes no `current_version` (the dead advisory parameter was
+implement it. `get_releases` (renamed from `get_latest_releases`) takes no `current_version` (the
+dead advisory parameter was
 dropped): the updater re-filters downstream, discarding releases not strictly newer than current,
 preferring the newest semver-compatible one, and otherwise offering the newest available, so the
 source need not pre-filter. Releases should be returned newest-first.
@@ -36,7 +40,7 @@ It also requires `Send + Sync` and has the same three methods, but each returns 
 return-position `impl Trait` future rather than a value:
 
 - `get_latest_release(&self) -> impl Future<Output = Result<Release>> + Send + '_`
-- `get_latest_releases(&self) -> impl Future<Output = Result<Vec<Release>>> + Send + '_`
+- `get_releases(&self) -> impl Future<Output = Result<Vec<Release>>> + Send + '_`
 - `get_release_version<'a>(&'a self, ver: &'a str) -> impl Future<Output = Result<Release>> + Send + 'a`
 
 The `+ Send` bound on each returned future is load-bearing. Because the trait is consumed
@@ -87,7 +91,7 @@ source into the blocking task; a `JoinError` is mapped to `Error::Internal { mes
 three fetch methods to the source. `get_latest_release` wraps the single release in a
 one-element `Releases` carrying the configured `current_version` (so `is_update_available()`
 works without a second fetch); the trait's `get_newer_releases` wraps the `Vec` from the
-source's `get_latest_releases` likewise (the source method keeps its name);
+source's `get_releases` likewise;
 `get_release_version` returns the source's `Release` directly. The inherent update verbs
 (including `is_update_available`) come from `impl_sync_update_verbs!(Update)`
 (`src/macros.rs:impl_sync_update_verbs`). Shared config accessors come from
@@ -110,7 +114,7 @@ builders use `impl_common_builder_setters!(no_auth_token)`), and there is no `cu
 
 ## Public surface
 
-- `trait ReleaseSource: Send + Sync` with `get_latest_release`, `get_latest_releases`,
+- `trait ReleaseSource: Send + Sync` with `get_latest_release`, `get_releases`,
   `get_release_version` (re-exported at crate root).
 - `trait AsyncReleaseSource: Send + Sync` (feature `async`), same three methods returning
   `impl Future<Output = ...> + Send`.
