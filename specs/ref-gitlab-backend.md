@@ -21,23 +21,23 @@ pagination/transport helpers (`send`, the sans-io `PageRequest`/`Page` core and 
 The builder (`ReleaseListBuilder`) exposes `host`,
 `repo_owner`, `repo_name`, `filter_target`, `auth_token`, the shared
 `request_config_setters!(request)` setters, and `build()`
-(`gitlab.rs:142`). `build()` calls `self.request.check()` first (surfacing any deferred
+(`gitlab.rs:233`). `build()` calls `self.request.check()` first (surfacing any deferred
 `request_header` error as `Error::InvalidHeader`), then requires `repo_owner` and `repo_name`,
 each bailing `Error::MissingField { field }` when unset.
 `repo_owner`/`repo_name` are stored `Option<String>` on the builder and resolved to
-`String` on `ReleaseList`. `ReleaseList` has `fetch` and, under the `async` feature,
-`fetch_async` (`gitlab.rs:226`), both returning `Result<Releases>`.
+`String` on `ReleaseList`. `ReleaseList` has `fetch` (`gitlab.rs:303-320`) and, under the
+`async` feature, `fetch_async` (`gitlab.rs:324`), both returning `Result<Releases>`.
 
-`filter_target` (`gitlab.rs:101`) sets a target that drops whole releases lacking a
+`filter_target` (`gitlab.rs:189`) sets a target that drops whole releases lacking a
 matching asset; it is the `ReleaseList` release filter. `fetch()` applies it via
-`r.has_target_asset(target)` (`gitlab.rs:181-186`). This differs from `Update::target`,
+`r.has_target_asset(target)` (`gitlab.rs:316`). This differs from `Update::target`,
 which selects *which asset* to download.
 
 `Update` is built via `Update::configure()` -> `UpdateBuilder`.
 Backend-specific setters are `host`, `repo_owner`, `repo_name`; all common
 options come from `impl_common_builder_setters!()`. `build()` returns the concrete
-`Update` (`gitlab.rs:326`), as does `build_async()` under the `async` feature
-(`gitlab.rs:335`). `Update` is `Send` and exposes the update verbs as inherent methods
+`Update` (`gitlab.rs:462`), as does `build_async()` under the `async` feature
+(`gitlab.rs:472`). `Update` is `Send` and exposes the update verbs as inherent methods
 (`update`, `update_extended`, `get_latest_release`, `get_newer_releases`,
 `get_release_version`, `is_update_available`). Both build paths delegate to
 `build_update()`, which requires
@@ -48,21 +48,23 @@ deferred-header `check` and validates `current_version`, `bin_name`, `bin_path_i
 
 ### Route shapes, host, and project-path encoding
 
-The list/latest/newer routes share one base, `Update::releases_url()` (`gitlab.rs:297`),
-and `ReleaseList::fetch` builds the same shape (`gitlab.rs:174`):
+The list/latest/newer routes share one base, `Update::releases_url()` (`gitlab.rs:493-500`),
+and `ReleaseList::fetch` builds the same shape inline (`gitlab.rs:304-309`):
 
 ```
 <host>/api/v4/projects/<owner>%2F<repo>/releases
 ```
 
-The literal `%2F` separating owner and repo is hard-coded in the format string
-(`gitlab.rs:175-178`, `gitlab.rs:298-303`); only `repo_owner` is run through
+The literal `%2F` separating owner and repo is hard-coded in the format string in both places;
+only `repo_owner` is run through
 `urlencoding::encode`, while `repo_name` is interpolated verbatim. Encoding `repo_owner`
 matters for subgroup paths (e.g. `group/subgroup` becomes `group%2Fsubgroup`) so an
 embedded `/` does not create an extra path segment.
 
 Fetch-by-tag (`get_release_version` / `get_release_version_async`) appends the tag to the
-releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
+releases base via the shared `tag_url` helper (`gitlab.rs:507-509`), percent-encoding the tag,
+called from `get_release_version` (`gitlab.rs:539`) and `get_release_version_async`
+(`gitlab.rs:737`):
 
 ```
 {releases_url}/{urlencoding::encode(tag)}
@@ -71,7 +73,8 @@ releases base, percent-encoding the tag (`gitlab.rs:361`, `gitlab.rs:480`):
 This route returns a single release *object* (not an array), parsed directly by
 `ReleaseDto::into_release` (called from `release_array_page`).
 
-Custom host: `host(impl Into<String>)` (`gitlab.rs:99`, `gitlab.rs:274`) overrides `host`. The
+Custom host: `host(impl Into<String>)` (`gitlab.rs:165` `ReleaseListBuilder`, `gitlab.rs:377`
+`UpdateBuilder`) overrides `host`. The
 setter was renamed `url` -> `host` (and earlier `instance_url`/`with_host` -> `url`); it
 carries no `#[doc(alias)]`
 (all builder-setter doc-aliases were dropped). Its doc states the instance host only (scheme
@@ -83,17 +86,38 @@ common setters) take `impl Into<String>`.
 
 ### Authentication
 
-`api_headers` (`gitlab.rs:582`) sets only
+The free `api_headers()` (`gitlab.rs:754-763`) sets only
 `User-Agent: rust-reqwest/self-update`; the `Authorization: Bearer <token>` header is applied
 centrally by the shared `apply_auth` (`backends/common.rs`) on both the listing and download
 paths. The token is host-gated: it is only attached to requests whose host matches the
 configured instance host (or an `allow_auth_host` entry), over https
 (`dangerously_allow_non_https_auth_forwarding()` relaxes the https requirement), and a
 user-set `Authorization` via `request_header` overrides it. A token that cannot be parsed
-into a header value yields `Error::InvalidAuthToken`. There is no
-`PRIVATE-TOKEN` header and no environment-variable lookup in this file; the token comes
-solely from the builder setter (`ReleaseListBuilder::auth_token`) or the
-common `auth_token` setter for `Update` (`self.common.auth_token`).
+into a header value yields `Error::InvalidAuthToken`. There is no `PRIVATE-TOKEN` header and no
+implicit environment lookup: the token comes from the builder setter
+(`ReleaseListBuilder::auth_token`) or the common `auth_token` setter for `Update`
+(`self.common.auth_token`), or on request from `auth_token_from_env()` on either builder, which
+reads **`GITLAB_TOKEN` only** (`AUTH_TOKEN_ENV_VARS`, `gitlab.rs:216`/`404`) and is a no-op when it
+is unset. `CI_JOB_TOKEN` was deliberately removed from the list (`gitlab.rs:222`/`410`): it is
+exported in every GitLab CI job, but this backend sends `Authorization: Bearer`, not GitLab's
+job-token mechanism (the `JOB-TOKEN` header or a `job_token` request parameter), and job tokens are
+project-scoped -- so keeping it meant `auth_token_from_env()` was not the advertised no-op inside
+CI (it could turn a working anonymous fetch against a public project into a 401/403). An explicit
+`auth_token(..)` with a non-blank value always wins over `auth_token_from_env()`, whatever the call
+order (a blank explicit token is the documented exception:
+`auth_token("").auth_token_from_env()` still picks up the env token, but
+`auth_token_from_env().auth_token("")` discards it -- see `ref-common-config.md`);
+`has_auth_token()` reports whether either source set a token.
+
+An env-sourced token is bound to whatever host `host(..)` is configured with (or the default
+`gitlab.com`), which `build()` flags via `env_token_host_decision`
+(`gitlab.rs:247-252` `ReleaseListBuilder`, `:447-452` `Update`). It returns
+`EnvTokenDecision::WarnedAndSent` (warns, but still attaches the token) when the resolved host is
+neither gitlab's canonical `gitlab.com` (`CANONICAL_AUTH_HOST`, `gitlab.rs:19`) nor an acknowledged
+`allow_auth_host` entry -- unchanged from before; a host passed to `allow_auth_host(..)` is now
+acknowledged (`host_is_acknowledged`, `backends/common.rs`) and yields `EnvTokenDecision::Sent`
+with no warning. An explicitly-set token is never warned about either. Both builders' `Debug`
+impls redact the token to `"<token>"`.
 
 ### Pagination and ordering
 
@@ -122,20 +146,22 @@ per-item, preserving order; pagination continues through all pages regardless.
 
 ### JSON to model
 
-`ReleaseDto::into_release` (called from `release_array_page`) maps a release object:
-`tag_name` -> required `version` with a leading `v` trimmed (`trim_start_matches('v')`,
-`gitlab.rs:52`); `created_at` -> required `date`; `name` -> `name`, defaulting to the tag
-when absent (`gitlab.rs:41`); `description` -> optional `body` (`gitlab.rs:45`). Assets are
-read from `assets.links` (not a bare `assets` array); a missing/non-array `assets.links`
-yields `Error::MissingAssetField { field }` (`gitlab.rs:42-44`). Each asset is parsed by
-`ReleaseAsset::from_asset_gitlab` (`gitlab.rs:19`), which requires `url` (-> `download_url`)
-and `name`, each bailing `Error::MissingAssetField { field }` when missing (`gitlab.rs:20-25`).
-Missing `tag_name` or `created_at` also yields `Error::MissingAssetField { field }`.
+`ReleaseDto::into_release` (`gitlab.rs:69-102`, called from `release_array_page`) maps a release
+object, deserialized via the private `ReleaseDto` (`gitlab.rs:49-59`, field `tag_name` /
+`created_at` / `name` / `description` / `_links` / `assets`): `tag_name` -> required `version`
+via `strip_tag_prefix` (trims a leading `v` when no `tag_prefix` is configured), missing ->
+`Error::MissingAssetField { field: "tag_name" }`; `created_at` -> required `date`, missing ->
+`Error::MissingAssetField { field: "created_at" }`; `name` -> `name`, defaulting to the tag when
+absent; `description` -> optional `body`. Assets are read from `assets.links` (the private
+`AssetsDto`, `gitlab.rs:41-44`), not a bare `assets` array; a missing `links` array yields
+`Error::MissingAssetField { field: "assets.links" }`. Each asset is parsed by `AssetDto::into_asset`
+(`gitlab.rs:30-38`), which requires `url` (-> `download_url`) and `name`, each bailing
+`Error::MissingAssetField { field }` when missing.
 
 ### Errors
 
 A completed non-2xx response is rejected by `send` / `send_async` before any body is parsed
-and mapped to a structured variant by status (`status_to_error`, `errors.rs:254`): 404 ->
+and mapped to a structured variant by status (`status_to_error`, `errors.rs:844`): 404 ->
 `Error::NotFound` (e.g. an unknown tag), 401/403 -> `Error::Unauthorized`, any other non-2xx
 -> `Error::HttpStatus` (e.g. a 500/503 listing failure). A request that cannot complete is
 `Error::Transport`. An empty array on the latest path yields `Error::NoReleaseFound { target: None }`;
@@ -176,8 +202,18 @@ surface as `Error::MissingField { field }`; a deferred bad `request_header` surf
   order; empty/non-array payloads error rather than panic.
 - Newer-than filtering is per-item and preserves order; pagination walks all pages.
 - Auth uses `Authorization: Bearer <token>` plus a fixed `User-Agent`; no `PRIVATE-TOKEN`
-  header, no env var. The token is only sent to the configured instance host (or an
+  header. The token is only sent to the configured instance host (or an
   `allow_auth_host` entry) over https.
+- `auth_token_from_env()` reads `GITLAB_TOKEN` only (`AUTH_TOKEN_ENV_VARS`); `CI_JOB_TOKEN` is
+  deliberately not read (it is project-scoped and incompatible with the `Bearer` scheme this
+  backend sends). An explicit `auth_token(..)` always wins over `auth_token_from_env()`, whatever
+  the call order. `has_auth_token()` reports whether either source set a token. An env-sourced
+  token bound to a non-`gitlab.com` host (from a custom `host(..)`) logs a warning at `build()` and
+  is still sent, unless that host was also passed to `allow_auth_host(..)`, in which case it is
+  acknowledged and no warning fires.
+- A 429 is always `Error::RateLimited`; a 403 is `RateLimited` when it carries a spent quota
+  (`RateLimit-Remaining: 0`) or a usable `Retry-After`; a bare 403 with neither stays
+  `Unauthorized`. `retry`/`retry_async` never spend budget retrying a `RateLimited` response.
 - `Update` is `#[non_exhaustive]`.
 
 ## Tests
@@ -193,7 +229,8 @@ non-array (`InvalidResponse`) error paths; missing `tag_name` and missing
 `api_headers` User-Agent wiring and the centrally-applied Bearer scheme; invalid-header
 `Error::InvalidHeader` at build; `ReleaseList::fetch_async` returning a bare listing; and
 `identifier`/`bin_name` wiring. Shared pagination/retry helpers are tested in
-`src/backends/mod.rs`.
+`src/backends/mod.rs`. `AUTH_TOKEN_ENV_VARS` is pinned to `["GITLAB_TOKEN"]` on both builders
+(`gitlab.rs:804-809`), with a comment noting `CI_JOB_TOKEN` must not be reintroduced.
 
 ## Related
 

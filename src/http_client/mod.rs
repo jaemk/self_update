@@ -21,9 +21,21 @@ pub use ureq::UreqClient;
 
 /// Object-safe HTTP transport seam. The crate only ever issues GETs, so `get` is the whole
 /// surface. Each implementation maps a non-2xx status to the structured
-/// `NotFound`/`Unauthorized`/`HttpStatus` error variant *before* returning `Ok` (preserving the
-/// per-client `status_to_error` logic), so callers see a structured error for a bad status and an
+/// [`NotFound`](crate::Error::NotFound) / [`Unauthorized`](crate::Error::Unauthorized) /
+/// [`RateLimited`](crate::Error::RateLimited) / [`HttpStatus`](crate::Error::HttpStatus) error
+/// variant *before* returning `Ok`, so callers see a structured error for a bad status and an
 /// `Ok(response)` only for a 2xx.
+///
+/// A custom transport should build that error with
+/// [`Error::http_status_error_with_headers`](crate::Error::http_status_error_with_headers), which
+/// takes the response headers and so classifies a spent quota (a 403/429 carrying
+/// `x-ratelimit-remaining: 0` or gitlab's `RateLimit-Remaining: 0`) as `RateLimited` exactly the way
+/// the built-in clients do. A 429 is rate limiting whatever headers accompany it; a 403 is upgraded
+/// only when the response reports a spent quota or supplies a usable `Retry-After`. The header-blind
+/// [`Error::http_status_error`](crate::Error::http_status_error) still maps a **429** to
+/// `RateLimited`: the status alone is the signal. What it cannot do is promote a **403** (with no
+/// headers in hand a 403 stays `Unauthorized`) or recover the `reset_at` / `retry_after` fields, so
+/// `rate_limit_delay()` on one of its errors is always `None`.
 ///
 /// Object safety is what makes the transport injectable: a user can hand the crate any
 /// `Arc<dyn HttpClient>` (e.g. a test double or a wrapper around a custom client). Retries are

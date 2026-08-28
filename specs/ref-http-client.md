@@ -92,19 +92,26 @@ that holds `timeout`, `headers`, `retries`, an injected `client`
   (`macros.rs:41-54`).
 
 The retry loop lives in `backends/mod.rs`, not in the http_client module.
-`send` (`backends/mod.rs:173-189`) merges `config.headers` over the backend's
+`send` (`backends/mod.rs:447-486`) merges `config.headers` over the backend's
 base headers, then calls `retry` with `client.get(...)` as the attempt and a
 closure that logs a warning and sleeps `backoff` ms between tries. `retry`
-(`backends/mod.rs:117-135`) runs the attempt, and on error returns immediately
-once `attempts >= retries`, otherwise sleeps `retry_backoff_ms(attempts)` and
-increments. So `retries == 0` attempts exactly once; the budget boundary is
-`>=`. Any failed attempt (including a permanent 404) consumes budget.
+(`backends/mod.rs:376-396`) runs the attempt, and on error returns immediately
+once `attempts >= retries` **or the error is `Error::RateLimited`** (checked via
+`is_rate_limited`, `backends/mod.rs:364-366`), otherwise sleeps
+`retry_backoff_ms(attempts)` and increments. So `retries == 0` attempts exactly
+once; the budget boundary is `>=`. Any failed attempt still consumes budget --
+**except** `Error::RateLimited`, which always returns on the very first attempt
+regardless of `retries`, since the request's quota is already exhausted and a
+sub-second backoff cannot make more of it appear (see `ref-errors.md` /
+`auth-token-from-env.md` AUTH-2-9). A permanent 404 (or any other non-`RateLimited`
+error) still consumes the full budget as before.
 
 Backoff is `retry_backoff_ms(attempt) = 100u64 << attempt.min(5)`
-(`backends/mod.rs:109-111`): 100, 200, 400, 800, 1600, 3200 ms, capped at
+(`backends/mod.rs:347-358`): 100, 200, 400, 800, 1600, 3200 ms, capped at
 3200 ms for attempt 5 and beyond. The in-loop attempt index feeds the rising
-backoff (not just index 0). `send_async` / `retry_async`
-(`backends/mod.rs:141-211`) are the async siblings, using `tokio::time::sleep`;
+backoff (not just index 0). `send_async` (`backends/mod.rs:502-536`) / `retry_async`
+(`backends/mod.rs:401-431`) are the async siblings, using `tokio::time::sleep`,
+short-circuiting on `Error::RateLimited` the same way as the sync `retry`;
 the log runs synchronously between tries so the error is never held across the
 await.
 
@@ -179,15 +186,34 @@ reusing `send_async`.
 A transport-layer failure (connect/timeout/TLS) surfaces through the `?` on the
 client's `send()` / `call()`, converted by `From<reqwest::Error>` /
 `From<ureq::Error>` into `Error::Transport`. A response with a non-success status is
-mapped to a structured status variant by `errors::status_to_error` from the explicit
-status check in each `get` (`http_client/reqwest.rs`, `http_client/ureq.rs`): 404 =>
-`Error::NotFound { url }`, 401/403 => `Error::Unauthorized { status, url }`, any other
-non-2xx => `Error::HttpStatus { status, url }`. Both clients produce the same variants:
-for the default ureq agent this needs `http_status_as_error(false)` so the status check
-runs, and for an injected ureq agent the `ureq::Error::StatusCode(code)` arm maps the
-code instead of letting it fall through to `Transport`. So "could not reach / talk to
-the server" is `Transport` and "reached the server, got a bad status" is one of the
-status variants.
+mapped to a structured status variant by `errors::status_to_error_with_headers` (which
+reads the response's rate-limit headers and delegates to the pure `classify_status`; see
+`ref-errors.md`) from the explicit status check in each `get`
+(`http_client/reqwest.rs`, `http_client/ureq.rs`): 404 => `Error::NotFound { url }`;
+429 (always), or 403 with a spent quota or a usable `Retry-After` => `Error::RateLimited
+{ status, url, reset_at, retry_after }`; 401, or 403 with neither rate-limit signal =>
+`Error::Unauthorized { status, url }`; any other non-2xx => `Error::HttpStatus { status,
+url }`.
+
+All three client lanes produce the same variants for a given status + headers:
+- The **default (per-call) ureq agent** is built with `.http_status_as_error(false)`
+  (`build_call_agent`, `ureq.rs:75`) so the explicit status check at the bottom of `get`
+  runs with the response headers in hand.
+- An **injected ureq agent** keeps ureq's own default `http_status_as_error(true)` at the
+  agent level, but `get` applies a **per-request** override on the request builder --
+  `req.config().http_status_as_error(false).build()` (`ureq.rs:142-149`) -- so it also
+  reaches the same header-aware check instead of failing early with a headerless
+  `ureq::Error::StatusCode`. This closed a prior gap where an injected agent's spent-quota
+  403 fell back to `Unauthorized` (no headers reachable from `StatusCode`). The
+  `Err(ureq::Error::StatusCode(code)) if is_injected` arm (`ureq.rs:157-164`) is retained
+  only as a defensive fallback for a future ureq that stops honoring the per-request
+  override; it maps through the header-less `status_to_error` and so still cannot produce
+  `RateLimited`.
+- **reqwest** always has the response (and its headers) in hand at the status check.
+
+So "could not reach / talk to the server" is `Transport` and "reached the server, got a
+bad status" is one of the status variants (`NotFound` / `Unauthorized` / `RateLimited` /
+`HttpStatus`), identically across all three lanes.
 
 ## Public surface
 
@@ -216,25 +242,38 @@ status variants.
 - TLS is feature-selected; when both TLS features are on, rustls wins, so
   `cargo build --all-features` builds.
 - `retries == 0` means exactly one attempt; the exhaustion boundary is
-  `attempts >= retries` (one retry => two attempts).
+  `attempts >= retries` (one retry => two attempts). **Exception:** `Error::RateLimited`
+  always returns after the first attempt regardless of `retries` (`is_rate_limited`,
+  `backends/mod.rs:364-366`, checked by both `retry` and `retry_async`) -- the request's
+  quota is already spent, so retrying cannot succeed and would only spend more of it.
 - Backoff sequence is 100/200/400/800/1600/3200 ms, capped at 3200 from attempt
-  5 onward (`100 << attempt.min(5)`); the rising index is fed in-loop.
+  5 onward (`100 << attempt.min(5)`); the rising index is fed in-loop. Never reached for
+  `Error::RateLimited`, which short-circuits before any backoff is scheduled.
 - The binary download's request-establishment phase is retried under the `retries`
-  budget (via `send`); mid-stream transfer errors are not retried.
+  budget (via `send`), with the same `RateLimited` short-circuit; mid-stream transfer
+  errors are not retried.
 - An injected client still honors `request_header` and `retries`; for a reqwest
   client it also honors the per-request `timeout`, for a ureq agent the timeout
   defers to the agent. Proxy-env and TLS defer to the injected client.
 - Non-success status => a structured status variant (`NotFound` / `Unauthorized` /
-  `HttpStatus`), identically on both clients; transport failure => `Error::Transport`.
+  `RateLimited` / `HttpStatus`), identically on **all three** client lanes -- default ureq
+  agent, injected ureq agent (via a per-request `http_status_as_error(false)` override,
+  `http_client/ureq.rs:142-149`), and reqwest; transport failure => `Error::Transport`. See
+  `ref-errors.md` for the full classification rule (429 always `RateLimited`; 403 on a spent
+  quota or a usable `Retry-After`).
 - Injected clients are `Arc<dyn HttpClient>` and reused across paginated pages.
 - s3 feeds quick-xml from the streaming `body_buffered()` reader, not a fully
   buffered `text()` String.
 
 ## Tests
 
-- `backends/mod.rs` retry/backoff unit tests: zero-budget attempts once,
+- `backends/mod.rs` retry/backoff unit tests (`mod tests`): zero-budget attempts once,
   single-retry boundary, exponential-and-capped sequence, in-loop climb to cap,
-  later-attempt success, async sibling (`backends/mod.rs:329-530`).
+  later-attempt success, async sibling. The
+  `RateLimited` short-circuit: `retry_does_not_retry_a_rate_limited_error`,
+  `retry_still_consumes_the_budget_for_a_non_rate_limited_error`,
+  `retry_async_does_not_retry_a_rate_limited_error`,
+  `retry_async_still_consumes_the_budget_for_a_non_rate_limited_error`.
 - `backends/github.rs`: `retries_recover_from_transient_failures`,
   `retries_are_exhausted_and_then_error`, `retries=1` boundary, timeout honored,
   pagination follows `Link` (`github.rs:1260-1364`, `764-833`).
@@ -242,7 +281,11 @@ status variants.
   wins, valid-then-invalid keeps the valid header.
 - `http_client/{reqwest,ureq}.rs`: per-client status-mapping tests, exercised
   through the trait `get` method; `build_with_certs_rejects_non_pem` for the
-  certificate path.
+  certificate path. `http_client/ureq.rs` additionally pins the injected-agent
+  classification gap closure: `injected_agent_sees_rate_limit_headers`,
+  `injected_agent_with_status_error_disabled_sees_rate_limit_headers`,
+  `injected_agent_no_status_error_falls_through_to_is_success_check`,
+  `default_agent_path_maps_statuses_identically_to_injected`.
 - `backends/github.rs`: `injected_fake_http_client_drives_a_backend_through_the_trait`
   (a `FakeClient` test double injected via `.http_client(Arc::new(...))` records
   the URL and returns a canned `Box<dyn HttpResponse>`), and

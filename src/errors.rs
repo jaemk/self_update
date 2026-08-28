@@ -71,6 +71,10 @@ pub enum Error {
     /// A request completed and returned HTTP 401 or 403 (not authorized).
     ///
     /// `status` is the exact HTTP status code (401 or 403). `url` is the request URL.
+    ///
+    /// Not every 403 lands here: a 403 whose headers report a spent quota or ask for a
+    /// `Retry-After` is classified as [`RateLimited`](Error::RateLimited) instead, so code that
+    /// matched `Unauthorized { status: 403, .. }` to detect rate limiting must match that variant.
     #[non_exhaustive]
     Unauthorized {
         /// The HTTP status code (401 or 403).
@@ -78,9 +82,71 @@ pub enum Error {
         /// The URL whose response was this status.
         url: String,
     },
+    /// A request was rejected because the caller's request quota is exhausted.
+    ///
+    /// Distinguished from [`Unauthorized`](Error::Unauthorized) so a caller can tell "wait for the
+    /// window to reset, or set a token" from "these credentials are wrong": the forges answer a
+    /// rate-limited request with the same 403 they use for a bad credential, and only the
+    /// quota headers separate the two. A response is classified here when it is a 429 (RFC 6585
+    /// defines that status as rate limiting), or a 403 carrying a zero remaining-quota header
+    /// (`x-ratelimit-remaining: 0`, or gitlab's `RateLimit-Remaining: 0`) or a usable
+    /// `Retry-After` (GitHub's *secondary* rate limit answers 403 + `Retry-After` while
+    /// `x-ratelimit-remaining` is still nonzero).
+    ///
+    /// The most common cause is the unauthenticated GitHub budget of 60 requests/hour, which is
+    /// counted **per source IP** and so is pooled across everyone behind a shared egress IP (a
+    /// NAT'd corporate network). Setting a token moves the count to the token's own 5000/hour
+    /// budget; see `auth_token_from_env()` on the backend builders.
+    ///
+    /// Retrying immediately only consumes more quota — back off by
+    /// [`rate_limit_delay()`](Error::rate_limit_delay), or check less often (see
+    /// [`UpdateCheckGuard`](crate::check_interval::UpdateCheckGuard)).
+    ///
+    /// **This classification is derived from untrusted response headers.** A server (or anything
+    /// on the path able to shape the response) chooses the status and the quota headers, so
+    /// receiving `RateLimited` is *not* proof that the credential in use is valid: a hostile or
+    /// misconfigured endpoint can present a genuine authorization failure as a rate limit. Treat
+    /// it as a hint for back-off, never as an authentication result.
+    ///
+    /// This variant is `#[non_exhaustive]`, so it cannot be built with a struct literal from
+    /// outside this crate. A downstream consumer that needs one — for example to exercise their
+    /// own back-off handler against a synthetic response — constructs it through
+    /// [`Error::http_status_error_with_headers`], which is the only public entry point that
+    /// produces this variant.
+    #[non_exhaustive]
+    RateLimited {
+        /// The HTTP status code (403 or 429).
+        status: u16,
+        /// The URL whose response was this status.
+        url: String,
+        /// When the quota window resets, from the response's `x-ratelimit-reset` /
+        /// `RateLimit-Reset` header (a unix timestamp); `None` when absent or unparseable.
+        ///
+        /// This is a **server-supplied absolute instant** that is only meaningful when compared
+        /// against the *local* clock, so client clock skew flows straight into any wait derived
+        /// from it (a client running behind the server sees a longer wait, one running ahead sees
+        /// a shorter one or none at all). Values more than 24h in the future are rejected as
+        /// `None`; see [`rate_limit_delay()`](Error::rate_limit_delay).
+        reset_at: Option<std::time::SystemTime>,
+        /// The delay requested by the response's `Retry-After` header; `None` when absent. Only
+        /// the delta-seconds form is parsed — the HTTP-date form yields `None`.
+        ///
+        /// Server-supplied, and therefore capped: a delay above 24h is rejected as `None` rather
+        /// than carried through, so a hostile `Retry-After` cannot park a caller (and with it a
+        /// security-update channel) indefinitely. A delay of exactly zero is also `None`: it is
+        /// treated as no signal at all rather than "wait zero seconds", so that a bare 403 whose
+        /// only rate-limit header is a literal `Retry-After: 0` stays
+        /// [`Unauthorized`](Error::Unauthorized) instead of a `RateLimited` with a zero-second wait.
+        retry_after: Option<std::time::Duration>,
+    },
     /// A request completed and returned a non-2xx status other than 404, 401, or 403.
     ///
     /// `status` is the HTTP status code. `url` is the request URL.
+    ///
+    /// 429 never lands here: it is always [`RateLimited`](Error::RateLimited), with or without
+    /// quota headers, from either constructor
+    /// ([`http_status_error`](Error::http_status_error) and
+    /// [`http_status_error_with_headers`](Error::http_status_error_with_headers)).
     #[non_exhaustive]
     HttpStatus {
         /// The HTTP status code.
@@ -302,23 +368,61 @@ pub enum Error {
 
 impl Error {
     /// The HTTP status code if this error came from a completed non-2xx response
-    /// (`NotFound` => 404, `Unauthorized`/`HttpStatus` => their code); `None` otherwise.
+    /// (`NotFound` => 404, `Unauthorized`/`RateLimited`/`HttpStatus` => their code); `None`
+    /// otherwise.
     pub fn http_status(&self) -> Option<u16> {
         match self {
             Error::NotFound { .. } => Some(404),
             Error::Unauthorized { status, .. } => Some(*status),
+            Error::RateLimited { status, .. } => Some(*status),
             Error::HttpStatus { status, .. } => Some(*status),
             _ => None,
         }
     }
 
     /// The URL of the request that failed, for the HTTP error variants
-    /// (`NotFound`/`Unauthorized`/`HttpStatus`); `None` otherwise.
+    /// (`NotFound`/`Unauthorized`/`RateLimited`/`HttpStatus`); `None` otherwise.
     pub fn url(&self) -> Option<&str> {
         match self {
             Error::NotFound { url } => Some(url.as_str()),
             Error::Unauthorized { url, .. } => Some(url.as_str()),
+            Error::RateLimited { url, .. } => Some(url.as_str()),
             Error::HttpStatus { url, .. } => Some(url.as_str()),
+            _ => None,
+        }
+    }
+
+    /// How long to wait before retrying a [`RateLimited`](Error::RateLimited) request, measured
+    /// from *now*; `None` for every other variant.
+    ///
+    /// Prefers the server's explicit `Retry-After` delay and otherwise derives one from
+    /// `reset_at` minus the current time. `None` means "no wait is known, or the window has
+    /// already elapsed" — i.e. retry when you like, not "retry immediately is safe forever".
+    ///
+    /// Use this instead of reading the fields directly: neither one alone is the answer. On
+    /// GitHub's *primary* rate limit only `x-ratelimit-reset` is sent, so
+    /// `retry_after.unwrap_or_default()` sleeps zero and burns more quota; conversely
+    /// `reset_at.unwrap().duration_since(SystemTime::now()).unwrap()` panics once the window has
+    /// passed. Both server-supplied values are capped at 24h (see the field docs), and `reset_at`
+    /// is compared against the local clock, so client skew shifts the result.
+    ///
+    /// ```rust
+    /// # use self_update::Error;
+    /// # use std::time::Duration;
+    /// # let mut headers = self_update::http_client::HeaderMap::new();
+    /// # headers.insert("retry-after", "60".parse().unwrap());
+    /// let err = Error::http_status_error_with_headers(403, "https://api.example.com/x", &headers);
+    /// assert_eq!(err.rate_limit_delay(), Some(Duration::from_secs(60)));
+    /// ```
+    pub fn rate_limit_delay(&self) -> Option<std::time::Duration> {
+        match self {
+            Error::RateLimited {
+                reset_at,
+                retry_after,
+                ..
+            } => retry_after.or_else(|| {
+                reset_at.and_then(|at| at.duration_since(std::time::SystemTime::now()).ok())
+            }),
             _ => None,
         }
     }
@@ -372,9 +476,41 @@ impl Error {
     }
 
     /// Construct the HTTP status error for a completed non-2xx response: `NotFound` for 404,
-    /// `Unauthorized` for 401/403, else `HttpStatus`.
+    /// `Unauthorized` for 401/403, [`RateLimited`](Error::RateLimited) for 429, else `HttpStatus`.
+    ///
+    /// A 429 is a rate limit by RFC 6585 whether or not the response carried quota headers, so it
+    /// classifies as `RateLimited` here too -- with `reset_at` and `retry_after` both `None`, since
+    /// this form cannot see the headers that supply the wait
+    /// ([`rate_limit_delay()`](Error::rate_limit_delay) is then `None`: "no wait is known").
+    ///
+    /// A custom [`HttpClient`](crate::http_client::HttpClient) that has the response in hand should
+    /// call [`http_status_error_with_headers`](Error::http_status_error_with_headers) instead: it
+    /// recovers that wait, and it is the only form that can tell a spent-quota 403 (`RateLimited`)
+    /// from a credential failure (`Unauthorized`), which this form always reports as the latter.
     pub fn http_status_error(status: u16, url: impl Into<String>) -> Error {
         status_to_error(status, &url.into())
+    }
+
+    /// Header-aware [`http_status_error`](Error::http_status_error), for a custom
+    /// [`HttpClient`](crate::http_client::HttpClient) / [`AsyncHttpClient`](crate::http_client::AsyncHttpClient)
+    /// mapping a non-2xx response: a 429, or a 403 carrying a zero remaining-quota header
+    /// (`x-ratelimit-remaining` / `RateLimit-Remaining`) or a usable `Retry-After`, becomes
+    /// [`RateLimited`](Error::RateLimited), picking up the reset instant and `Retry-After` delay
+    /// when present; every other status classifies exactly as `http_status_error` does.
+    ///
+    /// ```rust
+    /// # use self_update::{Error, http_client::HeaderMap};
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+    /// let err = Error::http_status_error_with_headers(403, "https://api.example.com/x", &headers);
+    /// assert!(matches!(err, Error::RateLimited { status: 403, .. }));
+    /// ```
+    pub fn http_status_error_with_headers(
+        status: u16,
+        url: impl Into<String>,
+        headers: &crate::http_client::HeaderMap,
+    ) -> Error {
+        status_to_error_with_headers(status, &url.into(), headers)
     }
 
     /// Construct a [`Transport`](Error::Transport) error wrapping the underlying
@@ -439,6 +575,36 @@ impl std::fmt::Display for Error {
                 "UnauthorizedError: request to {} was not authorized (HTTP {})",
                 url, status
             ),
+            RateLimited {
+                status,
+                url,
+                retry_after,
+                ..
+            } => {
+                write!(
+                    f,
+                    "RateLimitedError: request to {} was rate limited (HTTP {})",
+                    url, status
+                )?;
+                // `Retry-After` is a requested back-off, not necessarily proof the quota is spent
+                // (GitHub's secondary rate limit answers 403 + `Retry-After` while the primary
+                // quota is still nonzero), so it gets its own wording rather than "quota resets".
+                // Absent that, the wait comes from `reset_at` via `rate_limit_delay` -- that
+                // accessor is the one implementation of the precedence, so the rendered countdown
+                // and a caller's programmatic back-off can never disagree.
+                match retry_after {
+                    Some(wait) => write!(f, "; retry in {}s", wait.as_secs())?,
+                    None => {
+                        if let Some(wait) = self.rate_limit_delay() {
+                            write!(f, "; quota resets in {}s", wait.as_secs())?;
+                        }
+                    }
+                }
+                write!(
+                    f,
+                    "; set an auth token to raise the limit, or check less often"
+                )
+            }
             HttpStatus { status, url } => write!(
                 f,
                 "HttpStatusError: request to {} failed with status {}",
@@ -660,9 +826,17 @@ impl From<time::error::ComponentRange> for Error {
     }
 }
 
-/// Map an HTTP status code and URL to the appropriate structured error variant.
+/// Map an HTTP status code and URL to the appropriate structured error variant, without seeing the
+/// response headers.
 ///
-/// 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`, else -> `Error::HttpStatus`.
+/// 404 -> `Error::NotFound`, 401/403 -> `Error::Unauthorized`, 429 -> `Error::RateLimited`,
+/// else -> `Error::HttpStatus`.
+///
+/// 429 is classified here, not only in [`classify_status`], because RFC 6585 defines the status
+/// itself as rate limiting: the headers only supply the *wait*, never the meaning, so a 429 with no
+/// headers in hand is still a rate limit (carrying `reset_at: None` / `retry_after: None`). 401/403
+/// deliberately stay [`Error::Unauthorized`] on this path: a 403 genuinely needs a header to tell a
+/// spent quota from a bad credential, which is the whole point of the separate variant.
 ///
 /// The URL is stored redacted (see [`redact_url`]) so an s3 presigned request URL does not carry a
 /// live `X-Amz-Signature` or the `X-Amz-Credential` access-key id into error messages, logs, or the
@@ -672,8 +846,138 @@ pub(crate) fn status_to_error(status: u16, url: &str) -> Error {
     match status {
         404 => Error::NotFound { url },
         401 | 403 => Error::Unauthorized { status, url },
+        429 => Error::RateLimited {
+            status,
+            url,
+            reset_at: None,
+            retry_after: None,
+        },
         _ => Error::HttpStatus { status, url },
     }
+}
+
+/// The rate-limit signals read off a response, as raw header strings.
+///
+/// Borrowed rather than parsed so [`classify_status`] is a pure function of the header text and can
+/// be exercised from synthetic values without a live response or a `HeaderMap`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RateLimitSignals<'a> {
+    /// `x-ratelimit-remaining` (github/gitea/gitee) or `RateLimit-Remaining` (gitlab).
+    pub(crate) remaining: Option<&'a str>,
+    /// `x-ratelimit-reset` / `RateLimit-Reset`: the unix timestamp at which the quota resets.
+    pub(crate) reset: Option<&'a str>,
+    /// `Retry-After`: the delay the server asks the client to wait.
+    pub(crate) retry_after: Option<&'a str>,
+}
+
+/// The ceiling applied to every server-supplied wait (`Retry-After`, and `reset_at` measured from
+/// now): 24 hours.
+///
+/// These values are attacker-controlled — anything able to shape the response picks them — and the
+/// documented use for them is "sleep this long before retrying", so an unbounded value is a way to
+/// switch off a caller's update channel (and with it its security updates) permanently. A wait past
+/// the ceiling is treated as absent (`None`) rather than clamped down to the ceiling, so a caller
+/// falls back to its own policy instead of trusting a nonsense number. 24h is comfortably above any
+/// real forge window (GitHub's is an hour) while staying well short of "indefinitely".
+const MAX_RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Map a status + its rate-limit headers to an error variant.
+///
+/// - **429** is always [`Error::RateLimited`]: RFC 6585 defines the status as rate limiting, and a
+///   bare 429 with no quota headers at all is what proxies, CDNs, and self-hosted gitea return.
+///   The header-blind [`status_to_error`] classifies it the same way (this path only adds the
+///   `reset_at` / `retry_after` wait fields).
+/// - **403** is [`Error::RateLimited`] when the response reports a spent quota
+///   (remaining-quota header parsing to `0`) *or* supplies a usable `Retry-After`. The latter is
+///   GitHub's *secondary* rate limit, which answers 403 + `Retry-After` while
+///   `x-ratelimit-remaining` is still nonzero. A bare 403 with neither signal is a genuine
+///   authorization failure and stays [`Error::Unauthorized`]. A `Retry-After: 0` does not count as
+///   "usable" ([`parse_retry_after`] treats a zero delay as `None`), so a 403 with no other signal
+///   stays `Unauthorized` too, rather than becoming a `RateLimited` with a zero-second wait.
+/// - Every other status is untouched by the quota headers and falls through to
+///   [`status_to_error`].
+pub(crate) fn classify_status(status: u16, url: &str, signals: RateLimitSignals<'_>) -> Error {
+    let quota_spent = signals
+        .remaining
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|remaining| remaining == 0);
+    // Parsed up front so the 403 decision keys on the same value the variant carries: a
+    // `Retry-After` rejected by the clamp is no signal at all.
+    let retry_after = signals.retry_after.and_then(parse_retry_after);
+    let rate_limited = match status {
+        429 => true,
+        403 => quota_spent || retry_after.is_some(),
+        _ => false,
+    };
+    if rate_limited {
+        return Error::RateLimited {
+            status,
+            url: redact_url(url),
+            reset_at: signals.reset.and_then(parse_reset_epoch),
+            retry_after,
+        };
+    }
+    status_to_error(status, url)
+}
+
+/// Parse an `x-ratelimit-reset` / `RateLimit-Reset` value (unix timestamp in seconds) into an
+/// instant. `None` for a non-numeric value, one too large to represent, or one further out than
+/// [`MAX_RATE_LIMIT_WAIT`] from now. An instant in the past is kept as-is (it renders no wait).
+fn parse_reset_epoch(value: &str) -> Option<std::time::SystemTime> {
+    let secs: u64 = value.trim().parse().ok()?;
+    let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))?;
+    match at.duration_since(std::time::SystemTime::now()) {
+        Ok(wait) if wait > MAX_RATE_LIMIT_WAIT => None,
+        _ => Some(at),
+    }
+}
+
+/// Parse a `Retry-After` value. Only the delta-seconds form is supported; the HTTP-date form
+/// returns `None` rather than pulling in a date parser (the reset header already carries an
+/// absolute instant). A delay above [`MAX_RATE_LIMIT_WAIT`] is also `None`.
+///
+/// A **zero** delay is also `None`, not `Some(Duration::ZERO)`: `classify_status`'s 403 branch
+/// keys on `retry_after.is_some()`, so a literal `Retry-After: 0` would otherwise promote a bare
+/// authorization failure to `Error::RateLimited` carrying a zero-second wait, and a caller
+/// following this crate's own documented sleep-then-continue pattern would spin in a tight loop
+/// against the server. Treating "wait zero seconds" as "no wait was actually communicated" keeps
+/// that 403 as `Error::Unauthorized`. A 429 is unaffected: `classify_status` classifies every 429
+/// as rate limiting on the status code alone, regardless of `retry_after`.
+fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+    let delay = std::time::Duration::from_secs(value.trim().parse().ok()?);
+    (!delay.is_zero() && delay <= MAX_RATE_LIMIT_WAIT).then_some(delay)
+}
+
+/// [`status_to_error`] with the response's headers in hand, so a rate-limited response is
+/// distinguished from an authorization failure. Used by every built-in HTTP client on the non-2xx
+/// path. `HeaderMap` lookups are case-insensitive, so one lookup key covers every casing of a given
+/// header name (gitlab's `RateLimit-Remaining` matches `ratelimit-remaining`); the *differently
+/// named* github/gitlab headers are covered by the explicit `.or_else` fallbacks below.
+///
+/// The un-prefixed `ratelimit-reset` fallback is read under the same assumption as
+/// `x-ratelimit-reset`: a unix-epoch timestamp, per [`parse_reset_epoch`]. That holds for every
+/// forge this crate talks to (gitlab sends unix time under this exact spelling), but
+/// draft-ietf-httpapi-ratelimit-headers defines the un-prefixed `RateLimit-Reset` as
+/// *delta-seconds from now*, not an absolute epoch. A server following that draft would have its
+/// value parsed as an epoch second in 1970, which is always in the past, so `parse_reset_epoch`
+/// would not reject it outright but `rate_limit_delay()` would silently derive no wait from it
+/// (a past instant yields no duration). No supported forge exhibits this, so the fallback is not
+/// changed here; this is only a warning for a future backend that speaks the draft dialect.
+pub(crate) fn status_to_error_with_headers(
+    status: u16,
+    url: &str,
+    headers: &http::HeaderMap,
+) -> Error {
+    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    classify_status(
+        status,
+        url,
+        RateLimitSignals {
+            remaining: get("x-ratelimit-remaining").or_else(|| get("ratelimit-remaining")),
+            reset: get("x-ratelimit-reset").or_else(|| get("ratelimit-reset")),
+            retry_after: get("retry-after"),
+        },
+    )
 }
 
 /// Redact sensitive query-parameter values from a URL for display/logging. Blanks the value of any
@@ -1007,6 +1311,819 @@ mod tests {
         );
     }
 
+    /// Build the rate-limit signals a response would carry, for the classification tests.
+    fn signals<'a>(
+        remaining: Option<&'a str>,
+        reset: Option<&'a str>,
+        retry_after: Option<&'a str>,
+    ) -> super::RateLimitSignals<'a> {
+        super::RateLimitSignals {
+            remaining,
+            reset,
+            retry_after,
+        }
+    }
+
+    // AUTH-2-2: a 403 carrying a spent quota (`x-ratelimit-remaining: 0`) is rate limiting, not an
+    // authorization failure. The reset header is parsed into an absolute instant and `Retry-After`
+    // into a delay, so a caller can back off past the window instead of guessing.
+    #[test]
+    fn classify_status_maps_a_spent_quota_403_to_rate_limited() {
+        let err = super::classify_status(
+            403,
+            "https://api.github.com/repos/o/r/releases/latest",
+            signals(Some("0"), Some("1780000000"), Some("60")),
+        );
+        let Error::RateLimited {
+            status,
+            url,
+            reset_at,
+            retry_after,
+        } = err
+        else {
+            panic!("a 403 with remaining=0 must classify as RateLimited, got {err:?}");
+        };
+        assert_eq!(status, 403);
+        assert_eq!(url, "https://api.github.com/repos/o/r/releases/latest");
+        assert_eq!(
+            reset_at,
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000)),
+            "x-ratelimit-reset must parse as a unix timestamp"
+        );
+        assert_eq!(retry_after, Some(std::time::Duration::from_secs(60)));
+    }
+
+    // The same 403 WITHOUT the quota headers is a genuine credential failure and must keep its
+    // historical `Unauthorized` classification -- this is the distinction the variant exists for.
+    #[test]
+    fn classify_status_keeps_a_plain_403_unauthorized() {
+        let err = super::classify_status(403, "https://example.com/r", signals(None, None, None));
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a 403 with no rate-limit headers must stay Unauthorized, got {err:?}"
+        );
+    }
+
+    // Quota remaining but not exhausted, and no `Retry-After` asking the client to back off: the
+    // 403 is about *this* request's credentials, not the budget, so it stays `Unauthorized`.
+    #[test]
+    fn classify_status_keeps_403_unauthorized_when_quota_remains() {
+        let err = super::classify_status(
+            403,
+            "https://example.com/r",
+            signals(Some("57"), Some("1780000000"), None),
+        );
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a nonzero remaining quota must not classify as RateLimited, got {err:?}"
+        );
+    }
+
+    // A 429 with a spent quota is rate limiting too. Gitlab spells the header `RateLimit-Remaining`
+    // (no `x-` prefix); `status_to_error_with_headers` maps both spellings onto `remaining`.
+    #[test]
+    fn classify_status_maps_a_spent_quota_429_to_rate_limited() {
+        let err = super::classify_status(
+            429,
+            "https://gitlab.com/api/v4/x",
+            signals(Some("0"), None, None),
+        );
+        assert!(
+            matches!(err, Error::RateLimited { status: 429, .. }),
+            "a 429 with remaining=0 must classify as RateLimited, got {err:?}"
+        );
+    }
+
+    // RFC 6585 defines 429 as rate limiting, so the status alone is enough -- proxies, CDNs and
+    // self-hosted gitea all return a bare 429 with no quota headers at all. Classifying that as the
+    // catch-all `HttpStatus` (the pre-fix behavior) hid the one case a caller can act on.
+    #[test]
+    fn classify_status_maps_a_bare_429_to_rate_limited() {
+        let err = super::classify_status(429, "https://example.com/r", signals(None, None, None));
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    reset_at: None,
+                    retry_after: None,
+                    ..
+                }
+            ),
+            "a 429 must classify as RateLimited even with no quota headers, got {err:?}"
+        );
+    }
+
+    // A 429 that carries only a `Retry-After` is still rate limiting, and the delay is picked up.
+    #[test]
+    fn classify_status_maps_a_429_with_only_retry_after_to_rate_limited() {
+        let err = super::classify_status(
+            429,
+            "https://example.com/r",
+            signals(None, None, Some("30")),
+        );
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    retry_after: Some(d),
+                    ..
+                } if d == std::time::Duration::from_secs(30)
+            ),
+            "a 429 with Retry-After must classify as RateLimited carrying the delay, got {err:?}"
+        );
+    }
+
+    // GitHub's *secondary* rate limit answers 403 + `Retry-After` while `x-ratelimit-remaining` is
+    // still NONZERO. Keying only on a spent quota misfiled that as `Unauthorized`, i.e. "your token
+    // is wrong" for a caller who merely needs to wait.
+    #[test]
+    fn classify_status_maps_a_403_with_retry_after_to_rate_limited() {
+        let err = super::classify_status(
+            403,
+            "https://api.github.com/repos/o/r/releases",
+            signals(Some("4999"), None, Some("60")),
+        );
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    retry_after: Some(d),
+                    ..
+                } if d == std::time::Duration::from_secs(60)
+            ),
+            "a 403 with Retry-After must classify as RateLimited, got {err:?}"
+        );
+    }
+
+    // The other 403 signal, unchanged: a spent quota with no `Retry-After` at all.
+    #[test]
+    fn classify_status_maps_a_403_with_spent_quota_and_no_retry_after_to_rate_limited() {
+        let err = super::classify_status(
+            403,
+            "https://api.github.com/repos/o/r/releases",
+            signals(Some("0"), None, None),
+        );
+        assert!(
+            matches!(err, Error::RateLimited { status: 403, .. }),
+            "a 403 with remaining=0 must classify as RateLimited, got {err:?}"
+        );
+    }
+
+    // Only 403/429 consult the quota headers: a 404 carrying a full set of rate-limit headers --
+    // including the newly-honored `Retry-After` -- is still a missing resource.
+    #[test]
+    fn classify_status_ignores_quota_headers_on_a_404() {
+        let err = super::classify_status(
+            404,
+            "https://example.com/r",
+            signals(Some("0"), Some("1780000000"), Some("60")),
+        );
+        assert!(
+            matches!(err, Error::NotFound { .. }),
+            "a 404 must stay NotFound regardless of quota headers, got {err:?}"
+        );
+    }
+
+    // A spent quota reported on an unrelated status (e.g. 404) must not be re-classified: only
+    // 403/429 are rate-limit statuses.
+    #[test]
+    fn classify_status_ignores_quota_headers_on_other_statuses() {
+        let err =
+            super::classify_status(404, "https://example.com/r", signals(Some("0"), None, None));
+        assert!(
+            matches!(err, Error::NotFound { .. }),
+            "a 404 must stay NotFound regardless of quota headers, got {err:?}"
+        );
+    }
+
+    // Unparseable header values degrade gracefully: the classification still fires off `remaining`,
+    // and the fields that could not be parsed are `None` rather than a panic or a bogus instant.
+    // `Retry-After` also accepts an HTTP-date form, which is deliberately not parsed.
+    #[test]
+    fn classify_status_tolerates_unparseable_reset_and_retry_after() {
+        let err = super::classify_status(
+            403,
+            "https://example.com/r",
+            signals(
+                Some("0"),
+                Some("not-a-number"),
+                Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+            ),
+        );
+        let Error::RateLimited {
+            reset_at,
+            retry_after,
+            ..
+        } = err
+        else {
+            panic!("expected RateLimited, got {err:?}");
+        };
+        assert_eq!(
+            reset_at, None,
+            "a non-numeric reset must not yield an instant"
+        );
+        assert_eq!(
+            retry_after, None,
+            "the HTTP-date form of Retry-After is not parsed"
+        );
+    }
+
+    // The header-reading wrapper: `HeaderMap` matches a name case-insensitively, which is what lets
+    // gitlab's `RateLimit-Remaining` be found under the `ratelimit-remaining` lookup key; the
+    // *different* github and gitlab names are bridged by the explicit `.or_else` fallback chain.
+    // Both spellings must land on the same signal.
+    #[test]
+    fn status_to_error_with_headers_reads_both_header_spellings() {
+        let mut github = http::HeaderMap::new();
+        github.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        github.insert("x-ratelimit-reset", "1780000000".parse().unwrap());
+        assert!(
+            matches!(
+                super::status_to_error_with_headers(403, "https://api.github.com/x", &github),
+                Error::RateLimited {
+                    status: 403,
+                    reset_at: Some(_),
+                    ..
+                }
+            ),
+            "the x-ratelimit-* spelling must classify as RateLimited"
+        );
+
+        let mut gitlab = http::HeaderMap::new();
+        gitlab.insert("RateLimit-Remaining", "0".parse().unwrap());
+        assert!(
+            matches!(
+                super::status_to_error_with_headers(429, "https://gitlab.com/x", &gitlab),
+                Error::RateLimited { status: 429, .. }
+            ),
+            "the un-prefixed gitlab spelling must classify as RateLimited"
+        );
+
+        assert!(
+            matches!(
+                super::status_to_error_with_headers(
+                    403,
+                    "https://example.com/x",
+                    &http::HeaderMap::new()
+                ),
+                Error::Unauthorized { status: 403, .. }
+            ),
+            "a header-less 403 must stay Unauthorized"
+        );
+    }
+
+    // The URL stored on a `RateLimited` is redacted like every other HTTP variant's, so a presigned
+    // URL's signature cannot leak through `url()` or the Display string.
+    #[test]
+    fn classify_status_redacts_the_rate_limited_url() {
+        let err = super::classify_status(
+            429,
+            "https://bucket.s3.amazonaws.com/x?X-Amz-Signature=secretsig",
+            signals(Some("0"), None, None),
+        );
+        assert!(
+            !err.url().unwrap().contains("secretsig"),
+            "the RateLimited url must be redacted"
+        );
+    }
+
+    // AUTH-2-3: `http_status()` / `url()` work for `RateLimited` exactly as for the other HTTP
+    // variants, so a caller keying on status/URL does not need to learn a new accessor.
+    #[test]
+    fn http_status_and_url_helpers_cover_rate_limited() {
+        let err = Error::RateLimited {
+            status: 429,
+            url: "https://example.com/r".to_string(),
+            reset_at: None,
+            retry_after: None,
+        };
+        assert_eq!(err.http_status(), Some(429));
+        assert_eq!(err.url(), Some("https://example.com/r"));
+        assert!(
+            err.source().is_none(),
+            "RateLimited carries no chained source"
+        );
+    }
+
+    // AUTH-2-4: the Display string must name rate limiting and the token remedy rather than reading
+    // as an auth failure, and must surface the wait when the response supplied one.
+    #[test]
+    fn rate_limited_display_names_the_limit_and_the_remedy() {
+        let err = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/repos/o/r/releases/latest".to_string(),
+            reset_at: None,
+            retry_after: Some(std::time::Duration::from_secs(90)),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("RateLimitedError:"),
+            "the Display string must identify the variant, got: {msg}"
+        );
+        assert!(
+            msg.contains("rate limited"),
+            "the message must name rate limiting, not authorization, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not authorized"),
+            "the message must not read as an auth failure, got: {msg}"
+        );
+        assert!(
+            msg.contains("retry in 90s"),
+            "the message must surface the wait, got: {msg}"
+        );
+        assert!(
+            msg.contains("auth token"),
+            "the message must name the token remedy, got: {msg}"
+        );
+    }
+
+    // A `Retry-After`-sourced wait is a requested back-off, not proof the quota is exhausted
+    // (GitHub's secondary rate limit answers 403 + `Retry-After` while the primary quota is still
+    // nonzero), so it must not be worded as "quota resets in Ns".
+    #[test]
+    fn rate_limited_display_does_not_call_a_retry_after_wait_a_quota_reset() {
+        let msg = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/x".to_string(),
+            reset_at: None,
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        }
+        .to_string();
+        assert!(
+            !msg.contains("quota resets"),
+            "a Retry-After-sourced wait must not be worded as a quota reset, got: {msg}"
+        );
+    }
+
+    // A wait derived from `reset_at` (no `Retry-After` in hand) IS a quota-window reset, so it
+    // keeps the "quota resets in Ns" wording -- only the `Retry-After` path changed under B10.
+    #[test]
+    fn rate_limited_display_still_calls_a_reset_at_wait_a_quota_reset() {
+        let msg = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/x".to_string(),
+            reset_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(600)),
+            retry_after: None,
+        }
+        .to_string();
+        assert!(
+            msg.contains("quota resets in"),
+            "a reset_at-derived wait must still read as a quota reset, got: {msg}"
+        );
+        assert!(
+            !msg.contains("retry in"),
+            "a reset_at-derived wait must not use the Retry-After wording, got: {msg}"
+        );
+    }
+
+    // B10: when BOTH fields are present the Display branches on `retry_after` alone (it is
+    // matched directly, not routed through `rate_limit_delay()`), so it must render "retry in Ns"
+    // using the `Retry-After` value verbatim and must NOT fall back to the `reset_at`-derived
+    // wording or value, even though `rate_limit_delay()` would resolve to the same number here.
+    #[test]
+    fn rate_limited_display_prefers_retry_after_wording_when_both_fields_are_present() {
+        let msg = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/x".to_string(),
+            // A reset_at far enough out that, if the Display mistakenly rendered a reset-derived
+            // wait instead of the Retry-After value, the two numbers would visibly disagree.
+            reset_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        }
+        .to_string();
+        assert!(
+            msg.contains("retry in 30s"),
+            "with both fields present the Retry-After value must be rendered, got: {msg}"
+        );
+        assert!(
+            !msg.contains("quota resets"),
+            "with both fields present the message must not also/instead read as a quota reset, \
+             got: {msg}"
+        );
+        assert!(
+            !msg.contains("3600s"),
+            "the reset_at-derived duration must never leak into the message, got: {msg}"
+        );
+    }
+
+    // With no wait information at all the message still renders (no dangling clause), and an
+    // already-elapsed reset instant does not produce a bogus countdown.
+    #[test]
+    fn rate_limited_display_omits_the_wait_when_unknown_or_elapsed() {
+        let no_info = Error::RateLimited {
+            status: 403,
+            url: "https://example.com/r".to_string(),
+            reset_at: None,
+            retry_after: None,
+        }
+        .to_string();
+        assert!(
+            !no_info.contains("resets in"),
+            "with no reset info the wait clause must be omitted, got: {no_info}"
+        );
+        assert!(
+            no_info.ends_with("check less often"),
+            "the message must still end with the remedy, got: {no_info}"
+        );
+
+        let elapsed = Error::RateLimited {
+            status: 403,
+            url: "https://example.com/r".to_string(),
+            // An instant well in the past: `duration_since(now)` errors, so no clause is rendered.
+            reset_at: Some(std::time::UNIX_EPOCH),
+            retry_after: None,
+        }
+        .to_string();
+        assert!(
+            !elapsed.contains("resets in"),
+            "an elapsed reset window must not render a countdown, got: {elapsed}"
+        );
+    }
+
+    // The Display string's clauses are separated consistently (`; `), not a comma for the wait and
+    // a colon for the remedy. Pinned here so the whole rendered shape lives in one place.
+    #[test]
+    fn rate_limited_display_separates_its_clauses_consistently() {
+        let msg = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/x".to_string(),
+            reset_at: None,
+            retry_after: Some(std::time::Duration::from_secs(90)),
+        }
+        .to_string();
+        assert_eq!(
+            msg,
+            "RateLimitedError: request to https://api.github.com/x was rate limited (HTTP 403); \
+             retry in 90s; set an auth token to raise the limit, or check less often",
+            "the RateLimited Display shape changed"
+        );
+    }
+
+    /// The `x-ratelimit-reset` header value for a window resetting `secs_from_now` seconds from
+    /// now. `now` is truncated to a whole second, so the wait the parser actually computes is at
+    /// most `secs_from_now` — a "exactly at the ceiling" case can never tip over it.
+    fn reset_header(secs_from_now: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after the unix epoch")
+            .as_secs();
+        (now + secs_from_now).to_string()
+    }
+
+    // A `reset_at` inside the 24h ceiling is kept, and so is one in the *past* (the clamp only
+    // rejects absurd futures; an elapsed window is already handled by yielding no wait).
+    #[test]
+    fn parse_reset_epoch_keeps_a_normal_and_a_past_window() {
+        let soon = reset_header(600);
+        assert_eq!(
+            super::parse_reset_epoch(&soon),
+            Some(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(soon.parse::<u64>().unwrap())
+            ),
+            "a window 10 minutes out must be kept as-is"
+        );
+        assert_eq!(
+            super::parse_reset_epoch("1"),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+            "a reset instant in the past must not be rejected by the future-facing clamp"
+        );
+    }
+
+    // Exactly at the 24h ceiling is still accepted: the clamp rejects "further out than", not
+    // "at".
+    #[test]
+    fn parse_reset_epoch_keeps_a_window_exactly_at_the_ceiling() {
+        assert!(
+            super::parse_reset_epoch(&reset_header(24 * 60 * 60)).is_some(),
+            "a reset exactly 24h out must be honored"
+        );
+    }
+
+    // Past the ceiling the value is dropped rather than carried: a server that claims the quota
+    // resets in a week would otherwise park the caller for a week. (The header is built two
+    // seconds past the ceiling so truncating `now` to a whole second cannot pull it back under.)
+    #[test]
+    fn parse_reset_epoch_rejects_a_window_past_the_ceiling() {
+        assert_eq!(
+            super::parse_reset_epoch(&reset_header(24 * 60 * 60 + 2)),
+            None,
+            "a reset more than 24h out must be discarded"
+        );
+        assert_eq!(
+            super::parse_reset_epoch(&reset_header(30 * 24 * 60 * 60)),
+            None,
+            "a reset a month out must be discarded"
+        );
+    }
+
+    // The degenerate maximum: `u64::MAX` seconds since the epoch must not survive as an instant a
+    // caller would sleep until.
+    #[test]
+    fn parse_reset_epoch_rejects_the_u64_max_timestamp() {
+        assert_eq!(
+            super::parse_reset_epoch(&u64::MAX.to_string()),
+            None,
+            "a u64::MAX reset timestamp must not yield an instant"
+        );
+    }
+
+    // Malformed header text must degrade to `None`, never panic: empty, whitespace-only,
+    // non-numeric, a negative number (the field is a `u64` timestamp, so a leading `-` is simply
+    // unparseable rather than "before the epoch"), and a float.
+    #[test]
+    fn parse_reset_epoch_rejects_malformed_values() {
+        for bad in ["", "   ", "not-a-number", "-1", "1.5", "0x10"] {
+            assert_eq!(
+                super::parse_reset_epoch(bad),
+                None,
+                "malformed reset value {bad:?} must yield None, not a panic or a bogus instant"
+            );
+        }
+    }
+
+    // A `Retry-After` inside the ceiling is taken at face value.
+    #[test]
+    fn parse_retry_after_keeps_a_normal_delay() {
+        assert_eq!(
+            super::parse_retry_after("60"),
+            Some(std::time::Duration::from_secs(60)),
+            "a 60s Retry-After must be kept"
+        );
+    }
+
+    // The floor is "zero is no signal", not "small is no signal": the smallest nonzero delay is
+    // the boundary directly above the one A4 carved out, and must still be honored as a real wait.
+    #[test]
+    fn parse_retry_after_keeps_the_smallest_nonzero_delay() {
+        assert_eq!(
+            super::parse_retry_after("1"),
+            Some(std::time::Duration::from_secs(1)),
+            "a 1s Retry-After is the boundary directly above the zero floor and must be kept"
+        );
+    }
+
+    // Surrounding whitespace is trimmed before parsing, matching `first_env_token`'s behavior on
+    // the analogous header-adjacent value elsewhere in the crate.
+    #[test]
+    fn parse_retry_after_trims_surrounding_whitespace() {
+        assert_eq!(
+            super::parse_retry_after(" 60 \t"),
+            Some(std::time::Duration::from_secs(60)),
+            "surrounding whitespace around a valid delay must be trimmed, not treated as unparseable"
+        );
+    }
+
+    // Malformed header text must degrade to `None`, never panic: empty, whitespace-only,
+    // non-numeric, a negative number (the field is a `u64` delay, so a leading `-` is simply
+    // unparseable), and a float. The HTTP-date form is covered separately by
+    // `classify_status_tolerates_unparseable_reset_and_retry_after`.
+    #[test]
+    fn parse_retry_after_rejects_malformed_values() {
+        for bad in ["", "   ", "not-a-number", "-1", "1.5", "0x10"] {
+            assert_eq!(
+                super::parse_retry_after(bad),
+                None,
+                "malformed Retry-After value {bad:?} must yield None, not a panic or a bogus delay"
+            );
+        }
+    }
+
+    // A4: a literal `Retry-After: 0` is no signal at all, not a zero-second wait. `classify_status`
+    // keys its 403 promotion on `retry_after.is_some()`, so `Some(Duration::ZERO)` here would turn a
+    // bare authorization failure into a `RateLimited` a caller's documented sleep-then-continue
+    // pattern would spin on forever.
+    #[test]
+    fn parse_retry_after_treats_a_zero_delay_as_no_signal() {
+        assert_eq!(
+            super::parse_retry_after("0"),
+            None,
+            "a zero-second Retry-After must not be carried through as Some(0)"
+        );
+    }
+
+    // Exactly 24h is the largest delay still honored; one second more is discarded.
+    #[test]
+    fn parse_retry_after_clamps_at_twenty_four_hours() {
+        assert_eq!(
+            super::parse_retry_after("86400"),
+            Some(std::time::Duration::from_secs(86_400)),
+            "a Retry-After exactly at the 24h ceiling must be honored"
+        );
+        assert_eq!(
+            super::parse_retry_after("86401"),
+            None,
+            "a Retry-After one second past the ceiling must be discarded"
+        );
+    }
+
+    // The attack this clamp exists for: `Retry-After: 18446744073709551615` is ~584 billion years,
+    // which would permanently disable a caller's (security) update channel if it were honored.
+    #[test]
+    fn parse_retry_after_rejects_the_u64_max_delay() {
+        assert_eq!(
+            super::parse_retry_after(&u64::MAX.to_string()),
+            None,
+            "a u64::MAX Retry-After must not yield a delay"
+        );
+    }
+
+    // The clamp is applied *before* the 403 decision, so an over-ceiling `Retry-After` is no signal
+    // at all: it must not promote a 403 to `RateLimited` while carrying `retry_after: None`.
+    #[test]
+    fn classify_status_ignores_an_over_ceiling_retry_after_on_a_403() {
+        let err = super::classify_status(
+            403,
+            "https://example.com/r",
+            signals(Some("4999"), None, Some(&u64::MAX.to_string())),
+        );
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "an unusable Retry-After must not promote a 403 to RateLimited, got {err:?}"
+        );
+    }
+
+    // A4: `Retry-After: 0` on a 403 with no other rate-limit signal is a genuine authorization
+    // failure, not a zero-wait rate limit. Before the fix this promoted to `RateLimited` with
+    // `rate_limit_delay() == Some(Duration::ZERO)`.
+    #[test]
+    fn classify_status_keeps_a_403_with_zero_retry_after_unauthorized() {
+        let err =
+            super::classify_status(403, "https://example.com/r", signals(None, None, Some("0")));
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a 403 with Retry-After: 0 and no spent-quota signal must stay Unauthorized, got {err:?}"
+        );
+    }
+
+    // The same 403 + zero `Retry-After`, but this time reported net of an already-spent quota:
+    // the spent-quota signal alone is still enough to classify as RateLimited, `retry_after` just
+    // carries no wait.
+    #[test]
+    fn classify_status_still_rate_limits_a_spent_quota_403_with_zero_retry_after() {
+        let err = super::classify_status(
+            403,
+            "https://example.com/r",
+            signals(Some("0"), None, Some("0")),
+        );
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 403,
+                    retry_after: None,
+                    ..
+                }
+            ),
+            "a spent quota must still classify as RateLimited even with Retry-After: 0, got {err:?}"
+        );
+    }
+
+    // `reset_at` is enrichment, never a promotion signal on its own: a 403 that supplies only a
+    // (perfectly valid, future) `x-ratelimit-reset` and neither a spent quota nor a `Retry-After`
+    // must stay `Unauthorized`, and the reset value must be dropped along with it (`status_to_error`
+    // carries no reset field). A regression that added `signals.reset.is_some()` to the 403
+    // promotion condition would turn every 403 that merely echoes a reset header into a rate limit.
+    #[test]
+    fn classify_status_keeps_a_403_unauthorized_when_only_reset_at_is_present() {
+        let err = super::classify_status(
+            403,
+            "https://example.com/r",
+            signals(None, Some(&reset_header(600)), None),
+        );
+        assert!(
+            matches!(err, Error::Unauthorized { status: 403, .. }),
+            "a 403 with only a reset_at header (no spent quota, no Retry-After) must stay \
+             Unauthorized, got {err:?}"
+        );
+    }
+
+    // A4 must not touch 429: RFC 6585 defines the status itself as rate limiting, independent of
+    // any header, so `Retry-After: 0` on a 429 stays RateLimited (just with no usable wait).
+    #[test]
+    fn classify_status_keeps_a_429_with_zero_retry_after_rate_limited() {
+        let err =
+            super::classify_status(429, "https://example.com/r", signals(None, None, Some("0")));
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    status: 429,
+                    retry_after: None,
+                    ..
+                }
+            ),
+            "a 429 must stay RateLimited regardless of Retry-After, got {err:?}"
+        );
+    }
+
+    // `rate_limit_delay` is the single implementation of the back-off precedence: the server's
+    // explicit `Retry-After` wins over a `reset_at`-derived wait when both are present.
+    #[test]
+    fn rate_limit_delay_prefers_retry_after_over_reset_at() {
+        let err = Error::RateLimited {
+            status: 403,
+            url: "https://example.com/r".to_string(),
+            reset_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        };
+        assert_eq!(
+            err.rate_limit_delay(),
+            Some(std::time::Duration::from_secs(30)),
+            "Retry-After must take precedence over the reset instant"
+        );
+    }
+
+    // With only a `Retry-After` the delay is that header, verbatim.
+    #[test]
+    fn rate_limit_delay_uses_retry_after_alone() {
+        let err = Error::RateLimited {
+            status: 429,
+            url: "https://example.com/r".to_string(),
+            reset_at: None,
+            retry_after: Some(std::time::Duration::from_secs(45)),
+        };
+        assert_eq!(
+            err.rate_limit_delay(),
+            Some(std::time::Duration::from_secs(45))
+        );
+    }
+
+    // GitHub's *primary* limit sends only `x-ratelimit-reset`, so the fallback matters: a caller
+    // reaching for `retry_after.unwrap_or_default()` would sleep zero and burn more quota.
+    #[test]
+    fn rate_limit_delay_derives_a_wait_from_a_future_reset_at() {
+        let err = Error::RateLimited {
+            status: 403,
+            url: "https://api.github.com/x".to_string(),
+            reset_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(600)),
+            retry_after: None,
+        };
+        let delay = err
+            .rate_limit_delay()
+            .expect("a future reset instant must yield a wait");
+        assert!(
+            delay <= std::time::Duration::from_secs(600)
+                && delay > std::time::Duration::from_secs(590),
+            "the wait must be measured from now, got {delay:?}"
+        );
+    }
+
+    // An already-elapsed window yields `None` rather than panicking the way
+    // `duration_since(now).unwrap()` would.
+    #[test]
+    fn rate_limit_delay_is_none_for_an_elapsed_reset_at() {
+        let err = Error::RateLimited {
+            status: 403,
+            url: "https://example.com/r".to_string(),
+            reset_at: Some(std::time::UNIX_EPOCH),
+            retry_after: None,
+        };
+        assert_eq!(
+            err.rate_limit_delay(),
+            None,
+            "an elapsed reset window must yield no wait, not a panic or a bogus duration"
+        );
+    }
+
+    // No signal at all: `None` means "nothing known", not "wait zero".
+    #[test]
+    fn rate_limit_delay_is_none_when_nothing_is_known() {
+        let err = Error::RateLimited {
+            status: 429,
+            url: "https://example.com/r".to_string(),
+            reset_at: None,
+            retry_after: None,
+        };
+        assert_eq!(err.rate_limit_delay(), None);
+    }
+
+    // Every other variant answers `None`, so a caller can call it unconditionally on an `Error`.
+    #[test]
+    fn rate_limit_delay_is_none_for_a_non_rate_limited_variant() {
+        assert_eq!(
+            Error::Unauthorized {
+                status: 403,
+                url: "https://example.com/r".to_string(),
+            }
+            .rate_limit_delay(),
+            None,
+            "Unauthorized carries no rate-limit wait"
+        );
+        assert_eq!(
+            Error::NotFound {
+                url: "https://example.com/r".to_string(),
+            }
+            .rate_limit_delay(),
+            None,
+            "NotFound carries no rate-limit wait"
+        );
+    }
+
     // http_status() returns Some(404) for NotFound
     #[test]
     fn http_status_helper_not_found() {
@@ -1108,6 +2225,51 @@ mod tests {
             "status 403 must map to Error::Unauthorized, got {:?}",
             e
         );
+    }
+
+    // The header-blind path used to disagree with `classify_status` about 429: it fell through to
+    // the `_ =>` arm and produced `HttpStatus { status: 429 }`, while the header-aware path (and the
+    // `HttpStatus` variant docs) said a 429 is ALWAYS `RateLimited`. Both could not be true for a
+    // downstream custom `HttpClient` calling `Error::http_status_error`, or for ureq's headerless
+    // `StatusCode` fallback arm. 429 means rate limiting by RFC 6585 regardless of headers, so this
+    // path classifies it too -- carrying no wait, since it cannot see the headers that supply one.
+    #[test]
+    fn status_to_error_maps_429_to_rate_limited_without_a_wait() {
+        let e = super::status_to_error(429, "https://example.com/r");
+        assert!(
+            matches!(
+                e,
+                Error::RateLimited {
+                    status: 429,
+                    ref url,
+                    reset_at: None,
+                    retry_after: None,
+                } if url == "https://example.com/r"
+            ),
+            "status 429 must map to Error::RateLimited with no wait fields, got {:?}",
+            e
+        );
+        assert_eq!(
+            e.rate_limit_delay(),
+            None,
+            "a header-blind 429 knows no wait, so rate_limit_delay must be None"
+        );
+        assert_eq!(e.http_status(), Some(429));
+    }
+
+    // The other half of the same boundary: only 429 moved. 401/403 stay `Unauthorized` on the
+    // header-blind path, because a 403 needs a header to tell a spent quota from a bad credential
+    // (that distinction is the whole reason `RateLimited` is a separate variant).
+    #[test]
+    fn status_to_error_keeps_401_and_403_unauthorized() {
+        assert!(matches!(
+            super::status_to_error(401, "https://example.com/r"),
+            Error::Unauthorized { status: 401, .. }
+        ));
+        assert!(matches!(
+            super::status_to_error(403, "https://example.com/r"),
+            Error::Unauthorized { status: 403, .. }
+        ));
     }
 
     #[test]

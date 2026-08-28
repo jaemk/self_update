@@ -3,6 +3,46 @@
 ## [unreleased]
 
 ### Added
+- `auth_token_from_env()` on the github/gitlab/gitea/gitee `Update` and `ReleaseList` builders
+  (eight builders in all): read the token from the backend's conventional environment variables
+  instead of plumbing `std::env::var` through the application. Reads `GH_TOKEN` then `GITHUB_TOKEN`
+  (the `gh` CLI's documented precedence), `GITLAB_TOKEN`, `GITEA_TOKEN`, `GITEE_TOKEN`, using the
+  first that is set and non-empty after trimming. An explicit `auth_token(..)` always wins, in
+  either call order: the environment is only a fallback that fills an unset token, so an ambient
+  `*_TOKEN` can never displace the credential the application provisioned. Opt-in: the crate never
+  reads the environment on its own, since the configured API base can be a self-hosted host. With
+  nothing set the call is a no-op and the request goes out unauthenticated, and it never clears a
+  token. `CI_JOB_TOKEN` is deliberately not read on gitlab, even though every GitLab CI job exports
+  it: this backend sends `Authorization: Bearer`, which is not GitLab's job-token mechanism (the
+  `JOB-TOKEN` header / `job_token` parameter), so reading it would turn a working anonymous fetch of
+  a public project into a 401/403 inside CI; pass it explicitly with `auth_token(..)` if you want
+  it. The variable set does not change with `api_base_url` / `host`; `gh` reads
+  `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for a GitHub Enterprise host and this crate does
+  not, so an enterprise base url still needs one of the variables above (or an explicit token).
+  ([#78](https://github.com/jaemk/self_update/issues/78))
+- `has_auth_token()` on the same eight builders: whether an authorization token is configured, from
+  either `auth_token(..)` or `auth_token_from_env()`. Reports presence only -- never validity, and
+  never the value -- so an application can answer "am I about to run authenticated?" without
+  reimplementing the environment-variable list.
+- `Error::RateLimited { status, url, reset_at, retry_after }`: a spent request quota is now
+  distinguished from a credential failure. A 429 is always rate limiting (with or without quota
+  headers); a 403 is rate limiting when it carries a zero remaining-quota header
+  (`x-ratelimit-remaining` / gitlab's `RateLimit-Remaining`) or a usable `Retry-After` (GitHub's
+  *secondary* rate limit, which answers 403 + `Retry-After` while the primary quota is still
+  nonzero). A 403 with neither stays `Error::Unauthorized`. Both server-supplied wait values are
+  clamped to a 24h ceiling and resolve to `None` beyond it. `http_status()` and `url()` cover the new
+  variant, and `Error::http_status_error_with_headers(status, url, &HeaderMap)` gives a custom
+  `HttpClient` the same classification (the header-blind `Error::http_status_error` cannot see the
+  quota headers and so never produces `RateLimited`). All three built-in client lanes -- reqwest,
+  ureq, and an injected `ureq::Agent` -- classify identically.
+  ([#78](https://github.com/jaemk/self_update/issues/78))
+- `Error::rate_limit_delay() -> Option<Duration>`: how long to wait before retrying a `RateLimited`
+  request, measured from now. Prefers the server's `Retry-After` and otherwise derives the wait from
+  `reset_at` minus the current time; `None` when the window has already elapsed or nothing is known.
+  This is the accessor to back off with: on GitHub's *primary* rate limit only `x-ratelimit-reset` is
+  sent, so reading the raw fields and calling `retry_after.unwrap_or_default()` sleeps zero and burns
+  more quota.
+
 - Directory-bundle installs (macOS `.app`): `bundle_path_in_archive(..)` names the bundle directory
   inside the release archive and selects bundle mode, where the whole tree replaces
   `bundle_install_path(..)` instead of one file replacing `bin_install_path`. The new bundle is
@@ -65,10 +105,18 @@
   `record_check()` stamps the current time via a write-to-temp-then-rename so a concurrent reader
   never sees a partial stamp. The caller owns the stamp-file path; it is a guard, not a scheduler,
   and pulls in no time/date dependency. ([#79](https://github.com/jaemk/self_update/issues/79))
+- Docs: an "Authentication" section in the crate docs covering both token setters, every backend's
+  environment variables, the explicit-token precedence rule, `has_auth_token()`, and the fact that
+  the variable set does not change with the configured host. Authentication is cross-backend, so it
+  is no longer buried under the rate-limit heading where only a github reader would find it.
+  ([#78](https://github.com/jaemk/self_update/issues/78))
 - Docs: a "GitHub rate limits" section in the crate docs covering GitHub's 60/hour (unauthenticated)
-  vs 5000/hour (authenticated) API limits, that a rate-limited response surfaces as
-  `Error::Unauthorized { status: 403, .. }`, and how to mitigate (a token, and checking less often
-  via `UpdateCheckGuard`). ([#78](https://github.com/jaemk/self_update/issues/78))
+  vs 5000/hour (authenticated) per-source-IP API limits, which responses classify as
+  `Error::RateLimited`, backing off with `rate_limit_delay()` (with a worked example), that the retry
+  loop short-circuits rather than spending the budget, and how to mitigate (a token, and checking
+  less often via `UpdateCheckGuard`). The "Custom HTTP client" section points a custom transport at
+  `Error::http_status_error_with_headers`, since the header-blind `Error::http_status_error` can
+  never report a rate limit. ([#78](https://github.com/jaemk/self_update/issues/78))
 - Docs: the Features section now names the exact `no HTTP client selected` compile error a
   client-less build (e.g. `default-features = false, features = ["rustls"]`) produces, and shows the
   fix (add a client, e.g. `features = ["ureq", "rustls", "github"]`).
@@ -94,6 +142,68 @@
   ([#121](https://github.com/jaemk/self_update/issues/121))
 
 ### Changed
+- **A rate-limited response no longer returns `Error::Unauthorized`.** A 429, a 403 whose headers
+  report a spent quota (`x-ratelimit-remaining: 0` / gitlab's `RateLimit-Remaining: 0`), or a 403
+  carrying a usable `Retry-After` now returns `Error::RateLimited` instead. `Error` is
+  `#[non_exhaustive]`, so this does not break compilation: code that matched
+  `Unauthorized { status: 403, .. }` to detect rate limiting (which the previous docs told users to
+  write) keeps compiling and silently stops matching, falling through to the wildcard arm. Migration:
+  match `Error::RateLimited { .. }` instead, and take the wait from `rate_limit_delay()` rather than
+  the fields.
+
+  ```rust
+  // before
+  Err(Error::Unauthorized { status: 403, .. }) => back_off(),
+  // after (write the variant with a trailing `..`; both wait fields are `Option`s)
+  Err(err @ Error::RateLimited { .. }) => match err.rate_limit_delay() {
+      Some(wait) => std::thread::sleep(wait),
+      None => reschedule(),
+  },
+  ```
+
+  A bare 403 with no quota signal is still `Error::Unauthorized`, so a genuine credential failure is
+  unchanged. ([#78](https://github.com/jaemk/self_update/issues/78))
+- `retry` / `retry_async` no longer retry a rate-limited request. An `Error::RateLimited` returns
+  immediately regardless of the configured `retries`, instead of spending the budget on a quota that
+  is already at zero (and, on GitHub's unauthenticated per-IP budget, shared with everyone behind the
+  same egress IP). Every other error still consumes the budget as before. The download path retries
+  through the same loop, so it short-circuits too.
+- Each backend `Update` / `ReleaseList` builder's `Debug` output redacts the authorization token,
+  rendering it as `"<token>"` instead of the value, so logging a builder no longer prints an ambient
+  CI credential. All other fields are still shown.
+- A credential passed via `request_header("Authorization", ..)` (or `PRIVATE-TOKEN`, `Cookie`, or
+  any header name ending in `-token`, case-insensitive) is now marked sensitive, so it is redacted
+  in a builder's `Debug` output and kept out of the underlying HTTP client's own header logging, the
+  same as a token set with `auth_token(..)`. Previously only the `auth_token` slot was redacted, so
+  a credential passed as a header printed verbatim.
+- `build()` logs a `log::warn!` when a token resolved from the environment would be sent to a host
+  other than the backend's canonical one (`api.github.com`, `gitlab.com`, `gitee.com`). The
+  environment variables are conventions of the backend's own service, so an application that exposes
+  its update url as configuration would otherwise hand `GITHUB_TOKEN` to an arbitrary host with no
+  signal. An explicitly-set token is the application's own decision and is never warned about. gitea
+  has no canonical host, so its rule is stricter: an env-sourced token is withheld at `build()`
+  rather than sent, and the request goes out anonymous, unless the configured host was acknowledged
+  by passing it to `allow_auth_host(..)` or by setting the token explicitly with `auth_token(..)`;
+  the warning still fires, naming the host and the remedy. github/gitlab/gitee are unchanged: an
+  env-sourced token to a non-canonical host still warns and is still sent. On every backend, a host
+  passed to `allow_auth_host` no longer produces that warning.
+- A blank (empty or all-whitespace) `auth_token(..)` is now treated as unset: it no longer blocks the
+  `auth_token_from_env()` fallback, no longer sends an empty `Authorization` header, and
+  `has_auth_token()` reports `false` for it.
+- `Error::http_status_error(429, url)` returns `Error::RateLimited` (with both wait fields `None`)
+  instead of `Error::HttpStatus`, so a custom `HttpClient` that has no headers to hand over still
+  reports a 429 as rate limiting. 429 does not need a header to mean "too many requests" (RFC 6585);
+  401/403 are unchanged on that path, since only a header distinguishes a spent quota from a
+  credential failure. Use `Error::http_status_error_with_headers` to get the full classification.
+- A `Retry-After: 0` is no longer treated as a rate-limit signal. A bare 403 carrying a zero
+  `Retry-After` and no quota header stays `Error::Unauthorized` instead of becoming a zero-wait
+  `Error::RateLimited`.
+- An injected `ureq::Agent` classifies a non-2xx response exactly like the crate-built agents. The
+  agent keeps ureq's default `http_status_as_error(true)`, whose `StatusCode` error carries no
+  headers, so that path could not see the quota headers; the client now applies a per-request
+  `http_status_as_error(false)` override, and all three client lanes (reqwest, ureq, injected ureq)
+  produce the same `NotFound` / `Unauthorized` / `RateLimited` / `HttpStatus` mapping. Nothing else
+  about the injected agent's timeout / TLS / proxy configuration is touched.
 - A recognized-but-unsupported compression extension now fails loudly instead of silently
   installing the still-compressed bytes as the binary: a `.tar.xz` / `.txz` / `.xz` asset without
   the `compression-tar-xz` feature returns `Error::CompressionNotEnabled("xz")` (matching the
