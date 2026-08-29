@@ -158,10 +158,12 @@ macro_rules! request_config_setters {
         /// certificate is surfaced at connection time instead.
         ///
         /// **ureq-only builds**: when the `reqwest` feature is disabled, the crate-built ureq client
-        /// trusts *only* the supplied certificates (replacing the default Mozilla root set). Supply
-        /// all CA certificates you need, including any public roots. If you need the Mozilla set plus
-        /// a custom CA, inject a pre-built `ureq::Agent` via [`ureq_agent`](Self::ureq_agent)
-        /// configured with `RootCerts::PlatformVerifier` or a merged root set instead.
+        /// trusts *only* the supplied certificates (replacing whatever the default root set was).
+        /// Supply all CA certificates you need, including any public roots. If what you actually
+        /// want is the machine's own trust store -- the usual case behind an intercepting corporate
+        /// proxy, whose CA is already installed there -- enable the `native-certs` feature and do
+        /// not call this setter at all. For anything finer, inject a pre-built `ureq::Agent` via
+        /// [`ureq_agent`](Self::ureq_agent) carrying its own merged root set.
         pub fn add_root_certificate(&mut self, cert: crate::Certificate) -> &mut Self {
             self.$($path).+.root_certificates.push(cert);
             self

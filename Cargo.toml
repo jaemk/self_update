@@ -110,6 +110,14 @@ native-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
 # the reqwest client; a ureq-only build gets `native-tls` (system OpenSSL) without vendoring.
 native-tls-vendored = ["native-tls", "reqwest?/native-tls-vendored"]
 rustls = ["reqwest?/rustls", "ureq?/rustls"]
+# Trust the OS certificate store instead of Mozilla's bundled roots, for the ureq client.
+# reqwest already does this (its rustls setup uses `rustls-platform-verifier`), so this feature
+# only moves the ureq per-call agent from `RootCerts::WebPki` to `RootCerts::PlatformVerifier`.
+# Turn it on when your users sit behind a TLS-intercepting corporate proxy whose CA is installed
+# in the machine's trust store: without it, every request fails to verify. No effect on an
+# injected `ureq::Agent`, which owns its own TLS config. See CORP-2 in
+# specs/corporate-network-config.md.
+native-certs = ["ureq?/platform-verifier"]
 
 reqwest = ["dep:reqwest"]
 ureq = ["dep:ureq"]

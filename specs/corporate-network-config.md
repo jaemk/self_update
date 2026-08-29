@@ -1,6 +1,6 @@
 # Corporate Network Config
 
-Status: CORP-1 done; CORP-2 and CORP-3 pending
+Status: CORP-1 and CORP-2 done; CORP-3 pending
 
 ## Problem
 
@@ -10,24 +10,25 @@ its own root store and does not read the OS trust store, so any connection throu
 proxy fails with a certificate verification error unless the caller injects a
 pre-configured `reqwest` client with the custom CA added manually.
 
-CORP-1 has shipped; CORP-2 and CORP-3 remain open:
+CORP-1 and CORP-2 have shipped; CORP-3 remains open:
 
 - **Custom root CA (CORP-1)**: shipped. `self_update::Certificate` plus
   `add_root_certificate` on every builder and on `Download`; a malformed
   certificate surfaces as `Error::InvalidCertificate` from `build()` /
   `download_to`. See CORP-1 below and `ref-http-client.md`.
 
-- **OS trust store (CORP-2)**: the default reqwest + rustls setup in 0.13.4 already uses
-  the platform verifier (OS trust store) via `rustls-platform-verifier`. The gap is the
-  ureq per-call path, which defaults to Mozilla's bundled roots (`WebPki`), not the OS.
+- **OS trust store (CORP-2)**: shipped in 1.2.0 as the opt-in `native-certs` feature. The
+  default reqwest + rustls setup in 0.13.4 already used the platform verifier (OS trust
+  store) via `rustls-platform-verifier`; the gap was the ureq per-call path, which defaults
+  to Mozilla's bundled roots (`WebPki`) and so ignores the machine's trust store entirely.
 
 - **Proxy with auth (CORP-3)**: env-var passthrough (`HTTP_PROXY` / `HTTPS_PROXY`) works
   for unauthenticated proxies, but any proxy requiring credentials must be configured on
   an injected client. There is no `.proxy(url)` setter on the builders.
 
-The remaining gaps (CORP-2, CORP-3) force corporate users to add `reqwest` or `ureq` as
-a direct dependency solely to unlock transport config that belongs on the `self_update`
-builder surface.
+The remaining gap (CORP-3) forces corporate users to add `reqwest` or `ureq` as a direct
+dependency solely to unlock transport config that belongs on the `self_update` builder
+surface.
 
 ---
 
@@ -128,7 +129,7 @@ ureq build-time client        -- #[cfg(all(feature = "ureq", not(feature = "reqw
 
 ---
 
-## CORP-2: OS trust store for ureq (designed)
+## CORP-2: OS trust store for ureq (done)
 
 ### reqwest: already solved
 

@@ -855,5 +855,24 @@ export SSL_CERT_DIR=/etc/ssl/certs
 Alternatively build with the `rustls` feature, which uses a bundled root store and does not depend
 on the system OpenSSL cert layout.
 
+**TLS certificate errors behind a corporate proxy (`ureq` + `rustls`).** Many company networks
+terminate outbound HTTPS at an intercepting proxy that re-signs traffic with an internal CA. That CA
+is installed in the machine's trust store, so `curl` and the system browsers accept it, but the
+ureq client's default root store is `RootCerts::WebPki` (Mozilla's bundled roots), which ignores the
+machine entirely, so every request fails to verify. Enable the `native-certs` feature to move the
+ureq client onto the OS trust store instead:
+
+```toml
+self_update = { version = "1.2", features = ["ureq", "rustls", "native-certs"] }
+```
+
+The reqwest client needs nothing: its rustls setup already verifies against the OS trust store.
+`native-certs` has no effect on an injected `ureq::Agent` either, since that agent owns its own TLS
+config, so set `RootCerts::PlatformVerifier` on it yourself. On Linux the OS trust store honors
+`SSL_CERT_FILE` / `SSL_CERT_DIR`, so those env vars work as an escape hatch once the feature is on.
+To trust exactly one internal CA and nothing else, skip the feature and pass the certificate to
+[`add_root_certificate`](crate::backends::github::UpdateBuilder::add_root_certificate). Note that on
+a ureq build that *replaces* the trust store rather than adding to it.
+
 
 License: MIT

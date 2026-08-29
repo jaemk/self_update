@@ -42,8 +42,34 @@ impl From<Agent> for UreqClient {
     }
 }
 
+/// The trust store a crate-built ureq agent starts from, before any caller-supplied certificates
+/// replace it (CORP-2-4).
+///
+/// ureq's own default is [`RootCerts::WebPki`](ureq::tls::RootCerts::WebPki) -- Mozilla's bundled
+/// roots, which ignore the machine's trust store entirely. That is the safer default for a
+/// self-updater (it cannot be widened by anything installed on the host), so it stays the default
+/// here. The `native-certs` feature opts into
+/// [`PlatformVerifier`](ureq::tls::RootCerts::PlatformVerifier) instead, which is what a caller
+/// behind a TLS-intercepting corporate proxy needs: the company CA lives in the OS store, not in
+/// Mozilla's list.
+///
+/// Note the rustls lane *panics* on `PlatformVerifier` without ureq's `platform-verifier` feature
+/// (`ureq::tls::rustls`), which is exactly what `native-certs = ["ureq?/platform-verifier"]`
+/// guarantees -- so the two must stay wired together.
+fn default_root_certs() -> ureq::tls::RootCerts {
+    #[cfg(feature = "native-certs")]
+    {
+        ureq::tls::RootCerts::PlatformVerifier
+    }
+    #[cfg(not(feature = "native-certs"))]
+    {
+        ureq::tls::RootCerts::WebPki
+    }
+}
+
 /// Build a per-call ureq agent honoring the per-request `timeout`, the TLS feature, and proxy-env.
-/// `root_certs`, when `Some`, replaces the default trust store with the supplied certificates.
+/// `root_certs`, when `Some`, replaces the default trust store (see [`default_root_certs`]) with
+/// the supplied certificates.
 fn build_call_agent(
     timeout: Option<Duration>,
     #[cfg(any(not(feature = "reqwest"), test))] root_certs: Option<UreqRootCerts>,
@@ -57,9 +83,13 @@ fn build_call_agent(
     let provider = TlsProvider::NativeTls;
 
     #[cfg(any(not(feature = "reqwest"), test))]
-    let mut tls = TlsConfig::builder().provider(provider);
+    let mut tls = TlsConfig::builder()
+        .provider(provider)
+        .root_certs(default_root_certs());
     #[cfg(all(feature = "reqwest", not(test)))]
-    let tls = TlsConfig::builder().provider(provider);
+    let tls = TlsConfig::builder()
+        .provider(provider)
+        .root_certs(default_root_certs());
     #[cfg(any(not(feature = "reqwest"), test))]
     if let Some(certs) = root_certs {
         tls = tls.root_certs(ureq::tls::RootCerts::Specific(certs));
@@ -557,6 +587,44 @@ mod tests {
         assert!(
             res.is_ok(),
             "ureq DER validation is deferred to connection time; build must accept the bytes"
+        );
+    }
+
+    // spec: CORP-2-4
+    #[test]
+    fn default_trust_store_follows_the_native_certs_feature() {
+        // The whole point of `native-certs`: a crate-built agent must consult the OS trust store
+        // rather than Mozilla's bundled roots, because a corporate MITM proxy's CA is only ever in
+        // the former. Without the feature the WebPki default must be preserved exactly -- widening
+        // the trust store of a self-updater is not something a minor release gets to do silently.
+        let agent = build_call_agent(None, None);
+        let roots = agent.config().tls_config().root_certs();
+        #[cfg(feature = "native-certs")]
+        assert!(
+            matches!(roots, ureq::tls::RootCerts::PlatformVerifier),
+            "with `native-certs` the per-call agent must use the OS trust store, got {roots:?}"
+        );
+        #[cfg(not(feature = "native-certs"))]
+        assert!(
+            matches!(roots, ureq::tls::RootCerts::WebPki),
+            "without `native-certs` the per-call agent must keep ureq's WebPki roots, got {roots:?}"
+        );
+    }
+
+    // spec: CORP-1-14, CORP-1-15, CORP-2-4
+    #[test]
+    fn caller_supplied_certs_replace_the_default_trust_store() {
+        // CORP-1-15's documented limitation, pinned against the CORP-2 change: adding the default
+        // `root_certs` call must not turn `Specific` into a merge, and must not let the default
+        // win over an explicit cert. `Specific` still fully replaces whatever the default was.
+        let certs = std::sync::Arc::new(vec![
+            ureq::tls::Certificate::from_der(b"der-bytes").to_owned(),
+        ]);
+        let agent = build_call_agent(None, Some(certs));
+        let roots = agent.config().tls_config().root_certs();
+        assert!(
+            matches!(roots, ureq::tls::RootCerts::Specific(_)),
+            "caller-supplied roots must replace the default trust store, got {roots:?}"
         );
     }
 

@@ -3,6 +3,12 @@
 ## [unreleased]
 
 ### Added
+- `native-certs` feature: the crate-built ureq client verifies against the OS trust store
+  (`RootCerts::PlatformVerifier`) instead of Mozilla's bundled roots (`RootCerts::WebPki`). Needed
+  behind a TLS-intercepting corporate proxy, whose CA is installed on the machine and is absent from
+  the bundled set, so every request otherwise fails to verify. Off by default, so the ureq client's
+  trust store is unchanged unless asked for. No effect on reqwest (its rustls setup already uses
+  `rustls-platform-verifier`) or on an injected `ureq::Agent`, which owns its own TLS config.
 
 ### Changed
 
