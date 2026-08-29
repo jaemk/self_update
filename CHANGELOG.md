@@ -3,6 +3,16 @@
 ## [unreleased]
 
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.2.0]
+Additive over `1.1.0`: one opt-in feature for the ureq client's trust store. No API breaks, no
+migration needed.
+
+### Added
 - `native-certs` feature: the crate-built ureq client verifies against the OS trust store
   (`RootCerts::PlatformVerifier`) instead of Mozilla's bundled roots (`RootCerts::WebPki`). Needed
   behind a TLS-intercepting corporate proxy, whose CA is installed on the machine and is absent from
