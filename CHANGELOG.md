@@ -3,6 +3,16 @@
 ## [unreleased]
 
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.1.0]
+Additive over `1.0.0`: two verification entry points for releases the built-in gates do not cover.
+No API breaks, no migration needed.
+
+### Added
 - `verify_archive(|archive: &Path| -> Result<()>)` on every backend's `Update` builder: a
   pre-extraction hook over the downloaded archive, for verification whose subject is the released
   file itself (`gh attestation verify`, `cosign verify-blob`). It runs after the checksum,
@@ -20,10 +30,6 @@
   digest, with the algorithm taken from the digest's length. A lookup that yields no digest is the
   new `Error::ChecksumSourceInvalid { asset, reason }`, never a silently skipped check. This is the
   digest source for gitlab / gitea / s3, whose APIs publish no per-asset digest.
-
-### Changed
-
-### Removed
 
 ## [1.0.0]
 The stable 1.0. `1.x` releases from here are backwards compatible.
