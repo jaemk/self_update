@@ -26,6 +26,8 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | --- | --- | --- | --- |
 | `Internal { message: String, source: Option<Box<dyn Error + Send + Sync>> }` | Genuine internal invariants / task failures: extractor source has no file name (`lib.rs`), path not in archive, non-UTF-8 archive path (`lib.rs`), and blocking-task join failure (`custom.rs`, `update.rs`). The join sites carry the tokio `JoinError` as `source`; the invariant sites set `source: None`. `#[non_exhaustive]`. | none | source boxed when present |
 | `VerificationRejected { reason: Option<String> }` | The post-update `verify_binary` callback returned `Err(..)`, so nothing was installed (`update.rs`). `reason` carries `Some(<error message>)` from the callback's returned error. `#[non_exhaustive]`. | none | no (struct fields) |
+| `ArchiveVerificationRejected { reason: Option<String> }` | The pre-extraction `verify_archive` callback returned `Err(..)`, so nothing was extracted and nothing was installed (`update.rs`). `reason` carries `Some(<error message>)` from the callback's returned error. Distinct from `VerificationRejected` because the two hooks see different files (the downloaded archive vs the extracted binary). `#[non_exhaustive]`. | none | no (struct fields) |
+| `ChecksumSourceInvalid { asset: String, reason: String }` | No checksum could be resolved from the sums asset named by `checksum_from_asset` (`update.rs`, `checksum.rs`): the release carries no such asset, the sums body is not UTF-8, it lists no entry for the selected asset, or the entry's digest is not 64/128 hex characters. `asset` is the artifact a digest was wanted for; `reason` says which. Raised before verification, so it never means "digest did not match" (that is `ChecksumMismatch`). `#[non_exhaustive]`. | `checksums` | no (struct fields) |
 | `ChecksumMismatch { expected: String, computed: String }` | The downloaded artifact's digest did not match the configured `Checksum` (`checksum.rs`). Both fields are lowercase hex-encoded digests. `#[non_exhaustive]`. | none (compiled unconditionally) | no (struct fields) |
 | `Aborted` | The user declined the interactive confirmation prompt (`lib.rs` `confirm()`). | none | no (unit) |
 | `NotFound { url: String }` | A request completed and returned HTTP 404. Raised by both HTTP clients when the response status is 404. `#[non_exhaustive]`. | none | no (struct fields) |
@@ -69,6 +71,9 @@ construction sites that stringified-and-discarded a real underlying error now ca
 
 - **`update.rs` `install_binary()`** (verify callback returned `Err(..)`) -> `VerificationRejected
   { reason }`. A user-controlled rejection, not an internal failure.
+- **`update.rs` `run_archive_verify_hook()`** (the `verify_archive` callback returned `Err(..)`) ->
+  `ArchiveVerificationRejected { reason }`. The same user-controlled shape one step earlier in the
+  pipeline, over the downloaded archive.
 - **`lib.rs` extractor / extract helpers** (no file-name, path not in archive, non-UTF-8 path) ->
   `Internal { message, source: None }`. Internal invariants.
 - **`backends/custom.rs` `Blocking`** and **`update.rs` finish-update** (tokio join failure) ->
@@ -122,6 +127,8 @@ Each variant renders with a specific Display string:
 
 - `Internal { message, .. }` -> `"InternalError: {message}"`
 - `VerificationRejected { reason: None }` -> `"VerificationRejectedError: post-update verification rejected the new binary"`; with `Some(r)` it appends `": {r}"`
+- `ArchiveVerificationRejected { reason: None }` -> `"ArchiveVerificationRejectedError: verification rejected the downloaded archive"`; with `Some(r)` it appends `": {r}"`
+- `ChecksumSourceInvalid { asset, reason }` -> `"ChecksumSourceInvalidError: could not resolve a checksum for `{asset}`: {reason}"`
 - `ChecksumMismatch { expected, computed }` -> `"ChecksumMismatchError: checksum mismatch (expected {expected}, computed {computed})"`
 - `Aborted` -> `"AbortedError: the update was not confirmed"`
 - `NotFound { url }` -> `"NotFoundError: no resource found at {url} (HTTP 404)"`
@@ -166,7 +173,7 @@ boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
 `InvalidCertificate`, `InvalidProgressStyle` (gated), `InvalidAssetKeyPattern` (gated); and
 `Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
-(`VerificationRejected`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
+(`VerificationRejected`, `ArchiveVerificationRejected`, `ChecksumSourceInvalid`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
 `RateLimited`, `NoReleaseFound`, `MissingAssetField`, `MissingField`, `InstallPathNotWritable`, `NoAppBundle`,
 `ConflictingConfig`, `AppTranslocated`, `ArchiveNotEnabled`, `CompressionNotEnabled`,
 `InvalidAssetName`, `NoSignatures`, `SignatureNonUTF8`) return `None`. The concrete inner error of
@@ -370,9 +377,13 @@ type directly, since `std::io::Error` is stable std.)
   all other variants. The `RateLimited` url is redacted like the others.
 - A checksum digest mismatch produces `Error::ChecksumMismatch { expected, computed }`. Both
   fields are lowercase hex-encoded digests.
+- A `checksum_from_asset(..)` lookup that cannot produce a digest (missing sums asset, missing
+  entry, unusable digest length, non-UTF-8 body) produces
+  `Error::ChecksumSourceInvalid { asset, reason }`, never a silently skipped verification.
 - A user-declined confirmation prompt produces `Error::Aborted`.
 - Every struct-form variant carries `#[non_exhaustive]` on the variant (`Unauthorized`,
-  `RateLimited`, `HttpStatus`, `Internal`, `VerificationRejected`, `NoReleaseFound`, `MissingAssetField`,
+  `RateLimited`, `HttpStatus`, `Internal`, `VerificationRejected`, `ArchiveVerificationRejected`,
+  `ChecksumSourceInvalid`, `NoReleaseFound`, `MissingAssetField`,
   `InvalidResponse`, `MissingField`, `InstallPathNotWritable`, `InvalidHeader`, `InvalidAuthToken`,
   `InvalidCertificate`, `InvalidProgressStyle`, `InvalidAssetName`, `NotFound`,
   `ChecksumMismatch`, `NoAppBundle`, `ConflictingConfig`, `AppTranslocated`).
@@ -385,6 +396,7 @@ type directly, since `std::io::Error` is stable std.)
   archive-path failures, and tokio blocking-task join failures (which carry the `JoinError` as
   `source`).
 - A rejecting `verify_binary` callback produces `Error::VerificationRejected { reason: Some(<error message>) }`.
+- A rejecting `verify_archive` callback produces `Error::ArchiveVerificationRejected { reason: Some(<error message>) }`, a separate variant so a caller registering both hooks can tell which file was refused.
 - The sites that previously stringified-and-discarded a source now chain it via `source()`: the
   S3 XML/regex parse (`InvalidResponse`), the auth-token header-value parse (`InvalidAuthToken`),
   and the tokio `JoinError` sites (`Internal`).

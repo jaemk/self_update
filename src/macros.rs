@@ -257,12 +257,19 @@ macro_rules! impl_update_config_accessors {
             fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
                 self.common.verify.as_ref().map(|c| c.0.clone())
             }
+            fn verify_archive_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>> {
+                self.common.verify_archive.as_ref().map(|c| c.0.clone())
+            }
             fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
                 self.common.asset_matcher.as_ref().map(|c| c.0.clone())
             }
             #[cfg(feature = "checksums")]
             fn verify_checksum(&self) -> Option<&crate::Checksum> {
                 self.common.checksum.as_ref()
+            }
+            #[cfg(feature = "checksums")]
+            fn checksum_from_asset(&self) -> Option<&str> {
+                self.common.checksum_from_asset.as_deref()
             }
             #[cfg(feature = "checksums")]
             fn verify_release_digest(&self) -> bool {
@@ -947,9 +954,10 @@ macro_rules! impl_common_builder_setters {
         /// downloaded archive. The full order is: [`verify_checksum`](Self::verify_checksum) (digest
         /// of the archive) -> release digest ([`verify_release_digest`](Self::verify_release_digest),
         /// over the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
-        /// extract -> `verify_binary` (the extracted binary) -> replace. Use
-        /// `verify_checksum`/`verifying_keys` to gate the download by content; use `verify_binary` to
-        /// gate it by running the new binary. Reject with
+        /// [`verify_archive`](Self::verify_archive) (the downloaded archive) -> extract ->
+        /// `verify_binary` (the extracted binary) -> replace. Use
+        /// `verify_checksum`/`verifying_keys`/`verify_archive` to gate the download by content; use
+        /// `verify_binary` to gate it by running the new binary. Reject with
         /// [`Error::verification_rejected("reason")`](crate::Error::verification_rejected), which is
         /// surfaced as-is; any other returned error's message becomes the reason of the resulting
         /// `Error::VerificationRejected`.
@@ -958,6 +966,57 @@ macro_rules! impl_common_builder_setters {
             verify: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
         ) -> &mut Self {
             self.common.verify = Some(crate::VerifyCallback(std::sync::Arc::new(verify)));
+            self
+        }
+
+        /// Register a pre-extraction verification hook over the **downloaded archive**. After the
+        /// archive is downloaded and every content gate the crate itself applies has passed, but
+        /// **before** anything is extracted, the closure is called with the path to the downloaded
+        /// file; returning `Err(..)` aborts the update with nothing extracted and nothing installed.
+        ///
+        /// This is the hook for verification that must run against the artifact **as published** --
+        /// an external attestation or signature check whose subject is the release file itself, such
+        /// as `gh attestation verify <archive> --repo owner/repo`, `cosign verify-blob`, or a
+        /// detached-signature check the crate has no built-in support for. Verifying the extracted
+        /// binary instead ([`verify_binary`](Self::verify_binary)) would ask about a different file
+        /// than the one the forge attested.
+        ///
+        /// Where it sits in the chain: [`verify_checksum`](Self::verify_checksum) (digest of the
+        /// archive) -> release digest ([`verify_release_digest`](Self::verify_release_digest), over
+        /// the archive) -> signature ([`verifying_keys`](Self::verifying_keys), over the archive) ->
+        /// `verify_archive` (the downloaded archive) -> extract ->
+        /// [`verify_binary`](Self::verify_binary) (the extracted binary) -> replace. Running last
+        /// among the archive gates means the cheap built-in digest checks reject a corrupt download
+        /// before an external tool is spawned on it. Bundle mode
+        /// ([`bundle_path_in_archive`](Self::bundle_path_in_archive)) runs it at the same point.
+        ///
+        /// Reject with
+        /// [`Error::archive_verification_rejected("reason")`](crate::Error::archive_verification_rejected),
+        /// which is surfaced as-is; any other returned error's message becomes the reason of the
+        /// resulting [`Error::ArchiveVerificationRejected`](crate::Error::ArchiveVerificationRejected).
+        /// That is a distinct variant from the `verify_binary` hook's
+        /// [`Error::VerificationRejected`](crate::Error::VerificationRejected), so a caller using
+        /// both hooks can tell which one rejected the update.
+        ///
+        /// ```rust
+        /// # fn attested(path: &std::path::Path) -> bool { true }
+        /// # let hook =
+        /// |archive: &std::path::Path| {
+        ///     if attested(archive) {
+        ///         Ok(())
+        ///     } else {
+        ///         Err(self_update::Error::archive_verification_rejected(
+        ///             "no build-provenance attestation for this artifact",
+        ///         ))
+        ///     }
+        /// }
+        /// # ;
+        /// ```
+        pub fn verify_archive(
+            &mut self,
+            verify: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
+        ) -> &mut Self {
+            self.common.verify_archive = Some(crate::VerifyCallback(std::sync::Arc::new(verify)));
             self
         }
 
@@ -970,6 +1029,48 @@ macro_rules! impl_common_builder_setters {
         #[cfg(feature = "checksums")]
         pub fn verify_checksum(&mut self, checksum: crate::Checksum) -> &mut Self {
             self.common.checksum = Some(checksum);
+            self
+        }
+
+        /// Verify the downloaded artifact against a digest published in a sums asset of the same
+        /// release, naming that asset (e.g. `"SHA256SUMS"`).
+        ///
+        /// During the update, after the artifact to install has been selected and confirmed and
+        /// before it is downloaded, the named asset is fetched over the same transport (client,
+        /// headers, auth, timeout, retries) and the entry matching the selected asset's file name
+        /// supplies the expected digest. The algorithm comes from the digest's length, so a
+        /// `SHA512SUMS` asset needs no extra configuration, and the usual formats are accepted (see
+        /// [`Checksum::from_sums_file`](crate::Checksum::from_sums_file) for the exact set). It
+        /// costs one extra request, taken before the artifact download so a missing or unusable
+        /// sums asset fails without pulling the whole release first.
+        ///
+        /// The failure modes before verification (no such asset in the release, no entry for the
+        /// selected asset, an unusable digest) are
+        /// [`Error::ChecksumSourceInvalid`](crate::Error::ChecksumSourceInvalid), distinct from the
+        /// `ChecksumMismatch` a resolved-but-wrong digest produces; a release that publishes no
+        /// sums asset is therefore an error rather than a silently skipped check.
+        ///
+        /// Independent of [`verify_checksum`](Self::verify_checksum) and
+        /// [`verify_release_digest`](Self::verify_release_digest): when more than one applies, all
+        /// of them must pass.
+        ///
+        /// ```rust
+        /// # #[cfg(feature = "checksums")]
+        /// # fn f() -> Result<(), Box<dyn std::error::Error>> {
+        /// self_update::backends::github::Update::configure()
+        ///     .repo_owner("jaemk")
+        ///     .repo_name("self_update")
+        ///     .bin_name("github")
+        ///     .current_version(self_update::cargo_crate_version!())
+        ///     .checksum_from_asset("SHA256SUMS")
+        ///     .build()?
+        ///     .update()?;
+        /// # Ok(())
+        /// # }
+        /// ```
+        #[cfg(feature = "checksums")]
+        pub fn checksum_from_asset(&mut self, asset_name: impl Into<String>) -> &mut Self {
+            self.common.checksum_from_asset = Some(asset_name.into());
             self
         }
 

@@ -123,6 +123,9 @@ In `finish_update`, before any extraction or replacement:
 
 1. **Checksum** (feature `checksums`): if `verify_checksum()` is set, `checksum.verify(archive_path)`
    on the downloaded archive; a mismatch aborts here (`src/update.rs:finish_update_owned`).
+1b. **Published sums digest** (feature `checksums`): if `checksum_from_asset()` names an asset, the
+   digest resolved from it before the download (see below) is verified the same way, independently
+   of gate 1 (`src/update.rs:finish_update_owned`).
 2. **Release digest** (feature `checksums`): if `verify_release_digest()` is on (the default) and
    the selected asset carries a backend-published digest (`ReleaseAsset::digest()`, the
    `algorithm:hex` form github publishes per asset), the digest is parsed via
@@ -138,10 +141,34 @@ In `finish_update`, before any extraction or replacement:
    (`tar.gz` / `zip` / `tar` / `gz` / `plain`), e.g. "signature verification is only
    implemented for `.tar.gz` and `.zip` assets, not gz files".
 
-All three run on the *downloaded archive bytes* and before extraction. The last hook,
+4. **Archive hook**: if `verify_archive_callback()` is set, it is called with the archive path
+   (`src/update.rs:run_archive_verify_hook`, from `src/update.rs:finish_update_owned`). `Err(..)`
+   aborts with `Error::ArchiveVerificationRejected { reason }`, nothing extracted and nothing
+   installed; an error that already is an `ArchiveVerificationRejected` passes through unwrapped,
+   any other error's message becomes the reason. This is the caller's own gate over the artifact as
+   published -- an external attestation/signature check (`gh attestation verify`,
+   `cosign verify-blob`) whose subject is the release file itself. It runs *after* gates 1-3 so a
+   corrupt download is rejected by the cheap built-in digest check before an external tool is
+   spawned on it.
+
+The sums digest itself is resolved *before* the artifact download, in both orchestrators
+(`src/update.rs:update_extended`, `src/update.rs:update_extended_async`): after the asset is selected
+and confirmed, `sums_asset_for` finds the release asset named by `checksum_from_asset()`
+(absent => `Error::ChecksumSourceInvalid`, never a skipped check), `build_sums_download` fetches it
+over the artifact download's transport with progress reporting cleared
+(`src/lib.rs:Download::clear_progress_reporting`), and `checksum_from_sums_bytes` ->
+`Checksum::from_sums_file` (`src/checksum.rs`) parses the entry for the selected asset's file name.
+Resolving first means a release missing the sums asset fails without pulling the artifact. The
+algorithm comes from the digest length (64 -> sha256, 128 -> sha512).
+
+All four gates run on the *downloaded archive bytes* and before extraction. The last hook,
 `verify_binary`, runs later inside `install_binary` on the *extracted binary* (in bundle mode, on
 the *staged bundle root*), immediately before the swap. Ordering: verify_checksum -> release
-digest -> verify_keys -> extract -> verify_binary -> replace.
+digest -> verify_keys -> verify_archive -> extract -> verify_binary -> replace.
+
+The two hooks are deliberately distinct error variants (`ArchiveVerificationRejected` vs
+`VerificationRejected`) because they see different files: a caller registering both can tell which
+one refused the update.
 
 ### Replace
 
@@ -289,9 +316,17 @@ under feature `async`; the free `update::update_extended_async` they route to is
 
 ## Invariants and regression checklist
 
-- Verify-before-replace: checksum, release digest, and signature all run on the downloaded
-  archive *before* extraction; `verify_binary` runs on the extracted binary *before* the swap.
-  Nothing is replaced if any of the four rejects (`src/update.rs:finish_update_owned`, `src/update.rs:install_binary`).
+- Verify-before-replace: checksum, release digest, signature, and the `verify_archive` hook all run
+  on the downloaded archive *before* extraction; `verify_binary` runs on the extracted binary
+  *before* the swap. Nothing is extracted or replaced if any of the five rejects
+  (`src/update.rs:finish_update_owned`, `src/update.rs:install_binary`).
+- The `verify_archive` hook runs last among the archive gates, so a corrupt download is rejected by
+  the built-in digest checks before the caller's external verifier is invoked
+  (`src/update.rs:finish_update_owned`). It fires in bundle mode too: the hook sits ahead of the
+  branch into `install_bundle`.
+- `checksum_from_asset` never degrades to "no verification": a missing sums asset, a missing entry,
+  a non-UTF-8 body, or an unusable digest length all abort with `Error::ChecksumSourceInvalid`
+  (`src/update.rs:sums_asset_for`, `src/checksum.rs:from_sums_file`).
 - The release-digest gate is on by default under `checksums` and only fires when the selected
   asset carries a digest; `verify_release_digest(false)` opts out. A present-but-unparseable
   digest is a hard `Error::InvalidResponse`, not a silent skip (`src/update.rs:finish_update_owned`).
@@ -375,6 +410,7 @@ download/extract/replace and `MoveAll` flows.
 - `ref-signatures-and-checksums.md` (verify primitives), `checksum-verification.md`,
   `checksum-from-asset.md`
 - `post-update-verify.md` (the `verify_binary` hook)
+- `archive-verify.md` (the `verify_archive` hook)
 - `multi-file-install.md` (`MoveAll`)
 - `progress-callback.md` (download progress)
 - `custom-asset-matching.md` (the `asset_matcher` override)

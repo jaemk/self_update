@@ -319,6 +319,14 @@ applied (when both apply, both must pass):
 - **A known digest you pass explicitly** (e.g. one published in a `SHA256SUMS` file alongside
   the release) via `verify_checksum`. The algorithm is chosen by the `Checksum` variant
   (`Sha256` / `Sha512`).
+- **A digest resolved from a sums asset of the same release**, via
+  `checksum_from_asset("SHA256SUMS")`. The named asset is fetched before the artifact is
+  downloaded, and the entry for the selected asset supplies the digest. The usual `SHA256SUMS`
+  shapes are accepted (coreutils text and binary modes, leading paths, the BSD tag form, `#`
+  comments, and a whole-file bare digest), and the algorithm comes from the digest's length, so a
+  `SHA512SUMS` asset needs no extra configuration. A release with no such asset, or no entry for
+  the artifact, is an `Error::ChecksumSourceInvalid` rather than a skipped check. This is the one
+  to reach for on gitlab / gitea / s3, whose APIs publish no per-asset digest.
 
 Both complement the `signatures` feature (zipsign), which verifies authenticity rather than a
 published digest.
@@ -333,6 +341,70 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
         .current_version(self_update::cargo_crate_version!())
         // hex digest, obtained out of band (e.g. parsed from the release's SHA256SUMS)
         .verify_checksum(self_update::Checksum::Sha256("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()))
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+Or let the updater fetch and parse the release's own sums asset:
+
+```rust
+# #[cfg(feature = "checksums")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .checksum_from_asset("SHA256SUMS")
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+### Verification hooks
+
+Two hooks let you gate an update with your own check. They differ in *what file they see*, which is
+the whole reason both exist:
+
+- `verify_archive(|archive: &Path| ..)` runs on the **downloaded archive**, after the crate's own
+  content gates (checksum, release digest, signature) and before anything is extracted. This is
+  where an external attestation or signature check belongs, since those are issued over the released
+  file itself: `gh attestation verify <archive> --repo owner/repo`, `cosign verify-blob`, and so on.
+  A rejection is `Error::ArchiveVerificationRejected`.
+- `verify_binary(|new_exe: &Path| ..)` runs on the **extracted binary**, immediately before it
+  replaces the installed one. This is where a smoke test belongs, typically running
+  `new_exe --version` and checking the output. A rejection is `Error::VerificationRejected`.
+
+Either returning `Err(..)` aborts the update with nothing installed. Full order:
+`verify_checksum` -> release digest -> signature -> `verify_archive` -> extract -> `verify_binary`
+-> replace.
+
+```rust
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .verify_archive(|archive: &std::path::Path| {
+            let ok = std::process::Command::new("gh")
+                .args(["attestation", "verify"])
+                .arg(archive)
+                .args(["--repo", "jaemk/self_update"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                Ok(())
+            } else {
+                Err(self_update::Error::archive_verification_rejected(
+                    "no build-provenance attestation for this artifact",
+                ))
+            }
+        })
         .build()?
         .update()?;
     Ok(())
@@ -2191,6 +2263,15 @@ impl Download {
         callback: std::sync::Arc<DynProgressFn>,
     ) -> &mut Self {
         self.on_progress = Some(ProgressCallback(callback));
+        self
+    }
+
+    /// Internal: drop any progress callback and terminal bar (used for the update flow's
+    /// side-fetches, e.g. a `SHA256SUMS` asset, which are not the download the caller is tracking).
+    #[cfg(feature = "checksums")]
+    pub(crate) fn clear_progress_reporting(&mut self) -> &mut Self {
+        self.on_progress = None;
+        self.show_progress = false;
         self
     }
 

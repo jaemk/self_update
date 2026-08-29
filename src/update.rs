@@ -906,6 +906,10 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
     /// Optional post-update verification hook, run on the extracted binary before install.
     fn verify_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
 
+    /// Optional pre-extraction verification hook, run on the downloaded archive after the built-in
+    /// content gates (checksum, release digest, signature) and before anything is extracted.
+    fn verify_archive_callback(&self) -> Option<std::sync::Arc<crate::DynVerifyFn>>;
+
     /// Optional custom asset matcher, overriding the built-in target/identifier selection.
     fn asset_matcher(&self) -> Option<std::sync::Arc<crate::DynAssetMatcher>> {
         None
@@ -914,6 +918,10 @@ pub(crate) trait UpdateInternals: sealed::Sealed {
     /// Optional checksum to verify the downloaded artifact against before installing it.
     #[cfg(feature = "checksums")]
     fn verify_checksum(&self) -> Option<&crate::Checksum>;
+
+    /// Optional name of a release asset (e.g. `SHA256SUMS`) to resolve the expected digest from.
+    #[cfg(feature = "checksums")]
+    fn checksum_from_asset(&self) -> Option<&str>;
 
     /// Whether to verify the download against the backend-published digest of the selected asset,
     /// when one is present. On by default.
@@ -1033,6 +1041,23 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
             probe_writable(self.bin_install_path(), bundle_target)?;
         }
 
+        // Resolve the published-sums digest before the artifact download, so a release that is
+        // missing the sums asset (or lists no entry for this one) fails without first pulling the
+        // whole artifact.
+        #[cfg(feature = "checksums")]
+        let sums_checksum = match sums_asset_for(self, &release, &target_asset)? {
+            None => None,
+            Some(sums_asset) => {
+                let mut body = Vec::new();
+                build_sums_download(self, &sums_asset)?.download_to(&mut body)?;
+                Some(checksum_from_sums_bytes(
+                    &body,
+                    target_asset.name(),
+                    sums_asset.name(),
+                )?)
+            }
+        };
+
         let tmp_archive_dir = tempfile::TempDir::new()?;
         let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
         let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -1047,6 +1072,8 @@ pub trait ReleaseUpdate: UpdateConfig + UpdateInternals {
             tmp_archive_dir,
             &tmp_archive_path,
             bundle_target,
+            #[cfg(feature = "checksums")]
+            sums_checksum,
         )
     }
 }
@@ -1377,6 +1404,61 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     Ok(download)
 }
 
+/// The release asset a `checksum_from_asset(..)` setting names, or `None` when it is unset.
+///
+/// A configured name that the release does not carry is an error, not a skipped check: opting in to
+/// sums verification and silently getting none would be the worst of both.
+#[cfg(feature = "checksums")]
+fn sums_asset_for<U: UpdateConfig + UpdateInternals + ?Sized>(
+    u: &U,
+    release: &Release,
+    target_asset: &ReleaseAsset,
+) -> Result<Option<ReleaseAsset>> {
+    let Some(name) = u.checksum_from_asset() else {
+        return Ok(None);
+    };
+    release
+        .assets()
+        .iter()
+        .find(|asset| asset.name() == name)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| Error::ChecksumSourceInvalid {
+            asset: target_asset.name().to_string(),
+            reason: format!("release {} has no asset named `{name}`", release.version()),
+        })
+}
+
+/// A [`Download`] for a sums asset: the artifact download's transport (client, headers, auth,
+/// timeout, retries) without its progress reporting, which belongs to the artifact the caller is
+/// actually tracking rather than to a few hundred bytes of digests.
+#[cfg(feature = "checksums")]
+fn build_sums_download<U: UpdateConfig + UpdateInternals + ?Sized>(
+    u: &U,
+    sums_asset: &ReleaseAsset,
+) -> Result<Download> {
+    let mut download = build_download(u, sums_asset)?;
+    download.clear_progress_reporting();
+    Ok(download)
+}
+
+/// Parse a downloaded sums asset and pull out the digest for `target_name`.
+///
+/// `sums_name` only labels the error: a sums file that is not UTF-8 text is a property of the asset
+/// that was fetched, so the message names it.
+#[cfg(feature = "checksums")]
+fn checksum_from_sums_bytes(
+    body: &[u8],
+    target_name: &str,
+    sums_name: &str,
+) -> Result<crate::Checksum> {
+    let text = std::str::from_utf8(body).map_err(|_| Error::ChecksumSourceInvalid {
+        asset: target_name.to_string(),
+        reason: format!("`{sums_name}` is not valid UTF-8 text"),
+    })?;
+    crate::Checksum::from_sums_file(text, target_name)
+}
+
 /// The owned, `'static` fields the blocking finish tail needs, copied out of the `&U` accessors so
 /// the tail can run inside [`tokio::task::spawn_blocking`] without borrowing the updater.
 struct FinishCtx {
@@ -1393,8 +1475,15 @@ struct FinishCtx {
     bundle_target: Option<std::path::PathBuf>,
     show_output: bool,
     verify_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
+    /// The pre-extraction hook over the downloaded archive, run after the built-in content gates
+    /// below and before extraction.
+    verify_archive_callback: Option<std::sync::Arc<crate::DynVerifyFn>>,
     #[cfg(feature = "checksums")]
     verify_checksum: Option<crate::Checksum>,
+    /// The digest resolved from the release's sums asset (`checksum_from_asset`), already fetched
+    /// and parsed by the orchestrator because that step needs the transport.
+    #[cfg(feature = "checksums")]
+    sums_checksum: Option<crate::Checksum>,
     /// The selected asset's backend-published digest (`algorithm:hex`), if any, verified when
     /// `verify_release_digest` is on.
     #[cfg(feature = "checksums")]
@@ -1414,6 +1503,7 @@ impl FinishCtx {
         release: Release,
         target_asset: &ReleaseAsset,
         bundle_target: Option<&std::path::Path>,
+        #[cfg(feature = "checksums")] sums_checksum: Option<crate::Checksum>,
     ) -> Self {
         Self {
             #[cfg(feature = "checksums")]
@@ -1427,8 +1517,11 @@ impl FinishCtx {
             bundle_target: bundle_target.map(std::path::Path::to_path_buf),
             show_output: u.show_output(),
             verify_callback: u.verify_callback(),
+            verify_archive_callback: u.verify_archive_callback(),
             #[cfg(feature = "checksums")]
             verify_checksum: u.verify_checksum().cloned(),
+            #[cfg(feature = "checksums")]
+            sums_checksum,
             #[cfg(feature = "checksums")]
             verify_release_digest: u.verify_release_digest(),
             #[cfg(feature = "signatures")]
@@ -1448,8 +1541,16 @@ fn finish_update<U: UpdateConfig + UpdateInternals + ?Sized>(
     tmp_archive_dir: tempfile::TempDir,
     tmp_archive_path: &std::path::Path,
     bundle_target: Option<&std::path::Path>,
+    #[cfg(feature = "checksums")] sums_checksum: Option<crate::Checksum>,
 ) -> Result<ReleaseStatus> {
-    let ctx = FinishCtx::capture(u, release, target_asset, bundle_target);
+    let ctx = FinishCtx::capture(
+        u,
+        release,
+        target_asset,
+        bundle_target,
+        #[cfg(feature = "checksums")]
+        sums_checksum,
+    );
     finish_update_owned(ctx, tmp_archive_dir, tmp_archive_path)
 }
 
@@ -1469,6 +1570,11 @@ fn finish_update_owned(
         if let Some(checksum) = ctx.verify_checksum.as_ref() {
             checksum.verify(tmp_archive_path)?;
         }
+        // The digest resolved from the release's sums asset. Independent of the caller-supplied
+        // checksum above: when both apply, both must pass.
+        if let Some(checksum) = ctx.sums_checksum.as_ref() {
+            checksum.verify(tmp_archive_path)?;
+        }
         // The backend-published digest of the selected asset (github's per-asset `digest` field),
         // verified by default. A present-but-unparseable digest is a hard error rather than a
         // silent skip; `verify_release_digest(false)` is the escape hatch.
@@ -1486,6 +1592,13 @@ fn finish_update_owned(
         }
         verify_signature(tmp_archive_path, &ctx.verify_keys)?;
     }
+
+    // The caller's own gate over the artifact as published, after every built-in content check and
+    // before a single byte is extracted. Its subject is the downloaded file itself, which is what an
+    // external attestation (`gh attestation verify`, `cosign verify-blob`) is issued over -- the
+    // extracted binary that `verify_binary` sees is a different file with a different digest. A
+    // rejection here aborts with nothing extracted, in bundle mode as well as single-binary mode.
+    run_archive_verify_hook(tmp_archive_path, ctx.verify_archive_callback.as_deref())?;
 
     print_flush(show_output, "Extracting archive... ")?;
 
@@ -1608,6 +1721,23 @@ where
         probe_writable(u.bin_install_path(), bundle_target)?;
     }
 
+    // Resolve the published-sums digest before the artifact download, as on the sync path.
+    #[cfg(feature = "checksums")]
+    let sums_checksum = match sums_asset_for(u, &release, &target_asset)? {
+        None => None,
+        Some(sums_asset) => {
+            let mut body = Vec::new();
+            build_sums_download(u, &sums_asset)?
+                .download_to_async(&mut body)
+                .await?;
+            Some(checksum_from_sums_bytes(
+                &body,
+                target_asset.name(),
+                sums_asset.name(),
+            )?)
+        }
+    };
+
     let tmp_archive_dir = tempfile::TempDir::new()?;
     let tmp_archive_path = tmp_archive_dir.path().join(target_asset.name());
     let mut tmp_archive = fs::File::create(&tmp_archive_path)?;
@@ -1620,7 +1750,14 @@ where
     // Run the blocking finish tail (verify/extract/install) off the async executor. Copy out the
     // owned fields, MOVE the TempDir into the closure (it is dropped there), and `.await` the
     // join handle, mapping a JoinError to an update error.
-    let ctx = FinishCtx::capture(u, release, &target_asset, bundle_target);
+    let ctx = FinishCtx::capture(
+        u,
+        release,
+        &target_asset,
+        bundle_target,
+        #[cfg(feature = "checksums")]
+        sums_checksum,
+    );
     tokio::task::spawn_blocking(move || {
         finish_update_owned(ctx, tmp_archive_dir, &tmp_archive_path)
     })
@@ -1672,6 +1809,29 @@ fn run_verify_hook(new_path: &std::path::Path, verify: Option<&crate::DynVerifyF
         verify(new_path).map_err(|e| match e {
             Error::VerificationRejected { .. } => e,
             other => Error::VerificationRejected {
+                reason: Some(other.to_string()),
+            },
+        })?;
+    }
+    Ok(())
+}
+
+/// Run the pre-extraction verification hook (if any) on the downloaded archive, before anything is
+/// extracted.
+///
+/// The mirror of [`run_verify_hook`] one step earlier in the pipeline, and it maps to its own error
+/// variant: a rejection here is `ArchiveVerificationRejected`, so a caller that registers both hooks
+/// can tell whether the artifact or the binary it carried was refused. An error that already is an
+/// `ArchiveVerificationRejected` (e.g. built via `Error::archive_verification_rejected`) passes
+/// through unwrapped so the reason is not nested inside another rejection message.
+fn run_archive_verify_hook(
+    archive_path: &std::path::Path,
+    verify: Option<&crate::DynVerifyFn>,
+) -> Result<()> {
+    if let Some(verify) = verify {
+        verify(archive_path).map_err(|e| match e {
+            Error::ArchiveVerificationRejected { .. } => e,
+            other => Error::ArchiveVerificationRejected {
                 reason: Some(other.to_string()),
             },
         })?;
@@ -4642,6 +4802,8 @@ mod tests {
             rel("1.2.3"),
             &asset,
             Some(std::path::Path::new("/Applications/MyApp.app")),
+            #[cfg(feature = "checksums")]
+            None,
         );
         assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
         assert_eq!(
@@ -4656,7 +4818,14 @@ mod tests {
             .current_version("1.0.0")
             .build()
             .unwrap();
-        let ctx = super::FinishCtx::capture(&plain, rel("1.2.3"), &asset, None);
+        let ctx = super::FinishCtx::capture(
+            &plain,
+            rel("1.2.3"),
+            &asset,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        );
         assert!(
             ctx.bundle_path_in_archive.is_none() && ctx.bundle_target.is_none(),
             "without the setters the finish tail must stay in single-file mode"
@@ -4683,11 +4852,402 @@ mod tests {
             rel("1.2.3"),
             &asset,
             Some(std::path::Path::new("/Applications/MyApp.app")),
+            #[cfg(feature = "checksums")]
+            None,
         );
         assert_eq!(ctx.bundle_path_in_archive.as_deref(), Some("MyApp.app"));
         assert_eq!(
             ctx.bundle_target.as_deref(),
             Some(std::path::Path::new("/Applications/MyApp.app"))
+        );
+    }
+
+    // Build a custom-backend `Update` carrying a `verify_archive` hook, to drive `finish_update`
+    // directly and observe where in the pipeline the hook runs.
+    fn update_with_archive_hook(
+        hook: impl Fn(&std::path::Path) -> crate::Result<()> + Send + Sync + 'static,
+    ) -> crate::backends::custom::Update {
+        crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .verify_archive(hook)
+            .build()
+            .unwrap()
+    }
+
+    // A rejecting `verify_archive` hook aborts the update, and it does so *before* extraction: the
+    // archive here is not a real archive, so had the hook been skipped (or run after extraction) the
+    // failure would be an extraction error instead of the rejection.
+    #[test]
+    fn finish_update_rejects_the_archive_before_extracting() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_archive_hook(|_: &std::path::Path| {
+            Err(crate::errors::Error::archive_verification_rejected(
+                "no attestation found",
+            ))
+        });
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("a rejecting verify_archive hook must abort the update");
+        match err {
+            crate::errors::Error::ArchiveVerificationRejected { reason } => {
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("no attestation found"),
+                    "the constructor's reason must pass through unwrapped"
+                );
+            }
+            other => panic!("expected Error::ArchiveVerificationRejected, got {other:?}"),
+        }
+    }
+
+    // The hook receives the path of the file that was actually downloaded -- the subject an external
+    // attestation check (`gh attestation verify <archive>`) has to be pointed at.
+    #[test]
+    fn verify_archive_hook_receives_the_downloaded_archive_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let seen: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorder = std::sync::Arc::clone(&seen);
+        let upd = update_with_archive_hook(move |p: &std::path::Path| {
+            // Read inside the hook: the archive lives in a temp dir that is dropped when the update
+            // returns, and the point is that the file is readable *while the hook runs*, exactly as
+            // it was downloaded. An external verifier is spawned on this path, so it has to exist.
+            assert_eq!(
+                std::fs::read(p).expect("the archive must be readable while the hook runs"),
+                b"hello",
+                "the hook must see the archive as downloaded, unmodified"
+            );
+            *recorder.lock().unwrap() = Some(p.to_path_buf());
+            Err(crate::errors::Error::archive_verification_rejected("stop"))
+        });
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let _ = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        );
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some(archive_path.as_path()),
+            "the hook must be handed the downloaded archive, not the extracted binary"
+        );
+    }
+
+    // An accepting hook is not a gate: the flow proceeds past it (and here fails at extraction,
+    // since the bytes are not a real archive), so a passing hook cannot stall an update.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn finish_update_proceeds_when_the_archive_hook_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_archive_hook(|_: &std::path::Path| Ok(()));
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("the bytes are not a real archive, so extraction must fail");
+        assert!(
+            !matches!(
+                err,
+                crate::errors::Error::ArchiveVerificationRejected { .. }
+            ),
+            "an accepting hook must let the flow through to extraction, got: {err}"
+        );
+    }
+
+    // Ordering: the built-in content gates run first, so a corrupt download is rejected by the cheap
+    // digest check without spawning the caller's external verifier at all.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn checksum_gate_runs_before_the_archive_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("release.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&ran);
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            // A valid-length but wrong SHA-256 digest (the file's real digest is 2cf24dba…).
+            .verify_checksum(crate::Checksum::Sha256("00".repeat(32)))
+            .verify_archive(move |_: &std::path::Path| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .build()
+            .unwrap();
+        let release = crate::update::Release::builder()
+            .version("1.2.3")
+            .build()
+            .unwrap();
+        let asset =
+            crate::update::ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
+
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("a mismatched checksum must abort the update");
+        assert!(
+            err.to_string().contains("checksum mismatch"),
+            "expected a checksum-mismatch abort, got: {err}"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the archive hook must not run once a built-in content gate has already failed"
+        );
+    }
+
+    // A hook error that is not already an `ArchiveVerificationRejected` (e.g. the IO error from a
+    // verifier binary that could not be spawned) is wrapped, carrying its message as the reason.
+    #[test]
+    fn run_archive_verify_hook_wraps_a_foreign_error() {
+        let hook: Box<DynVerifyFn> = Box::new(|_: &std::path::Path| {
+            Err(crate::errors::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not run gh attestation verify",
+            )))
+        });
+        let err =
+            super::run_archive_verify_hook(std::path::Path::new("/tmp/a.tar.gz"), Some(&*hook))
+                .expect_err("a hook IO error must abort the update");
+        match err {
+            crate::errors::Error::ArchiveVerificationRejected { reason } => {
+                let reason = reason.expect("a hook IO error must carry its message as the reason");
+                assert!(
+                    reason.contains("could not run gh attestation verify"),
+                    "the hook IO error message must propagate as the reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Error::ArchiveVerificationRejected, got {other:?}"),
+        }
+    }
+
+    // No hook configured is not a failure: the step is a no-op.
+    #[test]
+    fn run_archive_verify_hook_is_a_no_op_without_a_hook() {
+        super::run_archive_verify_hook(std::path::Path::new("/tmp/a.tar.gz"), None)
+            .expect("no configured hook must not fail the update");
+    }
+
+    // Build a custom-backend `Update` naming a sums asset, to drive the resolution helpers the
+    // orchestrators compose (`sums_asset_for` -> download -> `checksum_from_sums_bytes`).
+    #[cfg(feature = "checksums")]
+    fn update_with_sums_asset(name: &str) -> crate::backends::custom::Update {
+        crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .checksum_from_asset(name)
+            .show_download_progress(true)
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "checksums")]
+    fn release_with_sums_asset() -> Release {
+        Release::builder()
+            .version("1.2.3")
+            .asset(crate::update::ReleaseAsset::new(
+                "app.tar.gz",
+                "https://host/app.tar.gz",
+            ))
+            .asset(crate::update::ReleaseAsset::new(
+                "SHA256SUMS",
+                "https://host/SHA256SUMS",
+            ))
+            .build()
+            .unwrap()
+    }
+
+    // Unconfigured is the no-op: no sums asset is looked for, so no extra request is made.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn sums_asset_is_not_looked_up_unless_configured() {
+        let upd = crate::backends::custom::Update::configure()
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .build()
+            .unwrap();
+        let release = release_with_sums_asset();
+        let target = crate::update::ReleaseAsset::new("app.tar.gz", "https://host/app.tar.gz");
+        assert!(
+            super::sums_asset_for(&upd, &release, &target)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // A configured sums asset resolves to that release's asset, so the digest comes from the same
+    // release as the artifact rather than from a URL the caller guessed.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn sums_asset_resolves_from_the_same_release() {
+        let upd = update_with_sums_asset("SHA256SUMS");
+        let release = release_with_sums_asset();
+        let target = crate::update::ReleaseAsset::new("app.tar.gz", "https://host/app.tar.gz");
+        let sums = super::sums_asset_for(&upd, &release, &target)
+            .unwrap()
+            .expect("the configured sums asset is present on the release");
+        assert_eq!(sums.name(), "SHA256SUMS");
+        assert_eq!(sums.download_url(), "https://host/SHA256SUMS");
+    }
+
+    // A release that does not carry the configured sums asset is an error, not a skipped check:
+    // opting in to sums verification and silently getting none is the failure mode worth avoiding.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn a_missing_sums_asset_is_an_error() {
+        let upd = update_with_sums_asset("SHA512SUMS");
+        let release = release_with_sums_asset();
+        let target = crate::update::ReleaseAsset::new("app.tar.gz", "https://host/app.tar.gz");
+        let err = super::sums_asset_for(&upd, &release, &target)
+            .expect_err("a configured-but-absent sums asset must abort the update");
+        match &err {
+            crate::errors::Error::ChecksumSourceInvalid { asset, .. } => {
+                assert_eq!(asset, "app.tar.gz", "the error names the artifact")
+            }
+            other => panic!("expected ChecksumSourceInvalid, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("SHA512SUMS"),
+            "the error must name the asset that was looked for, got: {err}"
+        );
+    }
+
+    // The sums body is parsed against the *selected asset's* name, and a body that is not text is
+    // reported against the sums asset rather than surfacing as a raw UTF-8 error.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn sums_bytes_are_parsed_against_the_selected_asset() {
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let body = format!("{digest}  app.tar.gz\n");
+        let checksum =
+            super::checksum_from_sums_bytes(body.as_bytes(), "app.tar.gz", "SHA256SUMS").unwrap();
+        assert!(matches!(checksum, crate::Checksum::Sha256(_)));
+
+        let err = super::checksum_from_sums_bytes(&[0xff, 0xfe], "app.tar.gz", "SHA256SUMS")
+            .expect_err("a non-UTF-8 sums body must abort the update");
+        assert!(
+            err.to_string().contains("SHA256SUMS` is not valid UTF-8"),
+            "the error must name the sums asset, got: {err}"
+        );
+    }
+
+    // The sums fetch reuses the artifact download's transport but not its progress reporting: a
+    // progress bar for a few hundred bytes of digests is noise on top of the real download.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn the_sums_fetch_does_not_report_progress() {
+        let upd = update_with_sums_asset("SHA256SUMS");
+        let sums_asset = crate::update::ReleaseAsset::new("SHA256SUMS", "https://host/SHA256SUMS");
+        let artifact = crate::update::ReleaseAsset::new("app.tar.gz", "https://host/app.tar.gz");
+
+        let artifact_download = format!("{:?}", super::build_download(&upd, &artifact).unwrap());
+        let sums_download = format!(
+            "{:?}",
+            super::build_sums_download(&upd, &sums_asset).unwrap()
+        );
+        assert!(
+            artifact_download.contains("show_progress: true"),
+            "the artifact download keeps the configured progress bar, got: {artifact_download}"
+        );
+        assert!(
+            sums_download.contains("show_progress: false"),
+            "the sums fetch must not draw a progress bar, got: {sums_download}"
+        );
+    }
+
+    // A resolved sums digest is verified by the finish tail, independently of `verify_checksum`: a
+    // mismatch aborts before extraction with no other gate configured.
+    #[cfg(feature = "checksums")]
+    #[test]
+    fn finish_update_verifies_the_resolved_sums_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("app.tar.gz");
+        std::fs::write(&archive_path, b"hello").unwrap();
+
+        let upd = update_with_sums_asset("SHA256SUMS");
+        let release = release_with_sums_asset();
+        let asset = crate::update::ReleaseAsset::new("app.tar.gz", "https://host/app.tar.gz");
+
+        // A valid-length but wrong SHA-256 digest (the file's real digest is 2cf24dba...).
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            Some(crate::Checksum::Sha256("00".repeat(32))),
+        )
+        .expect_err("a mismatched sums digest must abort the update");
+        assert!(
+            err.to_string().contains("checksum mismatch"),
+            "expected a checksum-mismatch abort, got: {err}"
         );
     }
 
@@ -4734,8 +5294,17 @@ mod tests {
         let release = Release::builder().version("1.2.3").build().unwrap();
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("a mismatched checksum must abort the update");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("a mismatched checksum must abort the update");
         let msg = err.to_string();
         assert!(
             msg.contains("checksum mismatch"),
@@ -4765,8 +5334,17 @@ mod tests {
         let release = Release::builder().version("1.2.3").build().unwrap();
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
             !msg.contains("checksum mismatch"),
@@ -4792,8 +5370,17 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest(format!("sha256:{}", "00".repeat(32)));
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("a mismatched release digest must abort the update");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("a mismatched release digest must abort the update");
         let msg = err.to_string();
         assert!(
             msg.contains("checksum mismatch"),
@@ -4821,8 +5408,17 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
             !msg.contains("checksum mismatch"),
@@ -4850,8 +5446,17 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest(format!("sha256:{}", "00".repeat(32)));
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("the bytes are not a real archive, so extraction must fail");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("the bytes are not a real archive, so extraction must fail");
         let msg = err.to_string();
         assert!(
             !msg.contains("checksum mismatch"),
@@ -4875,8 +5480,17 @@ mod tests {
         let asset = ReleaseAsset::new("release.tar.gz", "https://host/release.tar.gz")
             .with_digest("md5:abc123");
 
-        let err = super::finish_update(&upd, release, &asset, dir, &archive_path, None)
-            .expect_err("an unsupported digest must abort the update");
+        let err = super::finish_update(
+            &upd,
+            release,
+            &asset,
+            dir,
+            &archive_path,
+            None,
+            #[cfg(feature = "checksums")]
+            None,
+        )
+        .expect_err("an unsupported digest must abort the update");
         assert!(
             matches!(err, crate::errors::Error::InvalidResponse { .. }),
             "expected Error::InvalidResponse, got {:?}",
@@ -5734,8 +6348,11 @@ mod tests {
             bundle_target: None,
             show_output: false,
             verify_callback: None,
+            verify_archive_callback: None,
             #[cfg(feature = "checksums")]
             verify_checksum: None,
+            #[cfg(feature = "checksums")]
+            sums_checksum: None,
             #[cfg(feature = "checksums")]
             asset_digest: None,
             #[cfg(feature = "checksums")]

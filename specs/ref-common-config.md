@@ -200,7 +200,18 @@ parses versions from object keys and the custom backend supplies its own `Releas
   (`verify_checksum` -> release digest -> signature/`verifying_keys` -> extract ->
   `verify_binary` -> replace), so it runs last. `Err(..) => bail` with
   `Error::VerificationRejected { reason }`.
+- `verify_archive(impl Fn(&Path) -> Result<()> ...)` (`src/macros.rs:verify_archive`) - the
+  pre-extraction hook on the downloaded archive, for an external attestation/signature check whose
+  subject is the released file itself (`gh attestation verify`, `cosign verify-blob`). Runs after
+  the built-in archive gates and before extraction (`verify_checksum` -> release digest ->
+  signature/`verifying_keys` -> `verify_archive` -> extract -> `verify_binary` -> replace).
+  `Err(..) => bail` with `Error::ArchiveVerificationRejected { reason }`, a distinct variant from
+  the `verify_binary` hook's.
 - `verify_checksum(Checksum)` (`src/macros.rs:verify_checksum`, under `checksums`).
+- `checksum_from_asset(impl Into<String>)` (`src/macros.rs:checksum_from_asset`, under `checksums`) -
+  name a sums asset of the same release (e.g. `SHA256SUMS`) to resolve the expected digest from,
+  fetched over the same transport before the artifact download. Independent of the two gates above;
+  a lookup that yields no digest is `Error::ChecksumSourceInvalid`.
 - `verify_release_digest(bool)` (`src/macros.rs:verify_release_digest`, under `checksums`, default on) - toggles
   verifying the download against the selected asset's backend-published digest.
 - `verifying_keys(impl Into<Vec<VerifyingKey>>)` (`src/macros.rs:verifying_keys`, under
@@ -231,7 +242,8 @@ the same `(@emit ...)` arm (`src/macros.rs:impl_update_config_accessors`). The c
 `pub(crate) trait UpdateInternals` (not the public `UpdateConfig`):
 `request_timeout`, `request_headers`, `request_config`, `request_client`,
 `request_async_client` (`async`), `progress_callback`,
-`verify_callback`, `asset_matcher`, `verify_checksum` and `verify_release_digest`
+`verify_callback`, `verify_archive_callback`, `asset_matcher`, `verify_checksum`,
+`checksum_from_asset` and `verify_release_digest`
 (`checksums`), and `verifying_keys` (`src/macros.rs:verifying_keys`, `signatures`) -- the accessor and the
 field it reads share the same name; there is no separate `verify_keys` accessor. See
 `update-config-internal-accessors.md`.

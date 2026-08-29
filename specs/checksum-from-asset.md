@@ -1,6 +1,6 @@
 # Checksum from release asset
 
-Status: partially implemented
+Status: implemented
 
 ## Problem
 
@@ -24,13 +24,26 @@ Added entry.
 The digest is an integrity check only (the forge recomputes it when an asset is
 replaced), so it is not a substitute for the `signatures` feature.
 
-## Deferred: SHA256SUMS-file fetch and parse
+## Implemented: SHA256SUMS-file fetch and parse
 
-Still not implemented: a setter such as `checksum_from_asset("SHA256SUMS")` that, during
-the update, downloads a named sums asset from the same release, parses the loosely
-standardized `<hex>  <filename>` line format (or a bare digest for a single-asset
-`.sha256`), and matches the line for the selected asset to derive the expected digest.
-This is sugar over the caller-provided checksum and adds an extra network request plus
-format-parsing surface (two spaces vs one, a `*` binary marker, leading paths), so it
-waits until there is demand. The forge-published digest above covers the common github
-case without any of it.
+`checksum_from_asset("SHA256SUMS")` names an asset of the same release to resolve the
+expected digest from. The update fetches it after the artifact is selected and confirmed
+and before the artifact itself is downloaded, so a release missing the sums asset fails
+without first pulling the whole artifact, then matches the entry for the selected asset's
+file name.
+
+The loosely standardized format is handled by `Checksum::from_sums_file`
+(`src/checksum.rs`): coreutils text (`<hex>  <name>`) and binary (`<hex> *<name>`) modes,
+any whitespace run between the two, leading path components on the listed name (matched
+on its last component, `/` and `\` both), the BSD tag form `SHA256 (<name>) = <hex>`,
+`#` comments and blank lines, and a whole-file bare digest for the single-artifact
+`<name>.sha256` convention. The algorithm comes from the digest length (64 -> sha256,
+128 -> sha512), so a `SHA512SUMS` asset needs no separate setting.
+
+Failing to produce a digest is always `Error::ChecksumSourceInvalid { asset, reason }`,
+never a silently skipped verification: the caller opted in to sums verification, so
+getting none instead is the outcome worth refusing.
+
+This reaches the release layout the per-asset digest above does not: gitlab, gitea, and
+s3, whose APIs publish no digest, plus any repo that publishes its own sums file. The
+cost is one extra request per update, and only when the setter is used.
