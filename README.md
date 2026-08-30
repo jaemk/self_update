@@ -866,7 +866,10 @@ ureq client onto the OS trust store instead:
 self_update = { version = "1.2", features = ["ureq", "rustls", "native-certs"] }
 ```
 
-The reqwest client needs nothing: its rustls setup already verifies against the OS trust store.
+The reqwest client needs nothing and is not affected by the feature: its rustls setup already
+verifies through `rustls-platform-verifier`, and its native-tls setup uses the system store by
+definition. On a reqwest-only build `native-certs` is a no-op that pulls in no extra dependency, so
+it is safe to enable unconditionally in a crate that offers both clients.
 `native-certs` has no effect on an injected `ureq::Agent` either, since that agent owns its own TLS
 config, so set `RootCerts::PlatformVerifier` on it yourself. On Linux the OS trust store honors
 `SSL_CERT_FILE` / `SSL_CERT_DIR`, so those env vars work as an escape hatch once the feature is on.

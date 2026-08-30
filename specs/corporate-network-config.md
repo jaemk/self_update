@@ -179,6 +179,22 @@ CORP-2-7. When both `reqwest` and `ureq` features are on, the ureq per-call path
 reached; `native-certs` is effectively a no-op (no overhead). This is acceptable since
 the common default-feature path uses reqwest with the platform verifier already.
 
+CORP-2-8. `native-certs` is a no-op on a build with no `ureq` feature, and pulls in no
+dependency there: the mapping is `ureq?/platform-verifier`, and the `?` prefix activates
+`platform-verifier` only when `ureq` is itself enabled. Enabling `native-certs`
+unconditionally is therefore safe for a downstream crate that offers both clients. Nothing
+is needed on the reqwest side for either TLS backend: rustls verifies through
+`rustls-platform-verifier` (CORP-2-1), and native-tls uses the system store by definition.
+
+CORP-2-9. The reqwest rustls lane reaches the platform verifier only while `root_certs` is
+empty and `tls_certs_only` was never set (reqwest 0.13.4 `async_impl/client.rs`; the
+blocking client wraps the same builder, so both APIs behave alike). Neither condition is
+reachable by accident from this crate: `tls_certs_only` is never called, and
+`tls_certs_merge` is invoked with the collected `add_root_certificate` certs, which extends
+an empty vec with nothing when the caller supplied none. A caller who DOES supply
+certificates moves to `Verifier::new_with_extra_roots`, which keeps the OS trust store and
+adds theirs (CORP-1-12), rather than the ureq lane's replace semantics (CORP-1-15).
+
 ---
 
 ## CORP-3: proxy with auth (designed)
