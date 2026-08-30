@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "1.1.0"
+version = "1.2.0"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -110,6 +110,17 @@ native-tls = ["reqwest?/native-tls", "ureq?/native-tls"]
 # the reqwest client; a ureq-only build gets `native-tls` (system OpenSSL) without vendoring.
 native-tls-vendored = ["native-tls", "reqwest?/native-tls-vendored"]
 rustls = ["reqwest?/rustls", "ureq?/rustls"]
+# Trust the OS certificate store instead of Mozilla's bundled roots, for the ureq client.
+# Turn it on when your users sit behind a TLS-intercepting corporate proxy whose CA is installed
+# in the machine's trust store: without it, every request fails to verify. It moves the ureq
+# per-call agent from `RootCerts::WebPki` to `RootCerts::PlatformVerifier`; no effect on an
+# injected `ureq::Agent`, which owns its own TLS config.
+#
+# A reqwest build needs nothing and is unaffected: reqwest 0.13's rustls setup already verifies
+# through `rustls-platform-verifier`, and its native-tls setup uses the system store by
+# definition. The `ureq?/` prefix means this feature is a no-op there, pulling in nothing.
+# See CORP-2 in specs/corporate-network-config.md.
+native-certs = ["ureq?/platform-verifier"]
 
 reqwest = ["dep:reqwest"]
 ureq = ["dep:ureq"]
