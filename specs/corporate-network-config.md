@@ -1,6 +1,6 @@
 # Corporate Network Config
 
-Status: CORP-1 and CORP-2 done; CORP-3 pending
+Status: CORP-1, CORP-2 and CORP-3 done
 
 ## Problem
 
@@ -10,7 +10,7 @@ its own root store and does not read the OS trust store, so any connection throu
 proxy fails with a certificate verification error unless the caller injects a
 pre-configured `reqwest` client with the custom CA added manually.
 
-CORP-1 and CORP-2 have shipped; CORP-3 remains open:
+All three items have shipped:
 
 - **Custom root CA (CORP-1)**: shipped. `self_update::Certificate` plus
   `add_root_certificate` on every builder and on `Download`; a malformed
@@ -22,11 +22,14 @@ CORP-1 and CORP-2 have shipped; CORP-3 remains open:
   store) via `rustls-platform-verifier`; the gap was the ureq per-call path, which defaults
   to Mozilla's bundled roots (`WebPki`) and so ignores the machine's trust store entirely.
 
-- **Proxy with auth (CORP-3)**: env-var passthrough (`HTTP_PROXY` / `HTTPS_PROXY`) works
-  for unauthenticated proxies, but any proxy requiring credentials must be configured on
-  an injected client. There is no `.proxy(url)` setter on the builders.
+- **Proxy with auth (CORP-3)**: shipped. `.proxy(url)` on every builder and on `Download`,
+  with credentials embedded in the URL (`http://user:pass@host:port`) sent to the proxy as
+  `Proxy-Authorization`. An unparseable URL surfaces as `Error::InvalidProxy` from
+  `build()` / `download_to`, with the password redacted from the message and from every
+  `Debug` rendering. Env-var passthrough (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`) is
+  unchanged for the unauthenticated case. See CORP-3 below and `ref-http-client.md`.
 
-The remaining gap (CORP-3) forces corporate users to add `reqwest` or `ureq` as a direct
+None of the three now forces a corporate user to add `reqwest` or `ureq` as a direct
 dependency solely to unlock transport config that belongs on the `self_update` builder
 surface.
 
@@ -197,7 +200,7 @@ adds theirs (CORP-1-12), rather than the ureq lane's replace semantics (CORP-1-1
 
 ---
 
-## CORP-3: proxy with auth (designed)
+## CORP-3: proxy with auth (done)
 
 ### Builder setter
 
@@ -248,6 +251,68 @@ CORP-3-10. When no programmatic proxy is set, the ureq per-call path continues t
 
 CORP-3-11. Callers who need both env-var fallback and programmatic-proxy auth (e.g.
 "use programmatic proxy if env var is unset") must inject a `ureq::Agent`.
+
+### As built
+
+CORP-3-12. The cert-only client builders were generalized rather than duplicated: one
+`http_client::ClientConfig { certs, proxy }` feeds
+`http_client::build_configured_client` / `build_configured_async_client`
+(`src/http_client/mod.rs:build_configured_client`), which dispatch to
+`ReqwestClient::build_configured` / `ReqwestAsyncClient::build_configured_async`
+(`src/http_client/reqwest.rs:ReqwestClient`) or `UreqClient::build_configured`
+(`src/http_client/ureq.rs:UreqClient`). A client is materialized when *either* knob is set
+(`ClientConfig::is_empty`), so CORP-3-5 is structural: both are applied to the same builder.
+
+CORP-3-13. `ClientConfigError` (`src/http_client/mod.rs:ClientConfigError`) distinguishes a
+proxy failure from any other build failure, so `RequestConfig::build_client`
+(`src/backends/common.rs:RequestConfig`) can route it to `proxy_error` vs `cert_error` and
+`check()` can surface the matching variant. A *generic* build failure is attributed to the
+certificates, except when none were supplied -- there it can only have come from the proxy,
+and naming a certificate the caller never set would send them to the wrong setter. The
+`Download` path applies the same rule in `Download::client_config_error` (`src/lib.rs:Download`).
+
+CORP-3-14. Precedence in `check()` is header error, then cert error, then proxy error.
+
+CORP-3-15. Credentials embedded in the proxy URL are secrets, so they never reach a log:
+`errors::redact_proxy_url` (`src/errors.rs:redact_proxy_url`) blanks the password (keeping the
+username, host and port, which is what lets a user recognize their own config) for the
+hand-written `Debug` of both `RequestConfig` and `Download`, and
+`errors::proxy_error_message` (`src/errors.rs:proxy_error_message`) additionally scrubs the raw
+password out of the *wrapped* client error, which may quote the URL it was handed.
+
+CORP-3-16. `build_download` (`src/update.rs:build_download`) forwards the configured proxy onto
+the `Download` alongside the root certificates. Without it the release listing would go through
+the proxy while the asset download went direct -- on a network that only permits egress via the
+proxy, an update that fails after a successful version check.
+
+CORP-3-17. `Download::proxy` (`src/lib.rs:Download`) is public, mirroring
+`Download::add_root_certificate`, so a standalone download can be proxied too.
+
+### Tests
+
+- `src/lib.rs`: `download_routes_through_a_configured_proxy_with_credentials` (and its
+  `_async` sibling) drive a real download through a loopback HTTP proxy stub at a `.invalid`
+  target host -- unresolvable, so success is only possible via the proxy -- and assert the
+  `Proxy-Authorization` credentials arrive. The stub handles both proxying styles: reqwest's
+  absolute-form `GET`, and ureq's `CONNECT` tunnel.
+  `an_injected_client_wins_over_a_configured_proxy` (CORP-3-6),
+  `download_rejects_an_unparseable_proxy_url`, `download_debug_redacts_the_proxy_password`.
+- `src/backends/common.rs`: `build_client_with_a_proxy_materializes_a_client`,
+  `build_client_bad_proxy_records_proxy_error_not_cert_error`,
+  `check_surfaces_proxy_error_as_invalid_proxy`,
+  `build_client_with_injected_client_skips_the_proxy_build`, plus the two `Debug` tests
+  extended with the proxy fields.
+- `src/backends/github.rs`: `proxy_bad_url_surfaces_from_build` (both builders),
+  `proxy_is_stored_and_last_call_wins` (CORP-3-2).
+- `src/http_client/reqwest.rs`: `build_configured_reports_an_unparseable_proxy_as_a_proxy_failure`,
+  `build_configured_applies_certificates_and_the_proxy_to_the_same_client`.
+- `src/http_client/ureq.rs`: the same proxy-failure test plus
+  `a_configured_proxy_replaces_the_env_proxy_on_the_per_call_agent` (CORP-3-9/10, asserted on
+  the agent's own config so no environment mutation races other tests).
+- `src/update.rs`: `build_download_forwards_the_proxy_to_download`.
+- `src/errors.rs`: `redact_proxy_url_redacts_only_the_password`,
+  `redact_proxy_url_leaves_credential_free_urls_unchanged`,
+  `proxy_error_message_scrubs_the_password_from_the_wrapped_error`.
 
 ---
 

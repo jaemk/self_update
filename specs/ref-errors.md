@@ -45,6 +45,7 @@ code builds them via the public constructors (`http_status_error(404, ..)`,
 | `InvalidHeader { source: Box<dyn Error + Send + Sync> }` | A request header (`request_header` on the builders or on `Download`) was not a valid HTTP header. The setters are infallible; the error is deferred and surfaced from `build()` (via `common.rs`) or from `Download::download_to` / `download_to_async` (`lib.rs`). The source is a crate-internal `MessageError` carrying the validation message. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidAuthToken { source: Box<dyn Error + Send + Sync> }` | An auth token could not be encoded as an HTTP `Authorization` header value (`github.rs`, `gitlab.rs`, `gitea.rs`, `update.rs`). The underlying header-value parse error is carried as `source`. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidCertificate { source: Box<dyn Error + Send + Sync> }` | A custom TLS root certificate could not be parsed, or the HTTP client that would trust it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`) when `add_root_certificate` certs are supplied. Exception: on a ureq-only build a malformed **DER** certificate is not caught at `build()` (ureq's `from_der` is infallible) and surfaces as `Transport` at connection time; PEM is validated at `build()` on both clients. `#[non_exhaustive]`. | none | yes (boxed source) |
+| `InvalidProxy { source: Box<dyn Error + Send + Sync> }` | A programmatic proxy URL (`proxy(url)` on the builders or on `Download`) could not be parsed, or the HTTP client that would route through it could not be built. Produced by `RequestConfig::check()` (`common.rs`, surfaced from `build()`) and by `Download::download_to` / `download_to_async` (`lib.rs`). Any credentials embedded in the URL are redacted from the message (`src/errors.rs:redact_proxy_url`, `src/errors.rs:proxy_error_message`), including from the wrapped client error. A generic client-build failure is reported here rather than as `InvalidCertificate` when no certificates were configured. `#[non_exhaustive]`. | none | yes (boxed source) |
 | `InvalidProgressStyle { source: Box<dyn Error + Send + Sync> }` | A progress-bar template string was not valid; wraps the underlying `indicatif` template error (`lib.rs`). `#[non_exhaustive]`. | `progress-bar` | yes (boxed source) |
 | `Io(std::io::Error)` | Wraps a `std::io::Error`. Constructed directly and via `From<std::io::Error>`. | none | no (concrete `std::io::Error`) |
 | `Json(Box<dyn Error + Send + Sync>)` | `serde_json` failure, only via `From<serde_json::Error>`. | none | yes (boxed) |
@@ -109,6 +110,10 @@ construction sites that stringified-and-discarded a real underlying error now ca
   `InvalidCertificate { source }`.
 - **`lib.rs` `Download::download_to` and `Download::download_to_async`** (same cert/build
   failure when custom root CAs are supplied) -> `InvalidCertificate { source }`.
+- **`common.rs` `RequestConfig::check()` / `lib.rs` `Download::download_to` /
+  `download_to_async`** (proxy-URL parse failure, or a client-build failure with no
+  certificates configured) -> `InvalidProxy { source }`. `check()`'s precedence is header
+  error, then cert error, then proxy error.
 - **`lib.rs` progress-bar template parse** (`progress-bar`) -> `InvalidProgressStyle { source }`.
 
 `Config(String)` is fully removed; every former producer routes to a structured variant.
@@ -146,6 +151,7 @@ Each variant renders with a specific Display string:
 - `InvalidHeader { source }` -> `"ConfigError: invalid HTTP header: {source}"`
 - `InvalidAuthToken { source }` -> `"ConfigError: failed to parse auth token: {source}"`
 - `InvalidCertificate { source }` -> `"ConfigError: invalid root certificate: {source}"`
+- `InvalidProxy { source }` -> `"ConfigError: invalid proxy: {source}"`
 - `InvalidProgressStyle { source }` -> `"ConfigError: invalid progress bar template: {source}"` (`progress-bar`)
 - `Io(e)` -> `"IoError: {e}"`
 - `Json(e)` -> `"JsonError: {e}"` (dereferences the box)
@@ -170,7 +176,8 @@ every other variant using a `<Name>Error:` prefix.
 `source()` returns the inner error for the wrapping variants: `Io` (the concrete io error); the
 boxed `Json`, `Transport`, `SemVer`, `Zip` (gated), `Signature` (gated), `S3Auth` (gated); the
 boxed-source variants `InvalidResponse`, `InvalidHeader`, `InvalidAuthToken`,
-`InvalidCertificate`, `InvalidProgressStyle` (gated), `InvalidAssetKeyPattern` (gated); and
+`InvalidCertificate`, `InvalidProxy`, `InvalidProgressStyle` (gated), `InvalidAssetKeyPattern`
+(gated); and
 `Internal` when its `source` is `Some`
 -- each via deref of the box. The `Internal { source: None }` form and all field-only variants
 (`VerificationRejected`, `ArchiveVerificationRejected`, `ChecksumSourceInvalid`, `ChecksumMismatch`, `Aborted`, `NotFound`, `Unauthorized`, `HttpStatus`,
@@ -293,7 +300,7 @@ headers identically:
 
 `Transport`, `S3Auth`, `Zip`, `Signature`, `Json`, `SemVer`, and the structured-source variants
 `InvalidResponse` / `InvalidHeader` / `InvalidAuthToken` / `InvalidCertificate` /
-`InvalidProgressStyle` (and `Internal`'s optional `source`) wrap
+`InvalidProxy` / `InvalidProgressStyle` (and `Internal`'s optional `source`) wrap
 `Box<dyn std::error::Error + Send + Sync>` so no dependency type appears in the public API. The
 inner type can change (reqwest vs ureq selection, a `zip`/`serde_json`/`semver` major bump, the
 signing implementation, the XML/regex/header dependency) without altering the public surface.

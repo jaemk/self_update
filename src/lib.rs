@@ -796,11 +796,45 @@ fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Proxies
+
+Both clients honor the `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables. When the
+proxy requires credentials that you would rather not put in the environment, set it on the builder
+instead — the URL may embed them, and they are sent to the proxy as `Proxy-Authorization`:
+
+```rust
+# #[cfg(feature = "github")]
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .proxy("http://corp-user:s3cret@proxy.corp.example:8080")
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+The proxy applies to every request the updater makes, the release listing and the asset download
+alike, and [`Download`](crate::Download) has the same `proxy` setter for standalone downloads. The
+password is redacted from the builder's `Debug` output and from any error it produces, so neither
+leaks into your logs. An unparseable URL surfaces as
+[`Error::InvalidProxy`](crate::errors::Error::InvalidProxy) from `build()`.
+
+Only HTTP CONNECT proxies are supported (SOCKS is out of scope — inject your own client for that).
+On the reqwest client this proxy is applied alongside the environment variables (reqwest tries its
+configured proxies in order, first match wins); on a ureq-only build the agent has a single proxy
+slot, so the configured proxy replaces the env-var one. A client injected via `http_client` /
+`reqwest_client` / `ureq_agent` owns its own proxy configuration and ignores this setter.
+
 ### Custom HTTP client
 
-The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
-for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
-simply reusing your application's existing client — you can hand the crate a **pre-built client**.
+The `.timeout()` / `.request_header()` / `.retries()` / `.proxy()` / `.add_root_certificate()`
+builder knobs cover most transport needs, but for full control — mTLS, connection pooling, redirect
+policy, SOCKS proxies, or simply reusing your application's existing client — you can hand the crate
+a **pre-built client**.
 It is used for both the release listing and the download. The client-specific convenience setters
 are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
 `reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
@@ -894,6 +928,11 @@ config, so set `RootCerts::PlatformVerifier` on it yourself. On Linux the OS tru
 To trust exactly one internal CA and nothing else, skip the feature and pass the certificate to
 [`add_root_certificate`](crate::backends::github::UpdateBuilder::add_root_certificate). Note that on
 a ureq build that *replaces* the trust store rather than adding to it.
+
+**The proxy needs a username and password.** `HTTP_PROXY` / `HTTPS_PROXY` cover an unauthenticated
+proxy, but if yours demands credentials, pass them on the builder with
+[`proxy`](crate::backends::github::UpdateBuilder::proxy) (see [Proxies](#proxies) above) rather than
+adding `reqwest` or `ureq` as a direct dependency just to build a client with a proxy on it.
 
 */
 
@@ -2173,6 +2212,9 @@ pub struct Download {
     /// Custom TLS root CA certificates to bake into the crate-built client when no client was
     /// injected (see [`add_root_certificate`](Self::add_root_certificate)).
     root_certificates: Vec<Certificate>,
+    /// Programmatic proxy URL the crate-built client routes through when no client was injected
+    /// (see [`proxy`](Self::proxy)). `None` leaves proxying to the client's own env-var support.
+    proxy: Option<String>,
     /// First error from a `request_header(name, value)` argument that wasn't a valid HTTP header.
     /// Deferred like the builders' `request_header` so the setter stays infallible; surfaced from
     /// [`download_to`](Self::download_to) as an `Error::InvalidHeader`.
@@ -2203,6 +2245,12 @@ impl std::fmt::Debug for Download {
         s.field(
             "root_certificates",
             &format_args!("<{} root_certificates>", self.root_certificates.len()),
+        );
+        // The proxy URL may embed credentials; print it with the password redacted (see
+        // `RequestConfig`'s `Debug`, which does the same for the builders).
+        s.field(
+            "proxy",
+            &self.proxy.as_deref().map(errors::redact_proxy_url),
         );
         s.finish()
     }
@@ -2238,6 +2286,7 @@ impl Download {
             #[cfg(feature = "async")]
             async_client: None,
             root_certificates: vec![],
+            proxy: None,
             header_error: None,
         }
     }
@@ -2365,6 +2414,53 @@ impl Download {
         &self.root_certificates
     }
 
+    /// Route this download through an HTTP proxy, given as a URL that may embed credentials
+    /// (`http://user:pass@proxy.corp:8080`). Calling it more than once replaces the previous URL.
+    /// Ignored when an HTTP client is injected via `set_http_client` (the injected client owns its
+    /// own proxy config). An unparseable URL surfaces as an [`Error::InvalidProxy`] from
+    /// [`download_to`](Self::download_to), with the password redacted from the message.
+    ///
+    /// On the reqwest client this proxy is applied alongside `HTTP(S)_PROXY` / `NO_PROXY`; on a
+    /// ureq-only build it replaces the env-var proxy (the agent has a single proxy slot). Only HTTP
+    /// CONNECT proxies are supported. An `Update` forwards its own
+    /// [`proxy`](crate::backends::github::UpdateBuilder::proxy) setting here, so the download goes
+    /// through the same proxy as the release listing.
+    pub fn proxy(&mut self, url: impl Into<String>) -> &mut Self {
+        self.proxy = Some(url.into());
+        self
+    }
+
+    /// Internal: the configured proxy URL (used by tests to confirm proxy forwarding). `None`
+    /// unless [`proxy`](Self::proxy) was called.
+    #[cfg(test)]
+    pub(crate) fn configured_proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
+    }
+
+    /// The transport configuration (custom roots + proxy) a crate-built client is materialized
+    /// from, shared by the sync and async download paths.
+    fn client_config(&self) -> http_client::ClientConfig<'_> {
+        http_client::ClientConfig {
+            certs: &self.root_certificates,
+            proxy: self.proxy.as_deref(),
+        }
+    }
+
+    /// Map a client-build failure to the error naming the setter that caused it: a proxy-parse
+    /// failure to [`proxy`](Self::proxy), anything else to
+    /// [`add_root_certificate`](Self::add_root_certificate) -- except when no certificates were
+    /// supplied, where a generic build failure can only have come from the proxy config (mirrors
+    /// `RequestConfig::build_client`).
+    fn client_config_error(&self, e: http_client::ClientConfigError) -> Error {
+        match e {
+            http_client::ClientConfigError::Proxy(source) => Error::InvalidProxy { source },
+            http_client::ClientConfigError::Other(source) if self.root_certificates.is_empty() => {
+                Error::InvalidProxy { source }
+            }
+            http_client::ClientConfigError::Other(source) => Error::InvalidCertificate { source },
+        }
+    }
+
     /// Set a download request header, inserting into the existing `HeaderMap`. To add a single
     /// header without discarding the others; to replace the whole map use
     /// [`replace_headers`](Self::replace_headers).
@@ -2428,13 +2524,15 @@ impl Download {
 
         let default;
         let built;
+        let config = self.client_config();
         let client: &dyn http_client::HttpClient = match self.client.as_deref() {
             Some(c) => c,
-            None if !self.root_certificates.is_empty() => {
-                // No injected client but custom root CAs were supplied: build a client that trusts
-                // them. A malformed cert / build failure surfaces here as `Error::InvalidCertificate`.
-                built = http_client::client_with_root_certs(&self.root_certificates)
-                    .map_err(|source| Error::InvalidCertificate { source })?;
+            None if !config.is_empty() => {
+                // No injected client but custom root CAs and/or a proxy were supplied: build a
+                // client honoring them. A malformed cert or proxy URL surfaces here as
+                // `Error::InvalidCertificate` / `Error::InvalidProxy`.
+                built = http_client::build_configured_client(config)
+                    .map_err(|e| self.client_config_error(e))?;
                 &*built
             }
             None => {
@@ -2538,13 +2636,15 @@ impl Download {
 
         let default;
         let built;
+        let config = self.client_config();
         let client: &dyn http_client::AsyncHttpClient = match self.async_client.as_deref() {
             Some(c) => c,
-            None if !self.root_certificates.is_empty() => {
-                // No injected async client but custom root CAs were supplied: build one that trusts
-                // them. A malformed cert / build failure surfaces here as `Error::InvalidCertificate`.
-                built = http_client::async_client_with_root_certs(&self.root_certificates)
-                    .map_err(|source| Error::InvalidCertificate { source })?;
+            None if !config.is_empty() => {
+                // No injected async client but custom root CAs and/or a proxy were supplied: build
+                // one honoring them. A malformed cert or proxy URL surfaces here as
+                // `Error::InvalidCertificate` / `Error::InvalidProxy`.
+                built = http_client::build_configured_async_client(config)
+                    .map_err(|e| self.client_config_error(e))?;
                 &*built
             }
             None => {
@@ -3001,6 +3101,180 @@ mod tests {
             last = *downloaded;
         }
         assert_eq!(calls.last().unwrap().0, 20_000);
+    }
+
+    /// Read one HTTP message head (through the blank line) a byte at a time, so nothing of a
+    /// following tunneled request is swallowed. Returns the head verbatim.
+    fn read_http_head(stream: &mut impl Read) -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        while stream.read(&mut byte).unwrap_or(0) == 1 {
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// A loopback HTTP proxy stub. Serves `body` for whatever the client asks for, and reports the
+    /// head of the first request it received (the one carrying `Proxy-Authorization`) over the
+    /// returned channel. Handles both proxying styles the two clients use for a plain-http target:
+    /// reqwest sends an absolute-form `GET http://host/path`, while ureq opens a
+    /// `CONNECT host:80` tunnel first and sends the request through it.
+    ///
+    /// Returns `(authority, request_head_rx)` where `authority` is `127.0.0.1:<port>`.
+    fn proxy_stub(body: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let authority = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let head = read_http_head(&mut stream);
+            let _ = tx.send(head.clone());
+            if head.starts_with("CONNECT") {
+                // Accept the tunnel, then read the request the client sends through it. The target
+                // is plain http, so nothing is negotiated on top and the stub can answer directly.
+                let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+                let _ = read_http_head(&mut stream);
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+        (authority, rx)
+    }
+
+    /// `Proxy-Authorization` for `corpuser:hunter2`, i.e. `base64("corpuser:hunter2")`. Both
+    /// clients render the credentials embedded in the proxy URL into this header.
+    const PROXY_BASIC_CREDS: &str = "Y29ycHVzZXI6aHVudGVyMg==";
+
+    /// The proxy setter must actually route the download through the proxy *and* pass the
+    /// credentials embedded in its URL. The target host is `.invalid` (RFC 2606: never resolvable),
+    /// so the download can only succeed by going through the proxy -- a setter that silently did
+    /// nothing would fail to resolve instead of quietly downloading direct.
+    #[test]
+    fn download_routes_through_a_configured_proxy_with_credentials() {
+        let (authority, requests) = proxy_stub("proxied-body");
+        let mut out = Vec::new();
+        Download::from_url("http://target.invalid/file")
+            .proxy(format!("http://corpuser:hunter2@{authority}"))
+            .download_to(&mut out)
+            .expect("the download must succeed through the proxy");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "proxied-body",
+            "the body must come back through the proxy"
+        );
+        let head = requests
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the proxy must have received the request");
+        assert!(
+            head.contains("target.invalid"),
+            "the proxy must be asked for the target host (absolute-form GET or CONNECT), got: {head}"
+        );
+        assert!(
+            head.to_lowercase().contains("proxy-authorization") && head.contains(PROXY_BASIC_CREDS),
+            "the credentials embedded in the proxy URL must be sent to the proxy, got: {head}"
+        );
+    }
+
+    /// Async sibling of `download_routes_through_a_configured_proxy_with_credentials`: the async
+    /// download path builds its own client, so it needs its own proof that the proxy is applied.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn download_async_routes_through_a_configured_proxy_with_credentials() {
+        let (authority, requests) = proxy_stub("proxied-body-async");
+        let mut out = Vec::new();
+        Download::from_url("http://target.invalid/file")
+            .proxy(format!("http://corpuser:hunter2@{authority}"))
+            .download_to_async(&mut out)
+            .await
+            .expect("the async download must succeed through the proxy");
+        assert_eq!(String::from_utf8_lossy(&out), "proxied-body-async");
+        let head = requests
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the proxy must have received the async request");
+        assert!(head.contains("target.invalid"), "got: {head}");
+        assert!(
+            head.to_lowercase().contains("proxy-authorization") && head.contains(PROXY_BASIC_CREDS),
+            "the async lane must send the proxy credentials too, got: {head}"
+        );
+    }
+
+    /// An injected client owns its own proxy configuration, so `.proxy()` must not silently build a
+    /// second client over the top of it (CORP-3-6). Proven by injecting a client that answers
+    /// without any network at all: if the proxy setter rebuilt the client, the request would go to
+    /// the (unbound) proxy address and fail instead of returning the canned body.
+    #[test]
+    fn an_injected_client_wins_over_a_configured_proxy() {
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = std::sync::Arc::new(DlClient {
+            body: b"from-injected-client".to_vec(),
+            content_length: Some(20),
+            requested: requested.clone(),
+        });
+        let mut out = Vec::new();
+        let mut download = Download::from_url("http://target.invalid/file");
+        download.proxy("http://127.0.0.1:1/");
+        download.set_http_client(
+            Some(client),
+            #[cfg(feature = "async")]
+            None,
+        );
+        download
+            .download_to(&mut out)
+            .expect("the injected client must serve the download");
+        assert_eq!(String::from_utf8_lossy(&out), "from-injected-client");
+        assert_eq!(requested.lock().unwrap().len(), 1);
+    }
+
+    /// A proxy URL that neither client can parse must surface as `Error::InvalidProxy` from
+    /// `download_to` -- not as a transport error, and not as `InvalidCertificate` (no certificate
+    /// was ever supplied). The message must carry the redacted URL, never the password.
+    #[test]
+    fn download_rejects_an_unparseable_proxy_url() {
+        let mut out = Vec::new();
+        let err = Download::from_url("http://target.invalid/file")
+            .proxy("http://corpuser:hunter2@ not a proxy url")
+            .download_to(&mut out)
+            .expect_err("an unparseable proxy URL must be an error");
+        assert!(
+            matches!(err, Error::InvalidProxy { .. }),
+            "expected Error::InvalidProxy, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("hunter2"),
+            "the proxy password must not appear in the error, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("REDACTED"),
+            "the error must name the (redacted) proxy URL, got: {rendered}"
+        );
+    }
+
+    /// `Download`'s hand-written `Debug` must redact the proxy password, the same way
+    /// `RequestConfig`'s does for the builders: an application dumping its `Download` into a log
+    /// must not leak the credential.
+    #[test]
+    fn download_debug_redacts_the_proxy_password() {
+        let mut download = Download::from_url("http://example.com/file");
+        download.proxy("http://corpuser:hunter2@proxy.corp:8080");
+        let rendered = format!("{download:?}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "the proxy password must never appear in Debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("http://corpuser:REDACTED@proxy.corp:8080"),
+            "the proxy must still be identifiable in the dump, got: {rendered}"
+        );
     }
 
     /// A test-double [`HttpResponse`](http_client::HttpResponse) returning a canned body and a

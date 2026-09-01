@@ -140,37 +140,73 @@ pub(crate) fn default_client() -> Box<dyn HttpClient> {
     Box::new(UreqClient::default())
 }
 
-/// A boxed error used by the cert-client builders, so the underlying certificate-parse / client
-/// build failure is preserved as a `source` chain rather than stringified.
+/// A boxed error used by the configured-client builders, so the underlying certificate-parse /
+/// proxy-parse / client-build failure is preserved as a `source` chain rather than stringified.
 pub(crate) type ClientBuildError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Build a sync HTTP client pre-configured with custom root CA certificates.
-/// Returns `Err` if the cert bytes are invalid or the client cannot be built.
-/// When both `reqwest` and `ureq` are enabled, reqwest is preferred (same priority as default_client).
-pub(crate) fn client_with_root_certs(
-    certs: &[crate::tls::Certificate],
-) -> std::result::Result<std::sync::Arc<dyn HttpClient>, ClientBuildError> {
-    #[cfg(feature = "reqwest")]
-    {
-        crate::http_client::ReqwestClient::build_with_certs(certs)
-    }
-    #[cfg(all(feature = "ureq", not(feature = "reqwest")))]
-    {
-        crate::http_client::UreqClient::build_with_certs(certs)
-    }
-    #[cfg(not(any(feature = "reqwest", feature = "ureq")))]
-    {
-        let _ = certs;
-        Err("no HTTP client feature enabled".into())
+/// Which piece of transport configuration a [`build_configured_client`] failure came from, so the
+/// caller can surface it as the matching error variant (`Error::InvalidProxy` vs
+/// `Error::InvalidCertificate`) instead of blaming whichever setter happens to be checked first.
+pub(crate) enum ClientConfigError {
+    /// The proxy URL could not be parsed / applied. Always attributable to `proxy(..)`.
+    Proxy(ClientBuildError),
+    /// A certificate could not be parsed, or the client itself could not be built. Attributed to
+    /// the certificates, which is right for a cert-parse failure and is the more useful default
+    /// for a generic build failure when custom roots are in play (see `RequestConfig::build_client`
+    /// for how a build failure is attributed when only a proxy was configured).
+    Other(ClientBuildError),
+}
+
+/// The transport configuration a crate-built client is materialized from: custom root CA
+/// certificates ([CORP-1](../../specs/corporate-network-config.md)) and/or a programmatic proxy
+/// URL (CORP-3). Both are applied to the *same* client builder, so a caller behind an intercepting
+/// proxy that also needs a private CA gets one client honoring both.
+#[derive(Clone, Copy)]
+pub(crate) struct ClientConfig<'a> {
+    pub(crate) certs: &'a [crate::tls::Certificate],
+    /// Proxy URL in the standard format, credentials optional:
+    /// `http://user:pass@host:port`. `None` leaves proxy handling to the client's own env-var
+    /// support (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`).
+    pub(crate) proxy: Option<&'a str>,
+}
+
+impl ClientConfig<'_> {
+    /// Whether anything is configured at all. When nothing is, no client is built and the per-call
+    /// default client keeps its current behavior.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.certs.is_empty() && self.proxy.is_none()
     }
 }
 
-/// Async sibling of [`client_with_root_certs`]. Only reqwest is supported (async is reqwest-only).
+/// Build a sync HTTP client pre-configured with custom root CA certificates and/or a proxy.
+/// Returns `Err` if the cert bytes or the proxy URL are invalid, or the client cannot be built.
+/// When both `reqwest` and `ureq` are enabled, reqwest is preferred (same priority as default_client).
+pub(crate) fn build_configured_client(
+    config: ClientConfig<'_>,
+) -> std::result::Result<std::sync::Arc<dyn HttpClient>, ClientConfigError> {
+    #[cfg(feature = "reqwest")]
+    {
+        crate::http_client::ReqwestClient::build_configured(config)
+    }
+    #[cfg(all(feature = "ureq", not(feature = "reqwest")))]
+    {
+        crate::http_client::UreqClient::build_configured(config)
+    }
+    #[cfg(not(any(feature = "reqwest", feature = "ureq")))]
+    {
+        let _ = config;
+        Err(ClientConfigError::Other(
+            "no HTTP client feature enabled".into(),
+        ))
+    }
+}
+
+/// Async sibling of [`build_configured_client`]. Only reqwest is supported (async is reqwest-only).
 #[cfg(feature = "async")]
-pub(crate) fn async_client_with_root_certs(
-    certs: &[crate::tls::Certificate],
-) -> std::result::Result<std::sync::Arc<dyn AsyncHttpClient>, ClientBuildError> {
-    crate::http_client::ReqwestAsyncClient::build_async_with_certs(certs)
+pub(crate) fn build_configured_async_client(
+    config: ClientConfig<'_>,
+) -> std::result::Result<std::sync::Arc<dyn AsyncHttpClient>, ClientConfigError> {
+    crate::http_client::ReqwestAsyncClient::build_configured_async(config)
 }
 
 // Records the backend name chosen by the most recent `default_client` call on this thread.

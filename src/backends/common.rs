@@ -523,6 +523,16 @@ pub(crate) struct RequestConfig {
     /// (invalid cert bytes or a client-build failure). Deferred like [`header_error`](Self::header_error)
     /// and surfaced from [`check`](Self::check) as an `Error::InvalidCertificate`.
     pub(crate) cert_error: Option<String>,
+    /// Programmatic proxy URL (`http://user:pass@host:port`) the crate-built HTTP client routes
+    /// through, set via `proxy`. Baked into [`client`](Self::client) (and
+    /// [`async_client`](Self::async_client)) by [`build_client`](Self::build_client) at `build()`
+    /// time, alongside [`root_certificates`](Self::root_certificates). `None` leaves proxying to
+    /// the client's own `HTTP(S)_PROXY` env support.
+    pub(crate) proxy: Option<String>,
+    /// First error produced materializing a client from [`proxy`](Self::proxy) (an unparseable
+    /// proxy URL). Deferred like [`cert_error`](Self::cert_error) and surfaced from
+    /// [`check`](Self::check) as an `Error::InvalidProxy`, with any embedded password redacted.
+    pub(crate) proxy_error: Option<String>,
     /// The host of the backend's configured API base (e.g. `api.github.com`, `gitlab.com`, the
     /// gitea host). The derived [`auth_token`](Self::auth_token) is only attached to a request whose
     /// host matches this (or an [`auth_hosts`](Self::auth_hosts) entry), so a server-supplied asset
@@ -558,6 +568,8 @@ impl Default for RequestConfig {
             header_error: None,
             root_certificates: Vec::new(),
             cert_error: None,
+            proxy: None,
+            proxy_error: None,
             auth_base_host: None,
             auth_hosts: Vec::new(),
             allow_insecure_auth: false,
@@ -584,6 +596,8 @@ impl std::fmt::Debug for RequestConfig {
             header_error,
             root_certificates,
             cert_error,
+            proxy,
+            proxy_error,
             auth_base_host,
             auth_hosts,
             allow_insecure_auth,
@@ -608,6 +622,14 @@ impl std::fmt::Debug for RequestConfig {
                 &format_args!("<{} root_certificates>", root_certificates.len()),
             )
             .field("cert_error", cert_error)
+            // A proxy URL may embed credentials (`http://user:pass@host`), so the password is
+            // redacted here -- a `log::debug!("{builder:?}")` must not print it. The rest of the
+            // URL is kept so the dump can still answer "which proxy is this going through?".
+            .field(
+                "proxy",
+                &proxy.as_deref().map(crate::errors::redact_proxy_url),
+            )
+            .field("proxy_error", proxy_error)
             // The auth-host gate carries no secret (a hostname), and it decides whether the token is
             // attached at all -- including which host the env-token warning compares against -- so a
             // debug dump that hides it cannot answer "why was my token not sent?".
@@ -765,45 +787,61 @@ impl RequestConfig {
         uri.scheme_str() == Some("https") || is_loopback || self.allow_insecure_auth
     }
 
-    /// Materialize a pre-configured HTTP client from `root_certificates` if set and no client was
-    /// injected. On success, stores the client in `self.client` (and the async sibling). On failure,
-    /// records the error in `self.cert_error` (first error wins, mirroring `header_error`).
+    /// Materialize a pre-configured HTTP client from `root_certificates` and/or `proxy` if either
+    /// is set and no client was injected. On success, stores the client in `self.client` (and the
+    /// async sibling). On failure, records the error in `self.proxy_error` or `self.cert_error`
+    /// (first error wins, mirroring `header_error`).
     ///
-    /// Each client slot is materialized independently: the sync client is built from the certs only
-    /// when the sync slot is empty, and the async client only when the async slot is empty. So
-    /// injecting a client for one transport does not drop the custom roots for the other (the
-    /// injected client owns its own TLS; the auto-built one still trusts the certs). A cert-build
-    /// failure for a slot that will actually be built is recorded in `cert_error`.
+    /// Each client slot is materialized independently: the sync client is built from the
+    /// configuration only when the sync slot is empty, and the async client only when the async
+    /// slot is empty. So injecting a client for one transport does not drop the custom roots or the
+    /// proxy for the other (the injected client owns its own TLS and proxy config; the auto-built
+    /// one still honors both). A build failure for a slot that will actually be built is recorded.
     pub(crate) fn build_client(&mut self) {
-        if self.root_certificates.is_empty() {
+        let config = crate::http_client::ClientConfig {
+            certs: &self.root_certificates,
+            proxy: self.proxy.as_deref(),
+        };
+        if config.is_empty() {
             return;
         }
-        if self.client.is_none() {
-            match crate::http_client::client_with_root_certs(&self.root_certificates) {
-                Ok(c) => self.client = Some(c),
-                Err(e) => {
-                    if self.cert_error.is_none() {
-                        self.cert_error = Some(e.to_string());
-                    }
+        // A failure is attributed to the setter that caused it: a proxy-parse failure to `proxy`,
+        // anything else to `add_root_certificate` -- except when no certificates were supplied at
+        // all, where a generic client-build failure can only have come from the proxy config, and
+        // blaming a certificate the caller never set would be actively misleading.
+        let mut record = |e: crate::http_client::ClientConfigError| {
+            let (slot, message) = match e {
+                crate::http_client::ClientConfigError::Proxy(e) => (&mut self.proxy_error, e),
+                crate::http_client::ClientConfigError::Other(e)
+                    if self.root_certificates.is_empty() =>
+                {
+                    (&mut self.proxy_error, e)
                 }
+                crate::http_client::ClientConfigError::Other(e) => (&mut self.cert_error, e),
+            };
+            if slot.is_none() {
+                *slot = Some(message.to_string());
+            }
+        };
+        if self.client.is_none() {
+            match crate::http_client::build_configured_client(config) {
+                Ok(c) => self.client = Some(c),
+                Err(e) => record(e),
             }
         }
         #[cfg(feature = "async")]
         if self.async_client.is_none() {
-            match crate::http_client::async_client_with_root_certs(&self.root_certificates) {
+            match crate::http_client::build_configured_async_client(config) {
                 Ok(c) => self.async_client = Some(c),
-                Err(e) => {
-                    if self.cert_error.is_none() {
-                        self.cert_error = Some(e.to_string());
-                    }
-                }
+                Err(e) => record(e),
             }
         }
     }
 
     /// Surface any deferred config error: a `request_header` conversion failure as
     /// `Error::InvalidHeader` (checked first, so it takes precedence), then a root-certificate /
-    /// client-build failure as `Error::InvalidCertificate`.
+    /// client-build failure as `Error::InvalidCertificate`, then a proxy failure as
+    /// `Error::InvalidProxy`.
     pub(crate) fn check(&self) -> Result<()> {
         if let Some(msg) = &self.header_error {
             return Err(Error::InvalidHeader {
@@ -812,6 +850,11 @@ impl RequestConfig {
         }
         if let Some(msg) = &self.cert_error {
             return Err(Error::InvalidCertificate {
+                source: Box::new(crate::errors::MessageError(msg.clone())),
+            });
+        }
+        if let Some(msg) = &self.proxy_error {
+            return Err(Error::InvalidProxy {
                 source: Box::new(crate::errors::MessageError(msg.clone())),
             });
         }
@@ -1807,6 +1850,7 @@ mod tests {
             auth_base_host: Some("api.github.com".to_string()),
             auth_hosts: vec!["cdn.example.com".to_string()],
             allow_insecure_auth: true,
+            proxy: Some("http://corpuser:hunter2@proxy.corp:8080".to_string()),
             ..Default::default()
         };
         let rendered = format!("{req:?}");
@@ -1822,6 +1866,8 @@ mod tests {
             "header_error",
             "root_certificates",
             "cert_error",
+            "proxy",
+            "proxy_error",
             "auth_base_host",
             "auth_hosts",
             "allow_insecure_auth",
@@ -1845,6 +1891,16 @@ mod tests {
                 && rendered.contains("cdn.example.com")
                 && rendered.contains("allow_insecure_auth: true"),
             "the auth-host gate must be readable from the dump, got: {rendered}"
+        );
+        // A proxy URL's password is a credential too: the dump must name the proxy (so "which
+        // proxy?" stays answerable) while redacting the password.
+        assert!(
+            !rendered.contains("hunter2"),
+            "the proxy password must never appear in Debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("http://corpuser:REDACTED@proxy.corp:8080"),
+            "the proxy must render with only its password redacted, got: {rendered}"
         );
         // And the token redaction is untouched by the addition.
         assert!(
@@ -1966,6 +2022,8 @@ mod tests {
             retry_max_delay: Duration::from_millis(17),
             header_error: Some("header-error-marker".to_string()),
             cert_error: Some("cert-error-marker".to_string()),
+            proxy: Some("http://proxy-marker.example.test:8080".to_string()),
+            proxy_error: Some("proxy-error-marker".to_string()),
             auth_base_host: Some("base.example.test".to_string()),
             auth_hosts: vec!["extra.example.test".to_string()],
             allow_insecure_auth: true,
@@ -1979,6 +2037,8 @@ mod tests {
             ("retry_max_delay", "17ms"),
             ("header_error", "Some(\"header-error-marker\")"),
             ("cert_error", "Some(\"cert-error-marker\")"),
+            ("proxy", "Some(\"http://proxy-marker.example.test:8080\")"),
+            ("proxy_error", "Some(\"proxy-error-marker\")"),
             ("auth_base_host", "Some(\"base.example.test\")"),
             ("auth_hosts", "[\"extra.example.test\"]"),
             ("allow_insecure_auth", "true"),
@@ -2694,6 +2754,129 @@ mod tests {
             crate::errors::Error::InvalidHeader { .. } => {}
             other => panic!("expected Error::InvalidHeader to win, got {:?}", other),
         }
+    }
+
+    // --- CORP-3: programmatic proxy ----------------------------------------------------------
+
+    // spec: CORP-3-2, CORP-3-4
+    #[test]
+    fn build_client_with_a_proxy_materializes_a_client() {
+        // A proxy alone (no certificates) must be enough to make `build()` bake a client: before
+        // CORP-3 the only trigger was `root_certificates`, so a proxy-only config would silently
+        // fall through to the per-call default client and never proxy anything.
+        let mut req = RequestConfig {
+            proxy: Some("http://corpuser:hunter2@proxy.corp:8080".to_string()),
+            ..Default::default()
+        };
+        req.build_client();
+        assert!(
+            req.client.is_some(),
+            "a configured proxy must materialize a client"
+        );
+        assert!(
+            req.proxy_error.is_none() && req.cert_error.is_none(),
+            "a valid proxy must not record an error, got proxy_error={:?} cert_error={:?}",
+            req.proxy_error,
+            req.cert_error
+        );
+    }
+
+    // spec: CORP-3-3
+    #[cfg(any(feature = "reqwest", feature = "ureq"))]
+    #[test]
+    fn build_client_bad_proxy_records_proxy_error_not_cert_error() {
+        // An unparseable proxy URL must be recorded in `proxy_error`, NOT in `cert_error`: the
+        // caller supplied no certificate at all, and telling them their certificate is invalid
+        // sends them to the wrong setter. The recorded message must not carry the password.
+        let mut req = RequestConfig {
+            proxy: Some("http://corpuser:hunter2@ not a proxy url".to_string()),
+            ..Default::default()
+        };
+        req.build_client();
+        let recorded = req
+            .proxy_error
+            .as_deref()
+            .expect("an unparseable proxy URL must record a proxy_error");
+        assert!(
+            !recorded.contains("hunter2") && recorded.contains("REDACTED"),
+            "the recorded proxy error must be redacted, got: {recorded}"
+        );
+        assert!(
+            req.cert_error.is_none(),
+            "a proxy failure must not be misreported as a certificate failure"
+        );
+        assert!(
+            req.client.is_none(),
+            "a failed proxy build must not leave a client"
+        );
+    }
+
+    // spec: CORP-3-3
+    #[test]
+    fn check_surfaces_proxy_error_as_invalid_proxy() {
+        // A recorded `proxy_error` (and no header/cert error) surfaces from `check()` as
+        // `Error::InvalidProxy` carrying the stored message via `source()`.
+        let req = RequestConfig {
+            proxy_error: Some("boom".to_string()),
+            ..Default::default()
+        };
+        match req
+            .check()
+            .expect_err("proxy_error must surface from check()")
+        {
+            crate::errors::Error::InvalidProxy { source } => {
+                assert_eq!(source.to_string(), "boom")
+            }
+            other => panic!("expected Error::InvalidProxy, got {:?}", other),
+        }
+    }
+
+    // spec: CORP-3-6
+    #[test]
+    fn build_client_with_injected_client_skips_the_proxy_build() {
+        // An injected client owns its own proxy config, so a configured proxy must not cause a
+        // replacement client to be built over it -- even an unparseable one, which would otherwise
+        // record an error for a knob that has no effect on this transport.
+        struct DummyClient;
+        impl crate::http_client::HttpClient for DummyClient {
+            fn get(
+                &self,
+                _url: &str,
+                _headers: &crate::http_client::HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> crate::Result<Box<dyn crate::http_client::HttpResponse>> {
+                unreachable!("not called in this test")
+            }
+        }
+        #[cfg(feature = "async")]
+        struct DummyAsyncClient;
+        #[cfg(feature = "async")]
+        impl crate::http_client::AsyncHttpClient for DummyAsyncClient {
+            fn get<'a>(
+                &'a self,
+                _url: &'a str,
+                _headers: &'a crate::http_client::HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                crate::Result<Box<dyn crate::http_client::AsyncHttpResponse>>,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
+        let mut req = RequestConfig {
+            client: Some(std::sync::Arc::new(DummyClient)),
+            #[cfg(feature = "async")]
+            async_client: Some(std::sync::Arc::new(DummyAsyncClient)),
+            proxy: Some("http://corpuser:hunter2@ not a proxy url".to_string()),
+            ..Default::default()
+        };
+        req.build_client();
+        assert!(
+            req.proxy_error.is_none(),
+            "an injected client must short-circuit the proxy build"
+        );
+        assert!(req.client.is_some(), "the injected client must be kept");
     }
 
     #[test]

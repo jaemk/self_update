@@ -50,8 +50,9 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
   `current_exe()`, else `Error::NoAppBundle` / `Error::AppTranslocated`; other targets:
   `Error::MissingField { field: "bundle_install_path" }`).
 - Then calls `self.request.check()` (`src/backends/common.rs:RequestConfig::check`), surfacing any deferred
-  `request_header` conversion failure as `Error::InvalidHeader { source }`, and any
-  root-certificate/client-build failure as `Error::InvalidCertificate { source }`.
+  `request_header` conversion failure as `Error::InvalidHeader { source }`, any
+  root-certificate/client-build failure as `Error::InvalidCertificate { source }`, and any
+  proxy-URL failure as `Error::InvalidProxy { source }` (in that precedence order).
 - Required (each missing field yields `Error::MissingField { field }`, whose `Display` names the
   field generically as `` "`{field}` required" ``, per `ref-errors.md`): `current_version`
   (`src/backends/common.rs:current_version`), `bin_name` (`src/backends/common.rs:bin_name`), `bin_path_in_archive`
@@ -66,12 +67,14 @@ auto-derived from `bin_name`), `show_download_progress`, `show_output`,
 
 `RequestConfig` carries `timeout`, `headers`, `retries`, the retry-backoff
 delays, `client` / `async_client` (injected transports), root certificates
-(`add_root_certificate`), the auth fields (`auth_scheme`, `auth_token`,
-`auth_base_host`, the `allow_auth_host` allowlist, the non-https-forwarding
+(`add_root_certificate`), the programmatic `proxy` URL, the auth fields (`auth_scheme`,
+`auth_token`, `auth_base_host`, the `allow_auth_host` allowlist, the non-https-forwarding
 flag), and `header_error`. `insert_header` (`src/backends/common.rs:insert_header`)
 stays infallible, recording the first bad name/value in `header_error`;
-`check` replays it as `Error::InvalidHeader { source }` and surfaces a
-root-certificate/client-build failure as `Error::InvalidCertificate { source }`.
+`check` replays it as `Error::InvalidHeader { source }`, surfaces a
+root-certificate/client-build failure as `Error::InvalidCertificate { source }`, and a
+proxy-URL failure as `Error::InvalidProxy { source }`. The proxy's password is redacted from
+the hand-written `Debug` and from the error text (see `corporate-network-config.md` CORP-3-15).
 `insert_header` also marks the value [`set_sensitive`](https://docs.rs/http/latest/http/header/struct.HeaderValue.html#method.set_sensitive)
 when the header name is credential-bearing -- `authorization`, gitlab's `private-token`, `cookie`
 (exact match), or any name ending in `-token` (`header_name_is_credential_bearing`,
@@ -189,6 +192,8 @@ parses versions from object keys and the custom backend supplies its own `Releas
   (each feature-gated, delegating to `http_client` / `http_client_async`),
   `add_root_certificate(Certificate)` (trust a private/internal CA; a malformed
   cert surfaces as `Error::InvalidCertificate` from `build()`),
+  `proxy(url)` (route every request through an HTTP proxy, credentials allowed in the URL;
+  an unparseable URL surfaces as `Error::InvalidProxy` from `build()`),
   `allow_auth_host(host)` (authorize an extra host, e.g. an asset CDN, to receive
   the auth token), and `dangerously_allow_non_https_auth_forwarding()` (allow the
   token over http to a host-matched request); the macro itself is defined at `src/macros.rs:request_config_setters`.

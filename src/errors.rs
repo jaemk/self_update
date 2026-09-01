@@ -305,6 +305,18 @@ pub enum Error {
         /// The underlying certificate-parse / client-build error.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// A programmatic proxy URL (`proxy(..)`) could not be parsed, or the HTTP client that would
+    /// route through it could not be built.
+    ///
+    /// Produced from `build()` (via a backend builder's `proxy`) or from a
+    /// [`Download`](crate::Download) with a `proxy`. Wraps the underlying error, surfaced via
+    /// [`std::error::Error::source`]. Any credentials embedded in the URL
+    /// (`http://user:pass@host:port`) are redacted from the message, so the error is safe to log.
+    #[non_exhaustive]
+    InvalidProxy {
+        /// The underlying proxy-parse / client-build error, with credentials redacted.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A progress-bar template string was not valid (`progress-bar`).
     ///
     /// Wraps the underlying `indicatif` template error, surfaced via [`std::error::Error::source`].
@@ -729,6 +741,9 @@ impl std::fmt::Display for Error {
             InvalidCertificate { source } => {
                 write!(f, "ConfigError: invalid root certificate: {}", source)
             }
+            InvalidProxy { source } => {
+                write!(f, "ConfigError: invalid proxy: {}", source)
+            }
             #[cfg(feature = "progress-bar")]
             InvalidProgressStyle { source } => {
                 write!(f, "ConfigError: invalid progress bar template: {}", source)
@@ -789,6 +804,7 @@ impl std::error::Error for Error {
             Error::InvalidHeader { ref source } => &**source,
             Error::InvalidAuthToken { ref source } => &**source,
             Error::InvalidCertificate { ref source } => &**source,
+            Error::InvalidProxy { ref source } => &**source,
             #[cfg(feature = "progress-bar")]
             Error::InvalidProgressStyle { ref source } => &**source,
             Error::Io(ref e) => e,
@@ -1051,6 +1067,68 @@ pub(crate) fn status_to_error_with_headers(
     )
 }
 
+/// The byte range of the password half of a proxy URL's userinfo
+/// (`scheme://user:password@host`), if it has one.
+///
+/// A range rather than a `&str` so [`redact_proxy_url`] can splice a replacement into the original
+/// string without pointer arithmetic. Only the part between the first `:` after the userinfo's
+/// start and the `@` counts; a bare `user@host` (no colon) has no password and yields `None`.
+fn proxy_url_password_span(url: &str) -> Option<std::ops::Range<usize>> {
+    // Everything before `://` is the scheme; a proxy URL may omit it entirely (ureq accepts
+    // `user:pass@host:8080`), so fall back to offset 0.
+    let authority_start = url.find("://").map(|i| i + 3).unwrap_or(0);
+    // The authority ends at the first `/` after the scheme (or at the end of the string).
+    let authority_end = url[authority_start..]
+        .find('/')
+        .map(|i| authority_start + i)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+    // The userinfo ends at the *last* `@` in the authority (a password may itself contain `@`).
+    let at = authority.rfind('@')?;
+    let colon = authority[..at].find(':')?;
+    Some(authority_start + colon + 1..authority_start + at)
+}
+
+/// The password half of a proxy URL's userinfo, if it has one, as a slice of `url`. Used to scrub
+/// the exact secret out of a third-party error message that echoed the URL back.
+fn proxy_url_password(url: &str) -> Option<&str> {
+    proxy_url_password_span(url).map(|span| &url[span])
+}
+
+/// Redact the password embedded in a proxy URL's userinfo for display/logging: the username is
+/// kept (it names *which* account, and is what a user needs to recognize their own config) and the
+/// password becomes `REDACTED`. A URL with no credentials is returned unchanged.
+///
+/// Every place a configured proxy URL can reach a human -- the `Debug` of a builder / `Download`,
+/// and the `Error::InvalidProxy` message -- goes through this, so `proxy("http://user:hunter2@…")`
+/// never prints `hunter2`.
+pub(crate) fn redact_proxy_url(url: &str) -> String {
+    let mut out = url.to_string();
+    // Replace only the password span, so the rest of the URL (scheme, username, host, port, any
+    // path) is preserved verbatim and the user can still recognize their own configuration.
+    if let Some(span) = proxy_url_password_span(url) {
+        out.replace_range(span, "REDACTED");
+    }
+    out
+}
+
+/// Build the message for an [`Error::InvalidProxy`] from the configured `url` and the underlying
+/// client-side error, with the proxy password scrubbed from both halves.
+///
+/// The underlying error comes from reqwest/ureq and may quote the URL it was handed (credentials
+/// included), so the raw password is also removed from the wrapped message -- not just from the
+/// copy of the URL this crate prints.
+pub(crate) fn proxy_error_message(url: &str, err: impl std::fmt::Display) -> String {
+    let redacted = redact_proxy_url(url);
+    let mut inner = err.to_string();
+    if let Some(password) = proxy_url_password(url)
+        && !password.is_empty()
+    {
+        inner = inner.replace(password, "REDACTED");
+    }
+    format!("invalid proxy URL `{redacted}`: {inner}")
+}
+
 /// Redact sensitive query-parameter values from a URL for display/logging. Blanks the value of any
 /// `X-Amz-Signature` (a live capability until expiry) and `X-Amz-Credential` (the access-key id) so
 /// a presigned s3 URL is safe to surface. Non-s3 URLs are returned unchanged.
@@ -1091,6 +1169,58 @@ mod tests {
         assert!(
             red.contains("X-Amz-Expires=300"),
             "non-sensitive params must be preserved: {red}"
+        );
+    }
+
+    #[test]
+    fn redact_proxy_url_redacts_only_the_password() {
+        // The username identifies which account the proxy config uses and carries no secret, so it
+        // (and the host/port) must survive: a dump that redacts the whole URL cannot answer "which
+        // proxy am I going through?", which is the first question when a corporate update fails.
+        assert_eq!(
+            super::redact_proxy_url("http://corpuser:hunter2@proxy.corp:8080"),
+            "http://corpuser:REDACTED@proxy.corp:8080"
+        );
+        // A scheme-less proxy URL (ureq accepts these, defaulting to http) redacts the same way.
+        assert_eq!(
+            super::redact_proxy_url("corpuser:hunter2@proxy.corp:8080"),
+            "corpuser:REDACTED@proxy.corp:8080"
+        );
+        // A password containing `@` and `:` must be fully removed: the userinfo ends at the LAST
+        // `@` of the authority, not the first, or the tail of the password would leak.
+        assert_eq!(
+            super::redact_proxy_url("http://corpuser:p@ss:word@proxy.corp:8080"),
+            "http://corpuser:REDACTED@proxy.corp:8080"
+        );
+    }
+
+    #[test]
+    fn redact_proxy_url_leaves_credential_free_urls_unchanged() {
+        // No credentials, nothing to redact -- including a bare `user@host` (a username is not a
+        // secret) and a URL whose *path* contains an `@` or a `:` after the authority.
+        for url in [
+            "http://proxy.corp:8080",
+            "http://corpuser@proxy.corp:8080",
+            "http://proxy.corp:8080/pac@file:1",
+        ] {
+            assert_eq!(super::redact_proxy_url(url), url, "unchanged: {url}");
+        }
+    }
+
+    #[test]
+    fn proxy_error_message_scrubs_the_password_from_the_wrapped_error() {
+        // The underlying client error may quote the URL it was handed, credentials included, so the
+        // password is scrubbed from the *wrapped* text too -- not just from this crate's copy of
+        // the URL. Otherwise the redaction would be defeated by whatever reqwest/ureq chose to print.
+        let url = "http://corpuser:hunter2@proxy.corp:8080";
+        let msg = super::proxy_error_message(url, format!("failed to parse {url}"));
+        assert!(
+            !msg.contains("hunter2"),
+            "the password must not survive anywhere in the message, got: {msg}"
+        );
+        assert!(
+            msg.contains("http://corpuser:REDACTED@proxy.corp:8080"),
+            "the redacted URL must still identify the proxy, got: {msg}"
         );
     }
 
