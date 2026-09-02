@@ -20,6 +20,11 @@
   so it cannot leak into logs.
 
 ### Changed
+- The publish workflow now runs only when the crate version is not yet on crates.io, instead of on
+  every push to `master`. A push that does not bump the version no longer spends a full CI run in
+  `release.yml` (`build.yml` already covers it) and no longer requests `release`-environment
+  approval. The workflow also skips itself on forks, where it could only fail for lack of publish
+  credentials, and gains a `workflow_dispatch` trigger for re-running a release that failed partway.
 
 ### Fixed
 - `Extract::extract_file` (and so `bin_path_in_archive` on the update path) now finds an entry
