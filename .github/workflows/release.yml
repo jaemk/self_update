@@ -4,8 +4,59 @@ on:
     branches:
       - master
       - main
+  workflow_dispatch:
 jobs:
+  # Decide whether there is anything to release, from the actual signal: the crate's version is not
+  # on crates.io yet. Every push to master used to run the full `make ci` here and then ask the
+  # `release` environment for approval, whether or not the commit changed the version.
+  #
+  # This deliberately does NOT key off the commit message. A guard requiring the head commit to
+  # start with "release:" is silently defeated by squash-merging a release PR: the squash replaces
+  # the commit message with the PR title, the prefix is lost, and the workflow skips while still
+  # reporting success. A version that is not on the index is the condition that actually means
+  # "publish", and no merge strategy can lose it.
+  decide:
+    # Skip the whole workflow on forks: a contributor pushing to their own master has no `release`
+    # environment and no publish credentials, so the run could only fail or hang for them.
+    if: github.repository == 'jaemk/self_update'
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.decide.outputs.should_publish }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Check whether the crate version is already published
+      id: decide
+      run: |
+        set -euo pipefail
+        version=$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "self_update") | .version')
+        if [ -z "$version" ]; then
+          echo "Could not determine the crate version." >&2
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+        # A network or API failure must fail loudly rather than silently resolving to "nothing to
+        # publish", which would skip a real release.
+        body=$(curl -sS --fail-with-body \
+          -H "User-Agent: jaemk-self_update-release-workflow" \
+          "https://crates.io/api/v1/crates/self_update/versions")
+
+        if jq -e --arg v "$version" '.versions[] | select(.num == $v)' >/dev/null <<<"$body"; then
+          echo "self_update $version is already on crates.io - nothing to release."
+          echo "should_publish=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "self_update $version is not on crates.io - releasing."
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+        fi
+
   check:
+    needs: decide
+    # Only spend a full CI run when something is actually going out. `build.yml` already ran the
+    # same pipeline on the PR, but a release is the one place worth re-proving it against the
+    # merged tree.
+    if: github.event_name == 'workflow_dispatch' || needs.decide.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -17,7 +68,11 @@ jobs:
     - run: make ci
 
   publish:
-    needs: check
+    needs: [decide, check]
+    # Only request release-environment approval when there is actually a new version to publish (or
+    # on a manual dispatch, the escape hatch for re-running a release whose earlier attempt failed
+    # partway).
+    if: github.event_name == 'workflow_dispatch' || needs.decide.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     environment: release  # Optional: for enhanced security
     permissions:
