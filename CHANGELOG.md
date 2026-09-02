@@ -21,6 +21,14 @@
 
 ### Changed
 
+### Fixed
+- `Extract::extract_file` (and so `bin_path_in_archive` on the update path) now finds an entry
+  stored with a leading `./`. `tar -czf app.tar.gz -C dir .` names every entry that way, and the
+  lookup was an exact match, so such an archive failed with "Could not find the required path in
+  the archive" even though the file was present. A `./`-prefixed request now also matches a
+  plainly-named entry. Only a leading `./` is ignored; interior components are still compared
+  exactly, so a same-named file in a subdirectory cannot be selected by accident. Reported in #27.
+
 ### Removed
 
 ## [1.2.0]
