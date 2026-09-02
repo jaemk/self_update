@@ -2249,6 +2249,28 @@ mod tests {
         );
     }
 
+    // The asset download URL comes from the API `url` field, not `browser_download_url`. Both are
+    // present on a real payload, and picking the wrong one is a silent, release-visible break: the
+    // API url + `Accept: application/octet-stream` (see
+    // `update::tests::download_path_requests_the_asset_as_octet_stream`) works for public AND
+    // private releases, while `browser_download_url` 404s for a private one. Pin the choice.
+    #[test]
+    fn asset_download_url_comes_from_the_api_url_field() {
+        let dto: super::ReleaseDto = serde_json::from_str(
+            r#"{"tag_name":"v1.2.3","created_at":"2024-01-01T00:00:00Z","name":"1.2.3","assets":[
+                 {"name":"app.tar.gz",
+                  "url":"https://api.github.com/repos/o/r/releases/assets/1",
+                  "browser_download_url":"https://github.com/o/r/releases/download/v1.2.3/app.tar.gz"}]}"#,
+        )
+        .expect("parse release json");
+        let release = dto.into_release(None).expect("into_release");
+        assert_eq!(
+            release.assets()[0].download_url(),
+            "https://api.github.com/repos/o/r/releases/assets/1",
+            "the asset URL must be the API `url`, which serves private assets too"
+        );
+    }
+
     // github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
     // config that BOTH the listing and download paths consume. A configured auth_token renders as
     // `token <token>`; a user `request_header(AUTHORIZATION, ..)` override wins on both paths.

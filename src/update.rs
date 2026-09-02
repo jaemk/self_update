@@ -5644,6 +5644,40 @@ mod tests {
 
     #[cfg(feature = "github")]
     #[test]
+    fn download_path_requests_the_asset_as_octet_stream() {
+        // The github backend takes an asset's download URL from the API `url` field, which serves
+        // the release JSON unless the request asks for the binary. `Accept:
+        // application/octet-stream` is what turns it into the asset download (and is what makes a
+        // private-release asset reachable at all), so the header is part of the download contract,
+        // not a nicety. Asserted on the bytes the server actually received.
+        let (base, captured) = download_auth_capture_stub();
+        let upd = crate::backends::github::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .build()
+            .unwrap();
+        let asset = super::ReleaseAsset::new("app.tar.gz", format!("{base}/releases/assets/1"));
+        let download = super::build_download(&upd, &asset).unwrap();
+        let mut out = Vec::new();
+        download.download_to(&mut out).unwrap();
+        let lines = captured.lock().unwrap().clone();
+        let accept = lines
+            .iter()
+            .find_map(|l| {
+                l.strip_prefix("Accept: ")
+                    .or_else(|| l.strip_prefix("accept: "))
+            })
+            .expect("the download must send an Accept header");
+        assert_eq!(
+            accept, "application/octet-stream",
+            "the asset download must ask for the binary, not the release JSON"
+        );
+    }
+
+    #[cfg(feature = "github")]
+    #[test]
     fn download_path_drops_auth_for_cross_origin_asset_url() {
         // A server-supplied asset download_url on a host other than the github API (and not in the
         // allow_auth_host set) must NOT receive the token. This is the SEC-1 credential-exfiltration

@@ -1690,6 +1690,11 @@ impl Extract {
     /// If the source is a single compressed file, it will be saved with the name `file_to_extract`
     /// in the specified `into_dir`.
     ///
+    /// The lookup ignores a leading `./` on either side, so `bin_path_in_archive("app")` finds an
+    /// entry stored as `./app`. `tar -czf a.tar.gz -C dir .` (the usual "archive this directory"
+    /// invocation) names every entry that way, and the archive is otherwise indistinguishable from
+    /// one built with `tar -czf a.tar.gz *`.
+    ///
     /// If the named zip entry is a symbolic link (its unix mode carries `S_IFLNK`), extraction
     /// fails with an error rather than writing the link's target string out as the requested file:
     /// this API returns a single concrete file, and silently substituting the target path text for
@@ -1748,7 +1753,9 @@ impl Extract {
                         .find(|e| {
                             let p = e.path();
                             debug!("Archive path: {:?}", p);
-                            p.ok().filter(|p| p == file_to_extract).is_some()
+                            p.ok()
+                                .filter(|p| archive_path_matches(p, file_to_extract))
+                                .is_some()
                         })
                         .ok_or_else(|| Error::Internal {
                             message: format!(
@@ -1787,7 +1794,16 @@ impl Extract {
                     ),
                     source: None,
                 })?;
-                let mut file = archive.by_name(file_name)?;
+                // `by_name` is an exact string match, so resolve the entry through the same
+                // `./`-tolerant comparison the tar arm uses. Falling back to the requested name
+                // when nothing matches keeps the original `ZipError::FileNotFound` for the
+                // genuinely-missing case.
+                let entry_name = archive
+                    .file_names()
+                    .find(|name| archive_path_matches(path::Path::new(name), file_to_extract))
+                    .unwrap_or(file_name)
+                    .to_string();
+                let mut file = archive.by_name(&entry_name)?;
 
                 let Some(rel_path) = file.enclosed_name() else {
                     return Err(Error::Internal {
@@ -1831,6 +1847,20 @@ impl Extract {
         };
         Ok(())
     }
+}
+
+/// Whether an archive entry's path names the file the caller asked for, ignoring a leading `./` on
+/// either side.
+///
+/// `tar -czf archive.tar.gz -C dir .` stores every entry as `./name`, while `tar -czf archive.tar.gz
+/// *` stores it as `name`; the caller writes `bin_path_in_archive` the way the file is named and
+/// cannot be expected to know which invocation produced the release artifact. Only a leading `./`
+/// is stripped: interior components are compared exactly, so this cannot match a different file.
+fn archive_path_matches(entry: &path::Path, wanted: &path::Path) -> bool {
+    fn strip_curdir(p: &path::Path) -> &path::Path {
+        p.strip_prefix(".").unwrap_or(p)
+    }
+    strip_curdir(entry) == strip_curdir(wanted)
 }
 
 /// Lexically decide whether a zip symlink target escapes the extraction root.
@@ -4431,6 +4461,183 @@ mod tests {
         assert!(
             !out_tmp.path().join("escape.txt").exists(),
             "nothing must be written outside the extraction dir"
+        );
+    }
+
+    // A tar built as `tar -czf a.tar.gz -C dir .` names its entries `./f1.txt`, which is what GNU
+    // tar produces for the most common "archive this directory" invocation. `bin_path_in_archive`
+    // is written the way a user reads the file name ("f1.txt"), so the lookup must see through the
+    // leading `./` rather than failing with "Could not find the required path in the archive".
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn extract_file_finds_a_dot_slash_prefixed_tar_entry() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("dot.tar.gz");
+        {
+            let mut ar = tar::Builder::new(vec![]);
+            let mut header = tar::Header::new_gnu();
+            // Write the name into the raw GNU header: `set_path` / `append_data` normalize a
+            // leading `./` away, which would make this test vacuous. GNU tar keeps it.
+            {
+                let gnu = header.as_gnu_mut().expect("gnu header");
+                let raw = b"./f1.txt";
+                gnu.name[..raw.len()].copy_from_slice(raw);
+            }
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            ar.append(&header, &b"hello"[..]).expect("append");
+            let bytes = ar.into_inner().expect("finish tar");
+            let mut out = File::create(&archive_path).expect("create archive");
+            let mut e = GzEncoder::new(&mut out, flate2::Compression::default());
+            e.write_all(&bytes).expect("gz write");
+            e.finish().expect("gz finish");
+        }
+        // Guard against a vacuous test: confirm the archive really stores the `./`-prefixed name
+        // (a writer that silently normalized it away would make the lookup below trivial).
+        {
+            let f = File::open(&archive_path).expect("open archive");
+            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(f));
+            let names: Vec<String> = ar
+                .entries()
+                .expect("entries")
+                .map(|e| {
+                    e.expect("entry")
+                        .path()
+                        .expect("path")
+                        .display()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(names, vec!["./f1.txt".to_string()], "stored entry name");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_file(out_tmp.path(), "f1.txt")
+            .expect("a `./`-prefixed entry must be found by its plain name");
+        assert_eq!(
+            fs::read(out_tmp.path().join("f1.txt")).expect("read extracted"),
+            b"hello"
+        );
+    }
+
+    // Zip sibling of `extract_file_finds_a_dot_slash_prefixed_tar_entry`: some zip writers store
+    // entries with a `./` prefix too, and the by-name lookup is an exact string match.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn extract_file_finds_a_dot_slash_prefixed_zip_entry() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("dot.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("./f1.txt", options).expect("start");
+            zip.write_all(b"hello").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_file(out_tmp.path(), "f1.txt")
+            .expect("a `./`-prefixed zip entry must be found by its plain name");
+        assert_eq!(
+            fs::read(out_tmp.path().join("f1.txt")).expect("read extracted"),
+            b"hello"
+        );
+    }
+
+    // The tolerance runs both ways: a caller who writes the path as `./f1.txt` (copying it out of
+    // `tar tzf` output) must find an entry stored as plain `f1.txt`.
+    #[cfg(all(feature = "archive-tar", feature = "compression-tar-gz"))]
+    #[test]
+    fn extract_file_accepts_a_dot_slash_prefixed_request() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("plain.tar.gz");
+        {
+            let mut ar = tar::Builder::new(vec![]);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            ar.append_data(&mut header, "f1.txt", &b"hello"[..])
+                .expect("append");
+            let bytes = ar.into_inner().expect("finish tar");
+            let mut out = File::create(&archive_path).expect("create archive");
+            let mut e = GzEncoder::new(&mut out, flate2::Compression::default());
+            e.write_all(&bytes).expect("gz write");
+            e.finish().expect("gz finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_file(out_tmp.path(), "./f1.txt")
+            .expect("a `./`-prefixed request must find the plainly-named entry");
+        assert_eq!(
+            fs::read(out_tmp.path().join("f1.txt")).expect("read extracted"),
+            b"hello"
+        );
+    }
+
+    // Only a LEADING `./` is ignored. Interior components are still compared exactly, so the
+    // tolerance cannot start matching a same-named file in a subdirectory (which would extract the
+    // wrong binary, silently).
+    #[test]
+    fn archive_path_matching_ignores_only_a_leading_dot_slash() {
+        use std::path::Path;
+        assert!(super::archive_path_matches(
+            Path::new("./f1.txt"),
+            Path::new("f1.txt")
+        ));
+        assert!(super::archive_path_matches(
+            Path::new("f1.txt"),
+            Path::new("./f1.txt")
+        ));
+        assert!(super::archive_path_matches(
+            Path::new("./sub/f1.txt"),
+            Path::new("sub/f1.txt")
+        ));
+        assert!(
+            !super::archive_path_matches(Path::new("sub/f1.txt"), Path::new("f1.txt")),
+            "a file in a subdirectory must not satisfy a top-level request"
+        );
+        assert!(
+            !super::archive_path_matches(Path::new("./other.txt"), Path::new("f1.txt")),
+            "different names must not match"
+        );
+    }
+
+    // A zip carrying a nested tree must be restored recursively, including the case where the
+    // archive has no explicit directory entries at all (only deep file names), which is what
+    // several zip writers produce.
+    #[cfg(feature = "archive-zip")]
+    #[test]
+    fn extract_into_restores_a_nested_zip_tree_without_dir_entries() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let archive_path = staging.path().join("nested.zip");
+        {
+            let f = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // No `add_directory` calls: the parents exist only as path components of these names.
+            zip.start_file("top/mid/deep/file.txt", options)
+                .expect("start");
+            zip.write_all(b"deep").expect("write");
+            zip.start_file("top/other.txt", options).expect("start");
+            zip.write_all(b"other").expect("write");
+            zip.finish().expect("finish");
+        }
+        let out_tmp = tempfile::tempdir().expect("tempdir");
+        Extract::from_source(&archive_path)
+            .extract_into(out_tmp.path())
+            .expect("extract");
+        assert_eq!(
+            fs::read(out_tmp.path().join("top/mid/deep/file.txt")).expect("read deep"),
+            b"deep"
+        );
+        assert_eq!(
+            fs::read(out_tmp.path().join("top/other.txt")).expect("read shallow"),
+            b"other"
         );
     }
 
