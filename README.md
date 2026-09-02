@@ -896,7 +896,7 @@ machine entirely, so every request fails to verify. Enable the `native-certs` fe
 ureq client onto the OS trust store instead:
 
 ```toml
-self_update = { version = "1.2", features = ["ureq", "rustls", "native-certs"] }
+self_update = { version = "1.3", features = ["ureq", "rustls", "native-certs"] }
 ```
 
 The reqwest client needs nothing and is not affected by the feature: its rustls setup already

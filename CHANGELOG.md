@@ -3,6 +3,16 @@
 ## [unreleased]
 
 ### Added
+
+### Changed
+
+### Removed
+
+## [1.3.0]
+Additive over `1.2.0`: a proxy setter for corporate networks, plus an archive-lookup fix. No API
+breaks, no migration needed.
+
+### Added
 - `proxy(url)` on every backend's `Update` / `ReleaseList` builder and on `Download`: route every
   request (release listing and asset download alike) through an HTTP proxy, with credentials
   allowed in the URL (`http://user:pass@proxy.corp:8080`) and sent to the proxy as
