@@ -1378,6 +1378,12 @@ fn build_download<U: UpdateConfig + UpdateInternals + ?Sized>(
     for cert in &u.request_config().root_certificates {
         download.add_root_certificate(cert.clone());
     }
+    // Forward the configured proxy for the same reason: without this the release listing would go
+    // through the proxy while the asset download bypassed it (and, on a network that only permits
+    // egress via the proxy, would simply fail).
+    if let Some(proxy) = &u.request_config().proxy {
+        download.proxy(proxy.clone());
+    }
     if let Some(timeout) = u.request_timeout() {
         download.timeout(timeout);
     }
@@ -5900,6 +5906,67 @@ mod tests {
             download.root_certificates().len(),
             2,
             "both configured root certificates must be forwarded onto the Download"
+        );
+    }
+
+    // spec: CORP-3-4
+    // The configured proxy must reach the `Download` too. Without this the release listing would
+    // go through the proxy while the asset download went direct -- which on a network that only
+    // permits egress via the proxy means the update fails after a successful version check.
+    #[test]
+    fn build_download_forwards_the_proxy_to_download() {
+        use crate::http_client::header::HeaderMap;
+        use std::sync::Arc;
+
+        // Same injected-client trick as the cert test: an injected client short-circuits the
+        // builder's own client materialization, isolating the forwarding from proxy validation.
+        struct NoopClient;
+        impl crate::http_client::HttpClient for NoopClient {
+            fn get(
+                &self,
+                _url: &str,
+                _headers: &HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> Result<Box<dyn crate::http_client::HttpResponse>> {
+                unreachable!("not called in this test")
+            }
+        }
+        #[cfg(feature = "async")]
+        struct NoopAsyncClient;
+        #[cfg(feature = "async")]
+        impl crate::http_client::AsyncHttpClient for NoopAsyncClient {
+            fn get<'a>(
+                &'a self,
+                _url: &'a str,
+                _headers: &'a HeaderMap,
+                _timeout: Option<std::time::Duration>,
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<Box<dyn crate::http_client::AsyncHttpResponse>>,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
+
+        let mut builder = crate::backends::custom::Update::configure();
+        builder
+            .source(BoundSource)
+            .bin_name("app")
+            .target("x86_64-unknown-linux-gnu")
+            .current_version("1.0.0")
+            .http_client(Arc::new(NoopClient))
+            .proxy("http://corpuser:hunter2@proxy.corp:8080");
+        #[cfg(feature = "async")]
+        builder.http_client_async(Arc::new(NoopAsyncClient));
+        let upd = builder.build().unwrap();
+
+        let asset = super::ReleaseAsset::new("app.bin", "https://nonroutable.invalid/app.bin");
+        let download = super::build_download(&upd, &asset).unwrap();
+        assert_eq!(
+            download.configured_proxy(),
+            Some("http://corpuser:hunter2@proxy.corp:8080"),
+            "the configured proxy must be forwarded onto the Download verbatim (credentials \
+             included -- the download needs them to authenticate to the proxy)"
         );
     }
 

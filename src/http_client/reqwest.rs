@@ -23,15 +23,52 @@ impl From<reqwest::blocking::Client> for ReqwestClient {
     }
 }
 
+/// Convert this crate's [`Certificate`](crate::tls::Certificate)s into reqwest's, preserving the
+/// PEM/DER distinction. Shared by the blocking and async builders so the two lanes cannot drift.
+fn reqwest_certs(
+    certs: &[crate::tls::Certificate],
+) -> std::result::Result<Vec<reqwest::Certificate>, crate::http_client::ClientConfigError> {
+    use crate::http_client::ClientConfigError;
+    let mut collected = Vec::with_capacity(certs.len());
+    for cert in certs {
+        let c = if cert.is_pem() {
+            reqwest::Certificate::from_pem(cert.bytes()).map_err(|e| {
+                ClientConfigError::Other(format!("invalid PEM certificate: {e}").into())
+            })?
+        } else {
+            reqwest::Certificate::from_der(cert.bytes()).map_err(|e| {
+                ClientConfigError::Other(format!("invalid DER certificate: {e}").into())
+            })?
+        };
+        collected.push(c);
+    }
+    Ok(collected)
+}
+
+/// Build the reqwest proxy for a configured proxy URL. `Proxy::all` routes **both** http and https
+/// requests through it; credentials embedded in the URL (`http://user:pass@host:port`) are parsed
+/// by reqwest and sent as `Proxy-Authorization`. A parse failure is reported as
+/// [`ClientConfigError::Proxy`] with the password scrubbed out of the message.
+fn reqwest_proxy(
+    url: &str,
+) -> std::result::Result<reqwest::Proxy, crate::http_client::ClientConfigError> {
+    reqwest::Proxy::all(url).map_err(|e| {
+        crate::http_client::ClientConfigError::Proxy(
+            crate::errors::proxy_error_message(url, e).into(),
+        )
+    })
+}
+
 impl ReqwestClient {
-    /// Build a ReqwestClient with custom root CA certificates baked in.
+    /// Build a ReqwestClient with custom root CA certificates and/or a proxy baked in.
     /// Uses the same TLS backend selection (rustls wins over native-tls) as the per-call path.
-    pub(crate) fn build_with_certs(
-        certs: &[crate::tls::Certificate],
+    pub(crate) fn build_configured(
+        config: crate::http_client::ClientConfig<'_>,
     ) -> std::result::Result<
         std::sync::Arc<dyn crate::http_client::HttpClient>,
-        crate::http_client::ClientBuildError,
+        crate::http_client::ClientConfigError,
     > {
+        use crate::http_client::ClientConfigError;
         let mut builder = reqwest::blocking::ClientBuilder::new();
         #[cfg(feature = "rustls")]
         {
@@ -45,21 +82,15 @@ impl ReqwestClient {
         // Collect all certs and merge in a single call: `tls_certs_merge` accumulates the passed
         // certs onto the trust store, so one call with the whole set is equivalent to (and clearer
         // than) one call per cert.
-        let mut collected = Vec::with_capacity(certs.len());
-        for cert in certs {
-            let c = if cert.is_pem() {
-                reqwest::Certificate::from_pem(cert.bytes())
-                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
-            } else {
-                reqwest::Certificate::from_der(cert.bytes())
-                    .map_err(|e| format!("invalid DER certificate: {e}"))?
-            };
-            collected.push(c);
+        builder = builder.tls_certs_merge(reqwest_certs(config.certs)?);
+        if let Some(url) = config.proxy {
+            // A programmatic proxy is *added to* reqwest's proxy list, which still includes the
+            // env-var proxies it picks up itself; reqwest applies them in order, first match wins.
+            builder = builder.proxy(reqwest_proxy(url)?);
         }
-        builder = builder.tls_certs_merge(collected);
-        let client = builder
-            .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        let client = builder.build().map_err(|e| {
+            ClientConfigError::Other(format!("failed to build HTTP client: {e}").into())
+        })?;
         Ok(std::sync::Arc::new(ReqwestClient::from(client)))
     }
 }
@@ -135,15 +166,16 @@ impl From<reqwest::Client> for ReqwestAsyncClient {
 
 #[cfg(feature = "async")]
 impl ReqwestAsyncClient {
-    /// Async sibling of [`ReqwestClient::build_with_certs`]: build a `ReqwestAsyncClient` with
-    /// custom root CA certificates baked in, using `reqwest::ClientBuilder` (async) and the same
-    /// TLS backend selection.
-    pub(crate) fn build_async_with_certs(
-        certs: &[crate::tls::Certificate],
+    /// Async sibling of [`ReqwestClient::build_configured`]: build a `ReqwestAsyncClient` with
+    /// custom root CA certificates and/or a proxy baked in, using `reqwest::ClientBuilder` (async)
+    /// and the same TLS backend selection.
+    pub(crate) fn build_configured_async(
+        config: crate::http_client::ClientConfig<'_>,
     ) -> std::result::Result<
         std::sync::Arc<dyn crate::http_client::AsyncHttpClient>,
-        crate::http_client::ClientBuildError,
+        crate::http_client::ClientConfigError,
     > {
+        use crate::http_client::ClientConfigError;
         let mut builder = reqwest::ClientBuilder::new();
         #[cfg(feature = "rustls")]
         {
@@ -154,21 +186,13 @@ impl ReqwestAsyncClient {
             builder = builder.use_native_tls();
         }
         builder = builder.http2_adaptive_window(true);
-        let mut collected = Vec::with_capacity(certs.len());
-        for cert in certs {
-            let c = if cert.is_pem() {
-                reqwest::Certificate::from_pem(cert.bytes())
-                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
-            } else {
-                reqwest::Certificate::from_der(cert.bytes())
-                    .map_err(|e| format!("invalid DER certificate: {e}"))?
-            };
-            collected.push(c);
+        builder = builder.tls_certs_merge(reqwest_certs(config.certs)?);
+        if let Some(url) = config.proxy {
+            builder = builder.proxy(reqwest_proxy(url)?);
         }
-        builder = builder.tls_certs_merge(collected);
-        let client = builder
-            .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        let client = builder.build().map_err(|e| {
+            ClientConfigError::Other(format!("failed to build HTTP client: {e}").into())
+        })?;
         Ok(std::sync::Arc::new(ReqwestAsyncClient::from(client)))
     }
 }
@@ -241,6 +265,7 @@ impl super::AsyncHttpResponse for reqwest::Response {
 mod tests {
     use super::*;
     use crate::Error;
+    use crate::http_client::{ClientConfig, ClientConfigError};
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
@@ -351,28 +376,77 @@ mod tests {
     const BAD_PEM: &[u8] =
         b"-----BEGIN CERTIFICATE-----\nbm90IGEgdmFsaWQgY2VydA==\n-----END CERTIFICATE-----\n";
 
+    /// A [`ClientConfig`] over the given certs with no proxy, for the cert-only build tests.
+    fn cert_config(certs: &[crate::tls::Certificate]) -> crate::http_client::ClientConfig<'_> {
+        crate::http_client::ClientConfig { certs, proxy: None }
+    }
+
     #[test]
-    fn build_with_certs_rejects_garbage_pem() {
+    fn build_configured_rejects_garbage_pem() {
         // A PEM-framed but non-certificate body must surface a config-time `Err` from
-        // `build_with_certs` (the parse is deferred to here from the infallible
+        // `build_configured` (the parse is deferred to here from the infallible
         // `Certificate::from_pem` constructor) rather than panicking or building a usable client.
-        let res =
-            ReqwestClient::build_with_certs(&[crate::tls::Certificate::from_pem(BAD_PEM.to_vec())]);
+        let certs = [crate::tls::Certificate::from_pem(BAD_PEM.to_vec())];
+        let res = ReqwestClient::build_configured(cert_config(&certs));
         assert!(
-            res.is_err(),
-            "garbage PEM must be rejected at build time, got Ok"
+            matches!(res, Err(ClientConfigError::Other(_))),
+            "garbage PEM must be rejected at build time as a cert failure, got Ok or a proxy error"
         );
     }
 
     #[test]
-    fn build_with_certs_rejects_garbage_der() {
-        // Same as the PEM case for the DER decoder: invalid DER bytes must produce an `Err`.
-        let res = ReqwestClient::build_with_certs(&[crate::tls::Certificate::from_der(
-            b"not der".to_vec(),
-        )]);
+    fn build_configured_reports_an_unparseable_proxy_as_a_proxy_failure() {
+        // The failure must be attributed to the proxy (not lumped in with certificate failures),
+        // since that attribution is what picks `Error::InvalidProxy` over `InvalidCertificate`
+        // upstream. The password must be scrubbed from the message: it reaches logs verbatim.
+        let res = ReqwestClient::build_configured(ClientConfig {
+            certs: &[],
+            proxy: Some("http://corpuser:hunter2@ not a proxy url"),
+        });
+        let Err(ClientConfigError::Proxy(e)) = res else {
+            panic!("an unparseable proxy URL must be a ClientConfigError::Proxy");
+        };
+        let msg = e.to_string();
         assert!(
-            res.is_err(),
-            "garbage DER must be rejected at build time, got Ok"
+            !msg.contains("hunter2") && msg.contains("REDACTED"),
+            "the proxy password must be redacted from the error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_configured_applies_certificates_and_the_proxy_to_the_same_client() {
+        // CORP-3-5: both knobs feed *one* client builder, so a caller behind an intercepting proxy
+        // that also needs a private CA gets a single client honoring both -- rather than the proxy
+        // arm quietly building a fresh client that drops the certificates. Proven from both sides:
+        // with a proxy set the certificates are still consumed (a garbage cert still fails), and a
+        // proxy alone (no certs) builds fine.
+        let certs = [crate::tls::Certificate::from_pem(BAD_PEM.to_vec())];
+        let with_both = ReqwestClient::build_configured(ClientConfig {
+            certs: &certs,
+            proxy: Some("http://corpuser:hunter2@127.0.0.1:8080"),
+        });
+        assert!(
+            matches!(with_both, Err(ClientConfigError::Other(_))),
+            "the certificates must still be applied when a proxy is also configured"
+        );
+        let proxy_only = ReqwestClient::build_configured(ClientConfig {
+            certs: &[],
+            proxy: Some("http://corpuser:hunter2@127.0.0.1:8080"),
+        });
+        assert!(
+            proxy_only.is_ok(),
+            "a valid proxy with no certificates must build a client"
+        );
+    }
+
+    #[test]
+    fn build_configured_rejects_garbage_der() {
+        // Same as the PEM case for the DER decoder: invalid DER bytes must produce an `Err`.
+        let certs = [crate::tls::Certificate::from_der(b"not der".to_vec())];
+        let res = ReqwestClient::build_configured(cert_config(&certs));
+        assert!(
+            matches!(res, Err(ClientConfigError::Other(_))),
+            "garbage DER must be rejected at build time as a cert failure, got Ok or a proxy error"
         );
     }
 

@@ -48,7 +48,7 @@ design before it can be built). Keep each row's status current with `spec.py set
 | Releases Test Constructor | done | [releases-test-constructor.md](releases-test-constructor.md) |
 | Choose Latest Release Sort | done | [choose-latest-release-sort.md](choose-latest-release-sort.md) |
 | Embedded Key Verification | done | [embedded-key-verification.md](embedded-key-verification.md) |
-| Corporate Network Config | partial | [corporate-network-config.md](corporate-network-config.md) |
+| Corporate Network Config | done | [corporate-network-config.md](corporate-network-config.md) |
 | Restart After Update | done | [ref-restart.md](ref-restart.md) |
 | Update-check Interval Guard | done | [ref-check-interval.md](ref-check-interval.md) |
 | Manifest Backend | done | [ref-manifest-backend.md](ref-manifest-backend.md) |

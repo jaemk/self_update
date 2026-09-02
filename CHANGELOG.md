@@ -3,6 +3,21 @@
 ## [unreleased]
 
 ### Added
+- `proxy(url)` on every backend's `Update` / `ReleaseList` builder and on `Download`: route every
+  request (release listing and asset download alike) through an HTTP proxy, with credentials
+  allowed in the URL (`http://user:pass@proxy.corp:8080`) and sent to the proxy as
+  `Proxy-Authorization`. `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` already covered the
+  unauthenticated case; a proxy demanding a password previously forced callers to add `reqwest` or
+  `ureq` as a direct dependency purely to build a client with a proxy on it. Applied to the same
+  crate-built client as `add_root_certificate`, so an intercepting proxy that also needs a private
+  CA is one client. An injected client (`http_client` / `reqwest_client` / `ureq_agent`) owns its
+  own proxy config and is unaffected. On reqwest the configured proxy is applied alongside the env
+  vars (first match wins); on a ureq-only build it replaces the env-var proxy (single proxy slot).
+  Only HTTP CONNECT proxies are supported.
+- `Error::InvalidProxy { source }`: an unparseable proxy URL, surfaced from `build()` /
+  `download_to` / `download_to_async`. The password embedded in a proxy URL is redacted from this
+  error (including from the wrapped client error) and from every `Debug` rendering of the config,
+  so it cannot leak into logs.
 
 ### Changed
 

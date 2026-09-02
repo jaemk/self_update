@@ -779,11 +779,44 @@ fn wont_compile() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Proxies
+
+Both clients honor the `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables. When the
+proxy requires credentials that you would rather not put in the environment, set it on the builder
+instead — the URL may embed them, and they are sent to the proxy as `Proxy-Authorization`:
+
+```rust
+fn update() -> Result<(), Box<dyn std::error::Error>> {
+    self_update::backends::github::Update::configure()
+        .repo_owner("jaemk")
+        .repo_name("self_update")
+        .bin_name("github")
+        .current_version(self_update::cargo_crate_version!())
+        .proxy("http://corp-user:s3cret@proxy.corp.example:8080")
+        .build()?
+        .update()?;
+    Ok(())
+}
+```
+
+The proxy applies to every request the updater makes, the release listing and the asset download
+alike, and [`Download`](crate::Download) has the same `proxy` setter for standalone downloads. The
+password is redacted from the builder's `Debug` output and from any error it produces, so neither
+leaks into your logs. An unparseable URL surfaces as
+[`Error::InvalidProxy`](crate::errors::Error::InvalidProxy) from `build()`.
+
+Only HTTP CONNECT proxies are supported (SOCKS is out of scope — inject your own client for that).
+On the reqwest client this proxy is applied alongside the environment variables (reqwest tries its
+configured proxies in order, first match wins); on a ureq-only build the agent has a single proxy
+slot, so the configured proxy replaces the env-var one. A client injected via `http_client` /
+`reqwest_client` / `ureq_agent` owns its own proxy configuration and ignores this setter.
+
 ### Custom HTTP client
 
-The `.timeout()` / `.request_header()` / `.retries()` builder knobs cover most transport needs, but
-for full control — custom TLS roots / mTLS, connection pooling, redirect policy, proxy-with-auth, or
-simply reusing your application's existing client — you can hand the crate a **pre-built client**.
+The `.timeout()` / `.request_header()` / `.retries()` / `.proxy()` / `.add_root_certificate()`
+builder knobs cover most transport needs, but for full control — mTLS, connection pooling, redirect
+policy, SOCKS proxies, or simply reusing your application's existing client — you can hand the crate
+a **pre-built client**.
 It is used for both the release listing and the download. The client-specific convenience setters
 are `reqwest_client` (a blocking `reqwest::blocking::Client`, used by the blocking API),
 `reqwest_async_client` (an async `reqwest::Client`, used by the `*_async` verbs), and `ureq_agent`
@@ -876,6 +909,11 @@ config, so set `RootCerts::PlatformVerifier` on it yourself. On Linux the OS tru
 To trust exactly one internal CA and nothing else, skip the feature and pass the certificate to
 [`add_root_certificate`](crate::backends::github::UpdateBuilder::add_root_certificate). Note that on
 a ureq build that *replaces* the trust store rather than adding to it.
+
+**The proxy needs a username and password.** `HTTP_PROXY` / `HTTPS_PROXY` cover an unauthenticated
+proxy, but if yours demands credentials, pass them on the builder with
+[`proxy`](crate::backends::github::UpdateBuilder::proxy) (see [Proxies](#proxies) above) rather than
+adding `reqwest` or `ureq` as a direct dependency just to build a client with a proxy on it.
 
 
 License: MIT

@@ -22,9 +22,14 @@ enum UreqInner {
     /// timeout/TLS/proxy config, so the per-request timeout is *not* applied to it.
     Injected(Agent),
     /// Build a fresh per-call agent (like [`Default`](UreqInner::Default), so it still honors the
-    /// per-request timeout and proxy-env) that trusts these custom root certificates.
+    /// per-request timeout) that trusts these custom root certificates and/or routes through this
+    /// programmatic proxy. A configured proxy *replaces* proxy-env for this agent (ureq has a
+    /// single proxy slot); with no proxy configured, proxy-env still applies.
     #[cfg(any(not(feature = "reqwest"), test))]
-    Certs(UreqRootCerts),
+    Configured {
+        certs: Option<UreqRootCerts>,
+        proxy: Option<ureq::Proxy>,
+    },
 }
 
 /// Sync [`HttpClient`] backed by a `ureq::Agent`.
@@ -69,10 +74,13 @@ fn default_root_certs() -> ureq::tls::RootCerts {
 
 /// Build a per-call ureq agent honoring the per-request `timeout`, the TLS feature, and proxy-env.
 /// `root_certs`, when `Some`, replaces the default trust store (see [`default_root_certs`]) with
-/// the supplied certificates.
+/// the supplied certificates. `proxy`, when `Some`, replaces the env-var proxy for this agent
+/// (ureq's config has a single proxy slot, so a programmatic proxy and `HTTP(S)_PROXY` cannot both
+/// apply -- CORP-3-9); when `None`, `ureq::Proxy::try_from_env()` keeps the env behavior.
 fn build_call_agent(
     timeout: Option<Duration>,
     #[cfg(any(not(feature = "reqwest"), test))] root_certs: Option<UreqRootCerts>,
+    #[cfg(any(not(feature = "reqwest"), test))] proxy: Option<ureq::Proxy>,
 ) -> Agent {
     use ureq::tls::TlsConfig;
     // When both TLS features are enabled, rustls wins (it is the crate default); otherwise fall
@@ -94,11 +102,16 @@ fn build_call_agent(
     if let Some(certs) = root_certs {
         tls = tls.root_certs(ureq::tls::RootCerts::Specific(certs));
     }
+    // A programmatic proxy wins over the environment; with none configured, honor
+    // HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
+    #[cfg(any(not(feature = "reqwest"), test))]
+    let proxy = proxy.or_else(ureq::Proxy::try_from_env);
+    #[cfg(all(feature = "reqwest", not(test)))]
+    let proxy = ureq::Proxy::try_from_env();
     let config = Agent::config_builder()
         .tls_config(tls.build())
         .timeout_global(timeout)
-        // Honor HTTP(S)_PROXY / NO_PROXY env vars (reqwest does this automatically).
-        .proxy(ureq::Proxy::try_from_env())
+        .proxy(proxy)
         // Disable ureq's built-in status-error so we reach our own is_success() check, which has
         // the response headers in hand and maps the status through `status_to_error_with_headers`
         // (NotFound / Unauthorized / RateLimited / HttpStatus).
@@ -112,23 +125,28 @@ fn build_call_agent(
 // it to the lanes that actually reach it (and to `test`, where the ureq cert test exercises it).
 #[cfg(any(not(feature = "reqwest"), test))]
 impl UreqClient {
-    /// Build a UreqClient that trusts the supplied custom root CA certificates.
+    /// Build a UreqClient that trusts the supplied custom root CA certificates and/or routes
+    /// through the supplied proxy.
     ///
-    /// The certificates are parsed and validated here (a malformed PEM certificate returns `Err`);
-    /// the agent itself is built per request in [`get`](HttpClient::get), so it still honors the
-    /// per-request timeout and proxy-env. `RootCerts::Specific` replaces the default trust store, so
-    /// only the supplied certificates are trusted (see the `add_root_certificate` docs).
-    pub(crate) fn build_with_certs(
-        certs: &[crate::tls::Certificate],
+    /// The certificates and the proxy URL are parsed and validated here (a malformed PEM
+    /// certificate or an unparseable proxy URL returns `Err`); the agent itself is built per
+    /// request in [`get`](HttpClient::get), so it still honors the per-request timeout.
+    /// `RootCerts::Specific` replaces the default trust store, so only the supplied certificates
+    /// are trusted (see the `add_root_certificate` docs), and a configured proxy replaces the
+    /// env-var proxy (see `build_call_agent`).
+    pub(crate) fn build_configured(
+        config: crate::http_client::ClientConfig<'_>,
     ) -> std::result::Result<
         std::sync::Arc<dyn crate::http_client::HttpClient>,
-        crate::http_client::ClientBuildError,
+        crate::http_client::ClientConfigError,
     > {
-        let mut ureq_certs = Vec::with_capacity(certs.len());
-        for cert in certs {
+        use crate::http_client::ClientConfigError;
+        let mut ureq_certs = Vec::with_capacity(config.certs.len());
+        for cert in config.certs {
             let c = if cert.is_pem() {
-                ureq::tls::Certificate::from_pem(cert.bytes())
-                    .map_err(|e| format!("invalid PEM certificate: {e}"))?
+                ureq::tls::Certificate::from_pem(cert.bytes()).map_err(|e| {
+                    ClientConfigError::Other(format!("invalid PEM certificate: {e}").into())
+                })?
             } else {
                 // `from_der` is infallible in ureq; invalid DER bytes are surfaced at connection
                 // time, not here (documented on `Certificate::from_der` / `add_root_certificate`).
@@ -136,9 +154,20 @@ impl UreqClient {
             };
             ureq_certs.push(c.to_owned());
         }
-        Ok(std::sync::Arc::new(UreqClient(UreqInner::Certs(
-            std::sync::Arc::new(ureq_certs),
-        ))))
+        let proxy = match config.proxy {
+            // ureq parses the credentials out of the URL itself and sends them as
+            // `Proxy-Authorization`. Note ureq resolves a scheme-less URL (`host:port`) to an HTTP
+            // CONNECT proxy, and rejects a socks:// URL unless its `socks-proxy` feature is on --
+            // this crate does not enable it (SOCKS is an explicit non-goal).
+            Some(url) => Some(ureq::Proxy::new(url).map_err(|e| {
+                ClientConfigError::Proxy(crate::errors::proxy_error_message(url, e).into())
+            })?),
+            None => None,
+        };
+        Ok(std::sync::Arc::new(UreqClient(UreqInner::Configured {
+            certs: (!ureq_certs.is_empty()).then(|| std::sync::Arc::new(ureq_certs)),
+            proxy,
+        })))
     }
 }
 
@@ -170,12 +199,14 @@ impl HttpClient for UreqClient {
                     timeout,
                     #[cfg(any(not(feature = "reqwest"), test))]
                     None,
+                    #[cfg(any(not(feature = "reqwest"), test))]
+                    None,
                 );
                 (&built_agent, false)
             }
             #[cfg(any(not(feature = "reqwest"), test))]
-            UreqInner::Certs(certs) => {
-                built_agent = build_call_agent(timeout, Some(certs.clone()));
+            UreqInner::Configured { certs, proxy } => {
+                built_agent = build_call_agent(timeout, certs.clone(), proxy.clone());
                 (&built_agent, false)
             }
         };
@@ -559,35 +590,104 @@ mod tests {
         );
     }
 
+    /// A [`ClientConfig`](crate::http_client::ClientConfig) over the given certs with no proxy.
+    fn cert_config(certs: &[crate::tls::Certificate]) -> crate::http_client::ClientConfig<'_> {
+        crate::http_client::ClientConfig { certs, proxy: None }
+    }
+
     #[test]
-    fn build_with_certs_rejects_non_pem() {
+    fn build_configured_rejects_non_pem() {
         // ureq's `tls::Certificate::from_pem` validates the PEM framing eagerly and errors when the
-        // bytes contain no PEM certificate, so `build_with_certs` must surface a config-time `Err`
+        // bytes contain no PEM certificate, so `build_configured` must surface a config-time `Err`
         // (the parse is deferred to here from the infallible `Certificate::from_pem` constructor)
         // rather than panicking or building an agent over garbage.
-        let res = UreqClient::build_with_certs(&[crate::tls::Certificate::from_pem(
+        let certs = [crate::tls::Certificate::from_pem(
             b"not a pem certificate".to_vec(),
-        )]);
+        )];
+        let res = UreqClient::build_configured(cert_config(&certs));
         assert!(
-            res.is_err(),
-            "bytes with no PEM certificate must be rejected at build time, got Ok"
+            matches!(res, Err(crate::http_client::ClientConfigError::Other(_))),
+            "bytes with no PEM certificate must be rejected at build time as a cert failure"
         );
     }
 
     #[test]
-    fn build_with_certs_accepts_garbage_der_deferring_validation() {
+    fn build_configured_accepts_garbage_der_deferring_validation() {
         // ureq's `tls::Certificate::from_der` is infallible, so invalid DER bytes are accepted
         // here and only surface at connection time. This is intentional and documented (on
         // `add_root_certificate` and in the reference specs); the reqwest client rejects the same
-        // bytes at build time (`build_with_certs_rejects_garbage_der` in reqwest.rs). This test
+        // bytes at build time (`build_configured_rejects_garbage_der` in reqwest.rs). This test
         // pins the asymmetry: if ureq ever gains eager DER validation, this fails and the
         // deferred-validation caveat in the docs should be removed.
-        let res =
-            UreqClient::build_with_certs(&[crate::tls::Certificate::from_der(b"not der".to_vec())]);
+        let certs = [crate::tls::Certificate::from_der(b"not der".to_vec())];
+        let res = UreqClient::build_configured(cert_config(&certs));
         assert!(
             res.is_ok(),
             "ureq DER validation is deferred to connection time; build must accept the bytes"
         );
+    }
+
+    // spec: CORP-3-9
+    #[test]
+    fn build_configured_reports_an_unparseable_proxy_as_a_proxy_failure() {
+        // The proxy URL is parsed at build time (like the certificates), and the failure must be
+        // attributed to the proxy so it surfaces as `Error::InvalidProxy` rather than as a
+        // certificate error the caller never configured. The password must not survive into the
+        // message.
+        let res = UreqClient::build_configured(crate::http_client::ClientConfig {
+            certs: &[],
+            proxy: Some("http://corpuser:hunter2@ not a proxy url"),
+        });
+        let Err(crate::http_client::ClientConfigError::Proxy(e)) = res else {
+            panic!("an unparseable proxy URL must be a ClientConfigError::Proxy");
+        };
+        let msg = e.to_string();
+        assert!(
+            !msg.contains("hunter2") && msg.contains("REDACTED"),
+            "the proxy password must be redacted from the error, got: {msg}"
+        );
+    }
+
+    // spec: CORP-3-9, CORP-3-10
+    #[test]
+    fn a_configured_proxy_replaces_the_env_proxy_on_the_per_call_agent() {
+        // ureq's config has a single proxy slot, so the programmatic proxy and `HTTP(S)_PROXY`
+        // cannot both apply: a configured proxy must win, and with none configured the env lookup
+        // must still run (`Proxy::try_from_env`), which is the pre-CORP-3 behavior this must not
+        // regress. Asserted on the agent's own config rather than by driving traffic, so the test
+        // needs no environment mutation (which would race with other tests in the same process).
+        let proxy = ureq::Proxy::new("http://corpuser:hunter2@proxy.corp:8080").unwrap();
+        let agent = build_call_agent(None, None, Some(proxy));
+        let configured = agent
+            .config()
+            .proxy()
+            .expect("the proxy must be configured");
+        assert_eq!(configured.host(), "proxy.corp");
+        assert_eq!(configured.port(), 8080);
+        assert_eq!(
+            configured.username(),
+            Some("corpuser"),
+            "the credentials embedded in the URL must be parsed out for Proxy-Authorization"
+        );
+        assert_eq!(configured.password(), Some("hunter2"));
+        // And the certificates ride along on the same agent (CORP-3-5): a proxy must not discard
+        // the configured trust store.
+        let certs = std::sync::Arc::new(vec![
+            ureq::tls::Certificate::from_der(b"deferred-validation").to_owned(),
+        ]);
+        let both = build_call_agent(
+            None,
+            Some(certs),
+            Some(ureq::Proxy::new("http://proxy.corp:8080").unwrap()),
+        );
+        assert!(
+            matches!(
+                both.config().tls_config().root_certs(),
+                ureq::tls::RootCerts::Specific(_)
+            ),
+            "a configured proxy must not drop the custom root certificates"
+        );
+        assert!(both.config().proxy().is_some());
     }
 
     // spec: CORP-2-4
@@ -597,7 +697,7 @@ mod tests {
         // rather than Mozilla's bundled roots, because a corporate MITM proxy's CA is only ever in
         // the former. Without the feature the WebPki default must be preserved exactly -- widening
         // the trust store of a self-updater is not something a minor release gets to do silently.
-        let agent = build_call_agent(None, None);
+        let agent = build_call_agent(None, None, None);
         let roots = agent.config().tls_config().root_certs();
         #[cfg(feature = "native-certs")]
         assert!(
@@ -620,7 +720,7 @@ mod tests {
         let certs = std::sync::Arc::new(vec![
             ureq::tls::Certificate::from_der(b"der-bytes").to_owned(),
         ]);
-        let agent = build_call_agent(None, Some(certs));
+        let agent = build_call_agent(None, Some(certs), None);
         let roots = agent.config().tls_config().root_certs();
         assert!(
             matches!(roots, ureq::tls::RootCerts::Specific(_)),

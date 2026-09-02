@@ -140,6 +140,25 @@ automatically. ureq's per-call agent sets `.proxy(ureq::Proxy::try_from_env())`
 explicitly (`src/http_client/ureq.rs:build_call_agent`). Proxy-from-env applies only to the
 per-call client; an injected client is left to its own proxy config (see below).
 
+`proxy(url)` on the `Update`/`ReleaseList` builders and on `Download` configures a proxy
+programmatically, for the authenticated case the env vars cannot cover: the URL may embed
+credentials (`http://user:pass@host:port`), which both clients parse and send as
+`Proxy-Authorization`. Only HTTP CONNECT proxies are supported (SOCKS is a non-goal). Like
+the root certificates, it is materialized into the client at `build()` time by
+`RequestConfig::build_client` (`src/backends/common.rs:RequestConfig`) -- both knobs feed one
+`ClientConfig` and one client builder (`src/http_client/mod.rs:build_configured_client`), and a
+slot with an injected client is skipped. An unparseable URL is deferred to
+`Error::InvalidProxy { source }` from `build()` / `download_to` /
+`download_to_async`, with the password redacted (`src/errors.rs:redact_proxy_url`,
+`src/errors.rs:proxy_error_message`) -- also in every `Debug` rendering of the config.
+
+Lane differences: on reqwest the programmatic proxy is `Proxy::all` *added to* the
+env-var proxies (first match wins), so both are active; on a ureq-only build the agent has a
+single proxy slot, so the configured proxy replaces the env-var one
+(`src/http_client/ureq.rs:build_call_agent`). `build_download`
+(`src/update.rs:build_download`) forwards the proxy to the download, so the listing and the
+asset fetch take the same route.
+
 ### Client injection (Arc<dyn HttpClient>)
 
 The canonical injection seam is `Option<Arc<dyn HttpClient>>` (and, under
@@ -222,7 +241,7 @@ bad status" is one of the status variants (`NotFound` / `Unauthorized` / `RateLi
 - `self_update::reqwest` / `self_update::ureq` (re-export of each compiled client
   crate; both may be present).
 - Builder/`Download` setters: `timeout`, `request_header`, `retries`,
-  `http_client` / `http_client_async`, `add_root_certificate`, and the
+  `http_client` / `http_client_async`, `add_root_certificate`, `proxy`, and the
   convenience `reqwest_client`, `reqwest_async_client`, `ureq_agent`; plus
   `allow_auth_host` and `dangerously_allow_non_https_auth_forwarding` on the
   builders.
@@ -254,7 +273,12 @@ bad status" is one of the status variants (`NotFound` / `Unauthorized` / `RateLi
   errors are not retried.
 - An injected client still honors `request_header` and `retries`; for a reqwest
   client it also honors the per-request `timeout`, for a ureq agent the timeout
-  defers to the agent. Proxy-env and TLS defer to the injected client.
+  defers to the agent. Proxy-env, a configured `proxy(url)`, `add_root_certificate` and TLS
+  all defer to the injected client (per slot: injecting the sync client does not stop the
+  async slot from being built from the configuration, and vice versa).
+- A configured `proxy(url)` and `add_root_certificate` certs are applied to the **same**
+  crate-built client, and a proxy alone is enough to trigger that build; the proxy is
+  forwarded to the download, and its password never appears in a `Debug` or an error.
 - Non-success status => a structured status variant (`NotFound` / `Unauthorized` /
   `RateLimited` / `HttpStatus`), identically on **all three** client lanes -- default ureq
   agent, injected ureq agent (via a per-request `http_status_as_error(false)` override,

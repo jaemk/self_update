@@ -169,6 +169,32 @@ macro_rules! request_config_setters {
             self
         }
 
+        /// Route every request (release listing and the download) through an HTTP proxy, given as
+        /// a URL that may embed credentials: `http://user:pass@proxy.corp:8080`. This is the
+        /// corporate-proxy-with-auth case that `HTTP_PROXY` / `HTTPS_PROXY` cannot cover when the
+        /// proxy requires a password you would rather not put in the environment.
+        ///
+        /// Calling it more than once replaces the previous URL. An unparseable URL surfaces as an
+        /// [`Error::InvalidProxy`](crate::errors::Error::InvalidProxy) from `build()`; the password
+        /// is redacted from that error and from this builder's `Debug`, so neither leaks into logs.
+        /// Only HTTP CONNECT proxies are supported (SOCKS is out of scope; use
+        /// [`http_client`](Self::http_client) with a client of your own for that).
+        ///
+        /// Precedence and interaction with the environment:
+        ///
+        /// - A client injected via [`http_client`](Self::http_client) (or `http_client_async`,
+        ///   `reqwest_client`, `ureq_agent`) owns its own proxy config, so this setter has no
+        ///   effect on it; the *other*, auto-built transport still uses it.
+        /// - On the reqwest client, `HTTP(S)_PROXY` / `NO_PROXY` stay active alongside this proxy
+        ///   (reqwest tries its configured proxies in order, first match wins). To ignore the
+        ///   environment entirely, inject a client built with `.no_proxy()`.
+        /// - On a ureq-only build, the agent has a single proxy slot, so this proxy **replaces**
+        ///   the env-var proxy rather than layering with it.
+        pub fn proxy(&mut self, url: impl Into<String>) -> &mut Self {
+            self.$($path).+.proxy = Some(url.into());
+            self
+        }
+
         /// Authorize an additional host to receive the auth token.
         ///
         /// By default the token set via `auth_token` is sent only to the backend's own API host, so

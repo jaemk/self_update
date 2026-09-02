@@ -2190,6 +2190,65 @@ mod tests {
         );
     }
 
+    // spec: CORP-3-1, CORP-3-3
+    // An unparseable proxy URL supplied via `proxy` surfaces end to end as `Error::InvalidProxy`
+    // from `build()` on both the Update and ReleaseList builders -- the same deferred-error path as
+    // `add_root_certificate`, and the proof that the setter emitted by `request_config_setters!` is
+    // actually reachable on every backend builder. The password never reaches the error text.
+    #[test]
+    fn proxy_bad_url_surfaces_from_build() {
+        let res = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .proxy("http://corpuser:hunter2@ not a proxy url")
+            .build();
+        let err = res
+            .map(|_| "Ok")
+            .expect_err("an unparseable proxy must fail build()");
+        assert!(
+            matches!(err, crate::errors::Error::InvalidProxy { .. }),
+            "a bad proxy URL must surface as InvalidProxy from Update build(), got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("hunter2") && rendered.contains("REDACTED"),
+            "the proxy password must not reach the error text, got: {rendered}"
+        );
+        let res = super::ReleaseList::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .proxy("http://corpuser:hunter2@ not a proxy url")
+            .build();
+        assert!(
+            matches!(res, Err(crate::errors::Error::InvalidProxy { .. })),
+            "a bad proxy URL must surface as InvalidProxy from ReleaseList build(), got {:?}",
+            res.map(|_| "Ok")
+        );
+    }
+
+    // spec: CORP-3-2
+    // A valid proxy is stored on the built config and reaches the request layer, so the listing
+    // and download both route through it. `.proxy()` called twice keeps only the last URL.
+    #[test]
+    fn proxy_is_stored_and_last_call_wins() {
+        let upd = super::Update::configure()
+            .repo_owner("o")
+            .repo_name("r")
+            .bin_name("app")
+            .current_version("0.1.0")
+            .proxy("http://first.proxy:8080")
+            .proxy("http://second.proxy:8080")
+            .build()
+            .expect("a valid proxy must build");
+        assert_eq!(
+            upd.request_config().proxy.as_deref(),
+            Some("http://second.proxy:8080"),
+            "the last `proxy` call must win"
+        );
+    }
+
     // github resolves to the `token` scheme, applied by the shared `apply_auth` on the request
     // config that BOTH the listing and download paths consume. A configured auth_token renders as
     // `token <token>`; a user `request_header(AUTHORIZATION, ..)` override wins on both paths.
