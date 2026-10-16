@@ -45,7 +45,7 @@ flate2 = { version = "1", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "8", default-features = false, features = ["time"], optional = true }
+zip = { version = "9", default-features = false, features = ["time"], optional = true }
 indicatif = { version = "0.18", optional = true }
 quick-xml = { version = "0.41", optional = true }
 regex = "1"
