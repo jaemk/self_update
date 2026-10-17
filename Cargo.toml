@@ -1,6 +1,6 @@
 [package]
 name = "self_update"
-version = "1.3.0"
+version = "1.3.1"
 description = "Self updates for standalone executables"
 repository = "https://github.com/jaemk/self_update"
 keywords = ["update", "upgrade", "download", "release"]
@@ -45,14 +45,14 @@ flate2 = { version = "1", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 semver = "1.0"
-zip = { version = "8", default-features = false, features = ["time"], optional = true }
+zip = { version = "9", default-features = false, features = ["time"], optional = true }
 indicatif = { version = "0.18", optional = true }
 quick-xml = { version = "0.41", optional = true }
 regex = "1"
 log = "0.4"
 urlencoding = "2.1"
 self-replace = "1"
-zipsign-api = { version = "0.2", default-features = false, optional = true }
+zipsign-api = { version = "0.2.2", default-features = false, optional = true }
 
 http = "1"
 
@@ -75,7 +75,7 @@ bytes = { version = "1", optional = true }
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
 serde_json = "1"
-zipsign-api = { version = "0.2", default-features = false, features = ["sign-tar", "sign-zip"] }
+zipsign-api = { version = "0.2.2", default-features = false, features = ["sign-tar", "sign-zip"] }
 
 [features]
 default = ["reqwest", "rustls", "progress-bar", "github", "archive-tar", "compression-tar-gz"]
