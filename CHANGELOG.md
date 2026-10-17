@@ -5,6 +5,10 @@
 ### Added
 
 ### Changed
+- Bump `zip` to 9 and `zipsign-api` to 0.2.2 (which also moves to `zip` 9). All `zip` 7.x/8.x
+  releases were yanked (https://github.com/zip-rs/zip2/issues/1075). See #214. `zip` 9 made entry
+  names fallible; `extract_file` skips entries whose name fails to decode when resolving the
+  requested path, and zip error messages render the raw entry name lossily.
 
 ### Removed
 

@@ -1568,7 +1568,10 @@ impl Extract {
                     // returns `None` for an absolute path or one containing `..`.
                     let Some(rel_path) = file.enclosed_name() else {
                         return Err(Error::Internal {
-                            message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                            message: format!(
+                                "zip entry has an unsafe path: {:?}",
+                                String::from_utf8_lossy(file.name_raw())
+                            ),
                             source: None,
                         });
                     };
@@ -1606,7 +1609,7 @@ impl Extract {
                             fs::canonicalize(parent_dir).map_err(|e| Error::Internal {
                                 message: format!(
                                     "could not resolve the parent directory of zip entry {:?}: {}",
-                                    file.name(),
+                                    String::from_utf8_lossy(file.name_raw()),
                                     e
                                 ),
                                 source: Some(Box::new(e)),
@@ -1615,7 +1618,7 @@ impl Extract {
                             return Err(Error::Internal {
                                 message: format!(
                                     "zip entry {:?} descends through a symlinked directory that escapes the extraction dir",
-                                    file.name()
+                                    String::from_utf8_lossy(file.name_raw())
                                 ),
                                 source: None,
                             });
@@ -1632,7 +1635,7 @@ impl Extract {
                         use std::io::Read;
                         use std::os::unix::ffi::OsStrExt;
 
-                        let entry_name = file.name().to_string();
+                        let entry_name = String::from_utf8_lossy(file.name_raw()).into_owned();
                         let mut target_bytes = Vec::new();
                         file.read_to_end(&mut target_bytes)?;
                         let target = path::Path::new(OsStr::from_bytes(&target_bytes));
@@ -1797,17 +1800,24 @@ impl Extract {
                 // `by_name` is an exact string match, so resolve the entry through the same
                 // `./`-tolerant comparison the tar arm uses. Falling back to the requested name
                 // when nothing matches keeps the original `ZipError::FileNotFound` for the
-                // genuinely-missing case.
+                // genuinely-missing case. An entry whose name fails to decode cannot match the
+                // UTF-8 `file_name`, so it is skipped.
                 let entry_name = archive
                     .file_names()
-                    .find(|name| archive_path_matches(path::Path::new(name), file_to_extract))
-                    .unwrap_or(file_name)
-                    .to_string();
+                    .filter_map(|name| name.ok())
+                    .find(|name| {
+                        archive_path_matches(path::Path::new(name.as_ref()), file_to_extract)
+                    })
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_else(|| file_name.to_string());
                 let mut file = archive.by_name(&entry_name)?;
 
                 let Some(rel_path) = file.enclosed_name() else {
                     return Err(Error::Internal {
-                        message: format!("zip entry has an unsafe path: {:?}", file.name()),
+                        message: format!(
+                            "zip entry has an unsafe path: {:?}",
+                            String::from_utf8_lossy(file.name_raw())
+                        ),
                         source: None,
                     });
                 };
@@ -1819,7 +1829,7 @@ impl Extract {
                     return Err(Error::Internal {
                         message: format!(
                             "zip entry {:?} is a symlink; use extract_into to restore symlinks",
-                            file.name()
+                            String::from_utf8_lossy(file.name_raw())
                         ),
                         source: None,
                     });
