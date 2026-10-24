@@ -1602,78 +1602,73 @@ fn parse_s3_response<R: std::io::BufRead>(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name().into_inner() {
-                b"Contents" => {
+                "Contents" => {
                     current_tag = Tag::Contents;
                     if let Some(release) = current_release {
                         add_to_releases_list(&mut releases, release);
                     }
                     current_release = None;
                 }
-                b"Key" => current_tag = Tag::Key,
-                b"LastModified" => current_tag = Tag::LastModified,
-                b"IsTruncated" => current_tag = Tag::IsTruncated,
-                b"NextContinuationToken" => current_tag = Tag::NextContinuationToken,
+                "Key" => current_tag = Tag::Key,
+                "LastModified" => current_tag = Tag::LastModified,
+                "IsTruncated" => current_tag = Tag::IsTruncated,
+                "NextContinuationToken" => current_tag = Tag::NextContinuationToken,
                 _ => current_tag = Tag::Other,
             },
             Ok(Event::Text(e)) => {
-                // if we cannot decode a tag text we just ignore it
-                if let Ok(txt) = e.decode().map(|r| r.into_owned()) {
-                    match current_tag {
-                        Tag::Key => {
-                            let p = PathBuf::from(&txt);
-                            let exe_name = match p.file_name().map(|v| v.to_str()) {
-                                Some(Some(v)) => v,
-                                _ => &txt,
-                            };
+                let txt = e.into_inner().into_owned();
+                match current_tag {
+                    Tag::Key => {
+                        let p = PathBuf::from(&txt);
+                        let exe_name = match p.file_name().map(|v| v.to_str()) {
+                            Some(Some(v)) => v,
+                            _ => &txt,
+                        };
 
-                            if let Some(captures) = regex.captures(&txt) {
-                                let version =
-                                    captures["version"].trim_start_matches('v').to_string();
-                                // A user-supplied pattern can capture arbitrary text; require
-                                // real semver so a mis-tuned pattern skips the key (like the
-                                // forge backends skip non-semver tags) rather than producing a
-                                // garbage version. The default pattern's version group only
-                                // matches a `\d+.\d+.\d+` triple, so it is exempt to keep its
-                                // long-standing behavior unchanged.
-                                if asset_key_pattern.is_some()
-                                    && semver::Version::parse(&version).is_err()
-                                {
-                                    debug!("Non-semver version {:?} in key: {:?}", version, txt);
-                                } else {
-                                    let release = current_release.get_or_insert(Release::default());
-                                    release.name =
-                                        std::sync::Arc::from(captures["name"].to_string());
-                                    release.version = std::sync::Arc::from(version);
-                                    let download_url = format!("{}{}", download_base_url, txt);
-
-                                    #[cfg(feature = "s3-auth")]
-                                    let download_url = auth::s3_signature_v4(
-                                        &download_url,
-                                        region,
-                                        access_key,
-                                        signature_ttl.as_secs(),
-                                    )?;
-
-                                    release.assets =
-                                        vec![ReleaseAsset::new(exe_name, download_url)];
-                                    debug!("Matched release: {:?}", release);
-                                }
+                        if let Some(captures) = regex.captures(&txt) {
+                            let version = captures["version"].trim_start_matches('v').to_string();
+                            // A user-supplied pattern can capture arbitrary text; require
+                            // real semver so a mis-tuned pattern skips the key (like the
+                            // forge backends skip non-semver tags) rather than producing a
+                            // garbage version. The default pattern's version group only
+                            // matches a `\d+.\d+.\d+` triple, so it is exempt to keep its
+                            // long-standing behavior unchanged.
+                            if asset_key_pattern.is_some()
+                                && semver::Version::parse(&version).is_err()
+                            {
+                                debug!("Non-semver version {:?} in key: {:?}", version, txt);
                             } else {
-                                debug!("Regex mismatch: {:?}", txt);
+                                let release = current_release.get_or_insert(Release::default());
+                                release.name = std::sync::Arc::from(captures["name"].to_string());
+                                release.version = std::sync::Arc::from(version);
+                                let download_url = format!("{}{}", download_base_url, txt);
+
+                                #[cfg(feature = "s3-auth")]
+                                let download_url = auth::s3_signature_v4(
+                                    &download_url,
+                                    region,
+                                    access_key,
+                                    signature_ttl.as_secs(),
+                                )?;
+
+                                release.assets = vec![ReleaseAsset::new(exe_name, download_url)];
+                                debug!("Matched release: {:?}", release);
                             }
+                        } else {
+                            debug!("Regex mismatch: {:?}", txt);
                         }
-                        Tag::LastModified => {
-                            let release = current_release.get_or_insert(Release::default());
-                            release.date = std::sync::Arc::from(txt);
-                        }
-                        Tag::IsTruncated => {
-                            is_truncated = txt.eq_ignore_ascii_case("true");
-                        }
-                        Tag::NextContinuationToken => {
-                            next_continuation_token = Some(txt);
-                        }
-                        _ => (),
                     }
+                    Tag::LastModified => {
+                        let release = current_release.get_or_insert(Release::default());
+                        release.date = std::sync::Arc::from(txt);
+                    }
+                    Tag::IsTruncated => {
+                        is_truncated = txt.eq_ignore_ascii_case("true");
+                    }
+                    Tag::NextContinuationToken => {
+                        next_continuation_token = Some(txt);
+                    }
+                    _ => (),
                 }
             }
             Ok(Event::Eof) => {

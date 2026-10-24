@@ -8,6 +8,13 @@
 
 ### Removed
 
+## [1.3.2]
+Dependency update over `1.3.1`. No migration needed.
+
+### Changed
+- Bump `quick-xml` to 0.42. It is only used internally by the `s3` backend's listing parser and is
+  not part of the public API.
+
 ## [1.3.1]
 Dependency update over `1.3.0`. No migration needed.
 
