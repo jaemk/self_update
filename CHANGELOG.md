@@ -6,13 +6,16 @@
 
 ### Changed
 
+### Removed
+
+## [1.3.3]
+Bug fix over `1.3.2`. No migration needed.
+
 ### Fixed
 - `restart()` / `restart_with()` failed on linux after an update with `No such file or directory`
   (#217). Once the running binary is replaced, `current_exe()` returns `"<path> (deleted)"`. The
   restart now targets the path the update replaced, which is recorded before the replace. When
   nothing was recorded, it strips the `" (deleted)"` suffix as long as the stripped path exists.
-
-### Removed
 
 ## [1.3.2]
 Dependency update over `1.3.1`. No migration needed.
