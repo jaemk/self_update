@@ -85,3 +85,77 @@ fn restart_with_reexecs_current_exe_with_given_args() {
         "restart_with must re-exec current_exe with the given args, verbatim"
     );
 }
+
+const REPLACED_OUT_ENV: &str = "SU_RESTART_REPLACED_OUT";
+const REPLACED_MARKER: &str = "su_restart_replaced_grandchild_marker";
+const REPLACED_FORWARDED: [&str; 3] = [
+    "restart_replaced_child_entry",
+    REPLACED_MARKER,
+    "--nocapture",
+];
+
+/// The spawned generations for `restart_with_reexecs_after_exe_replaced_on_disk`. Same shape as
+/// `restart_child_entry`, except the second generation first replaces its own executable on disk
+/// the way `self_replace` does (rename a new file over the path), so the running image's inode is
+/// unlinked before `restart_with` runs. On linux `current_exe()` then reports the path with a
+/// " (deleted)" suffix, which `restart_with` must see through (#217). No-op without the env var.
+#[test]
+fn restart_replaced_child_entry() {
+    let Ok(out_path) = std::env::var(REPLACED_OUT_ENV) else {
+        return;
+    };
+
+    if std::env::args().any(|a| a == REPLACED_MARKER) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        std::fs::write(&out_path, args.join("\n")).expect("write forwarded args");
+    } else {
+        let exe = std::env::current_exe().unwrap();
+        let staged = exe.with_extension("new");
+        std::fs::copy(&exe, &staged).expect("stage replacement binary");
+        std::fs::rename(&staged, &exe).expect("rename replacement over running exe");
+        let err = self_update::restart::restart_with(REPLACED_FORWARDED)
+            .expect_err("restart_with returns only on failure");
+        panic!("exec failed after the exe was replaced on disk: {err}");
+    }
+}
+
+/// Run a private copy of the test binary (so replacing it on disk does not touch the real one),
+/// have it replace itself and then `restart_with`, and assert the re-executed process ran with the
+/// forwarded args.
+#[test]
+fn restart_with_reexecs_after_exe_replaced_on_disk() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let exe = dir.path().join("restart-test-bin");
+    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    let out_path = dir.path().join("forwarded-args.txt");
+
+    let status = spawn_retrying_busy(
+        Command::new(&exe)
+            .args(["restart_replaced_child_entry", "--exact", "--nocapture"])
+            .env(REPLACED_OUT_ENV, &out_path),
+    );
+    assert!(
+        status.success(),
+        "spawned restart generation exited unsuccessfully: {status:?}"
+    );
+
+    let recorded = std::fs::read_to_string(&out_path)
+        .expect("post-exec generation should have written the forwarded args");
+    let got: Vec<&str> = recorded.lines().collect();
+    assert_eq!(got, REPLACED_FORWARDED);
+}
+
+/// Spawn `cmd` and wait for it, retrying on ETXTBSY. A freshly written executable can briefly be
+/// "busy" when another test thread forks while the write fd is still open, and inherits it.
+fn spawn_retrying_busy(cmd: &mut Command) -> std::process::ExitStatus {
+    const ETXTBSY: i32 = 26;
+    for _ in 0..50 {
+        match cmd.status() {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            other => return other.expect("spawn test binary"),
+        }
+    }
+    panic!("test binary stayed busy (ETXTBSY)");
+}
