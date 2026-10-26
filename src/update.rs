@@ -1792,6 +1792,9 @@ fn install_binary(
     if same_file(bin_install_path, &current_exe) {
         self_replace::self_replace(new_exe)
             .map_err(|e| map_install_io_error(e, bin_install_path))?;
+        // `current_exe()` may stop naming a real file after this replace (linux appends
+        // " (deleted)"), so give `restart` the path read before it.
+        crate::restart::record_replaced_exe(&current_exe);
     } else {
         Move::from_source(new_exe)
             .to_dest(bin_install_path)
